@@ -692,3 +692,95 @@ git diff --check: exit 0, no output
 ### Concerns
 
 Unchanged from the preceding report: local durable validation used PostgreSQL 16 rather than the planned PostgreSQL 17 deployment image; Swift HTTP adapter, trusted reverse-proxy configuration, and TLS termination remain later integration/deployment scope.
+
+---
+
+## Final presence-refresh race remediation — 2026-08-26
+
+### Status
+
+Fixed the final Important presence race in commit `2733bfc` (`fix: serialize presence graph refreshes`). Targeted independent re-review approved the result with no remaining Critical or Important findings.
+
+- Every graph query carries an epoch captured before the query and may apply only while that epoch is current.
+- Global refresh, device refresh (including `Connect`), fail-closed invalidation, and disconnect are serialized through one transition lock.
+- The transition remains ordered through presence delivery, so an older online batch cannot overtake the offline batch produced by revocation or fail-closed handling.
+- An unrelated connection can register while a global refresh is blocked, but its device-local refresh queues behind the global security refresh and cannot cancel the remaining revoked-pair work.
+
+### TDD RED evidence
+
+The first regression reproduced the delayed-query reinstall before the epoch guard:
+
+```bash
+go test -race ./internal/presence \
+  -run TestOlderBlockedGraphQueryCannotReinstallVisibilityAfterFailClosed \
+  -count=1 -v
+```
+
+```text
+=== RUN   TestOlderBlockedGraphQueryCannotReinstallVisibilityAfterFailClosed
+    hub_test.go:129: unexpected stale presence event={Type:presence DeviceID:right Availability:internet}
+--- FAIL: TestOlderBlockedGraphQueryCannotReinstallVisibilityAfterFailClosed
+FAIL
+```
+
+The follow-up regression then exposed the device-local epoch preemption in the initial implementation:
+
+```bash
+go test -race ./internal/presence \
+  -run TestUnrelatedConnectCannotPreemptGlobalRevocationRefresh \
+  -count=1 -v
+```
+
+```text
+=== RUN   TestUnrelatedConnectCannotPreemptGlobalRevocationRefresh
+    hub_test.go:186: timed out waiting for offline presence for right
+--- FAIL: TestUnrelatedConnectCannotPreemptGlobalRevocationRefresh (1.00s)
+FAIL
+```
+
+### Final GREEN evidence
+
+The two deterministic adversarial interleavings passed twenty consecutive race-enabled runs:
+
+```bash
+go test -race ./internal/presence \
+  -run 'Test(OlderBlockedGraphQueryCannotReinstallVisibilityAfterFailClosed|UnrelatedConnectCannotPreemptGlobalRevocationRefresh)' \
+  -count=20 -v
+```
+
+```text
+PASS
+ok   macchannel/rendezvous/internal/presence  5.571s
+```
+
+Full verification:
+
+```bash
+cd Services/rendezvous
+go vet ./...
+go test -race ./... -count=1
+TEST_DATABASE_URL='postgresql://mason@localhost:5432/macchannel_task4_barrier_8266?sslmode=disable' \
+  go test -race ./... -count=1
+cd ../..
+swift test
+git diff --check
+```
+
+```text
+go vet: exit 0, no output
+memory Go race: all packages passed; httpapi 2.261s, presence 2.290s, signal 1.800s
+PostgreSQL Go race: all packages passed; httpapi 4.639s, presence 2.484s, signal 1.709s
+Swift: Executed 47 tests, with 0 failures (0 unexpected)
+git diff --check: exit 0, no output
+```
+
+### Self-review
+
+- Lock acquisition is consistently transition lock then hub state lock; no reverse-order path exists.
+- Graph reads remain outside the hub state lock, while the transition lock prevents a narrower refresh or fail-closed operation from overtaking the query and its resulting event batch.
+- `Connect` registers the client before its serialized device refresh. If a global refresh is already active, that device refresh queues and runs afterward without invalidating the global epoch.
+- Production WebSocket sink writes are deadline-bounded, limiting the liveness cost of preserving event order through delivery.
+
+### Concerns
+
+No new concern from this remediation. The previously recorded PostgreSQL-version, Swift HTTP adapter, trusted reverse-proxy, and TLS deployment concerns remain unchanged.
