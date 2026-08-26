@@ -59,7 +59,6 @@ final class TransferProtocolTests: XCTestCase {
         }
         XCTAssertEqual(decodedManifest.id, manifest.id)
         XCTAssertEqual(decodedManifest.entries[0].relativePath, manifest.entries[0].relativePath)
-        XCTAssertNil(decodedManifest.entries[0].sourceURL)
     }
 
     func testTamperedEncryptedFrameIsRejectedAndHidesManifestPath() throws {
@@ -116,17 +115,77 @@ final class TransferProtocolTests: XCTestCase {
         _ = try? await interruptedReceive
 
         let resumed = TestSecureChannelPair.make()
+        let recorder = TestChunkRecorder()
         async let receive: TransferReceiveResult = ReceiveSession(
             transferID: manifest.id,
             destinationDirectory: destination
         ).run(on: resumed.receiver)
-        let sent = try await SendSession(manifest).run(on: resumed.sender)
+        _ = try await SendSession(manifest, recorder: recorder).run(on: resumed.sender)
         _ = try await receive
 
-        XCTAssertEqual(sent.chunkCoordinates.map(\.chunkIndex), [2, 3])
+        let sentCoordinates = await recorder.coordinates
+        XCTAssertEqual(sentCoordinates.map(\.chunkIndex), [2, 3])
         XCTAssertEqual(
             try Data(contentsOf: destination.appendingPathComponent("payload.bin")),
             bytes
+        )
+    }
+
+    func testSenderUsesPinnedManifestBytesAfterSourcePathReplacement() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("replace.bin")
+        let original = Data(repeating: 0x11, count: TransferProtocolLimits.maximumChunkBytes + 7)
+        try original.write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+
+        try FileManager.default.removeItem(at: source)
+        try Data(repeating: 0x22, count: original.count).write(to: source)
+        let channels = TestSecureChannelPair.make()
+        async let receive = ReceiveSession(
+            transferID: manifest.id,
+            destinationDirectory: destination
+        ).run(on: channels.receiver)
+
+        _ = try await SendSession(manifest).run(on: channels.sender)
+        _ = try await receive
+
+        XCTAssertEqual(
+            try Data(contentsOf: destination.appendingPathComponent("replace.bin")),
+            original
+        )
+    }
+
+    func testSenderUsesPinnedManifestBytesAfterInPlaceSourceMutation() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("mutate.bin")
+        let original = Data(repeating: 0x33, count: TransferProtocolLimits.maximumChunkBytes + 7)
+        try original.write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.write(contentsOf: Data(repeating: 0x44, count: original.count))
+        try handle.synchronize()
+        try handle.close()
+        let channels = TestSecureChannelPair.make()
+        async let receive = ReceiveSession(
+            transferID: manifest.id,
+            destinationDirectory: destination
+        ).run(on: channels.receiver)
+
+        _ = try await SendSession(manifest).run(on: channels.sender)
+        _ = try await receive
+
+        XCTAssertEqual(
+            try Data(contentsOf: destination.appendingPathComponent("mutate.bin")),
+            original
         )
     }
 
@@ -164,18 +223,67 @@ final class TransferProtocolTests: XCTestCase {
         try handle.close()
 
         let resumed = TestSecureChannelPair.make()
+        let recorder = TestChunkRecorder()
         async let receive = ReceiveSession(
             transferID: manifest.id,
             destinationDirectory: destination
         ).run(on: resumed.receiver)
-        let result = try await SendSession(manifest).run(on: resumed.sender)
+        _ = try await SendSession(manifest, recorder: recorder).run(on: resumed.sender)
         _ = try await receive
 
-        XCTAssertEqual(result.chunkIndexes, [0, 2, 3])
+        let sentCoordinates = await recorder.coordinates
+        XCTAssertEqual(sentCoordinates.map(\.chunkIndex), [0, 2, 3])
         XCTAssertEqual(
             try Data(contentsOf: destination.appendingPathComponent("payload.bin")),
             bytes
         )
+    }
+
+    func testResumeJournalRecoversValidPrefixAfterTornTail() async throws {
+        let fixture = try await makeInterruptedResumeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let handle = try FileHandle(forWritingTo: fixture.journal)
+        _ = try handle.seekToEnd()
+        try handle.write(contentsOf: Data([0xde, 0xad, 0xbe, 0xef, 0x01]))
+        try handle.synchronize()
+        try handle.close()
+
+        let channels = TestSecureChannelPair.make()
+        async let receive = ReceiveSession(
+            transferID: fixture.manifest.id,
+            destinationDirectory: fixture.destination
+        ).run(on: channels.receiver)
+        _ = try await SendSession(fixture.manifest).run(on: channels.sender)
+        _ = try await receive
+
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.destination.appendingPathComponent("resume.bin")),
+            fixture.bytes
+        )
+    }
+
+    func testResumeJournalRejectsCorruptCompleteRecord() async throws {
+        let fixture = try await makeInterruptedResumeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        var journal = try Data(contentsOf: fixture.journal)
+        XCTAssertGreaterThan(journal.count, 37)
+        journal[journal.index(before: journal.endIndex)] ^= 0x01
+        try journal.write(to: fixture.journal)
+
+        let channels = TestSecureChannelPair.make()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: fixture.manifest.id,
+                destinationDirectory: fixture.destination
+            ).run(on: channels.receiver)
+        }
+        _ = try? await SendSession(fixture.manifest).run(on: channels.sender)
+        do {
+            _ = try await receiver.value
+            XCTFail("Expected the corrupt journal record to be rejected")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .invalidResumeMap)
+        }
     }
 
     func testReceiverRejectsSymlinkEscapeInItsStagingTree() async throws {
@@ -217,6 +325,40 @@ final class TransferProtocolTests: XCTestCase {
             XCTAssertEqual(error as? TransferProtocolError, .destinationEscape)
         }
         XCTAssertEqual(try Data(contentsOf: outside), Data("must remain unchanged".utf8))
+    }
+
+    func testReceiverFailsClosedWhenStagedFileIsSwappedAfterOpening() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("swapped.bin")
+        let outside = directory.appendingPathComponent("outside.bin")
+        try Data("source bytes".utf8).write(to: source)
+        try Data("outside remains".utf8).write(to: outside)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination,
+                onStagingPrepared: { staging in
+                    let stagedFile = staging.appendingPathComponent("swapped.bin")
+                    try! FileManager.default.removeItem(at: stagedFile)
+                    try! FileManager.default.linkItem(at: outside, to: stagedFile)
+                }
+            ).run(on: channels.receiver)
+        }
+
+        _ = try? await SendSession(manifest).run(on: channels.sender)
+        do {
+            _ = try await receiver.value
+            XCTFail("Expected the descriptor identity check to reject the swap")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .destinationEscape)
+        }
+        XCTAssertEqual(try Data(contentsOf: outside), Data("outside remains".utf8))
     }
 
     func testProtocolMetadataCannotCollideWithAValidSourceName() async throws {
@@ -308,6 +450,123 @@ final class TransferProtocolTests: XCTestCase {
         }
     }
 
+    func testDestinationVolumeEquivalentPathsAreRejectedBeforeStaging() throws {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let volume = try destination.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+        try XCTSkipIf(volume.volumeSupportsCaseSensitiveNames == true)
+        let emptyDigest = Data(SHA256.hash(data: Data()))
+        let manifest = TransferManifest(
+            id: TransferID(rawValue: UUID()),
+            entries: [
+                TransferManifestEntry(
+                    relativePath: try RelativePath("root"),
+                    kind: .directory,
+                    size: 0,
+                    modificationDate: .now,
+                    chunkCount: 0,
+                    digest: emptyDigest
+                ),
+                TransferManifestEntry(
+                    relativePath: try RelativePath("root/A"),
+                    kind: .file,
+                    size: 0,
+                    modificationDate: .now,
+                    chunkCount: 0,
+                    digest: emptyDigest
+                ),
+                TransferManifestEntry(
+                    relativePath: try RelativePath("root/a"),
+                    kind: .file,
+                    size: 0,
+                    modificationDate: .now,
+                    chunkCount: 0,
+                    digest: emptyDigest
+                ),
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try manifest.validateDestinationPaths(onVolumeContaining: destination)
+        ) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .destinationPathCollision)
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: destination.appendingPathComponent("root").path))
+    }
+
+    func testDecomposedUnicodePathIsRejectedBeforeDestinationUse() throws {
+        XCTAssertThrowsError(try RelativePath("root/cafe\u{0301}.txt")) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .invalidRelativePath)
+        }
+    }
+
+    func testManifestTraversalRejectsMoreThanMaximumEntries() throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: source) }
+        for index in 0..<TransferProtocolLimits.maximumManifestEntries {
+            XCTAssertTrue(
+                FileManager.default.createFile(
+                    atPath: source.appendingPathComponent("f-\(index)").path,
+                    contents: nil
+                ))
+        }
+
+        XCTAssertThrowsError(try TransferManifest.build(from: source)) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .manifestTooLarge)
+        }
+    }
+
+    func testManifestPreflightRejectsAggregateBytesBeforeContentProcessing() throws {
+        let chunkSize = UInt64(TransferProtocolLimits.maximumChunkBytes)
+        let oversized = TransferManifest(
+            id: TransferID(rawValue: UUID()),
+            entries: [
+                TransferManifestEntry(
+                    relativePath: try RelativePath("oversized.bin"),
+                    kind: .file,
+                    size: TransferProtocolLimits.maximumTransferBytes + 1,
+                    modificationDate: .now,
+                    chunkCount: UInt32(TransferProtocolLimits.maximumTransferChunks),
+                    digest: Data(repeating: 0, count: 32)
+                )
+            ]
+        )
+        XCTAssertGreaterThan(oversized.entries[0].size, chunkSize)
+
+        XCTAssertThrowsError(try oversized.validateProtocolLimits()) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .manifestTooLarge)
+        }
+    }
+
+    func testManifestPreflightRejectsOfferThatCannotFitAuthenticatedFrame() throws {
+        let digest = Data(SHA256.hash(data: Data()))
+        let entries = try (0..<100).map { index in
+            TransferManifestEntry(
+                relativePath: try RelativePath(
+                    "root/\(index)-" + String(repeating: "p", count: 700)
+                ),
+                kind: .file,
+                size: 0,
+                modificationDate: .now,
+                chunkCount: 0,
+                digest: digest
+            )
+        }
+        let manifest = TransferManifest(
+            id: TransferID(rawValue: UUID()),
+            entries: entries
+        )
+
+        XCTAssertThrowsError(try manifest.validateProtocolLimits()) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .manifestTooLarge)
+        }
+    }
+
     func testMaximumChunkFitsTheChannelCapIncludingAuthenticationOverhead() throws {
         let transferID = TransferID(rawValue: UUID())
         let chunk = try TransferChunk(
@@ -324,6 +583,20 @@ final class TransferProtocolTests: XCTestCase {
         )
 
         XCTAssertEqual(sealed.wireData.count, TransferProtocolLimits.maximumWireFrameBytes)
+    }
+
+    func testResumeMapRejectsMoreRangesThanABoundedFrameCanAdvertise() throws {
+        let ranges = try (0...TransferProtocolLimits.maximumResumeRanges).map { index in
+            try ChunkRange(
+                entryIndex: UInt32(index),
+                lowerBound: 0,
+                upperBound: 1
+            )
+        }
+
+        XCTAssertThrowsError(try ResumeMap(ranges: ranges)) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .invalidResumeMap)
+        }
     }
 
     func testReplayAndOutOfOrderSequenceIsRejectedBeforeFrameDecode() throws {
@@ -372,6 +645,108 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertEqual(try cipher.open(reconnect), plaintext)
     }
 
+    func testReceiverChallengeRejectsRecordedFrameWhenExporterRepeats() async throws {
+        let transferID = TransferID(rawValue: UUID())
+        let channels = TestSecureChannelPair.make(key: Data(repeating: 0x42, count: 32))
+        let oldContext = try await TransferCryptographicContext.make(
+            on: channels.sender,
+            transfer: transferID,
+            receiverChallenge: Data(repeating: 1, count: 32)
+        )
+        let newContext = try await TransferCryptographicContext.make(
+            on: channels.sender,
+            transfer: transferID,
+            receiverChallenge: Data(repeating: 2, count: 32)
+        )
+        let recorded = try oldContext.senderToReceiver.seal(
+            TransferFrame.pause.encode(),
+            transfer: transferID,
+            sequence: 0,
+            direction: .senderToReceiver
+        )
+
+        XCTAssertThrowsError(
+            try newContext.senderToReceiver.openWire(
+                recorded.wireData,
+                expectedTransfer: transferID,
+                expectedSequence: 0,
+                expectedDirection: .senderToReceiver
+            )
+        ) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .authenticationFailed)
+        }
+    }
+
+    func testRecordedOfferFromOldRunFailsInNewSameExporterSession() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let firstDestination = directory.appendingPathComponent("first", isDirectory: true)
+        let secondDestination = directory.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("replay.bin")
+        try Data("not replayable".utf8).write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let repeatedExporter = Data(repeating: 0x42, count: 32)
+
+        let oldChannels = TestSecureChannelPair.make(key: repeatedExporter)
+        var oldIterator = oldChannels.sender.frames().makeAsyncIterator()
+        let oldReceiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: firstDestination
+            ).run(on: oldChannels.receiver)
+        }
+        let oldCrypto = try await receiveCryptographicContext(
+            from: oldChannels.sender,
+            iterator: &oldIterator,
+            transferID: manifest.id
+        )
+        let recordedOffer = try oldCrypto.senderToReceiver.seal(
+            TransferFrame.offer(manifest).encode(),
+            transfer: manifest.id,
+            sequence: 0,
+            direction: .senderToReceiver
+        ).wireData
+        try await oldChannels.sender.send(recordedOffer)
+        var oldInboundSequence: UInt64 = 0
+        _ = try await receive(
+            from: &oldIterator,
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            cipher: oldCrypto.receiverToSender,
+            sequence: &oldInboundSequence
+        )
+        var oldOutboundSequence: UInt64 = 1
+        try await send(
+            .cancel,
+            transferID: manifest.id,
+            direction: .senderToReceiver,
+            on: oldChannels.sender,
+            cipher: oldCrypto.senderToReceiver,
+            sequence: &oldOutboundSequence
+        )
+        _ = try? await oldReceiver.value
+
+        let newChannels = TestSecureChannelPair.make(key: repeatedExporter)
+        var newIterator = newChannels.sender.frames().makeAsyncIterator()
+        let newReceiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: secondDestination
+            ).run(on: newChannels.receiver)
+        }
+        _ = try await newIterator.next()  // Consume the new, different challenge.
+        try await newChannels.sender.send(recordedOffer)
+
+        do {
+            _ = try await newReceiver.value
+            XCTFail("Expected the recorded offer to fail under the fresh challenge")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .authenticationFailed)
+        }
+    }
+
     func testSenderStopsAtSixtyFourChunksUntilAcknowledged() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -384,9 +759,12 @@ final class TransferProtocolTests: XCTestCase {
         ).write(to: source)
         let manifest = try TransferManifest.build(from: source)
         let channels = TestSecureChannelPair.make()
+        let challenge = TransferReceiverChallenge.fresh(for: manifest.id)
+        try await channels.receiver.send(challenge.encode())
         let crypto = try await TransferCryptographicContext.make(
             on: channels.receiver,
-            transfer: manifest.id
+            transfer: manifest.id,
+            receiverChallenge: challenge.bytes
         )
         var inboundSequence: UInt64 = 0
         var outboundSequence: UInt64 = 0
@@ -476,7 +854,160 @@ final class TransferProtocolTests: XCTestCase {
             sequence: &outboundSequence
         )
         let result = try await sender.value
-        XCTAssertEqual(result.chunkCoordinates.count, 65)
+        XCTAssertEqual(result.sentChunkCount, 65)
+    }
+
+    func testSenderControlPauseResumeStopsAndRestartsChunkProduction() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("controlled.bin")
+        try Data(
+            repeating: 0x61,
+            count: TransferProtocolLimits.maximumChunkBytes * 2
+        ).write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let control = TransferSessionControl()
+        let recorder = TestChunkRecorder()
+        await control.pause()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination
+            ).run(on: channels.receiver)
+        }
+        let sender = Task {
+            try await SendSession(
+                manifest,
+                recorder: recorder,
+                control: control
+            ).run(on: channels.sender)
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        let pausedCoordinates = await recorder.coordinates
+        XCTAssertTrue(pausedCoordinates.isEmpty)
+        await control.resume()
+        _ = try await sender.value
+        _ = try await receiver.value
+        let completedCoordinates = await recorder.coordinates
+        XCTAssertEqual(completedCoordinates.count, 2)
+    }
+
+    func testSenderControlCancellationTerminatesBothSidesAsCancelled() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("cancel.bin")
+        try Data(repeating: 0x71, count: TransferProtocolLimits.maximumChunkBytes * 2)
+            .write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let control = TransferSessionControl()
+        await control.cancel()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination
+            ).run(on: channels.receiver)
+        }
+
+        do {
+            _ = try await SendSession(manifest, control: control).run(on: channels.sender)
+            XCTFail("Expected sender cancellation")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .cancelled)
+        }
+        do {
+            _ = try await receiver.value
+            XCTFail("Expected receiver cancellation")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .cancelled)
+        }
+    }
+
+    func testSenderSourceFailureSendsTypedErrorAndClosesReceiver() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transferID = TransferID(rawValue: UUID())
+        let manifest = TransferManifest(
+            id: transferID,
+            entries: [
+                TransferManifestEntry(
+                    relativePath: try RelativePath("unavailable.bin"),
+                    kind: .file,
+                    size: 0,
+                    modificationDate: .now,
+                    chunkCount: 0,
+                    digest: Data(SHA256.hash(data: Data()))
+                )
+            ]
+        )
+        let channels = TestSecureChannelPair.make()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: transferID,
+                destinationDirectory: destination
+            ).run(on: channels.receiver)
+        }
+
+        do {
+            _ = try await SendSession(manifest).run(on: channels.sender)
+            XCTFail("Expected the missing pinned source to terminate the sender")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .sourceChanged)
+        }
+        do {
+            _ = try await receiver.value
+            XCTFail("Expected the receiver to map the typed source error")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .sourceChanged)
+        }
+    }
+
+    func testReceiverControlPauseBackpressuresSenderUntilResume() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("receiver-controlled.bin")
+        try Data(
+            repeating: 0x7a,
+            count: TransferProtocolLimits.maximumChunkBytes * 65
+        ).write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let control = TransferSessionControl()
+        let recorder = TestChunkRecorder()
+        await control.pause()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination,
+                control: control
+            ).run(on: channels.receiver)
+        }
+        let sender = Task {
+            try await SendSession(manifest, recorder: recorder).run(on: channels.sender)
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        let pausedCoordinates = await recorder.coordinates
+        XCTAssertEqual(pausedCoordinates.count, 64)
+        await control.resume()
+        _ = try await sender.value
+        _ = try await receiver.value
+        let completedCoordinates = await recorder.coordinates
+        XCTAssertEqual(completedCoordinates.count, 65)
     }
 
     func testReceiverAcknowledgesAContinuousRangeAtSixteenChunks() async throws {
@@ -493,10 +1024,6 @@ final class TransferProtocolTests: XCTestCase {
         try bytes.write(to: source)
         let manifest = try TransferManifest.build(from: source)
         let channels = TestSecureChannelPair.make()
-        let crypto = try await TransferCryptographicContext.make(
-            on: channels.sender,
-            transfer: manifest.id
-        )
         var outboundSequence: UInt64 = 0
         var inboundSequence: UInt64 = 0
         var iterator = channels.sender.frames().makeAsyncIterator()
@@ -506,6 +1033,11 @@ final class TransferProtocolTests: XCTestCase {
                 destinationDirectory: destination
             ).run(on: channels.receiver)
         }
+        let crypto = try await receiveCryptographicContext(
+            from: channels.sender,
+            iterator: &iterator,
+            transferID: manifest.id
+        )
 
         try await send(
             .offer(manifest),
@@ -585,10 +1117,6 @@ final class TransferProtocolTests: XCTestCase {
         try bytes.write(to: source)
         let manifest = try TransferManifest.build(from: source)
         let channels = TestSecureChannelPair.make()
-        let crypto = try await TransferCryptographicContext.make(
-            on: channels.sender,
-            transfer: manifest.id
-        )
         var outboundSequence: UInt64 = 0
         var inboundSequence: UInt64 = 0
         var iterator = channels.sender.frames().makeAsyncIterator()
@@ -598,6 +1126,11 @@ final class TransferProtocolTests: XCTestCase {
                 destinationDirectory: destination
             ).run(on: channels.receiver)
         }
+        let crypto = try await receiveCryptographicContext(
+            from: channels.sender,
+            iterator: &iterator,
+            transferID: manifest.id
+        )
         try await send(
             .offer(manifest),
             transferID: manifest.id,
@@ -629,7 +1162,11 @@ final class TransferProtocolTests: XCTestCase {
 
         try await Task.sleep(for: .milliseconds(300))
         let receiverFrameCount = await channels.receiver.sentCount()
-        XCTAssertEqual(receiverFrameCount, 2, "accept plus the timer-flushed ACK")
+        XCTAssertEqual(
+            receiverFrameCount,
+            3,
+            "challenge, accept, and the timer-flushed ACK"
+        )
 
         try await send(
             .cancel,
@@ -673,10 +1210,6 @@ final class TransferProtocolTests: XCTestCase {
         try bytes.write(to: source)
         let manifest = try TransferManifest.build(from: source)
         let channels = TestSecureChannelPair.make()
-        let crypto = try await TransferCryptographicContext.make(
-            on: channels.sender,
-            transfer: manifest.id
-        )
         var outboundSequence: UInt64 = 0
         var inboundSequence: UInt64 = 0
         var iterator = channels.sender.frames().makeAsyncIterator()
@@ -686,6 +1219,11 @@ final class TransferProtocolTests: XCTestCase {
                 destinationDirectory: destination
             ).run(on: channels.receiver)
         }
+        let crypto = try await receiveCryptographicContext(
+            from: channels.sender,
+            iterator: &iterator,
+            transferID: manifest.id
+        )
         try await send(
             .offer(manifest),
             transferID: manifest.id,
@@ -774,6 +1312,68 @@ private final class TestSecureChannel: SecureChannel, @unchecked Sendable {
     func sentCount() async -> Int { await sendGate.count }
 }
 
+private struct InterruptedResumeFixture {
+    let directory: URL
+    let destination: URL
+    let journal: URL
+    let manifest: TransferManifest
+    let bytes: Data
+}
+
+private func makeInterruptedResumeFixture() async throws -> InterruptedResumeFixture {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let destination = directory.appendingPathComponent("received", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let source = directory.appendingPathComponent("resume.bin")
+    let bytes = Data(
+        repeating: 0x5a,
+        count: TransferProtocolLimits.maximumChunkBytes * 4
+    )
+    try bytes.write(to: source)
+    let manifest = try TransferManifest.build(from: source)
+    let channels = TestSecureChannelPair.make(failSenderAfter: 3)
+    async let receive = ReceiveSession(
+        transferID: manifest.id,
+        destinationDirectory: destination
+    ).run(on: channels.receiver)
+    _ = try? await SendSession(manifest).run(on: channels.sender)
+    _ = try? await receive
+    let journal =
+        destination
+        .appendingPathComponent(
+            ".macchannel-\(manifest.id.rawValue.uuidString.lowercased()).partial",
+            isDirectory: true
+        )
+        .appendingPathComponent(".resume-state")
+    return InterruptedResumeFixture(
+        directory: directory,
+        destination: destination,
+        journal: journal,
+        manifest: manifest,
+        bytes: bytes
+    )
+}
+
+private func receiveCryptographicContext(
+    from channel: TestSecureChannel,
+    iterator: inout AsyncThrowingStream<Data, Error>.Iterator,
+    transferID: TransferID
+) async throws -> TransferCryptographicContext {
+    guard let wire = try await iterator.next() else {
+        throw TransferProtocolError.channelEnded
+    }
+    let challenge = try TransferReceiverChallenge.decode(
+        wire,
+        expectedTransferID: transferID
+    )
+    return try await TransferCryptographicContext.make(
+        on: channel,
+        transfer: transferID,
+        receiverChallenge: challenge.bytes
+    )
+}
+
 private actor TestSendGate {
     private let failAfter: Int?
     private var sent = 0
@@ -789,12 +1389,22 @@ private actor TestSendGate {
     var count: Int { sent }
 }
 
+private actor TestChunkRecorder: TransferChunkRecording {
+    private(set) var coordinates: [ChunkCoordinate] = []
+
+    func recordSentChunk(_ coordinate: ChunkCoordinate) {
+        coordinates.append(coordinate)
+    }
+}
+
 private enum TestSecureChannelPair {
-    static func make(failSenderAfter: Int? = nil) -> (
+    static func make(failSenderAfter: Int? = nil, key suppliedKey: Data? = nil) -> (
         sender: TestSecureChannel,
         receiver: TestSecureChannel
     ) {
-        let key = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+        let key =
+            suppliedKey
+            ?? Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
         let sender = TestSecureChannel(key: key, failAfter: failSenderAfter)
         let receiver = TestSecureChannel(key: key, failAfter: nil)
         sender.connect(to: receiver)

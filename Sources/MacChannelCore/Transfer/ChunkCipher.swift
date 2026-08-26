@@ -6,6 +6,45 @@ public enum TransferDirection: UInt8, Sendable {
     case receiverToSender = 2
 }
 
+struct TransferReceiverChallenge: Equatable, Sendable {
+    private static let magic = Data([0x4d, 0x43, 0x58, 0x43])  // MCXC
+    private static let version: UInt8 = 1
+    private static let challengeBytes = 32
+    private static let wireBytes = 4 + 1 + 16 + challengeBytes
+
+    let transferID: TransferID
+    let bytes: Data
+
+    static func fresh(for transferID: TransferID) -> Self {
+        Self(
+            transferID: transferID,
+            bytes: Data((0..<challengeBytes).map { _ in UInt8.random(in: .min ... .max) })
+        )
+    }
+
+    func encode() -> Data {
+        var output = Self.magic
+        output.append(Self.version)
+        output.append(TransferCryptographicContext.encodedTransferID(transferID))
+        output.append(bytes)
+        return output
+    }
+
+    static func decode(_ wire: Data, expectedTransferID: TransferID) throws -> Self {
+        guard wire.count == wireBytes,
+            wire.prefix(magic.count) == magic,
+            wire[magic.count] == version
+        else { throw TransferProtocolError.invalidFrame }
+        let transferBytes = wire.subdata(in: 5..<21)
+        guard transferBytes == TransferCryptographicContext.encodedTransferID(expectedTransferID)
+        else { throw TransferProtocolError.replayOrOutOfOrder }
+        return Self(
+            transferID: expectedTransferID,
+            bytes: wire.subdata(in: 21..<wireBytes)
+        )
+    }
+}
+
 public struct EncryptedTransferFrame: Sendable {
     public let transferID: TransferID
     public let sequence: UInt64
@@ -203,7 +242,14 @@ struct TransferCryptographicContext: Sendable {
     let senderToReceiver: ChunkCipher
     let receiverToSender: ChunkCipher
 
-    static func make(on channel: any SecureChannel, transfer: TransferID) async throws -> Self {
+    static func make(
+        on channel: any SecureChannel,
+        transfer: TransferID,
+        receiverChallenge: Data
+    ) async throws -> Self {
+        guard receiverChallenge.count == 32 else {
+            throw TransferProtocolError.invalidFrame
+        }
         let context = encodedTransferID(transfer)
         let exported = try await channel.exportKey(
             label: exporterLabel,
@@ -214,12 +260,14 @@ struct TransferCryptographicContext: Sendable {
             senderToReceiver: ChunkCipher(
                 key: directionalKey(
                     exported,
-                    direction: .senderToReceiver
+                    direction: .senderToReceiver,
+                    receiverChallenge: receiverChallenge
                 )),
             receiverToSender: ChunkCipher(
                 key: directionalKey(
                     exported,
-                    direction: .receiverToSender
+                    direction: .receiverToSender,
+                    receiverChallenge: receiverChallenge
                 ))
         )
     }
@@ -231,12 +279,15 @@ struct TransferCryptographicContext: Sendable {
 
     private static func directionalKey(
         _ exported: Data,
-        direction: TransferDirection
+        direction: TransferDirection,
+        receiverChallenge: Data
     ) -> Data {
+        var info = Data([direction.rawValue])
+        info.append(receiverChallenge)
         let key = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: exported),
             salt: Data("macchannel-transfer-direction-v1".utf8),
-            info: Data([direction.rawValue]),
+            info: info,
             outputByteCount: 32
         )
         return key.withUnsafeBytes { Data($0) }

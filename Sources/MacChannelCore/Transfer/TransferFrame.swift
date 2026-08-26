@@ -58,6 +58,9 @@ public struct ResumeMap: Equatable, Sendable {
                 merged.append(range)
             }
         }
+        guard merged.count <= TransferProtocolLimits.maximumResumeRanges else {
+            throw TransferProtocolError.invalidResumeMap
+        }
         self.ranges = merged
     }
 
@@ -100,6 +103,7 @@ public enum TransferRemoteError: UInt16, Equatable, Sendable {
     case verificationFailed = 3
     case protocolViolation = 4
     case destinationUnavailable = 5
+    case sourceUnavailable = 6
 }
 
 public enum TransferFrame: Sendable {
@@ -114,7 +118,6 @@ public enum TransferFrame: Sendable {
     case error(TransferRemoteError)
 
     private static let version: UInt8 = 1
-    private static let maximumManifestEntries = 4_096
     private static let maximumPathBytes = 4_096
 
     public func encode() throws -> Data {
@@ -124,7 +127,7 @@ public enum TransferFrame: Sendable {
         case .offer(let manifest):
             writer.byte(1)
             writer.uuid(manifest.id.rawValue)
-            guard manifest.entries.count <= Self.maximumManifestEntries else {
+            guard manifest.entries.count <= TransferProtocolLimits.maximumManifestEntries else {
                 throw TransferProtocolError.manifestTooLarge
             }
             writer.uint32(UInt32(manifest.entries.count))
@@ -178,7 +181,7 @@ public enum TransferFrame: Sendable {
         case 1:
             let id = TransferID(rawValue: try reader.uuid())
             let count = Int(try reader.uint32())
-            guard count <= maximumManifestEntries else {
+            guard count <= TransferProtocolLimits.maximumManifestEntries else {
                 throw TransferProtocolError.manifestTooLarge
             }
             var entries: [TransferManifestEntry] = []
@@ -209,12 +212,13 @@ public enum TransferFrame: Sendable {
                         size: size,
                         modificationDate: modificationDate,
                         chunkCount: chunkCount,
-                        digest: digest,
-                        sourceURL: nil
+                        digest: digest
                     ))
             }
             try validateEntryPaths(entries)
-            result = .offer(TransferManifest(id: id, entries: entries))
+            let manifest = TransferManifest(id: id, entries: entries)
+            try manifest.validateProtocolLimits()
+            result = .offer(manifest)
         case 2:
             result = .accept(try reader.resumeMap())
         case 3:
@@ -291,7 +295,9 @@ private struct BinaryWriter {
     }
 
     mutating func resumeMap(_ map: ResumeMap) throws {
-        guard map.ranges.count <= 65_536 else { throw TransferProtocolError.invalidResumeMap }
+        guard map.ranges.count <= TransferProtocolLimits.maximumResumeRanges else {
+            throw TransferProtocolError.invalidResumeMap
+        }
         uint32(UInt32(map.ranges.count))
         for range in map.ranges {
             uint32(range.entryIndex)
@@ -343,7 +349,9 @@ private struct BinaryReader {
 
     mutating func resumeMap() throws -> ResumeMap {
         let count = Int(try uint32())
-        guard count <= 65_536, count <= (input.count - offset) / 12 else {
+        guard count <= TransferProtocolLimits.maximumResumeRanges,
+            count <= (input.count - offset) / 12
+        else {
             throw TransferProtocolError.invalidResumeMap
         }
         var ranges: [ChunkRange] = []

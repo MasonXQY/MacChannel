@@ -2,69 +2,100 @@
 
 ## Status
 
-Complete. The implementation adds streamed manifest construction, authenticated
-versioned transfer frames, per-transfer encryption, bounded flow control, durable
-verified resume state, and fail-closed receiver assembly over `SecureChannel`.
+Complete after the independent security follow-up. The protocol now provides
+encrypted manifest/chunk transfer, bounded verified resumption, explicit session
+control, replay separation, immutable source pinning, crash-tolerant journals,
+and descriptor-relative receiver materialization over the audited
+`SecureChannel`.
 
 ## TDD evidence
 
-- The first `TransferProtocolTests` run failed to compile because
-  `TransferManifest` did not exist, matching the brief's required red state.
-- Each subsequent protocol behavior was introduced through a failing test before
-  its implementation or hardening change. Notable red/green cases covered the
-  250 ms ACK timer, reconnect nonce reuse, metadata/source-name collision, and
-  nested-directory finalization.
+- The original implementation began with the required compile-failing protocol
+  tests before `TransferManifest` existed.
+- The follow-up hardening also used red/green tests. Observed red states included
+  accepted case-equivalent paths, accepted decomposed Unicode, no fresh-session
+  challenge API, source replacement terminating the receiver, torn journal tails
+  producing `unexpectedFrame`, and unbounded resume-map construction.
+- Adversarial green coverage now includes APFS `A`/`a` and NFC/NFD behavior,
+  source pathname replacement and in-place mutation, same-exporter cross-session
+  replay, torn and corrupt journal records, sender/receiver pause-resume-cancel,
+  typed sender termination, bounded manifest/map limits, and staged hardlink
+  replacement after the receiver has opened the file.
 
 ## Implemented contract
 
-- Builds manifests by streaming file hashing and stores normalized NFC relative
-  path components, entry kind, size, modification date, chunk count, and SHA-256.
-- Rejects absolute, dot-segment, NUL, non-normalized, duplicate, unsupported, and
-  symlink source paths. Receiver staging rejects existing symlinks and verifies
-  every resolved relative destination remains beneath its staging root.
-- Encodes `offer`, `accept`, `chunk`, `ackRanges`, `pause`, `resume`, `cancel`,
-  `complete`, and `error` as strict versioned binary frames with bounded lengths
-  and exact-input consumption.
-- Calls `exportKey(label: "macchannel-transfer-v1", context: encodedTransferID,
-  length: 32)` once per session side, then derives distinct directional keys.
-- AES-GCM authenticates the visible wire header and encrypted frame. Nonces derive
-  from transfer ID, direction, monotonic frame sequence, and a fresh 128-bit
-  cipher-instance epoch, preventing reuse across reconnects even if an exporter
-  secret is repeated.
-- The maximum file payload is calculated so the largest encrypted chunk frame is
-  exactly 65,536 bytes including all binary and authentication overhead.
-- Sender permits at most 64 unacknowledged chunks. Receiver sends canonical
-  continuous range ACKs at 16 chunks, at completion, or after a real 250 ms timer.
-- Resume records are synchronized only after chunk write/read-back verification.
-  On reconnect, staged bytes are re-read and SHA-256 checked before their ranges
-  are advertised. Corrupt staged chunks are resent.
-- Frame sequence replay, authenticated-data tampering, duplicate chunks,
-  out-of-order chunks, malformed ACK/resume ranges, and final digest mismatch all
-  fail closed. The receiver uses exactly one task to consume `channel.frames()`.
-- Final output is moved from transfer-specific staging only after every file's
-  size and SHA-256 match the manifest. The result exposes exactly one root URL.
+- Manifest traversal is streamed and stops at 4,096 entries. Aggregate bytes,
+  chunk count, path bytes, and encoded offer size are checked before hashing or
+  snapshot cloning. Aggregate transfer state is capped at 1,000,000 chunks.
+- Relative paths reject absolute paths, dot segments, NUL, non-NFC input,
+  unsupported nodes, and source symlinks. Before staging, receiver paths are
+  canonical-normalized and case-folded according to the actual destination
+  volume; filesystem-equivalent collisions fail closed.
+- Every source file is opened with `O_NOFOLLOW`, its pathname and descriptor
+  identities must match, and `fclonefileat` creates an APFS copy-on-write snapshot.
+  The clone pathname is immediately unlinked. Manifest hashing, validation, and
+  every chunk read use only the stable retained descriptor; no mutable source
+  pathname remains in the manifest.
+- Calls to `exportKey` remain exactly
+  `label: "macchannel-transfer-v1"`, `context: encodedTransferID`, `length: 32`.
+  The receiver first contributes a fresh 32-byte challenge over authenticated
+  `SecureChannel`; HKDF mixes that challenge into each directional session key.
+  Recorded frames therefore fail in a new session even if the exporter repeats.
+- Strict versioned binary frames cover `offer`, `accept`, `chunk`, `ackRanges`,
+  `pause`, `resume`, `cancel`, `complete`, and typed `error`. AES-GCM authenticates
+  the wire header and encrypted body. Direction, transfer ID, monotonic sequence,
+  and fresh cipher epoch enforce nonce uniqueness and replay/order checks.
+- The maximum chunk is calculated so its complete authenticated wire frame is
+  exactly 65,536 bytes. The sender retains at most 64 outstanding coordinates,
+  not an unbounded sent-history array. Optional coordinate recording is an
+  internal test injection only.
+- Receiver ACKs are canonical continuous ranges after 16 chunks, at completion,
+  or after 250 ms. Resume advertisements are conservatively bounded to one
+  verified run per manifest entry, at most 4,096 ranges and within one frame;
+  omitted verified chunks are safely resent.
+- Resume journal version 2 uses fingerprint-bound SHA-256 checksums per record.
+  A torn final record is discarded and the valid prefix is recovered. A corrupt
+  complete record is rejected. Compaction uses a synchronized temporary
+  checkpoint and atomic descriptor-relative rename.
+- Receiver staging uses private same-owner directories and descriptor-relative
+  `mkdirat`/`openat` with `O_NOFOLLOW`. Staged files remain pinned, must be regular
+  with link count one, and are rechecked for device/inode identity before final
+  publication. `renameatx_np(RENAME_EXCL)` prevents final destination replacement.
+- `TransferSessionControl` makes pause, resume, and cancel operational from either
+  side. Cancellation maps to `cancelled`, while sender read/source/protocol errors
+  best-effort send typed terminal frames and always await `channel.close()` so the
+  peer terminates.
+- Tamper, replay, duplicate, out-of-order, invalid ACK/resume, journal corruption,
+  staged path replacement, and final digest failures all fail closed. Each side
+  still has exactly one receiver for `channel.frames()`.
 
 ## Verification
 
-- `swift test --filter TransferProtocolTests`: 18 tests, 0 failures.
-- `swift test`: 122 tests, 0 failures.
-- `WebRTCLoopbackTests` within the full run: 14 tests, 0 failures, including the
-  real ordered/reliable 1 MiB loopback and 64 KiB channel-cap regressions.
-- `swift-format lint` over all Task 7 source and test files: exit 0, no diagnostics.
+- `swift test --filter TransferProtocolTests`: 35 tests, 0 failures.
+- `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures, including the
+  ordered/reliable 1 MiB loopback and inclusive 64 KiB cap regressions.
+- `swift test`: 139 tests, 0 failures.
+- `swift-format lint` with the repository's four-space style over all Task 7
+  source and test files: exit 0, no diagnostics.
 - `git diff --check`: clean.
+- Verification host data volume: APFS, case-insensitive, canonical-normalization
+  insensitive, and width-sensitive.
 
 ## Self-review and constraints
 
-- No known blocking defects remain in the Task 7 scope.
+- No known blocking defect remains in Task 7 scope. Disk-capacity policy remains
+  intentionally deferred to Task 8; protocol aggregate limits are enforced here.
+- Source pinning intentionally supports APFS copy-on-write clones only. It also
+  needs permission to create a private, same-volume temporary snapshot directory
+  adjacent to each source file. If `fclonefileat`, the filesystem, or permissions
+  cannot provide that invariant, manifest construction fails closed with
+  `unsupportedSource`; there is no mutable-file fallback.
 - Symlinks are deliberately rejected rather than transferred or materialized.
-- Durable per-chunk resume metadata is capped at 1,000,000 records to bound local
-  resource use; a transfer exceeding that limit fails closed rather than growing
-  resume state without bound.
-- `ReceiveSession` requires the expected `TransferID` out of band so it can derive
-  the exporter key before decrypting the offer; this matches the authenticated
-  channel/session ownership boundary.
+- Resume format version 1 is not migrated; version mismatch fails closed and the
+  caller must restart that transfer with fresh staging.
 
-## Commit
+## Commits
 
-The implementation and this report are committed together with message:
-`feat: add encrypted resumable transfers`.
+- Original implementation: `10268fb feat: add encrypted resumable transfers`.
+- Independent-review hardening: `fix: harden resumable transfer invariants`
+  (this report is committed with that follow-up).

@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 public struct TransferReceiveResult: Equatable, Sendable {
@@ -10,34 +11,63 @@ public struct TransferReceiveResult: Equatable, Sendable {
 public struct ReceiveSession: Sendable {
     private let transferID: TransferID
     private let destinationDirectory: URL
+    private let control: TransferSessionControl?
+    private let onStagingPrepared: (@Sendable (URL) -> Void)?
 
-    public init(transferID: TransferID, destinationDirectory: URL) {
+    public init(
+        transferID: TransferID,
+        destinationDirectory: URL,
+        control: TransferSessionControl? = nil
+    ) {
         self.transferID = transferID
         self.destinationDirectory = destinationDirectory
+        self.control = control
+        onStagingPrepared = nil
+    }
+
+    init(
+        transferID: TransferID,
+        destinationDirectory: URL,
+        control: TransferSessionControl? = nil,
+        onStagingPrepared: @escaping @Sendable (URL) -> Void
+    ) {
+        self.transferID = transferID
+        self.destinationDirectory = destinationDirectory
+        self.control = control
+        self.onStagingPrepared = onStagingPrepared
     }
 
     public func run(on channel: any SecureChannel) async throws -> TransferReceiveResult {
-        let crypto = try await TransferCryptographicContext.make(on: channel, transfer: transferID)
         var outboundSequence: UInt64 = 0
-        let frameReader = TransferFrameReader(
-            stream: channel.frames(),
-            transferID: transferID,
-            direction: .senderToReceiver,
-            cipher: crypto.senderToReceiver
-        )
-
+        var terminationCrypto: TransferCryptographicContext?
         do {
+            let challenge = TransferReceiverChallenge.fresh(for: transferID)
+            try await channel.send(challenge.encode())
+            let crypto = try await TransferCryptographicContext.make(
+                on: channel,
+                transfer: transferID,
+                receiverChallenge: challenge.bytes
+            )
+            terminationCrypto = crypto
+            let frameReader = TransferFrameReader(
+                stream: channel.frames(),
+                transferID: transferID,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver
+            )
             guard case .frame(let first) = try await frameReader.next() else {
                 throw TransferProtocolError.channelEnded
             }
             guard case .offer(let manifest) = first, manifest.id == transferID else {
-                throw TransferProtocolError.unexpectedFrame
+                throw protocolError(for: first)
             }
             try validateManifest(manifest)
+            try manifest.validateDestinationPaths(onVolumeContaining: destinationDirectory)
             var preparation = try ResumePreparation(
                 manifest: manifest,
                 destinationDirectory: destinationDirectory
             )
+            onStagingPrepared?(preparation.stagingDirectory)
             var verified = try VerifiedChunks(preparation.verified)
             try await send(
                 .accept(verified.map),
@@ -52,8 +82,16 @@ public struct ReceiveSession: Sendable {
             var chunksSinceAcknowledgement = 0
             let clock = ContinuousClock()
             var lastAcknowledgement = clock.now
+            var announcedLocalPause = false
+            var peerPaused = false
             while true {
-                let timeout: Duration?
+                try await applyLocalControl(
+                    on: channel,
+                    cipher: crypto.receiverToSender,
+                    sequence: &outboundSequence,
+                    announcedPause: &announcedLocalPause
+                )
+                var timeout: Duration?
                 if chunksSinceAcknowledgement > 0 {
                     let elapsed = lastAcknowledgement.duration(to: clock.now)
                     timeout =
@@ -63,18 +101,25 @@ public struct ReceiveSession: Sendable {
                 } else {
                     timeout = nil
                 }
+                if control != nil {
+                    timeout = min(timeout ?? .milliseconds(20), .milliseconds(20))
+                }
                 let event = try await frameReader.next(timeout: timeout)
                 if case .timeout = event {
-                    try await send(
-                        .ackRanges(verified.map),
-                        transferID: transferID,
-                        direction: .receiverToSender,
-                        on: channel,
-                        cipher: crypto.receiverToSender,
-                        sequence: &outboundSequence
-                    )
-                    chunksSinceAcknowledgement = 0
-                    lastAcknowledgement = clock.now
+                    if chunksSinceAcknowledgement > 0,
+                        lastAcknowledgement.duration(to: clock.now) >= .milliseconds(250)
+                    {
+                        try await send(
+                            .ackRanges(verified.map),
+                            transferID: transferID,
+                            direction: .receiverToSender,
+                            on: channel,
+                            cipher: crypto.receiverToSender,
+                            sequence: &outboundSequence
+                        )
+                        chunksSinceAcknowledgement = 0
+                        lastAcknowledgement = clock.now
+                    }
                     continue
                 }
                 guard case .frame(let frame) = event else {
@@ -82,6 +127,7 @@ public struct ReceiveSession: Sendable {
                 }
                 switch frame {
                 case .chunk(let chunk):
+                    guard !peerPaused else { throw TransferProtocolError.unexpectedFrame }
                     guard let expectedCoordinate = expected,
                         chunk.coordinate == expectedCoordinate
                     else {
@@ -145,30 +191,89 @@ public struct ReceiveSession: Sendable {
                 case .cancel:
                     throw TransferProtocolError.cancelled
                 case .pause:
-                    continue
+                    guard !peerPaused else { throw TransferProtocolError.unexpectedFrame }
+                    peerPaused = true
                 case .resume:
-                    continue
-                default:
+                    guard peerPaused else { throw TransferProtocolError.unexpectedFrame }
+                    peerPaused = false
+                case .error(let remote):
+                    throw mapRemoteError(remote)
+                case .offer, .accept, .ackRanges:
                     throw TransferProtocolError.unexpectedFrame
                 }
             }
         } catch {
-            if let code = remoteErrorCode(for: error) {
-                try? await send(
-                    .error(code),
-                    transferID: transferID,
-                    direction: .receiverToSender,
-                    on: channel,
-                    cipher: crypto.receiverToSender,
-                    sequence: &outboundSequence
-                )
+            if let crypto = terminationCrypto {
+                let terminalFrame: TransferFrame?
+                if error is CancellationError
+                    || (error as? TransferProtocolError) == .cancelled
+                {
+                    terminalFrame = .cancel
+                } else if let code = remoteErrorCode(for: error) {
+                    terminalFrame = .error(code)
+                } else {
+                    terminalFrame = nil
+                }
+                if let terminalFrame {
+                    try? await send(
+                        terminalFrame,
+                        transferID: transferID,
+                        direction: .receiverToSender,
+                        on: channel,
+                        cipher: crypto.receiverToSender,
+                        sequence: &outboundSequence
+                    )
+                }
             }
+            await channel.close()
+            if error is CancellationError { throw TransferProtocolError.cancelled }
             throw error
         }
     }
 
+    private func applyLocalControl(
+        on channel: any SecureChannel,
+        cipher: ChunkCipher,
+        sequence: inout UInt64,
+        announcedPause: inout Bool
+    ) async throws {
+        guard let control else { return }
+        while true {
+            switch await control.state() {
+            case .active:
+                if announcedPause {
+                    try await send(
+                        .resume,
+                        transferID: transferID,
+                        direction: .receiverToSender,
+                        on: channel,
+                        cipher: cipher,
+                        sequence: &sequence
+                    )
+                    announcedPause = false
+                }
+                return
+            case .paused:
+                if !announcedPause {
+                    try await send(
+                        .pause,
+                        transferID: transferID,
+                        direction: .receiverToSender,
+                        on: channel,
+                        cipher: cipher,
+                        sequence: &sequence
+                    )
+                    announcedPause = true
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            case .cancelled:
+                throw TransferProtocolError.cancelled
+            }
+        }
+    }
+
     private func validateManifest(_ manifest: TransferManifest) throws {
-        guard !manifest.entries.isEmpty else { throw TransferProtocolError.invalidFrame }
+        try manifest.validateProtocolLimits()
         let root = manifest.entries[0].relativePath.components[0]
         var directories: Set<RelativePath> = []
         var seen: Set<RelativePath> = []
@@ -333,12 +438,19 @@ private actor TransferFrameInbox {
 private struct ResumePreparation {
     let destinationDirectory: URL
     let stagingDirectory: URL
+    let tree: DescriptorStagingTree
+    let files: [UInt32: StagedFile]
     var resumeStore: ResumeStateStore
     let verified: Set<ChunkCoordinate>
 
     init(manifest: TransferManifest, destinationDirectory: URL) throws {
         self.destinationDirectory = destinationDirectory.standardizedFileURL
-        try Self.prepareDestination(self.destinationDirectory)
+        if !FileManager.default.fileExists(atPath: self.destinationDirectory.path) {
+            try FileManager.default.createDirectory(
+                at: self.destinationDirectory,
+                withIntermediateDirectories: true
+            )
+        }
         let suffix = manifest.id.rawValue.uuidString.lowercased()
         let rootName = manifest.entries[0].relativePath.components[0]
         let preferredStagingName = ".macchannel-\(suffix).partial"
@@ -347,47 +459,35 @@ private struct ResumePreparation {
             ? preferredStagingName + ".metadata" : preferredStagingName
         stagingDirectory = self.destinationDirectory
             .appendingPathComponent(stagingName, isDirectory: true)
-        try Self.ensureDirectory(stagingDirectory)
-
-        let finalRoot = self.destinationDirectory.appendingPathComponent(
-            rootName,
-            isDirectory: manifest.entries[0].kind == .directory
+        tree = try DescriptorStagingTree(
+            destinationDirectory: self.destinationDirectory,
+            stagingName: stagingName
         )
-        guard !FileManager.default.fileExists(atPath: finalRoot.path) else {
-            throw TransferProtocolError.destinationExists
-        }
-        for entry in manifest.entries {
-            let url = try safeURL(for: entry.relativePath, under: stagingDirectory)
+        try tree.requireAbsentInDestination(rootName)
+        var openedFiles: [UInt32: StagedFile] = [:]
+        for (index, entry) in manifest.entries.enumerated() {
             switch entry.kind {
             case .directory:
-                try Self.ensureDirectory(url)
+                try tree.ensureDirectory(entry.relativePath.components)
             case .file:
-                let parent = url.deletingLastPathComponent()
-                try Self.ensureDirectory(parent)
-                if !FileManager.default.fileExists(atPath: url.path) {
-                    guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
-                        throw TransferProtocolError.destinationEscape
-                    }
-                }
-                let values = try url.resourceValues(forKeys: [
-                    .isRegularFileKey, .isSymbolicLinkKey,
-                ])
-                guard values.isRegularFile == true, values.isSymbolicLink != true else {
-                    throw TransferProtocolError.destinationEscape
-                }
+                openedFiles[UInt32(index)] = try tree.openFile(
+                    entry.relativePath.components,
+                    create: true
+                )
             }
         }
+        files = openedFiles
         let fingerprint = try manifestFingerprint(manifest)
         let preferredStateName = ".resume-state"
         let stateName =
             rootName == preferredStateName
             ? preferredStateName + ".metadata" : preferredStateName
-        let stateURL = stagingDirectory.appendingPathComponent(stateName)
         let loaded = try ResumeStateStore.load(
-            from: stateURL,
+            named: stateName,
             fingerprint: fingerprint,
             manifest: manifest,
-            stagingDirectory: stagingDirectory
+            tree: tree,
+            files: openedFiles
         )
         resumeStore = loaded.store
         verified = loaded.verified
@@ -397,119 +497,326 @@ private struct ResumePreparation {
         _ chunk: TransferChunk,
         manifest: TransferManifest
     ) throws -> Data {
-        let entry = manifest.entries[Int(chunk.coordinate.entryIndex)]
-        let url = try safeURL(for: entry.relativePath, under: stagingDirectory)
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seek(toOffset: chunk.offset)
-        try handle.write(contentsOf: chunk.data)
-        try handle.synchronize()
-
-        let readHandle = try FileHandle(forReadingFrom: url)
-        defer { try? readHandle.close() }
-        try readHandle.seek(toOffset: chunk.offset)
-        let written = try readHandle.read(upToCount: chunk.data.count) ?? Data()
-        guard written == chunk.data else { throw TransferProtocolError.digestMismatch }
-        return Data(SHA256.hash(data: written))
+        guard let file = files[chunk.coordinate.entryIndex] else {
+            throw TransferProtocolError.destinationEscape
+        }
+        return try file.writeAndVerify(chunk.data, offset: chunk.offset)
     }
 
     func verifyCompletedFiles(_ manifest: TransferManifest) throws {
-        for entry in manifest.entries where entry.kind == .file {
-            let url = try safeURL(for: entry.relativePath, under: stagingDirectory)
-            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            guard let size = attributes[.size] as? NSNumber,
-                size.uint64Value == entry.size,
-                try digestFile(at: url) == entry.digest
+        for (index, entry) in manifest.entries.enumerated() where entry.kind == .file {
+            guard let file = files[UInt32(index)],
+                try file.currentSize() == entry.size,
+                try file.digest(size: entry.size) == entry.digest
             else { throw TransferProtocolError.digestMismatch }
         }
     }
 
     func finalize(_ manifest: TransferManifest) throws -> [URL] {
-        for entry in manifest.entries.reversed() {
-            let url = try safeURL(for: entry.relativePath, under: stagingDirectory)
-            try FileManager.default.setAttributes(
-                [.modificationDate: entry.modificationDate],
-                ofItemAtPath: url.path
+        for (index, entry) in manifest.entries.enumerated() where entry.kind == .file {
+            guard let file = files[UInt32(index)] else {
+                throw TransferProtocolError.destinationEscape
+            }
+            try tree.requireIdentity(file, at: entry.relativePath.components)
+            try file.setModificationDate(entry.modificationDate)
+        }
+        for entry in manifest.entries.reversed() where entry.kind == .directory {
+            try tree.setDirectoryModificationDate(
+                entry.modificationDate,
+                components: entry.relativePath.components
             )
         }
-        try FileManager.default.removeItem(at: resumeStore.url)
+        try resumeStore.remove()
         let rootName = manifest.entries[0].relativePath.components[0]
         let isDirectory = manifest.entries[0].kind == .directory
-        let stagedRoot = stagingDirectory.appendingPathComponent(rootName, isDirectory: isDirectory)
         let finalRoot = destinationDirectory.appendingPathComponent(
             rootName, isDirectory: isDirectory)
-        guard !FileManager.default.fileExists(atPath: finalRoot.path) else {
-            throw TransferProtocolError.destinationExists
-        }
-        try FileManager.default.moveItem(at: stagedRoot, to: finalRoot)
-        try FileManager.default.removeItem(at: stagingDirectory)
+        try tree.finalize(rootName: rootName)
         return [finalRoot]
-    }
-
-    private static func prepareDestination(_ url: URL) throws {
-        if FileManager.default.fileExists(atPath: url.path) {
-            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            guard values.isDirectory == true, values.isSymbolicLink != true else {
-                throw TransferProtocolError.destinationEscape
-            }
-        } else {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        }
-    }
-
-    private static func ensureDirectory(_ url: URL) throws {
-        if FileManager.default.fileExists(atPath: url.path) {
-            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            guard values.isDirectory == true, values.isSymbolicLink != true else {
-                throw TransferProtocolError.destinationEscape
-            }
-        } else {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
-        }
     }
 }
 
-private struct ResumeStateStore {
-    private static let magic = Data([0x4d, 0x43, 0x52, 0x53])  // MCRS
-    private static let version: UInt8 = 1
-    private static let headerBytes = 37
-    private static let recordBytes = 40
-    private static let maximumRecords = 1_000_000
+private final class DescriptorStagingTree: @unchecked Sendable {
+    let rootDescriptor: Int32
+    private let destinationDescriptor: Int32
+    private let stagingName: String
 
-    let url: URL
+    init(destinationDirectory: URL, stagingName: String) throws {
+        let destinationDescriptor = Darwin.open(
+            destinationDirectory.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard destinationDescriptor >= 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+        self.destinationDescriptor = destinationDescriptor
+        self.stagingName = stagingName
+        if mkdirat(destinationDescriptor, stagingName, S_IRWXU) != 0, errno != EEXIST {
+            Darwin.close(destinationDescriptor)
+            throw TransferProtocolError.destinationEscape
+        }
+        rootDescriptor = Darwin.openat(
+            destinationDescriptor,
+            stagingName,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard rootDescriptor >= 0 else {
+            Darwin.close(destinationDescriptor)
+            throw TransferProtocolError.destinationEscape
+        }
+        var status = stat()
+        guard fstat(rootDescriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFDIR,
+            status.st_uid == geteuid(),
+            status.st_mode & 0o077 == 0
+        else {
+            Darwin.close(rootDescriptor)
+            Darwin.close(destinationDescriptor)
+            throw TransferProtocolError.destinationEscape
+        }
+    }
 
-    static func load(
-        from url: URL,
-        fingerprint: Data,
-        manifest: TransferManifest,
-        stagingDirectory: URL
-    ) throws -> (store: ResumeStateStore, verified: Set<ChunkCoordinate>) {
-        guard fingerprint.count == 32 else { throw TransferProtocolError.invalidResumeMap }
-        var candidates: [(ChunkCoordinate, Data)] = []
-        if FileManager.default.fileExists(atPath: url.path) {
-            let values = try url.resourceValues(forKeys: [
-                .isRegularFileKey, .isSymbolicLinkKey,
-            ])
-            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+    deinit {
+        Darwin.close(rootDescriptor)
+        Darwin.close(destinationDescriptor)
+    }
+
+    func requireAbsentInDestination(_ name: String) throws {
+        var status = stat()
+        if fstatat(destinationDescriptor, name, &status, AT_SYMLINK_NOFOLLOW) == 0 {
+            throw TransferProtocolError.destinationExists
+        }
+        guard errno == ENOENT else { throw TransferProtocolError.destinationEscape }
+    }
+
+    func ensureDirectory(_ components: [String]) throws {
+        let descriptor = try openDirectory(components, create: true)
+        Darwin.close(descriptor)
+    }
+
+    func openFile(_ components: [String], create: Bool) throws -> StagedFile {
+        guard let name = components.last else { throw TransferProtocolError.destinationEscape }
+        let parent = try openDirectory(Array(components.dropLast()), create: create)
+        defer { Darwin.close(parent) }
+        var flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW
+        if create { flags |= O_CREAT }
+        let descriptor = Darwin.openat(parent, name, flags, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw TransferProtocolError.destinationEscape }
+        do {
+            return try StagedFile(descriptor: descriptor)
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    func requireIdentity(_ file: StagedFile, at components: [String]) throws {
+        let current = try openFile(components, create: false)
+        guard try file.hasSameIdentity(as: current) else {
+            throw TransferProtocolError.destinationEscape
+        }
+    }
+
+    func setDirectoryModificationDate(_ date: Date, components: [String]) throws {
+        let descriptor = try openDirectory(components, create: false)
+        defer { Darwin.close(descriptor) }
+        try setDescriptorModificationDate(descriptor, date: date)
+    }
+
+    func finalize(rootName: String) throws {
+        guard
+            renameatx_np(
+                rootDescriptor,
+                rootName,
+                destinationDescriptor,
+                rootName,
+                UInt32(RENAME_EXCL)
+            ) == 0
+        else {
+            if errno == EEXIST { throw TransferProtocolError.destinationExists }
+            throw TransferProtocolError.destinationEscape
+        }
+        guard unlinkat(destinationDescriptor, stagingName, AT_REMOVEDIR) == 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+    }
+
+    private func openDirectory(_ components: [String], create: Bool) throws -> Int32 {
+        var current = dup(rootDescriptor)
+        guard current >= 0 else { throw TransferProtocolError.destinationEscape }
+        for component in components {
+            if create, mkdirat(current, component, S_IRWXU) != 0, errno != EEXIST {
+                Darwin.close(current)
                 throw TransferProtocolError.destinationEscape
             }
-            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            guard let size = attributes[.size] as? NSNumber,
-                size.uint64Value <= UInt64(headerBytes + recordBytes * maximumRecords)
-            else { throw TransferProtocolError.invalidResumeMap }
-            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            let next = Darwin.openat(
+                current,
+                component,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+            Darwin.close(current)
+            guard next >= 0 else { throw TransferProtocolError.destinationEscape }
+            current = next
+        }
+        return current
+    }
+}
+
+private final class StagedFile: @unchecked Sendable {
+    let descriptor: Int32
+    private let device: dev_t
+    private let inode: ino_t
+
+    init(descriptor: Int32) throws {
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_nlink == 1
+        else { throw TransferProtocolError.destinationEscape }
+        self.descriptor = descriptor
+        device = status.st_dev
+        inode = status.st_ino
+    }
+
+    deinit { Darwin.close(descriptor) }
+
+    func hasSameIdentity(as other: StagedFile) throws -> Bool {
+        var status = stat()
+        guard fstat(other.descriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_nlink == 1
+        else { throw TransferProtocolError.destinationEscape }
+        return status.st_dev == device && status.st_ino == inode
+    }
+
+    func writeAndVerify(_ data: Data, offset: UInt64) throws -> Data {
+        try writeAll(data, to: descriptor, offset: offset)
+        guard fsync(descriptor) == 0 else { throw TransferProtocolError.destinationEscape }
+        let written = try readExact(from: descriptor, offset: offset, length: data.count)
+        guard written == data else { throw TransferProtocolError.digestMismatch }
+        return Data(SHA256.hash(data: written))
+    }
+
+    func currentSize() throws -> UInt64 {
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_size >= 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+        return UInt64(status.st_size)
+    }
+
+    func digest(size: UInt64) throws -> Data {
+        var hasher = SHA256()
+        var offset: UInt64 = 0
+        while offset < size {
+            let length = Int(
+                min(
+                    UInt64(TransferProtocolLimits.maximumChunkBytes),
+                    size - offset
+                ))
+            hasher.update(
+                data: try readExact(
+                    from: descriptor,
+                    offset: offset,
+                    length: length
+                ))
+            offset += UInt64(length)
+        }
+        return Data(hasher.finalize())
+    }
+
+    func digest(offset: UInt64, length: Int) throws -> Data {
+        Data(
+            SHA256.hash(
+                data: try readExact(
+                    from: descriptor,
+                    offset: offset,
+                    length: length
+                )))
+    }
+
+    func setModificationDate(_ date: Date) throws {
+        try setDescriptorModificationDate(descriptor, date: date)
+    }
+}
+
+private final class ResumeStateStore: @unchecked Sendable {
+    private static let magic = Data([0x4d, 0x43, 0x52, 0x53])  // MCRS
+    private static let version: UInt8 = 2
+    private static let headerBytes = 37
+    private static let recordBodyBytes = 40
+    private static let recordBytes = 72
+    private static let maximumRecords = 1_000_000
+
+    private let descriptor: Int32
+    private let name: String
+    private let tree: DescriptorStagingTree
+    let fingerprint: Data
+
+    private init(
+        descriptor: Int32,
+        name: String,
+        tree: DescriptorStagingTree,
+        fingerprint: Data
+    ) {
+        self.descriptor = descriptor
+        self.name = name
+        self.tree = tree
+        self.fingerprint = fingerprint
+    }
+
+    deinit { Darwin.close(descriptor) }
+
+    static func load(
+        named name: String,
+        fingerprint: Data,
+        manifest: TransferManifest,
+        tree: DescriptorStagingTree,
+        files: [UInt32: StagedFile]
+    ) throws -> (store: ResumeStateStore, verified: Set<ChunkCoordinate>) {
+        guard fingerprint.count == 32 else { throw TransferProtocolError.invalidResumeMap }
+        let descriptor = Darwin.openat(
+            tree.rootDescriptor,
+            name,
+            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR
+        )
+        guard descriptor >= 0 else { throw TransferProtocolError.destinationEscape }
+        defer { Darwin.close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_nlink == 1,
+            status.st_size >= 0,
+            UInt64(status.st_size) <= UInt64(headerBytes + recordBytes * maximumRecords)
+        else { throw TransferProtocolError.destinationEscape }
+        var candidates: [(ChunkCoordinate, Data)] = []
+        if status.st_size > 0 {
+            let data = try readExact(
+                from: descriptor,
+                offset: 0,
+                length: Int(status.st_size)
+            )
             guard data.count >= headerBytes,
                 data.prefix(4) == magic,
                 data[4] == version,
-                data.subdata(in: 5..<37) == fingerprint,
-                (data.count - headerBytes).isMultiple(of: recordBytes)
+                data.subdata(in: 5..<37) == fingerprint
             else { throw TransferProtocolError.invalidResumeMap }
             var offset = headerBytes
             var seen: Set<ChunkCoordinate> = []
-            while offset < data.count {
+            let completeRecordBytes = (data.count - headerBytes) / recordBytes * recordBytes
+            let validEnd = headerBytes + completeRecordBytes
+            while offset < validEnd {
+                let body = data.subdata(in: offset..<(offset + recordBodyBytes))
+                let checksum = data.subdata(
+                    in: (offset + recordBodyBytes)..<(offset + recordBytes)
+                )
+                guard checksum == recordChecksum(fingerprint: fingerprint, body: body) else {
+                    throw TransferProtocolError.invalidResumeMap
+                }
                 let entry = readUInt32(data, at: offset)
                 let chunk = readUInt32(data, at: offset + 4)
-                let digest = data.subdata(in: (offset + 8)..<(offset + recordBytes))
+                let digest = data.subdata(in: (offset + 8)..<(offset + recordBodyBytes))
                 let coordinate = ChunkCoordinate(entryIndex: entry, chunkIndex: chunk)
                 guard seen.insert(coordinate).inserted else {
                     throw TransferProtocolError.invalidResumeMap
@@ -533,26 +840,39 @@ private struct ResumeStateStore {
                     UInt64(TransferProtocolLimits.maximumChunkBytes),
                     entry.size - offset
                 ))
-            let fileURL = try safeURL(for: entry.relativePath, under: stagingDirectory)
-            guard let digest = try? digestChunk(at: fileURL, offset: offset, length: length),
+            guard let file = files[coordinate.entryIndex],
+                let digest = try? file.digest(offset: offset, length: length),
                 digest == expectedDigest
             else { continue }
             verified.insert(coordinate)
             verifiedRecords.append((coordinate, digest))
         }
-        try writeState(
-            to: url,
+        let boundedVerified = boundedResumeCoordinates(verified)
+        verifiedRecords = verifiedRecords.filter { boundedVerified.contains($0.0) }
+        let compactedDescriptor = try writeState(
+            named: name,
+            tree: tree,
             fingerprint: fingerprint,
             records: verifiedRecords
         )
-        return (ResumeStateStore(url: url), verified)
+        return (
+            ResumeStateStore(
+                descriptor: compactedDescriptor,
+                name: name,
+                tree: tree,
+                fingerprint: fingerprint
+            ),
+            boundedVerified
+        )
     }
 
     func append(_ coordinate: ChunkCoordinate, digest: Data) throws {
         guard digest.count == 32 else { throw TransferProtocolError.invalidResumeMap }
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        let offset = try handle.seekToEnd()
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_size >= 0 else {
+            throw TransferProtocolError.invalidResumeMap
+        }
+        let offset = UInt64(status.st_size)
         guard offset <= UInt64(Self.headerBytes + Self.recordBytes * (Self.maximumRecords - 1))
         else {
             throw TransferProtocolError.invalidResumeMap
@@ -561,24 +881,80 @@ private struct ResumeStateStore {
         appendUInt32(coordinate.entryIndex, to: &record)
         appendUInt32(coordinate.chunkIndex, to: &record)
         record.append(digest)
-        try handle.write(contentsOf: record)
-        try handle.synchronize()
+        record.append(Self.recordChecksum(fingerprint: fingerprint, body: record))
+        try writeAll(record, to: descriptor, offset: offset)
+        guard fsync(descriptor) == 0 else { throw TransferProtocolError.destinationEscape }
+    }
+
+    func remove() throws {
+        guard unlinkat(tree.rootDescriptor, name, 0) == 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
     }
 
     private static func writeState(
-        to url: URL,
+        named name: String,
+        tree: DescriptorStagingTree,
         fingerprint: Data,
         records: [(ChunkCoordinate, Data)]
-    ) throws {
+    ) throws -> Int32 {
         var data = magic
         data.append(version)
         data.append(fingerprint)
         for (coordinate, digest) in records.sorted(by: { $0.0 < $1.0 }) {
-            appendUInt32(coordinate.entryIndex, to: &data)
-            appendUInt32(coordinate.chunkIndex, to: &data)
-            data.append(digest)
+            var record = Data()
+            appendUInt32(coordinate.entryIndex, to: &record)
+            appendUInt32(coordinate.chunkIndex, to: &record)
+            record.append(digest)
+            data.append(record)
+            data.append(recordChecksum(fingerprint: fingerprint, body: record))
         }
-        try data.write(to: url, options: .atomic)
+        let temporaryName = ".resume-checkpoint-\(UUID().uuidString.lowercased())"
+        let temporaryDescriptor = Darwin.openat(
+            tree.rootDescriptor,
+            temporaryName,
+            O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR
+        )
+        guard temporaryDescriptor >= 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+        var keepTemporary = true
+        defer {
+            Darwin.close(temporaryDescriptor)
+            if keepTemporary {
+                _ = unlinkat(tree.rootDescriptor, temporaryName, 0)
+            }
+        }
+        try writeAll(data, to: temporaryDescriptor, offset: 0)
+        guard fsync(temporaryDescriptor) == 0,
+            renameat(tree.rootDescriptor, temporaryName, tree.rootDescriptor, name) == 0
+        else { throw TransferProtocolError.destinationEscape }
+        guard fsync(tree.rootDescriptor) == 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+        keepTemporary = false
+        let replacement = Darwin.openat(
+            tree.rootDescriptor,
+            name,
+            O_RDWR | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard replacement >= 0 else { throw TransferProtocolError.destinationEscape }
+        var status = stat()
+        guard fstat(replacement, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_nlink == 1
+        else {
+            Darwin.close(replacement)
+            throw TransferProtocolError.destinationEscape
+        }
+        return replacement
+    }
+
+    private static func recordChecksum(fingerprint: Data, body: Data) -> Data {
+        var material = fingerprint
+        material.append(body)
+        return Data(SHA256.hash(data: material))
     }
 
     private static func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
@@ -609,6 +985,30 @@ private func nextMissing(
         chunkIndex = 0
     }
     return nil
+}
+
+// Resume advertisements are intentionally limited to one verified contiguous
+// run per manifest entry. This bounds the map to the manifest entry cap and
+// conservatively causes any other verified chunks to be resent.
+private func boundedResumeCoordinates(
+    _ coordinates: Set<ChunkCoordinate>
+) -> Set<ChunkCoordinate> {
+    var result: Set<ChunkCoordinate> = []
+    var activeEntry: UInt32?
+    var lastIncludedChunk: UInt32?
+    for coordinate in coordinates.sorted() {
+        if activeEntry != coordinate.entryIndex {
+            activeEntry = coordinate.entryIndex
+            lastIncludedChunk = coordinate.chunkIndex
+            result.insert(coordinate)
+        } else if lastIncludedChunk != nil,
+            coordinate.chunkIndex == lastIncludedChunk! + 1
+        {
+            result.insert(coordinate)
+            lastIncludedChunk = coordinate.chunkIndex
+        }
+    }
+    return result
 }
 
 private struct VerifiedChunks {
@@ -674,50 +1074,63 @@ private struct VerifiedChunks {
     }
 }
 
-private func safeURL(for path: RelativePath, under root: URL) throws -> URL {
-    let canonicalRoot = root.standardizedFileURL.resolvingSymlinksInPath()
-    var current = root.standardizedFileURL
-    for component in path.components {
-        current.appendPathComponent(component)
-        if FileManager.default.fileExists(atPath: current.path) {
-            let values = try current.resourceValues(forKeys: [.isSymbolicLinkKey])
-            guard values.isSymbolicLink != true else {
-                throw TransferProtocolError.destinationEscape
-            }
-        }
-        let resolved = current.resolvingSymlinksInPath().standardizedFileURL
-        let prefix =
-            canonicalRoot.path.hasSuffix("/") ? canonicalRoot.path : canonicalRoot.path + "/"
-        guard resolved.path.hasPrefix(prefix) else {
-            throw TransferProtocolError.destinationEscape
-        }
-    }
-    return current
-}
-
 private func manifestFingerprint(_ manifest: TransferManifest) throws -> Data {
     Data(SHA256.hash(data: try TransferFrame.offer(manifest).encode()))
 }
 
-private func digestFile(at url: URL) throws -> Data {
-    let handle = try FileHandle(forReadingFrom: url)
-    defer { try? handle.close() }
-    var hasher = SHA256()
-    while true {
-        let data = try handle.read(upToCount: TransferProtocolLimits.maximumChunkBytes) ?? Data()
-        if data.isEmpty { break }
-        hasher.update(data: data)
+private func readExact(from descriptor: Int32, offset: UInt64, length: Int) throws -> Data {
+    guard length >= 0, offset <= UInt64(Int64.max) else {
+        throw TransferProtocolError.destinationEscape
     }
-    return Data(hasher.finalize())
+    var output = Data(count: length)
+    try output.withUnsafeMutableBytes { bytes in
+        var total = 0
+        while total < length {
+            let count = pread(
+                descriptor,
+                bytes.baseAddress!.advanced(by: total),
+                length - total,
+                off_t(offset) + off_t(total)
+            )
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { throw TransferProtocolError.digestMismatch }
+            total += count
+        }
+    }
+    return output
 }
 
-private func digestChunk(at url: URL, offset: UInt64, length: Int) throws -> Data {
-    let handle = try FileHandle(forReadingFrom: url)
-    defer { try? handle.close() }
-    try handle.seek(toOffset: offset)
-    let data = try handle.read(upToCount: length) ?? Data()
-    guard data.count == length else { throw TransferProtocolError.digestMismatch }
-    return Data(SHA256.hash(data: data))
+private func writeAll(_ data: Data, to descriptor: Int32, offset: UInt64) throws {
+    guard offset <= UInt64(Int64.max) else { throw TransferProtocolError.destinationEscape }
+    try data.withUnsafeBytes { bytes in
+        var total = 0
+        while total < data.count {
+            let count = pwrite(
+                descriptor,
+                bytes.baseAddress!.advanced(by: total),
+                data.count - total,
+                off_t(offset) + off_t(total)
+            )
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { throw TransferProtocolError.destinationEscape }
+            total += count
+        }
+    }
+}
+
+private func setDescriptorModificationDate(_ descriptor: Int32, date: Date) throws {
+    let seconds = floor(date.timeIntervalSince1970)
+    let nanoseconds = min(
+        999_999_999,
+        max(0, Int((date.timeIntervalSince1970 - seconds) * 1_000_000_000))
+    )
+    var times = [
+        timespec(tv_sec: 0, tv_nsec: Int(UTIME_OMIT)),
+        timespec(tv_sec: time_t(seconds), tv_nsec: nanoseconds),
+    ]
+    guard futimens(descriptor, &times) == 0 else {
+        throw TransferProtocolError.destinationEscape
+    }
 }
 
 private func appendUInt32(_ value: UInt32, to data: inout Data) {
