@@ -189,6 +189,91 @@ final class DeviceDirectoryTests: XCTestCase {
         await session.stop()
     }
 
+    func testRendezvousSessionSendsSignalThroughItsAuthenticatedSocket() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = DeviceID(rawValue: UUID())
+        let socket = MemoryPresenceSocket(incoming: [
+            try frame(["type": "challenge", "nonce": Data(repeating: 10, count: 32).base64EncodedString(), "expiresAt": 1]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+        ])
+        let session = try AuthenticatedPresenceSession(
+            identity: identity,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: PresenceClient(directory: DeviceDirectory(trust: .allowing(identity.id, peer)))
+        )
+        try await session.connect()
+
+        try await session.sendSignal(Data("offer".utf8), to: peer)
+
+        let sent = await socket.sentFrames()
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: sent[1]) as? [String: Any])
+        XCTAssertEqual(object["type"] as? String, "signal")
+        XCTAssertEqual(object["to"] as? String, peer.rawValue.uuidString.lowercased())
+        XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(object["payload"] as? String)), Data("offer".utf8))
+        await session.stop()
+    }
+
+    func testRendezvousSessionDoesNotDropBurstOfICECandidates() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = DeviceID(rawValue: UUID())
+        var incoming = [
+            try frame(["type": "challenge", "nonce": Data(repeating: 11, count: 32).base64EncodedString(), "expiresAt": 1]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+        ]
+        incoming += try (0..<40).map { index in
+            try frame([
+                "type": "signal",
+                "from": peer.rawValue.uuidString.lowercased(),
+                "payload": Data("candidate-\(index)".utf8).base64EncodedString(),
+            ])
+        }
+        let session = try AuthenticatedPresenceSession(
+            identity: identity,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: MemoryPresenceSocket(incoming: incoming),
+            client: PresenceClient(directory: DeviceDirectory(trust: .allowing(identity.id, peer)))
+        )
+        let signals = await session.signalFrames()
+        try await session.connect()
+        _ = try? await session.run()
+
+        var received: [Data] = []
+        for await signal in signals { received.append(signal.payload) }
+
+        XCTAssertEqual(received, (0..<40).map { Data("candidate-\($0)".utf8) })
+        await session.stop()
+    }
+
+    func testRendezvousAcceptsMaximumServerSignalPayloadInside128KiBWebSocketFrame() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = DeviceID(rawValue: UUID())
+        let maximumPayload = Data(repeating: 0x5a, count: 64 * 1024)
+        let socket = MemoryPresenceSocket(incoming: [
+            try frame(["type": "challenge", "nonce": Data(repeating: 12, count: 32).base64EncodedString(), "expiresAt": 1]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+            try frame([
+                "type": "signal",
+                "from": peer.rawValue.uuidString.lowercased(),
+                "payload": maximumPayload.base64EncodedString(),
+            ]),
+        ])
+        let session = try AuthenticatedPresenceSession(
+            identity: identity,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: PresenceClient(directory: DeviceDirectory(trust: .allowing(identity.id, peer)))
+        )
+        let signals = await session.signalFrames()
+        var iterator = signals.makeAsyncIterator()
+        try await session.connect()
+        _ = try? await session.run()
+
+        let received = await iterator.next()
+        XCTAssertEqual(received?.payload, maximumPayload)
+        await session.stop()
+    }
+
     func testRendezvousStreamsFinishOnTerminalReaderErrorAndStop() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let peer = DeviceID(rawValue: UUID())
@@ -482,6 +567,7 @@ private actor MemoryPresenceSocket: PresenceWebSocket {
     }
     func close() async {}
     func sentFrame() throws -> Data { try XCTUnwrap(sent.first) }
+    func sentFrames() -> [Data] { sent }
 }
 
 private actor BonjourApplyGate {

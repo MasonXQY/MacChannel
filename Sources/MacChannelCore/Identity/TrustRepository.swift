@@ -37,6 +37,14 @@ public actor TrustRepository {
         store.isTrusted(device)
     }
 
+    /// Returns key material only for an identity trusted at the instant of the
+    /// lookup. A later revocation removes it from this authentication surface.
+    public func publicKey(for device: DeviceID) -> Data? {
+        guard store.isTrusted(device) else { return nil }
+        if device == ownerID { return ownerIdentity.publicKey.rawRepresentation }
+        return store.trustedPublicKey(for: device)
+    }
+
     public func currentTrustStore() -> TrustStore {
         store
     }

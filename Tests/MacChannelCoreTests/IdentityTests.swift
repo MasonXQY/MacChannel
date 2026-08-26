@@ -25,6 +25,30 @@ final class IdentityTests: XCTestCase {
         XCTAssertFalse(store.isTrusted(peer.id))
     }
 
+    func testTrustRepositoryReturnsOnlyCurrentlyTrustedIdentityKeys() async throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        let repository = try TrustRepository(
+            ownerIdentity: owner,
+            trustStore: TrustStore(owner: owner.id),
+            persistedGeneration: 0
+        )
+        _ = try await repository.issueAuthorization(
+            subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+
+        let ownerKey = await repository.publicKey(for: owner.id)
+        let peerKey = await repository.publicKey(for: peer.id)
+        _ = try await repository.revoke(peer.id)
+        let revokedKey = await repository.publicKey(for: peer.id)
+
+        XCTAssertEqual(ownerKey, owner.publicKey.rawRepresentation)
+        XCTAssertEqual(peerKey, peer.publicKey.rawRepresentation)
+        XCTAssertNil(revokedKey)
+    }
+
     func testInboundRevocationIsAppliedOnAnotherTrustStore() throws {
         let owner = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()

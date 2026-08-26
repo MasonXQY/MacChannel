@@ -151,6 +151,11 @@ public struct TrustStore: Sendable {
         !revokedDevices.contains(device) && (device == owner || trustedPublicKeys[device] != nil)
     }
 
+    func trustedPublicKey(for device: DeviceID) -> Data? {
+        guard isTrusted(device), device != owner else { return nil }
+        return trustedPublicKeys[device]
+    }
+
     /// Device identifiers only; this view intentionally exposes no key material.
     public var trustedDeviceIDs: Set<DeviceID> {
         Set(trustedPublicKeys.keys)

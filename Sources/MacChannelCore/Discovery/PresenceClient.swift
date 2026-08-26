@@ -126,7 +126,8 @@ public actor PresenceClient {
 public actor AuthenticatedPresenceSession {
     public static let subprotocol = "macchannel.auth.v1"
     public static let authenticationPayload = Data("{\"type\":\"websocket-auth-v1\"}".utf8)
-    public static let maximumFrameBytes = 64 * 1024
+    public static let maximumSignalPayloadBytes = 64 * 1024
+    public static let maximumFrameBytes = 128 * 1024
 
     private let identity: DeviceIdentity
     private let origin: URL
@@ -154,7 +155,9 @@ public actor AuthenticatedPresenceSession {
         presenceStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { presenceContinuation = $0 }
         self.presenceContinuation = presenceContinuation
         var signalContinuation: AsyncStream<RendezvousSignalFrame>.Continuation!
-        signalStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { signalContinuation = $0 }
+        // Bound memory while preserving realistic ICE candidate bursts. A
+        // larger burst fails the session instead of silently dropping a route.
+        signalStream = AsyncStream(bufferingPolicy: .bufferingOldest(256)) { signalContinuation = $0 }
         self.signalContinuation = signalContinuation
         var trustResultContinuation: AsyncStream<RendezvousTrustResult>.Continuation!
         trustResultStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { trustResultContinuation = $0 }
@@ -174,6 +177,27 @@ public actor AuthenticatedPresenceSession {
     public func trustResults() -> AsyncStream<RendezvousTrustResult> { trustResultStream }
     public func protocolErrors() -> AsyncStream<RendezvousProtocolError> { protocolErrorStream }
     public func verifiedTrustRecords() -> AsyncStream<SignedTrustRecord> { trustRecordStream }
+
+    /// Sends opaque WebRTC signaling through the already authenticated socket.
+    /// This actor remains the only owner and reader of `/v1/ws`.
+    public func sendSignal(_ payload: Data, to device: DeviceID) async throws {
+        guard running else { throw AuthenticatedPresenceError.authenticationRejected }
+        guard !payload.isEmpty, payload.count <= Self.maximumSignalPayloadBytes else {
+            throw AuthenticatedPresenceError.frameTooLarge
+        }
+        let frame: [String: Any] = [
+            "type": "signal",
+            "to": device.rawValue.uuidString.lowercased(),
+            "payload": payload.base64EncodedString(),
+        ]
+        do {
+            try await socket.send(JSONSerialization.data(withJSONObject: frame, options: [.sortedKeys]))
+        } catch let error as AuthenticatedPresenceError {
+            throw error
+        } catch {
+            throw AuthenticatedPresenceError.transport("send_failed")
+        }
+    }
 
     public func connect() async throws {
         await client.disconnect()
@@ -214,7 +238,17 @@ public actor AuthenticatedPresenceSession {
                     trustRecordContinuation.yield(signedRecord)
                 case "signal":
                     guard let from = frame.from, let uuid = UUID(uuidString: from), let payload = frame.payload else { throw AuthenticatedPresenceError.invalidFrame }
-                    signalContinuation.yield(RendezvousSignalFrame(from: DeviceID(rawValue: uuid), payload: payload))
+                    guard payload.count <= Self.maximumSignalPayloadBytes else {
+                        throw AuthenticatedPresenceError.frameTooLarge
+                    }
+                    switch signalContinuation.yield(RendezvousSignalFrame(from: DeviceID(rawValue: uuid), payload: payload)) {
+                    case .enqueued:
+                        break
+                    case .dropped, .terminated:
+                        throw AuthenticatedPresenceError.transport("signal_buffer_overflow")
+                    @unknown default:
+                        throw AuthenticatedPresenceError.transport("signal_buffer_overflow")
+                    }
                 case "signal-error":
                     guard let code = frame.code else { throw AuthenticatedPresenceError.invalidFrame }
                     protocolErrorContinuation.yield(RendezvousProtocolError(code: code))

@@ -9,8 +9,16 @@ let package = Package(
         .library(name: "MacChannelCore", targets: ["MacChannelCore"]),
         .executable(name: "MacChannelApp", targets: ["MacChannelApp"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/stasel/WebRTC.git", exact: "150.0.0"),
+    ],
     targets: [
-        .target(name: "MacChannelCore"),
+        .target(
+            name: "MacChannelCore",
+            dependencies: [
+                .product(name: "WebRTC", package: "WebRTC"),
+            ]
+        ),
         .executableTarget(
             name: "MacChannelApp",
             dependencies: ["MacChannelCore"]

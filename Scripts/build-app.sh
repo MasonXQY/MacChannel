@@ -8,6 +8,7 @@ contents_path="$app_path/Contents"
 rm -rf "$app_path"
 mkdir -p "$contents_path/MacOS" "$contents_path/Resources"
 cp ".build/debug/MacChannelApp" "$contents_path/MacOS/MacChannelApp"
+cp -R ".build/debug/WebRTC.framework" "$contents_path/MacOS/WebRTC.framework"
 
 cat > "$contents_path/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
