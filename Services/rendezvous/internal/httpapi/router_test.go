@@ -61,7 +61,7 @@ func (s *racingVersionedTrustStore) Load(context.Context) ([]auth.PersistedTrust
 	return append([]auth.PersistedTrustRecord(nil), s.current...), nil
 }
 
-func (s *racingVersionedTrustStore) Confirm(context.Context, string, []auth.SignedTrustRecord) error {
+func (s *racingVersionedTrustStore) ConfirmBatch(context.Context, string, []auth.SignedTrustRecord) error {
 	return nil
 }
 
@@ -77,7 +77,7 @@ func (s *memoryTrustRecordStore) Load(context.Context) ([]auth.PersistedTrustRec
 	return append([]auth.PersistedTrustRecord(nil), s.records...), nil
 }
 
-func (s *memoryTrustRecordStore) Confirm(_ context.Context, presentedBy string, records []auth.SignedTrustRecord) error {
+func (s *memoryTrustRecordStore) ConfirmBatch(_ context.Context, presentedBy string, records []auth.SignedTrustRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, record := range records {
@@ -185,9 +185,12 @@ type testAPI struct {
 }
 
 func newTestAPI(t *testing.T) *testAPI {
+	return newTestAPIWithRegistry(t, auth.NewTrustRegistry())
+}
+
+func newTestAPIWithRegistry(t *testing.T, registry *auth.TrustRegistry) *testAPI {
 	t.Helper()
 	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
-	registry := auth.NewTrustRegistry()
 	verifier := auth.NewVerifier(auth.VerifierConfig{
 		Clock:             clock.Now,
 		FreshnessWindow:   60 * time.Second,
@@ -2792,13 +2795,53 @@ func TestTrustUpdateFanoutIsPerRecordNonEchoingAndReplaySafe(t *testing.T) {
 		t.Fatalf("C received record for %q, want %q", trustRecordSubject(t, received), c.id)
 	}
 
-	if err := ownerWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{toB}}); err != nil {
+	if err := bWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{toB}}); err != nil {
 		t.Fatal(err)
 	}
-	readUntilType(t, ownerWS, "trust-ok")
-	expectNoFrameType(t, ownerWS, "trust-record")
-	expectNoFrameType(t, bWS, "trust-record")
+	readUntilTypeRejecting(t, bWS, "trust-ok", "trust-record")
+	if err := bWS.WriteJSON(map[string]any{"type": "signal", "to": owner.id, "payload": []byte("still-alive")}); err != nil {
+		t.Fatal(err)
+	}
+	if routed := readUntilTypeRejecting(t, ownerWS, "signal", "trust-record"); routed["from"] != b.id {
+		t.Fatalf("owner signal = %#v", routed)
+	}
 	expectNoFrameType(t, cWS, "trust-record")
+}
+
+func TestTrustUpdateBatchIsAtomicBeforeFanoutAndDurableConfirm(t *testing.T) {
+	store := &memoryTrustRecordStore{}
+	registry, err := auth.NewPersistentTrustRegistry(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := newTestAPIWithRegistry(t, registry)
+	owner := newIdentity(t)
+	b := newIdentity(t)
+	c := newIdentity(t)
+	ownerWS := api.authenticatedWebSocket(t, owner, nil)
+	defer ownerWS.Close()
+	bWS := api.authenticatedWebSocket(t, b, nil)
+	defer bWS.Close()
+
+	valid := owner.trustRecord(t, b, 1)
+	invalid := owner.trustRecord(t, c, 1) // duplicate issuer sequence invalidates the complete batch.
+	if err := ownerWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{valid, invalid}}); err != nil {
+		t.Fatal(err)
+	}
+	readUntilType(t, ownerWS, "trust-error")
+	store.mu.Lock()
+	persisted := len(store.records)
+	store.mu.Unlock()
+	if persisted != 0 {
+		t.Fatalf("durable records = %d, want 0", persisted)
+	}
+	expectNoFrameType(t, bWS, "trust-record")
+	if err := ownerWS.WriteJSON(map[string]any{"type": "signal", "to": b.id, "payload": []byte("must-not-route")}); err != nil {
+		t.Fatal(err)
+	}
+	if denied := readUntilType(t, ownerWS, "signal-error"); denied["code"] != "forbidden" {
+		t.Fatalf("signal result = %#v", denied)
+	}
 }
 
 func trustRecordSubject(t *testing.T, frame map[string]any) string {

@@ -85,6 +85,8 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     private var trustUpdateTask: Task<Void, Never>?
     private var trustObservationGeneration: UInt64 = 0
     private var directoryTasks: [UUID: Task<Void, Never>] = [:]
+    private var directorySessionTask: Task<DeviceDirectory.LANDiscoverySessionToken?, Never>?
+    private var directorySessionEndTask: Task<Void, Never>?
     private let beforeDirectoryApply: (@Sendable () async -> Void)?
 
     public convenience init(directory: DeviceDirectory, trust: DeviceTrust, renewalInterval: TimeInterval = 5) {
@@ -101,6 +103,13 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     deinit {
         trustUpdateTask?.cancel()
         directoryTasks.values.forEach { $0.cancel() }
+        if let directorySessionTask {
+            let directory = self.directory
+            Task {
+                guard let token = await directorySessionTask.value else { return }
+                await directory.endLANDiscoverySession(token)
+            }
+        }
     }
     public static func txtRecord(for device: DeviceID) -> [String: String] { ["id": deviceIDHash(for: device), "version": protocolVersion] }
     public static func service(for device: DeviceID) -> NWListener.Service { NWListener.Service(name: deviceIDHash(for: device), type: serviceType, txtRecord: NWTXTRecord(txtRecord(for: device))) }
@@ -130,7 +139,7 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     public func start() { queue.async { [weak self] in self?.startOnQueue() } }
     public func stop() { queue.async { [weak self] in
         guard let self else { return }
-        self.generation &+= 1; self.browser?.cancel(); self.browser = nil; self.renewalTimer?.cancel(); self.renewalTimer = nil; self.currentSightings = [:]; self.cancelOwnedTasksOnQueue(); self.lifecycleState = .stopped
+        self.generation &+= 1; self.browser?.cancel(); self.browser = nil; self.renewalTimer?.cancel(); self.renewalTimer = nil; self.currentSightings = [:]; self.endDirectorySessionOnQueue(); self.cancelOwnedTasksOnQueue(); self.lifecycleState = .stopped
     } }
 
     /// Internal test hook; production calls this only from the NWBrowser handler.
@@ -141,6 +150,12 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     private func startOnQueue() {
         guard browser == nil else { return }
         generation &+= 1; let activeGeneration = generation; lifecycleState = .starting
+        let directory = self.directory
+        let sessionTask: Task<DeviceDirectory.LANDiscoverySessionToken?, Never> = Task { [weak self, directory] in
+            guard self != nil, !Task.isCancelled else { return nil }
+            return await directory.beginLANDiscoverySession()
+        }
+        directorySessionTask = sessionTask
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil), using: .tcp)
         browser.browseResultsChangedHandler = { [weak self] results, _ in self?.consume(results, generation: activeGeneration) }
         browser.stateUpdateHandler = { [weak self] state in self?.record(state: state, generation: activeGeneration) }
@@ -158,8 +173,9 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
             browser?.cancel(); browser = nil
             renewalTimer?.cancel(); renewalTimer = nil
             currentSightings = [:]
+            endDirectorySessionOnQueue()
             cancelOwnedTasksOnQueue()
-        case .cancelled: lifecycleState = .stopped; browser = nil; cancelOwnedTasksOnQueue()
+        case .cancelled: lifecycleState = .stopped; browser = nil; endDirectorySessionOnQueue(); cancelOwnedTasksOnQueue()
         default: break
         }
     }
@@ -185,22 +201,29 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     }
     private func scheduleDirectoryApply(device: DeviceID, endpoint: NWEndpoint, generation: UInt64) {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard let sessionTask = directorySessionTask else { return }
         let identifier = UUID()
         let task = Task { [weak self, directory] in
             guard let self else { return }
             defer { self.removeDirectoryTask(identifier) }
+            guard let token = await sessionTask.value else { return }
             if let beforeDirectoryApply { await beforeDirectoryApply() }
-            guard !Task.isCancelled, await self.isCurrentForTask(generation) else { return }
-            await directory.apply(.bonjour(device, endpoint: endpoint))
+            guard !Task.isCancelled else { return }
+            await directory.applyLAN(device, endpoint: endpoint, token: token)
         }
         directoryTasks[identifier] = task
     }
     private func removeDirectoryTask(_ identifier: UUID) {
         queue.async { [weak self] in self?.directoryTasks.removeValue(forKey: identifier) }
     }
-    private func isCurrentForTask(_ candidate: UInt64) async -> Bool {
-        await withCheckedContinuation { continuation in
-            queue.async { [weak self] in continuation.resume(returning: self?.isCurrent(candidate) ?? false) }
+    private func endDirectorySessionOnQueue() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let sessionTask = directorySessionTask else { return }
+        directorySessionTask = nil
+        directorySessionEndTask?.cancel()
+        directorySessionEndTask = Task { [directory] in
+            guard let token = await sessionTask.value else { return }
+            await directory.endLANDiscoverySession(token)
         }
     }
     private func cancelOwnedTasksOnQueue() {

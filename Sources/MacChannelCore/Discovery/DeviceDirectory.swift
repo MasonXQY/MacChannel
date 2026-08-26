@@ -57,6 +57,13 @@ public actor DeviceDirectory {
     private var expirationTask: Task<Void, Never>?
     private var trustUpdateTask: Task<Void, Never>?
     private var observedTrustRepository: TrustRepository?
+    private var activeLANDiscoverySession: UUID?
+
+    /// Opaque capability held by a single discovery lifecycle. A stale browser
+    /// task cannot mutate LAN state after its token has been ended.
+    public struct LANDiscoverySessionToken: Hashable, Sendable {
+        fileprivate let value: UUID
+    }
 
     public init(
         trust: DeviceTrust,
@@ -122,14 +129,42 @@ public actor DeviceDirectory {
             )
 
         case let .bonjour(device, endpoint):
-            guard isEligible(device), case let .service(name, type, domain, _) = endpoint,
-                  type == BonjourPeerBrowser.serviceType, !name.isEmpty, !domain.isEmpty
-            else { return }
-            lanSightings[device] = LANSighting(
-                endpoint: .bonjour(endpoint),
-                expiresAt: now().addingTimeInterval(Self.lanLifetime)
-            )
+            // Bonjour sighting mutation requires the actor-owned discovery
+            // capability below; generic presence input cannot bypass it.
+            _ = device
+            _ = endpoint
+            return
         }
+        scheduleExpiryRefresh()
+        publishSnapshot()
+    }
+
+    public func beginLANDiscoverySession() -> LANDiscoverySessionToken {
+        let token = LANDiscoverySessionToken(value: UUID())
+        activeLANDiscoverySession = token.value
+        return token
+    }
+
+    public func endLANDiscoverySession(_ token: LANDiscoverySessionToken) {
+        guard activeLANDiscoverySession == token.value else { return }
+        activeLANDiscoverySession = nil
+    }
+
+    /// Atomically checks the discovery capability immediately before mutating
+    /// a Bonjour sighting. This closes the queue-to-actor stop/apply race.
+    public func applyLAN(_ device: DeviceID, endpoint: NWEndpoint, token: LANDiscoverySessionToken) {
+        let expired = purgeExpiredSightings()
+        scheduleExpiryRefresh()
+        if expired { publishSnapshot() }
+        guard activeLANDiscoverySession == token.value,
+              isEligible(device),
+              case let .service(name, type, domain, _) = endpoint,
+              type == BonjourPeerBrowser.serviceType, !name.isEmpty, !domain.isEmpty
+        else { return }
+        lanSightings[device] = LANSighting(
+            endpoint: .bonjour(endpoint),
+            expiresAt: now().addingTimeInterval(Self.lanLifetime)
+        )
         scheduleExpiryRefresh()
         publishSnapshot()
     }

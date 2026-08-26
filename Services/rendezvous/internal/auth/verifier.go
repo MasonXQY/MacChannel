@@ -624,7 +624,7 @@ type directionalTrustState struct {
 
 type TrustRecordStore interface {
 	Load(ctx context.Context) ([]PersistedTrustRecord, error)
-	Confirm(ctx context.Context, presentedBy string, records []SignedTrustRecord) error
+	ConfirmBatch(ctx context.Context, presentedBy string, records []SignedTrustRecord) error
 }
 
 type trustRecordCleaner interface {
@@ -780,7 +780,7 @@ func loadConsistentTrustSnapshot(ctx context.Context, store TrustRecordStore) ([
 }
 
 func (r *TrustRegistry) AuthenticateDevice(deviceID string, publicKey []byte, records []SignedTrustRecord) error {
-	_, err := r.authenticateDevice(deviceID, publicKey, records)
+	_, err := r.PrepareConfirmBatch(deviceID, publicKey, records)
 	return err
 }
 
@@ -789,59 +789,85 @@ func (r *TrustRegistry) AuthenticateDevice(deviceID string, publicKey []byte, re
 // avoid re-broadcasting byte-identical retry records while still forwarding a
 // second party's confirmation of a previously pending authorization.
 func (r *TrustRegistry) AuthenticateDeviceWithResult(deviceID string, publicKey []byte, records []SignedTrustRecord) (bool, error) {
-	return r.authenticateDevice(deviceID, publicKey, records)
+	changed, err := r.PrepareConfirmBatch(deviceID, publicKey, records)
+	if err != nil {
+		return false, err
+	}
+	for _, recordChanged := range changed {
+		if recordChanged {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-func (r *TrustRegistry) authenticateDevice(deviceID string, publicKey []byte, records []SignedTrustRecord) (bool, error) {
+// PrepareConfirmBatch validates the complete batch and commits it as one
+// registry/store transaction. Its result aligns with records: true means that
+// record changed accepted state and may be fanned out. If any record is
+// invalid, no registry mutation, durable write, or result is produced.
+func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, records []SignedTrustRecord) ([]bool, error) {
 	deviceID = strings.ToLower(deviceID)
 	if DeviceID(publicKey) != deviceID || len(records) > 256 {
-		return false, ErrInvalidTrust
+		return nil, ErrInvalidTrust
 	}
 	for _, record := range records {
 		if err := record.Validate(); err != nil {
-			return false, err
+			return nil, err
 		}
 	}
 	if r.recordStore != nil && r.refreshPersistent() != nil {
-		return false, ErrInvalidTrust
+		return nil, ErrInvalidTrust
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if pinned, ok := r.publicKeys[deviceID]; ok && !equalBytes(pinned, publicKey) {
-		return false, ErrInvalidTrust
+		return nil, ErrInvalidTrust
 	}
 	pending, err := r.preparePendingLocked(deviceID, records)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	changed := r.pendingChangesStateLocked(pending)
+	changesByHash := r.pendingChangesStateLocked(pending)
 	if r.recordStore != nil && len(pending) > 0 {
 		toSave := make([]SignedTrustRecord, 0, len(pending))
 		for _, item := range pending {
 			toSave = append(toSave, item.record)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := r.recordStore.Confirm(ctx, deviceID, toSave)
+		err := r.recordStore.ConfirmBatch(ctx, deviceID, toSave)
 		cancel()
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 	}
 
 	r.applyPendingLocked(pending)
-	return changed, nil
-}
-
-func (r *TrustRegistry) pendingChangesStateLocked(pending []pendingRecord) bool {
-	for _, item := range pending {
-		edge := directedTrustEdge{issuer: strings.ToLower(item.record.Issuer), subject: strings.ToLower(item.record.Subject)}
-		current, exists := r.directional[edge]
-		if item.isNew || !exists || current.issuerConfirmed != item.issuerConfirmed || current.subjectConfirmed != item.subjectConfirmed {
-			return true
+	results := make([]bool, len(records))
+	seen := make(map[[32]byte]bool, len(records))
+	for index, record := range records {
+		hashInput := append(append([]byte{}, record.CanonicalPayload()...), record.Signature...)
+		hash := sha256.Sum256(hashInput)
+		if !seen[hash] {
+			results[index] = changesByHash[hash]
+			seen[hash] = true
 		}
 	}
-	return false
+	return results, nil
+}
+
+func (r *TrustRegistry) pendingChangesStateLocked(pending []pendingRecord) map[[32]byte]bool {
+	changes := make(map[[32]byte]bool, len(pending))
+	for _, item := range pending {
+		changes[item.hash] = pendingRecordChangesStateLocked(r, item)
+	}
+	return changes
+}
+
+func pendingRecordChangesStateLocked(r *TrustRegistry, item pendingRecord) bool {
+	edge := directedTrustEdge{issuer: strings.ToLower(item.record.Issuer), subject: strings.ToLower(item.record.Subject)}
+	current, exists := r.directional[edge]
+	return item.isNew || !exists || current.issuerConfirmed != item.issuerConfirmed || current.subjectConfirmed != item.subjectConfirmed
 }
 
 func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []SignedTrustRecord) ([]pendingRecord, error) {
@@ -1369,7 +1395,7 @@ func (s *PostgresTrustRecordStore) Load(ctx context.Context) ([]PersistedTrustRe
 	return records, rows.Err()
 }
 
-func (s *PostgresTrustRecordStore) Confirm(ctx context.Context, presentedBy string, records []SignedTrustRecord) error {
+func (s *PostgresTrustRecordStore) ConfirmBatch(ctx context.Context, presentedBy string, records []SignedTrustRecord) error {
 	tx, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
 		return err

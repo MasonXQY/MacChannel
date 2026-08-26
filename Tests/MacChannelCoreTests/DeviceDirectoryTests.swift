@@ -396,6 +396,26 @@ final class DeviceDirectoryTests: XCTestCase {
         XCTAssertTrue(snapshot.isEmpty)
     }
 
+    func testDirectoryRejectsDiscoveryApplyAfterSessionTokenEnds() async {
+        let peer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer))
+        let gate = BonjourApplyGate()
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
+        let token = await directory.beginLANDiscoverySession()
+        let apply = Task {
+            await gate.block()
+            await directory.applyLAN(peer, endpoint: endpoint, token: token)
+        }
+
+        await gate.waitUntilBlocked()
+        await directory.endLANDiscoverySession(token)
+        await gate.release()
+        await apply.value
+
+        let snapshot = await directory.snapshot()
+        XCTAssertTrue(snapshot.isEmpty)
+    }
+
     func testBonjourObserveTrustAndStopRemainQueueSafeUnderConcurrency() async throws {
         let owner = try DeviceIdentity.ephemeral()
         let repository = try TrustRepository(ownerIdentity: owner, trustStore: TrustStore(owner: owner.id), persistedGeneration: 0)
