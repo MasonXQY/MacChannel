@@ -35,6 +35,7 @@ type delivery struct {
 
 type Hub struct {
 	mu             sync.Mutex
+	refreshMu      sync.Mutex
 	graph          TrustGraph
 	clients        map[string]clientEntry
 	visible        map[string]map[string]bool
@@ -42,6 +43,7 @@ type Hub struct {
 	nextToken      uint64
 	globalLimit    int
 	perSourceLimit int
+	epoch          uint64
 }
 
 func NewHub(graph TrustGraph) *Hub {
@@ -75,6 +77,8 @@ func (h *Hub) Connect(deviceID, source string, sink Sink) (func(), error) {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			h.refreshMu.Lock()
+			defer h.refreshMu.Unlock()
 			h.mu.Lock()
 			current, exists := h.clients[deviceID]
 			if !exists || current.token != token {
@@ -103,19 +107,26 @@ func (h *Hub) Connect(deviceID, source string, sink Sink) (func(), error) {
 }
 
 func (h *Hub) Refresh() {
+	h.refreshMu.Lock()
+	defer h.refreshMu.Unlock()
 	h.mu.Lock()
+	h.epoch++
+	epoch := h.epoch
 	identifiers := make([]string, 0, len(h.clients))
 	for deviceID := range h.clients {
 		identifiers = append(identifiers, deviceID)
 	}
 	h.mu.Unlock()
 	for _, deviceID := range identifiers {
-		h.RefreshDevice(deviceID)
+		h.refreshDeviceAtEpoch(deviceID, epoch)
 	}
 }
 
 func (h *Hub) FailClosed() {
+	h.refreshMu.Lock()
+	defer h.refreshMu.Unlock()
 	h.mu.Lock()
+	h.epoch++
 	seen := make(map[string]bool)
 	var deliveries []delivery
 	for deviceID, peers := range h.visible {
@@ -142,6 +153,16 @@ func (h *Hub) FailClosed() {
 }
 
 func (h *Hub) RefreshDevice(deviceID string) {
+	h.refreshMu.Lock()
+	defer h.refreshMu.Unlock()
+	h.mu.Lock()
+	h.epoch++
+	epoch := h.epoch
+	h.mu.Unlock()
+	h.refreshDeviceAtEpoch(deviceID, epoch)
+}
+
+func (h *Hub) refreshDeviceAtEpoch(deviceID string, epoch uint64) {
 	graphPeers := h.graph.DevicesInGraph(deviceID)
 	allowed := make(map[string]bool, len(graphPeers))
 	for _, peerID := range graphPeers {
@@ -150,6 +171,10 @@ func (h *Hub) RefreshDevice(deviceID string) {
 		}
 	}
 	h.mu.Lock()
+	if epoch != h.epoch {
+		h.mu.Unlock()
+		return
+	}
 	client, online := h.clients[deviceID]
 	if !online {
 		h.mu.Unlock()
