@@ -37,6 +37,11 @@ existing destination, and can resume safely after process or database loss.
   transaction). It also forced callback and SQLite failures after cancellation
   discard, both in-process and across restart, before the implementation was
   changed.
+- The concurrency pass then used deterministic async barriers at the first
+  database phase-transition boundary. The red tests showed finalize publishing
+  after cancellation had begun, cancellation discarding after finalize had
+  begun, and a second SQLite connection changing a leased transfer to terminal
+  between phase observation and preparation intent.
 
 ## Implemented contract
 
@@ -103,6 +108,15 @@ existing destination, and can resume safely after process or database loss.
   `discardedPendingCommit` state. Callback or SQLite failure can be retried by
   the same store; a new store also treats absent staging as a completed discard,
   commits `cancelled`, removes the pinned lease, and only then becomes finished.
+- Finalize and cancel synchronously claim an exclusive actor operation epoch
+  before either can yield. Cancellation claimed first prevents publication;
+  finalization claimed first makes later cancellation fail with the typed
+  `alreadyFinalizing` result and retains ownership through verification,
+  publication, history commit, and cleanup. Pre-publication failure restores
+  `receiving` only when the same epoch is still active, while the atomic
+  publication commit point permanently moves retry state to published cleanup.
+  Concurrent duplicate cancellation is likewise rejected as
+  `alreadyCancelling`; inactive cancellation retry states remain recoverable.
 - SQLite uses WAL mode, full synchronization, foreign keys, strict transactional
   schema migration, and mode `0600` even for an existing database. The
   `transfers`, `entries`, and `verified_ranges` tables store only transfer/peer
@@ -116,6 +130,12 @@ existing destination, and can resume safely after process or database loss.
   when construction becomes ready and is not exposed by local history APIs.
   Immutable transfer identity and durable terminal/cancelling phases cannot be
   rewritten by later snapshots or general phase updates.
+- Preparation re-reads history only after acquiring the inode-bound transfer
+  lease. Completed and cancelled rows are rejected before staging allocation.
+  The preparation-intent and ready updates run in immediate transactions with
+  allowed-phase predicates and checked affected-row counts, so a second process
+  committing cancellation or completion cannot be overwritten even if its
+  commit lands after the leased phase read.
 - Completion and cancellation clear private staging. Failed staging expires at
   exactly seven days or older; live leased transfers and newer failures remain.
 - Modification dates must be finite and exactly representable as platform
@@ -124,9 +144,9 @@ existing destination, and can resume safely after process or database loss.
 
 ## Verification
 
-- `swift test --filter ReceiveStoreTests`: 59 tests, 0 failures.
+- `swift test --filter ReceiveStoreTests`: 64 tests, 0 failures.
 - `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
-- `swift test`: 218 tests, 0 failures.
+- `swift test`: 223 tests, 0 failures.
 - `bash Scripts/build-app.sh`: successful packaged-app build.
 - `swift-format lint --strict` with the repository's four-space configuration
   over the Task 8 source and test files: clean.
@@ -153,5 +173,6 @@ existing destination, and can resume safely after process or database loss.
 
 - `feat: safely persist received files`
 - `fix: harden receive storage recovery`
-- `fix: make receive preparation crash-safe` (final preparation and
-  cancellation recovery corrections and this report)
+- `fix: make receive preparation crash-safe`
+- `fix: serialize receive terminal operations` (actor and cross-process
+  concurrency corrections and this report)

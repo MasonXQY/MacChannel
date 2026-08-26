@@ -1561,6 +1561,89 @@ final class ReceiveStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.lease(manifest.id).path))
     }
 
+    func testCancelClaimPreventsConcurrentFinalizeFromPublishing() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("cancel claims operation".utf8)
+        let manifest = try makeManifest(name: "cancel-claim.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+        let gate = ReceiveOperationGate()
+
+        let cancellation = Task {
+            try await store.cancel(
+                onOperationClaimed: { await gate.block() },
+                onCleanupStep: { _ in }
+            )
+        }
+        await gate.waitUntilBlocked()
+
+        await assertReceiveError(.alreadyFinished) {
+            _ = try await store.finalize()
+        }
+        await gate.release()
+        try await cancellation.value
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.downloads.appendingPathComponent("cancel-claim.txt").path
+            )
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.phase, .cancelled)
+    }
+
+    func testFinalizeClaimMakesConcurrentCancellationTooLate() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("finalize claims operation".utf8)
+        let manifest = try makeManifest(name: "finalize-claim.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+        let gate = ReceiveOperationGate()
+
+        let finalization = Task {
+            try await store.finalize(
+                onOperationClaimed: { await gate.block() },
+                onPublishedBeforeHistory: {},
+                onCleanupStep: { _ in }
+            )
+        }
+        await gate.waitUntilBlocked()
+
+        await assertReceiveError(.alreadyFinalizing) {
+            try await store.cancel()
+        }
+        await gate.release()
+        let output = try await finalization.value
+
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.phase, .completed)
+    }
+
+    func testFinalizeDatabaseFailureReleasesOnlyItsClaimForCancellation() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("finalize rollback epoch".utf8)
+        let manifest = try makeManifest(name: "finalize-rollback.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+        try await fixture.database.markPhase(.cancelling, for: manifest.id, at: Date())
+
+        await assertReceiveError(.databaseFailure) {
+            _ = try await store.finalize()
+        }
+        try await store.cancel()
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.downloads.appendingPathComponent("finalize-rollback.txt").path
+            )
+        )
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.phase, .cancelled)
+    }
+
     func testSameStoreRetriesCancellationAfterDatabaseFailureFollowingDiscard() async throws {
         let fixture = try StorageFixture()
         let bytes = Data("retry database cancellation".utf8)
@@ -1614,6 +1697,76 @@ final class ReceiveStoreTests: XCTestCase {
         let history = try await fixture.database.history(limit: 1)
         XCTAssertEqual(history.first?.phase, .cancelled)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.lease(manifest.id).path))
+    }
+
+    func testTerminalPhaseCommittedAfterLeaseReadCannotBeOverwrittenOrAllocateStaging()
+        async throws
+    {
+        let fixture = try StorageFixture()
+        let bytes = Data("terminal phase race".utf8)
+        let manifest = try makeManifest(name: "terminal-race.txt", bytes: bytes)
+        var first: ReceiveStore? = try await fixture.prepare(manifest: manifest)
+        try await first?.markFailed(at: Date(timeIntervalSince1970: 100))
+        first = nil
+        _ = try await ReceiveStore.expireFailedStaging(
+            database: fixture.database,
+            incomingDirectory: fixture.incoming,
+            now: Date(timeIntervalSince1970: 100 + 7 * 86_400)
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+
+        let capacity = BlockingReceiveCapacity(bytes: 1_000_000)
+        let preparation = Task {
+            try await fixture.prepare(
+                manifest: manifest,
+                capacity: capacity,
+                onPreparationStep: { step in
+                    if step == .treeCreated { throw PublicationTestFault.interrupted }
+                }
+            )
+        }
+        await capacity.waitUntilEntered()
+        let competingDatabase = try TransferDatabase(url: fixture.databaseURL)
+        try await competingDatabase.markPhase(.completed, for: manifest.id, at: Date())
+        capacity.release()
+
+        do {
+            _ = try await preparation.value
+            XCTFail("Expected terminal phase to reject preparation")
+        } catch {
+            XCTAssertEqual(error as? ReceiveStoreError, .alreadyFinished)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.phase, .completed)
+    }
+
+    func testCompletedAndCancelledHistoryNeverAllocateFreshStaging() async throws {
+        for phase in [TransferPhase.completed, .cancelled] {
+            let fixture = try StorageFixture()
+            let bytes = Data("terminal \(phase)".utf8)
+            let manifest = try makeManifest(name: "terminal.txt", bytes: bytes)
+            try await fixture.database.record(
+                TransferSnapshot(
+                    id: manifest.id,
+                    peer: fixture.source,
+                    phase: phase,
+                    completedBytes: Int64(bytes.count),
+                    totalBytes: Int64(bytes.count),
+                    route: .lan
+                ),
+                displayFilename: "terminal.txt"
+            )
+
+            await assertReceiveError(.alreadyFinished) {
+                _ = try await fixture.prepare(manifest: manifest)
+            }
+
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path)
+            )
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.lease(manifest.id).path))
+        }
     }
 
     func testRestartCompletesCancellationFromPartiallyDiscardedStaging() async throws {
@@ -1819,6 +1972,69 @@ private final class SQLiteWriteLock: @unchecked Sendable {
 
     func release() {
         if let connection { _ = sqlite3_exec(connection, "ROLLBACK", nil, nil, nil) }
+    }
+}
+
+private actor ReceiveOperationGate {
+    private var blocked = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func block() async {
+        blocked = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilBlocked() async {
+        guard !blocked else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+}
+
+private final class BlockingReceiveCapacity: ReceiveCapacityProviding, @unchecked Sendable {
+    private let condition = NSCondition()
+    private let stateLock = NSLock()
+    private let bytes: UInt64
+    private var entered = false
+    private var released = false
+
+    init(bytes: UInt64) { self.bytes = bytes }
+
+    func availableBytes(at directory: URL) throws -> UInt64 {
+        _ = directory
+        condition.lock()
+        stateLock.withLock { entered = true }
+        condition.broadcast()
+        while !released { condition.wait() }
+        condition.unlock()
+        return bytes
+    }
+
+    func waitUntilEntered() async {
+        while true {
+            let hasEntered = stateLock.withLock { entered }
+            if hasEntered { return }
+            await Task.yield()
+        }
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
     }
 }
 

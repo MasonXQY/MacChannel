@@ -16,6 +16,8 @@ public enum ReceiveStoreError: Error, Equatable, Sendable {
     case atomicPlacementUnavailable
     case databaseFailure
     case alreadyFinished
+    case alreadyFinalizing
+    case alreadyCancelling
     case transferBusy
 }
 
@@ -676,7 +678,9 @@ enum ReceivePreparationStep: CaseIterable, Sendable {
 public actor ReceiveStore {
     private enum State {
         case receiving
-        case cancelling
+        case finalizing(epoch: UInt64, published: URL?)
+        case cancelling(epoch: UInt64, stagingDiscarded: Bool)
+        case cancellationPendingDiscard
         case discardedPendingCommit
         case published(URL)
         case reconciled(URL)
@@ -697,6 +701,7 @@ public actor ReceiveStore {
     private var verified: Set<ChunkCoordinate>
     private let preparedFingerprint: Data
     private var state = State.receiving
+    private var operationEpoch: UInt64 = 0
 
     private init(
         manifest: TransferManifest,
@@ -810,12 +815,12 @@ public actor ReceiveStore {
                 url: applicationSupport.appendingPathComponent("transfers.sqlite3")
             )
         }
-        let knownPhase = try await database.phase(for: manifest.id)
         let lease = try ReceiveTransferLease.acquire(
             transferID: manifest.id,
             incomingDirectory: incoming
         )
         var resuming = try lease.stagingDirectoryExists(transferID: manifest.id)
+        let knownPhase = try await database.phase(for: manifest.id)
         if knownPhase == .cancelling || knownPhase == .cancelled || knownPhase == .completed {
             do {
                 try lease.removeExpiredQuarantines()
@@ -867,12 +872,29 @@ public actor ReceiveStore {
                     caseSensitive: caseSensitive
                 ) ? preferredMetadata + ".private" : preferredMetadata
         let fingerprint = try manifestFingerprint(manifest)
-        let initialPreparation = try await database.preparationRecord(
-            manifest: manifest,
-            source: source
-        )
-        var recordedPhase = initialPreparation?.phase ?? .preparing
-        var creationIntentDurable = initialPreparation?.isCreating == true
+        let initialPreparation: TransferPreparationRecord?
+        var recordedPhase: TransferPhase
+        var creationIntentDurable: Bool
+        if resuming {
+            initialPreparation = try await database.preparationRecord(
+                manifest: manifest,
+                source: source
+            )
+            recordedPhase = initialPreparation?.phase ?? .preparing
+            creationIntentDurable = initialPreparation?.isCreating == true
+        } else {
+            recordedPhase = try await database.recordPreparationIntent(
+                manifest: manifest,
+                source: source,
+                route: route,
+                at: Date()
+            )
+            initialPreparation = TransferPreparationRecord(
+                phase: recordedPhase,
+                isCreating: true
+            )
+            creationIntentDurable = true
+        }
 
         if resuming, creationIntentDurable {
             do {
@@ -900,16 +922,6 @@ public actor ReceiveStore {
                 lease.preserveForTransfer()
                 throw ReceiveStoreError.stagingUnavailable
             }
-        }
-
-        if !resuming, !creationIntentDurable {
-            recordedPhase = try await database.recordPreparationIntent(
-                manifest: manifest,
-                source: source,
-                route: route,
-                at: Date()
-            )
-            creationIntentDurable = true
         }
 
         var preparationInterrupted = false
@@ -1258,66 +1270,114 @@ public actor ReceiveStore {
     }
 
     public func finalize() async throws -> URL {
-        try await finalize(onPublishedBeforeHistory: {}, onCleanupStep: { _ in })
+        try await finalize(
+            onOperationClaimed: {},
+            onPublishedBeforeHistory: {},
+            onCleanupStep: { _ in }
+        )
     }
 
     func finalize(
         onPublishedBeforeHistory: @Sendable () throws -> Void
     ) async throws -> URL {
         try await finalize(
+            onOperationClaimed: {},
             onPublishedBeforeHistory: onPublishedBeforeHistory,
             onCleanupStep: { _ in }
         )
     }
 
     func finalize(
+        onOperationClaimed: @escaping @Sendable () async -> Void = {},
         onPublishedBeforeHistory: @Sendable () throws -> Void,
         onPublicationIntentRecorded: @Sendable () throws -> Void = {},
         onCleanupStep: @escaping @Sendable (PublicationCleanupStep) throws -> Void
     ) async throws -> URL {
+        let epoch = claimOperationEpoch()
+        let previouslyPublished: URL?
         switch state {
         case .reconciled(let output):
             state = .finished
             return output
         case .published(let output):
-            try await finishPublished(output, onCleanupStep: onCleanupStep)
-            return output
+            previouslyPublished = output
+            state = .finalizing(epoch: epoch, published: output)
         case .finished:
             throw ReceiveStoreError.alreadyFinished
-        case .cancelling:
+        case .finalizing:
+            throw ReceiveStoreError.alreadyFinalizing
+        case .cancelling, .cancellationPendingDiscard:
             throw ReceiveStoreError.alreadyFinished
         case .discardedPendingCommit:
             throw ReceiveStoreError.alreadyFinished
         case .receiving:
-            break
+            previouslyPublished = nil
+            state = .finalizing(epoch: epoch, published: nil)
         }
-        try lease.requireHeld()
-        for (index, entry) in manifest.entries.enumerated() where entry.kind == .file {
-            guard let file = files[UInt32(index)] else {
-                throw ReceiveStoreError.invalidManifest
-            }
-            for chunk in 0..<entry.chunkCount
-            where !verified.contains(
-                ChunkCoordinate(entryIndex: UInt32(index), chunkIndex: chunk)
-            ) {
-                _ = chunk
-                throw ReceiveStoreError.incompleteTransfer
+
+        if let output = previouslyPublished {
+            await onOperationClaimed()
+            guard ownsFinalization(epoch: epoch, published: output) else {
+                throw ReceiveStoreError.alreadyFinalizing
             }
             do {
-                guard try file.currentSize() == entry.size,
-                    try file.digest(size: entry.size) == entry.digest
-                else { throw ReceiveStoreError.digestMismatch }
-                try tree.requireIdentity(file, at: entry.relativePath.components)
-            } catch let error as ReceiveStoreError {
-                throw error
+                try await finishPublished(
+                    output,
+                    epoch: epoch,
+                    onCleanupStep: onCleanupStep
+                )
+                return output
             } catch {
-                throw ReceiveStoreError.digestMismatch
+                restorePublished(output, for: epoch)
+                throw error
             }
         }
-        guard (try? manifestFingerprint(manifest)) == preparedFingerprint else {
-            throw ReceiveStoreError.invalidManifest
+
+        do {
+            try lease.requireHeld()
+            for (index, entry) in manifest.entries.enumerated() where entry.kind == .file {
+                guard let file = files[UInt32(index)] else {
+                    throw ReceiveStoreError.invalidManifest
+                }
+                for chunk in 0..<entry.chunkCount
+                where !verified.contains(
+                    ChunkCoordinate(entryIndex: UInt32(index), chunkIndex: chunk)
+                ) {
+                    _ = chunk
+                    throw ReceiveStoreError.incompleteTransfer
+                }
+                do {
+                    guard try file.currentSize() == entry.size,
+                        try file.digest(size: entry.size) == entry.digest
+                    else { throw ReceiveStoreError.digestMismatch }
+                    try tree.requireIdentity(file, at: entry.relativePath.components)
+                } catch let error as ReceiveStoreError {
+                    throw error
+                } catch {
+                    throw ReceiveStoreError.digestMismatch
+                }
+            }
+            guard (try? manifestFingerprint(manifest)) == preparedFingerprint else {
+                throw ReceiveStoreError.invalidManifest
+            }
+        } catch {
+            restoreReceiving(for: epoch)
+            throw error
         }
-        try await database.markPhase(.verifying, for: manifest.id, at: Date())
+
+        await onOperationClaimed()
+        guard ownsFinalization(epoch: epoch, published: nil) else {
+            throw ReceiveStoreError.alreadyFinalizing
+        }
+        do {
+            try await database.markPhase(.verifying, for: manifest.id, at: Date())
+        } catch {
+            restoreReceiving(for: epoch)
+            throw error
+        }
+        guard ownsFinalization(epoch: epoch, published: nil) else {
+            throw ReceiveStoreError.alreadyFinalizing
+        }
         do {
             try destinationHandle.requirePathIdentity()
             try tree.requireStagingPathIdentity()
@@ -1377,75 +1437,169 @@ public actor ReceiveStore {
                     fingerprint: preparedFingerprint,
                     tree: tree
                 ), (try? tree.containsRootEntry(root.relativePath.components[0])) == false {
-                    state = .published(
-                        destinationDirectory.appendingPathComponent(
-                            intent.candidate,
-                            isDirectory: root.kind == .directory
-                        )
+                    let recoveredOutput = destinationDirectory.appendingPathComponent(
+                        intent.candidate,
+                        isDirectory: root.kind == .directory
                     )
+                    if ownsFinalization(epoch: epoch, published: nil) {
+                        state = .finalizing(epoch: epoch, published: recoveredOutput)
+                    }
                 }
                 throw error
             }
-            state = .published(output)
+            guard ownsFinalization(epoch: epoch, published: nil) else {
+                throw ReceiveStoreError.alreadyFinalizing
+            }
+            state = .finalizing(epoch: epoch, published: output)
             try onPublishedBeforeHistory()
-            try await finishPublished(output, onCleanupStep: onCleanupStep)
+            try await finishPublished(
+                output,
+                epoch: epoch,
+                onCleanupStep: onCleanupStep
+            )
             return output
         } catch {
-            if case .receiving = state {
+            if let output = finalizingPublishedOutput(for: epoch) {
+                restorePublished(output, for: epoch)
+            } else {
                 _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
+                restoreReceiving(for: epoch)
             }
             if let storage = error as? ReceiveStoreError { throw storage }
             throw ReceiveStoreError.atomicPlacementUnavailable
         }
     }
 
+    private func claimOperationEpoch() -> UInt64 {
+        operationEpoch &+= 1
+        return operationEpoch
+    }
+
+    private func ownsFinalization(epoch: UInt64, published: URL?) -> Bool {
+        guard case .finalizing(let current, let currentPublished) = state else { return false }
+        return current == epoch && currentPublished == published
+    }
+
+    private func finalizingPublishedOutput(for epoch: UInt64) -> URL? {
+        guard case .finalizing(let current, let output?) = state, current == epoch else {
+            return nil
+        }
+        return output
+    }
+
+    private func restoreReceiving(for epoch: UInt64) {
+        if ownsFinalization(epoch: epoch, published: nil) { state = .receiving }
+    }
+
+    private func restorePublished(_ output: URL, for epoch: UInt64) {
+        if ownsFinalization(epoch: epoch, published: output) { state = .published(output) }
+    }
+
     public func cancel() async throws {
-        try await cancel(onCleanupStep: { _ in })
+        try await cancel(onOperationClaimed: {}, onCleanupStep: { _ in })
     }
 
     func cancel(
         onCleanupStep: @escaping @Sendable (CancellationCleanupStep) throws -> Void
     ) async throws {
+        try await cancel(onOperationClaimed: {}, onCleanupStep: onCleanupStep)
+    }
+
+    func cancel(
+        onOperationClaimed: @escaping @Sendable () async -> Void,
+        onCleanupStep: @escaping @Sendable (CancellationCleanupStep) throws -> Void
+    ) async throws {
+        let epoch = claimOperationEpoch()
+        let fallback: State
+        var durableCancellation = false
+        var stagingDiscarded = false
         switch state {
         case .receiving:
-            try lease.requireHeld()
-            try await database.markPhase(.cancelling, for: manifest.id, at: Date())
-            state = .cancelling
-            try CancellationIntentStore.record(fingerprint: preparedFingerprint, tree: tree)
-            try onCleanupStep(.intentRecorded)
-        case .cancelling:
-            break
+            fallback = .receiving
+            state = .cancelling(epoch: epoch, stagingDiscarded: false)
+        case .cancellationPendingDiscard:
+            fallback = .cancellationPendingDiscard
+            durableCancellation = true
+            state = .cancelling(epoch: epoch, stagingDiscarded: false)
         case .discardedPendingCommit:
-            break
+            fallback = .discardedPendingCommit
+            durableCancellation = true
+            stagingDiscarded = true
+            state = .cancelling(epoch: epoch, stagingDiscarded: true)
+        case .cancelling:
+            throw ReceiveStoreError.alreadyCancelling
+        case .finalizing:
+            throw ReceiveStoreError.alreadyFinalizing
         case .published, .reconciled, .finished:
             return
         }
-        if case .cancelling = state {
+
+        do {
             try lease.requireHeld()
-            try await database.markPhase(.cancelling, for: manifest.id, at: Date())
-            do {
-                try tree.discard()
-            } catch {
+            await onOperationClaimed()
+            guard ownsCancellation(epoch: epoch, stagingDiscarded: stagingDiscarded) else {
+                throw ReceiveStoreError.alreadyCancelling
+            }
+            if !stagingDiscarded {
+                try await database.markPhase(.cancelling, for: manifest.id, at: Date())
+                durableCancellation = true
+                guard ownsCancellation(epoch: epoch, stagingDiscarded: false) else {
+                    throw ReceiveStoreError.alreadyCancelling
+                }
+                if try !CancellationIntentStore.exists(
+                    fingerprint: preparedFingerprint,
+                    tree: tree
+                ) {
+                    try CancellationIntentStore.record(
+                        fingerprint: preparedFingerprint,
+                        tree: tree
+                    )
+                    try onCleanupStep(.intentRecorded)
+                }
                 do {
-                    guard try !lease.stagingDirectoryExists(transferID: manifest.id) else {
+                    try tree.discard()
+                } catch {
+                    do {
+                        guard try !lease.stagingDirectoryExists(transferID: manifest.id) else {
+                            throw ReceiveStoreError.stagingUnavailable
+                        }
+                    } catch let storage as ReceiveStoreError {
+                        throw storage
+                    } catch {
                         throw ReceiveStoreError.stagingUnavailable
                     }
-                } catch let storage as ReceiveStoreError {
-                    throw storage
-                } catch {
-                    throw ReceiveStoreError.stagingUnavailable
+                }
+                stagingDiscarded = true
+                state = .cancelling(epoch: epoch, stagingDiscarded: true)
+                try onCleanupStep(.stagingDiscarded)
+            }
+            try lease.requireHeld()
+            guard try !lease.stagingDirectoryExists(transferID: manifest.id) else {
+                throw ReceiveStoreError.stagingUnavailable
+            }
+            try await database.markPhase(.cancelled, for: manifest.id, at: Date())
+            guard ownsCancellation(epoch: epoch, stagingDiscarded: true) else {
+                throw ReceiveStoreError.alreadyCancelling
+            }
+            try lease.removeAfterTerminalState()
+            state = .finished
+        } catch {
+            if ownsCancellation(epoch: epoch, stagingDiscarded: stagingDiscarded) {
+                if stagingDiscarded {
+                    state = .discardedPendingCommit
+                } else if durableCancellation {
+                    state = .cancellationPendingDiscard
+                } else {
+                    state = fallback
                 }
             }
-            state = .discardedPendingCommit
-            try onCleanupStep(.stagingDiscarded)
+            throw error
         }
-        try lease.requireHeld()
-        guard try !lease.stagingDirectoryExists(transferID: manifest.id) else {
-            throw ReceiveStoreError.stagingUnavailable
-        }
-        try await database.markPhase(.cancelled, for: manifest.id, at: Date())
-        try lease.removeAfterTerminalState()
-        state = .finished
+    }
+
+    private func ownsCancellation(epoch: UInt64, stagingDiscarded: Bool) -> Bool {
+        guard case .cancelling(let current, let currentDiscarded) = state else { return false }
+        return current == epoch && currentDiscarded == stagingDiscarded
     }
 
     public func markFailed(at date: Date = Date()) async throws {
@@ -1455,9 +1609,12 @@ public actor ReceiveStore {
 
     private func finishPublished(
         _ output: URL,
+        epoch: UInt64,
         onCleanupStep: @escaping @Sendable (PublicationCleanupStep) throws -> Void
     ) async throws {
-        guard case .published = state else { throw ReceiveStoreError.alreadyFinished }
+        guard ownsFinalization(epoch: epoch, published: output) else {
+            throw ReceiveStoreError.alreadyFinalizing
+        }
         try destinationHandle.requirePathIdentity()
         try verifyPublishedManifest(
             parentDescriptor: destinationHandle.descriptor,
@@ -1467,6 +1624,9 @@ public actor ReceiveStore {
         )
         try destinationHandle.synchronize()
         try await database.markPhase(.completed, for: manifest.id, at: Date())
+        guard ownsFinalization(epoch: epoch, published: output) else {
+            throw ReceiveStoreError.alreadyFinalizing
+        }
         try onCleanupStep(.historyCommitted)
         try performPublicationCleanup {
             try ResumeStateStore.remove(named: ".resume-state", tree: tree)

@@ -106,6 +106,9 @@ public actor TransferDatabase {
                 aggregate: aggregate
             )
         else { return nil }
+        guard isPreparationMutable(existing.phase) else {
+            throw ReceiveStoreError.alreadyFinished
+        }
         if let storedFingerprint = existing.preparationFingerprint,
             storedFingerprint != fingerprint
         {
@@ -134,6 +137,9 @@ public actor TransferDatabase {
                 displayName: displayName,
                 aggregate: aggregate
             ) {
+                guard isPreparationMutable(existing.phase) else {
+                    throw ReceiveStoreError.alreadyFinished
+                }
                 if let storedFingerprint = existing.preparationFingerprint,
                     storedFingerprint != fingerprint
                 {
@@ -144,6 +150,8 @@ public actor TransferDatabase {
                     UPDATE transfers
                     SET preparation_fingerprint = ?, updated_at = ?, route = ?
                     WHERE id = ?
+                      AND phase IN ('preparing', 'connecting', 'transferring', 'paused',
+                                    'verifying', 'failed')
                     """
                 )
                 defer { sqlite3_finalize(update) }
@@ -215,14 +223,21 @@ public actor TransferDatabase {
                     source: source,
                     displayName: manifest.entries[0].relativePath.components[0],
                     aggregate: aggregate
-                ),
-                existing.preparationFingerprint == fingerprint
+                )
             else { throw ReceiveStoreError.invalidManifest }
+            guard isPreparationMutable(existing.phase) else {
+                throw ReceiveStoreError.alreadyFinished
+            }
+            guard existing.preparationFingerprint == fingerprint else {
+                throw ReceiveStoreError.invalidManifest
+            }
             let update = try statement(
                 """
                 UPDATE transfers
                 SET preparation_fingerprint = NULL, updated_at = ?, route = ?
                 WHERE id = ? AND preparation_fingerprint = ?
+                  AND phase IN ('preparing', 'connecting', 'transferring', 'paused',
+                                'verifying', 'failed')
                 """
             )
             defer { sqlite3_finalize(update) }
@@ -1083,8 +1098,7 @@ public actor TransferDatabase {
             textColumn(transfer, 1) == displayName,
             sqlite3_column_int64(transfer, 2) == Int64(aggregate),
             let phaseValue = textColumn(transfer, 3),
-            let phase = TransferPhase(rawValue: phaseValue),
-            phase != .cancelled
+            let phase = TransferPhase(rawValue: phaseValue)
         else { throw ReceiveStoreError.invalidManifest }
 
         let preparationFingerprint: Data?
@@ -1172,6 +1186,15 @@ public actor TransferDatabase {
             return newPhase == oldPhase
         case .cancelling:
             return newPhase == .cancelling || newPhase == .cancelled
+        default:
+            return true
+        }
+    }
+
+    private func isPreparationMutable(_ phase: TransferPhase) -> Bool {
+        switch phase {
+        case .completed, .cancelled, .cancelling:
+            return false
         default:
             return true
         }
