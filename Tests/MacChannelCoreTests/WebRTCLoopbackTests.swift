@@ -227,6 +227,201 @@ final class WebRTCLoopbackTests: XCTestCase {
         await fulfillment(of: [cancelled], timeout: 1)
     }
 
+    func testPreDescriptionCandidateCountFloodFailsAttemptAndCleansUpReader() async throws {
+        let messages = (0..<129).map { index in
+            WebRTCSignalMessage.candidate(
+                sdp: "candidate:\(index) 1 udp 1 192.168.1.20 \(7_000 + index) typ host",
+                sdpMLineIndex: 0,
+                sdpMid: "0"
+            )
+        }
+        try await assertPreDescriptionCandidateFloodFails(messages)
+    }
+
+    func testPreDescriptionCandidateByteFloodFailsAttemptAndCleansUpReader() async throws {
+        let padding = String(repeating: "x", count: 60 * 1024)
+        let messages = (0..<9).map { index in
+            WebRTCSignalMessage.candidate(
+                sdp: "candidate:\(index) 1 udp 1 192.168.1.20 \(7_000 + index) typ host \(padding)",
+                sdpMLineIndex: 0,
+                sdpMid: "0"
+            )
+        }
+        try await assertPreDescriptionCandidateFloodFails(messages)
+    }
+
+    func testCloseWaitsForBlockedCandidateSenderAndPreventsLateSignaling() async throws {
+        let leftIdentity = try DeviceIdentity.ephemeral()
+        let rightIdentity = try DeviceIdentity.ephemeral()
+        let bus = InMemoryWebRTCSignalBus()
+        let connectionID = UUID()
+        let factory = WebRTCFactory(connectionTimeout: .seconds(15))
+        let ice = ICEConfiguration(stunURLs: [], turnServers: [])
+        async let left = factory.connect(
+            localIdentity: leftIdentity,
+            remoteDevice: rightIdentity.id,
+            remotePublicKey: rightIdentity.publicKey.rawRepresentation,
+            connectionID: connectionID,
+            role: .offerer,
+            route: .lan,
+            ice: ice,
+            signaling: bus.endpoint(for: leftIdentity.id)
+        )
+        async let right = factory.connect(
+            localIdentity: rightIdentity,
+            remoteDevice: leftIdentity.id,
+            remotePublicKey: leftIdentity.publicKey.rawRepresentation,
+            connectionID: connectionID,
+            role: .answerer,
+            route: .lan,
+            ice: ice,
+            signaling: bus.endpoint(for: rightIdentity.id)
+        )
+        let (leftChannel, rightChannel) = try await (left, right)
+
+        await bus.blockCandidateSends()
+        await leftChannel._testOnlyGenerateLocalCandidate()
+        let candidateBlocked = await bus.waitUntilCandidateSendIsBlocked()
+        XCTAssertTrue(candidateBlocked)
+        let deliveriesBeforeClose = await bus.candidateDeliveryCount
+
+        await leftChannel.close()
+
+        let blockedAfterClose = await bus.blockedCandidateSendCount
+        XCTAssertEqual(blockedAfterClose, 0, "close must drain cancelled candidate senders")
+        await bus.releaseCandidateSends()
+        try await Task.sleep(for: .milliseconds(20))
+        let deliveriesAfterClose = await bus.candidateDeliveryCount
+        XCTAssertEqual(deliveriesAfterClose, deliveriesBeforeClose, "signaling must not escape after close")
+        await rightChannel.close()
+    }
+
+    func testLiveSignalingOverflowAfterChannelCreationClosesPeer() async throws {
+        let leftIdentity = try DeviceIdentity.ephemeral()
+        let rightIdentity = try DeviceIdentity.ephemeral()
+        let bus = InMemoryWebRTCSignalBus()
+        let connectionID = UUID()
+        let factory = WebRTCFactory(connectionTimeout: .seconds(15))
+        let ice = ICEConfiguration(stunURLs: [], turnServers: [])
+        async let left = factory.connect(
+            localIdentity: leftIdentity,
+            remoteDevice: rightIdentity.id,
+            remotePublicKey: rightIdentity.publicKey.rawRepresentation,
+            connectionID: connectionID,
+            role: .offerer,
+            route: .lan,
+            ice: ice,
+            signaling: bus.endpoint(for: leftIdentity.id)
+        )
+        async let right = factory.connect(
+            localIdentity: rightIdentity,
+            remoteDevice: leftIdentity.id,
+            remotePublicKey: leftIdentity.publicKey.rawRepresentation,
+            connectionID: connectionID,
+            role: .answerer,
+            route: .lan,
+            ice: ice,
+            signaling: bus.endpoint(for: rightIdentity.id)
+        )
+        let (leftChannel, rightChannel) = try await (left, right)
+
+        await bus.failSignals(
+            recipient: leftIdentity.id,
+            sender: rightIdentity.id,
+            connectionID: connectionID,
+            error: WebRTCFactoryError.signalingOverflow
+        )
+        try await Task.sleep(for: .milliseconds(100))
+
+        do {
+            try await leftChannel.send(Data([1]))
+            XCTFail("A live signaling overflow must close an already-created peer channel")
+        } catch {
+            XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed)
+        }
+        await leftChannel.close()
+        await rightChannel.close()
+    }
+
+    func testBackpressureWaiterCountFloodFailsExcessSendAndCloseCancelsWaiters() async throws {
+        let channels = try await makeLoopbackPair()
+        await channels.left._testOnlyForceBackpressure(true)
+        var suspended: [Task<WebRTCSecureChannelError?, Never>] = []
+
+        for index in 0..<128 {
+            suspended.append(Task {
+                do {
+                    try await channels.left.send(Data([UInt8(index % 251)]))
+                    return nil
+                } catch {
+                    return error as? WebRTCSecureChannelError
+                }
+            })
+            let reachedCount = await waitForBackpressureWaiters(index + 1, on: channels.left)
+            XCTAssertTrue(reachedCount)
+        }
+        let excess = Task { () -> WebRTCSecureChannelError? in
+            do {
+                try await channels.left.send(Data([255]))
+                return nil
+            } catch {
+                return error as? WebRTCSecureChannelError
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+
+        await channels.left.close()
+
+        let excessError = await excess.value
+        XCTAssertEqual(excessError, .overloaded)
+        for task in suspended {
+            let error = await task.value
+            XCTAssertEqual(error, .transportClosed)
+        }
+        let remainingWaiters = await channels.left._testOnlyBackpressureWaiterCount()
+        XCTAssertEqual(remainingWaiters, 0)
+        await channels.right.close()
+    }
+
+    func testBackpressureSuspendedByteFloodFailsExcessSend() async throws {
+        let channels = try await makeLoopbackPair()
+        await channels.left._testOnlyForceBackpressure(true)
+        var suspended: [Task<WebRTCSecureChannelError?, Never>] = []
+        let frame = Data(repeating: 7, count: WebRTCSecureChannel.maximumMessageBytes)
+
+        for index in 0..<64 {
+            suspended.append(Task {
+                do {
+                    try await channels.left.send(frame)
+                    return nil
+                } catch {
+                    return error as? WebRTCSecureChannelError
+                }
+            })
+            let reachedCount = await waitForBackpressureWaiters(index + 1, on: channels.left)
+            XCTAssertTrue(reachedCount)
+        }
+        let excess = Task { () -> WebRTCSecureChannelError? in
+            do {
+                try await channels.left.send(frame)
+                return nil
+            } catch {
+                return error as? WebRTCSecureChannelError
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+
+        await channels.left.close()
+
+        let excessError = await excess.value
+        XCTAssertEqual(excessError, .overloaded)
+        for task in suspended {
+            let error = await task.value
+            XCTAssertEqual(error, .transportClosed)
+        }
+        await channels.right.close()
+    }
+
     func testAuthenticatedApplicationFrameMayStartWithHandshakeMagic() async throws {
         let channels = try await makeLoopbackPair()
         let frame = Data("MACCHANNEL-HANDSHAKE-1\nthis-is-application-data".utf8)
@@ -269,6 +464,45 @@ final class WebRTCLoopbackTests: XCTestCase {
         )
         return try await (left, right)
     }
+
+    private func assertPreDescriptionCandidateFloodFails(
+        _ messages: [WebRTCSignalMessage]
+    ) async throws {
+        let local = try DeviceIdentity.ephemeral()
+        let remote = try DeviceIdentity.ephemeral()
+        let termination = SignalStreamTerminationRecorder()
+        let signaling = CandidateFloodSignalTransport(messages: messages, termination: termination)
+        let factory = WebRTCFactory(connectionTimeout: .milliseconds(250))
+
+        do {
+            _ = try await factory.connect(
+                localIdentity: local,
+                remoteDevice: remote.id,
+                remotePublicKey: remote.publicKey.rawRepresentation,
+                connectionID: UUID(),
+                role: .answerer,
+                route: .lan,
+                ice: ICEConfiguration(stunURLs: [], turnServers: []),
+                signaling: signaling
+            )
+            XCTFail("Expected the candidate flood to fail the attempt")
+        } catch {
+            XCTAssertEqual(error as? WebRTCFactoryError, .remoteCandidateOverflow)
+        }
+        let readerTerminated = await termination.waitUntilTerminated()
+        XCTAssertTrue(readerTerminated)
+    }
+
+    private func waitForBackpressureWaiters(
+        _ count: Int,
+        on channel: WebRTCSecureChannel
+    ) async -> Bool {
+        for _ in 0..<1_000 {
+            if await channel._testOnlyBackpressureWaiterCount() == count { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return false
+    }
 }
 
 private actor ReceivedFrameRecorder {
@@ -300,6 +534,54 @@ private actor NeverSignalTransport: WebRTCSignalTransport {
     }
 }
 
+private actor SignalStreamTerminationRecorder {
+    private var terminated = false
+
+    func markTerminated() { terminated = true }
+
+    func waitUntilTerminated() async -> Bool {
+        for _ in 0..<1_000 {
+            if terminated { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return false
+    }
+}
+
+private struct CandidateFloodSignalTransport: WebRTCSignalTransport {
+    let messagesToDeliver: [WebRTCSignalMessage]
+    let termination: SignalStreamTerminationRecorder
+
+    init(messages: [WebRTCSignalMessage], termination: SignalStreamTerminationRecorder) {
+        messagesToDeliver = messages
+        self.termination = termination
+    }
+
+    func messages(
+        from remoteDevice: DeviceID,
+        connectionID: UUID
+    ) async -> AsyncThrowingStream<WebRTCSignalMessage, Error> {
+        _ = remoteDevice
+        _ = connectionID
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { [termination] _ in
+                Task { await termination.markTerminated() }
+            }
+            for message in messagesToDeliver { continuation.yield(message) }
+        }
+    }
+
+    func send(
+        _ message: WebRTCSignalMessage,
+        to remoteDevice: DeviceID,
+        connectionID: UUID
+    ) async throws {
+        _ = message
+        _ = remoteDevice
+        _ = connectionID
+    }
+}
+
 private actor InMemoryWebRTCSignalBus {
     struct Key: Hashable {
         let recipient: DeviceID
@@ -309,6 +591,8 @@ private actor InMemoryWebRTCSignalBus {
 
     private var subscribers: [Key: AsyncThrowingStream<WebRTCSignalMessage, Error>.Continuation] = [:]
     private var pending: [Key: [WebRTCSignalMessage]] = [:]
+    private let candidateGate = CancellableCandidateSendGate()
+    private(set) var candidateDeliveryCount = 0
 
     nonisolated func endpoint(for localDevice: DeviceID) -> InMemoryWebRTCSignalEndpoint {
         InMemoryWebRTCSignalEndpoint(localDevice: localDevice, bus: self)
@@ -322,13 +606,75 @@ private actor InMemoryWebRTCSignalBus {
         }
     }
 
-    func send(_ message: WebRTCSignalMessage, from: DeviceID, to: DeviceID, connectionID: UUID) {
+    func send(_ message: WebRTCSignalMessage, from: DeviceID, to: DeviceID, connectionID: UUID) async throws {
+        if case .candidate = message {
+            try await candidateGate.waitIfBlocked()
+            candidateDeliveryCount += 1
+        }
         let key = Key(recipient: to, sender: from, connectionID: connectionID)
         if let continuation = subscribers[key] {
             continuation.yield(message)
         } else {
             pending[key, default: []].append(message)
         }
+    }
+
+    func blockCandidateSends() async { await candidateGate.block() }
+    func releaseCandidateSends() async { await candidateGate.release() }
+    var blockedCandidateSendCount: Int { get async { await candidateGate.waiterCount } }
+
+    func waitUntilCandidateSendIsBlocked() async -> Bool {
+        for _ in 0..<1_000 {
+            if await candidateGate.waiterCount > 0 { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return false
+    }
+
+    func failSignals(
+        recipient: DeviceID,
+        sender: DeviceID,
+        connectionID: UUID,
+        error: Error
+    ) {
+        let key = Key(recipient: recipient, sender: sender, connectionID: connectionID)
+        subscribers.removeValue(forKey: key)?.finish(throwing: error)
+    }
+}
+
+private actor CancellableCandidateSendGate {
+    private var blocked = false
+    private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+
+    var waiterCount: Int { waiters.count }
+
+    func block() { blocked = true }
+
+    func release() {
+        blocked = false
+        let pending = waiters.values
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+
+    func waitIfBlocked() async throws {
+        guard blocked else { return }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    waiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancel(id) }
+        }
+    }
+
+    private func cancel(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 }
 
@@ -341,6 +687,6 @@ private struct InMemoryWebRTCSignalEndpoint: WebRTCSignalTransport {
     }
 
     func send(_ message: WebRTCSignalMessage, to remoteDevice: DeviceID, connectionID: UUID) async throws {
-        await bus.send(message, from: localDevice, to: remoteDevice, connectionID: connectionID)
+        try await bus.send(message, from: localDevice, to: remoteDevice, connectionID: connectionID)
     }
 }

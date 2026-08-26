@@ -224,6 +224,96 @@ final class ConnectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(bufferedOffer, offer)
     }
 
+    func testExactly128SignalsBufferedBeforeSubscribePreserveOrder() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let connectionID = UUID()
+        let session = MemoryRendezvousSignalSession()
+        let signaling = RendezvousWebRTCSignaling(session: session)
+        _ = await signaling.incomingOffers()
+        let expected = (0..<128).map { WebRTCSignalMessage.answer(sdp: "answer-\($0)") }
+
+        for message in expected {
+            try await signaling.send(message, to: peer, connectionID: connectionID)
+            let sentPayload = await session.lastSentPayload()
+            let payload = try XCTUnwrap(sentPayload)
+            await session.deliver(RendezvousSignalFrame(
+                from: peer,
+                payload: payload
+            ))
+        }
+        await waitForSignalingToProcess(128, signaling: signaling)
+
+        var iterator = await signaling.messages(from: peer, connectionID: connectionID).makeAsyncIterator()
+        var received: [WebRTCSignalMessage] = []
+        for _ in expected.indices {
+            let next = try await iterator.next()
+            received.append(try XCTUnwrap(next))
+        }
+        XCTAssertEqual(received, expected)
+    }
+
+    func test129thSignalBufferedBeforeSubscribeFailsClosed() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let connectionID = UUID()
+        let session = MemoryRendezvousSignalSession()
+        let signaling = RendezvousWebRTCSignaling(session: session)
+        _ = await signaling.incomingOffers()
+
+        for index in 0..<129 {
+            try await signaling.send(.answer(sdp: "answer-\(index)"), to: peer, connectionID: connectionID)
+            let sentPayload = await session.lastSentPayload()
+            let payload = try XCTUnwrap(sentPayload)
+            await session.deliver(RendezvousSignalFrame(
+                from: peer,
+                payload: payload
+            ))
+        }
+        await waitForSignalingToProcess(129, signaling: signaling)
+
+        var iterator = await signaling.messages(from: peer, connectionID: connectionID).makeAsyncIterator()
+        do {
+            _ = try await iterator.next()
+            XCTFail("An incomplete signaling stream must not continue after pending overflow")
+        } catch {
+            XCTAssertEqual(error as? WebRTCFactoryError, .signalingOverflow)
+        }
+    }
+
+    func testLiveSignalSubscriberByteOverflowFailsBeforeDeliveringIncompleteSequence() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let connectionID = UUID()
+        let session = MemoryRendezvousSignalSession()
+        let signaling = RendezvousWebRTCSignaling(session: session)
+        let stream = await signaling.messages(from: peer, connectionID: connectionID)
+        let padding = String(repeating: "x", count: 60 * 1024)
+
+        for index in 0..<9 {
+            try await signaling.send(
+                .candidate(
+                    sdp: "candidate:\(index) 1 udp 1 192.168.1.20 \(7_000 + index) typ host \(padding)",
+                    sdpMLineIndex: 0,
+                    sdpMid: "0"
+                ),
+                to: peer,
+                connectionID: connectionID
+            )
+            let sentPayload = await session.lastSentPayload()
+            await session.deliver(RendezvousSignalFrame(
+                from: peer,
+                payload: try XCTUnwrap(sentPayload)
+            ))
+        }
+        await waitForSignalingToProcess(9, signaling: signaling)
+
+        var iterator = stream.makeAsyncIterator()
+        do {
+            _ = try await iterator.next()
+            XCTFail("A byte-overflowed live signaling sequence must fail before partial delivery")
+        } catch {
+            XCTAssertEqual(error as? WebRTCFactoryError, .signalingOverflow)
+        }
+    }
+
     func testStoppedConnectionListenerCannotRestartItsOfferReader() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let session = MemoryRendezvousSignalSession()
@@ -300,6 +390,17 @@ final class ConnectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.maximumTotal, 8)
         XCTAssertLessThanOrEqual(snapshot.maximumPerDevice, 2)
         await listener.stop()
+    }
+
+    private func waitForSignalingToProcess(
+        _ count: Int,
+        signaling: RendezvousWebRTCSignaling
+    ) async {
+        for _ in 0..<1_000 {
+            if await signaling._testOnlyReceivedFrameCount() == count { return }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("Signaling reader did not process \(count) frames")
     }
 }
 

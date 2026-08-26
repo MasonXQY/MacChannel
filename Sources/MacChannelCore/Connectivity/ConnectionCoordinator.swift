@@ -7,6 +7,96 @@ public protocol RendezvousSignalSession: Sendable {
 
 extension AuthenticatedPresenceSession: RendezvousSignalSession {}
 
+private actor BoundedWebRTCSignalMailbox {
+    private struct Item {
+        let message: WebRTCSignalMessage
+        let bytes: Int
+    }
+
+    private static let maximumMessages = 128
+    private static let maximumBytes = 512 * 1024
+
+    private var queued: [Item] = []
+    private var queuedBytes = 0
+    private var waiter: CheckedContinuation<WebRTCSignalMessage?, Error>?
+    private var terminalError: WebRTCFactoryError?
+
+    func push(_ message: WebRTCSignalMessage, bytes: Int) -> Bool {
+        guard terminalError == nil, bytes <= Self.maximumBytes else {
+            finish(.signalingOverflow)
+            return false
+        }
+        if let waiter {
+            self.waiter = nil
+            waiter.resume(returning: message)
+            return true
+        }
+        guard queued.count < Self.maximumMessages,
+              queuedBytes + bytes <= Self.maximumBytes
+        else {
+            finish(.signalingOverflow)
+            return false
+        }
+        queued.append(Item(message: message, bytes: bytes))
+        queuedBytes += bytes
+        return true
+    }
+
+    func next() async throws -> WebRTCSignalMessage? {
+        if Task.isCancelled { throw CancellationError() }
+        if let terminalError { throw terminalError }
+        if !queued.isEmpty {
+            let item = queued.removeFirst()
+            queuedBytes -= item.bytes
+            return item.message
+        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else if let terminalError {
+                    continuation.resume(throwing: terminalError)
+                } else if let existing = waiter {
+                    waiter = nil
+                    terminalError = .signalingOverflow
+                    existing.resume(throwing: WebRTCFactoryError.signalingOverflow)
+                    continuation.resume(throwing: WebRTCFactoryError.signalingOverflow)
+                } else {
+                    waiter = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter() }
+        }
+    }
+
+    func finish(_ error: WebRTCFactoryError) {
+        guard terminalError == nil else { return }
+        terminalError = error
+        queued.removeAll(keepingCapacity: false)
+        queuedBytes = 0
+        let waiter = self.waiter
+        self.waiter = nil
+        waiter?.resume(throwing: error)
+    }
+
+    private func cancelWaiter() {
+        let waiter = self.waiter
+        self.waiter = nil
+        waiter?.resume(throwing: CancellationError())
+    }
+}
+
+private final class SignalSubscriptionLease: @unchecked Sendable {
+    private let onTermination: @Sendable () -> Void
+
+    init(onTermination: @escaping @Sendable () -> Void) {
+        self.onTermination = onTermination
+    }
+
+    deinit { onTermination() }
+}
+
 public struct IncomingWebRTCOffer: Equatable, Sendable {
     public let remoteDevice: DeviceID
     public let connectionID: UUID
@@ -34,15 +124,17 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
 
     private struct Subscriber {
         let token: UUID
-        let continuation: AsyncThrowingStream<WebRTCSignalMessage, Error>.Continuation
+        weak var mailbox: BoundedWebRTCSignalMailbox?
     }
 
     private struct PendingBucket {
         var messages: [WebRTCSignalMessage] = []
         var bytes = 0
+        var terminalError: WebRTCFactoryError?
     }
 
     private static let maximumPendingConnections = 64
+    private static let maximumPendingMessagesPerConnection = 128
     private static let maximumPendingBytes = 4 * 1024 * 1024
     private static let maximumPendingBytesPerConnection = 512 * 1024
 
@@ -52,6 +144,8 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
     private var pendingOrder: [Key] = []
     private var pendingBytes = 0
     private var announcedOffers: Set<Key> = []
+    private var receivedFrameCount = 0
+    private var routerTerminalError: WebRTCFactoryError?
     private var readerTask: Task<Void, Never>?
     private let incomingOfferStream: AsyncStream<IncomingWebRTCOffer>
     private let incomingOfferContinuation: AsyncStream<IncomingWebRTCOffer>.Continuation
@@ -69,17 +163,38 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
         await ensureReader()
         let key = Key(device: remoteDevice, connectionID: connectionID)
         let token = UUID()
-        return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(128)) { continuation in
-            subscribers.removeValue(forKey: key)?.continuation.finish(throwing: WebRTCFactoryError.signalingEnded)
-            subscribers[key] = Subscriber(token: token, continuation: continuation)
-            for message in takePendingMessages(for: key) {
-                continuation.yield(message)
-            }
-            announcedOffers.remove(key)
-            continuation.onTermination = { [weak self] _ in
-                Task { await self?.removeSubscriber(key, token: token) }
-            }
+        if let routerTerminalError {
+            return AsyncThrowingStream { $0.finish(throwing: routerTerminalError) }
         }
+        if let previous = subscribers.removeValue(forKey: key)?.mailbox {
+            await previous.finish(.signalingEnded)
+        }
+        let mailbox = BoundedWebRTCSignalMailbox()
+        var failed = false
+        while let pending = takePendingBucket(for: key) {
+            if let error = pending.terminalError {
+                await mailbox.finish(error)
+                failed = true
+                break
+            }
+            for message in pending.messages {
+                guard await mailbox.push(message, bytes: estimatedBytes(of: message)) else {
+                    await failPendingConnection(key, with: .signalingOverflow)
+                    failed = true
+                    break
+                }
+            }
+            if failed { break }
+        }
+        if !failed { subscribers[key] = Subscriber(token: token, mailbox: mailbox) }
+        announcedOffers.remove(key)
+        let lease = SignalSubscriptionLease { [weak self] in
+            Task { await self?.removeSubscriber(key, token: token) }
+        }
+        return AsyncThrowingStream(unfolding: { [mailbox, lease] in
+            _ = lease
+            return try await mailbox.next()
+        })
     }
 
     public func incomingOffers() async -> AsyncStream<IncomingWebRTCOffer> {
@@ -97,7 +212,7 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
     }
 
     private func ensureReader() async {
-        guard readerTask == nil else { return }
+        guard readerTask == nil, routerTerminalError == nil else { return }
         let frames = await session.signalFrames()
         readerTask = Task { [weak self] in
             for await frame in frames {
@@ -108,23 +223,25 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
         }
     }
 
-    private func receive(_ frame: RendezvousSignalFrame) {
+    private func receive(_ frame: RendezvousSignalFrame) async {
+        guard routerTerminalError == nil else { return }
         guard let envelope = try? JSONDecoder().decode(Envelope.self, from: frame.payload) else { return }
+        if receivedFrameCount < Int.max { receivedFrameCount += 1 }
         let key = Key(device: frame.from, connectionID: envelope.connectionID)
-        if let subscriber = subscribers[key] {
-            switch subscriber.continuation.yield(envelope.message) {
-            case .enqueued:
-                break
-            case .dropped, .terminated:
-                subscriber.continuation.finish(throwing: WebRTCFactoryError.signalingEnded)
+        if let subscriber = subscribers[key], let mailbox = subscriber.mailbox {
+            guard await mailbox.push(
+                envelope.message,
+                bytes: estimatedBytes(of: envelope.message)
+            ) else {
                 subscribers.removeValue(forKey: key)
-            @unknown default:
-                subscriber.continuation.finish(throwing: WebRTCFactoryError.signalingEnded)
-                subscribers.removeValue(forKey: key)
+                await failPendingConnection(key, with: .signalingOverflow)
+                return
             }
             return
+        } else if subscribers.removeValue(forKey: key) != nil {
+            // The consumer released its stream before the lease cleanup ran.
         }
-        guard buffer(envelope.message, for: key) else { return }
+        guard await buffer(envelope.message, for: key) else { return }
         if case let .offer(_, route) = envelope.message, announcedOffers.insert(key).inserted {
             let offer = IncomingWebRTCOffer(
                 remoteDevice: frame.from,
@@ -134,25 +251,29 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
             switch incomingOfferContinuation.yield(offer) {
             case .enqueued:
                 break
-            case .dropped, .terminated:
-                removePendingMessages(for: key)
-                announcedOffers.remove(key)
+            case .dropped:
+                await failPendingConnection(key, with: .signalingOverflow)
+            case .terminated:
+                await failRouter(with: .signalingEnded)
             @unknown default:
-                removePendingMessages(for: key)
-                announcedOffers.remove(key)
+                await failRouter(with: .signalingOverflow)
             }
         }
     }
 
-    private func buffer(_ message: WebRTCSignalMessage, for key: Key) -> Bool {
+    private func buffer(_ message: WebRTCSignalMessage, for key: Key) async -> Bool {
         let messageBytes = estimatedBytes(of: message)
-        guard messageBytes <= Self.maximumPendingBytesPerConnection else { return false }
+        guard messageBytes <= Self.maximumPendingBytesPerConnection else {
+            await failPendingConnection(key, with: .signalingOverflow)
+            return false
+        }
         if var bucket = pendingMessages[key] {
-            guard bucket.bytes + messageBytes <= Self.maximumPendingBytesPerConnection,
+            guard bucket.terminalError == nil else { return false }
+            guard bucket.messages.count < Self.maximumPendingMessagesPerConnection,
+                  bucket.bytes + messageBytes <= Self.maximumPendingBytesPerConnection,
                   pendingBytes + messageBytes <= Self.maximumPendingBytes
             else {
-                removePendingMessages(for: key)
-                announcedOffers.remove(key)
+                await failPendingConnection(key, with: .signalingOverflow)
                 return false
             }
             bucket.messages.append(message)
@@ -161,27 +282,57 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
             pendingBytes += messageBytes
             return true
         }
-        while pendingMessages.count >= Self.maximumPendingConnections
-                || pendingBytes + messageBytes > Self.maximumPendingBytes {
-            guard let oldest = pendingOrder.first else { return false }
-            removePendingMessages(for: oldest)
-            announcedOffers.remove(oldest)
+        guard pendingMessages.count < Self.maximumPendingConnections,
+              pendingBytes + messageBytes <= Self.maximumPendingBytes
+        else {
+            await failRouter(with: .signalingOverflow)
+            return false
         }
-        pendingMessages[key] = PendingBucket(messages: [message], bytes: messageBytes)
+        pendingMessages[key] = PendingBucket(
+            messages: [message],
+            bytes: messageBytes,
+            terminalError: nil
+        )
         pendingOrder.append(key)
         pendingBytes += messageBytes
         return true
     }
 
-    private func takePendingMessages(for key: Key) -> [WebRTCSignalMessage] {
-        guard let bucket = pendingMessages.removeValue(forKey: key) else { return [] }
+    private func takePendingBucket(for key: Key) -> PendingBucket? {
+        guard let bucket = pendingMessages.removeValue(forKey: key) else { return nil }
         pendingBytes -= bucket.bytes
         pendingOrder.removeAll { $0 == key }
-        return bucket.messages
+        return bucket
     }
 
     private func removePendingMessages(for key: Key) {
-        _ = takePendingMessages(for: key)
+        _ = takePendingBucket(for: key)
+    }
+
+    private func failPendingConnection(_ key: Key, with error: WebRTCFactoryError) async {
+        if pendingMessages[key] == nil, pendingMessages.count >= Self.maximumPendingConnections {
+            await failRouter(with: error)
+            return
+        }
+        removePendingMessages(for: key)
+        pendingMessages[key] = PendingBucket(messages: [], bytes: 0, terminalError: error)
+        pendingOrder.append(key)
+        announcedOffers.remove(key)
+    }
+
+    private func failRouter(with error: WebRTCFactoryError) async {
+        guard routerTerminalError == nil else { return }
+        routerTerminalError = error
+        readerTask?.cancel()
+        readerTask = nil
+        let active = subscribers.values.compactMap(\.mailbox)
+        subscribers.removeAll()
+        pendingMessages.removeAll()
+        pendingOrder.removeAll()
+        pendingBytes = 0
+        announcedOffers.removeAll()
+        incomingOfferContinuation.finish()
+        for mailbox in active { await mailbox.finish(error) }
     }
 
     private func estimatedBytes(of message: WebRTCSignalMessage) -> Int {
@@ -198,13 +349,21 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
         subscribers.removeValue(forKey: key)
     }
 
-    private func finishSubscribers() {
-        let active = subscribers.values
+    private func finishSubscribers() async {
+        guard routerTerminalError == nil else { return }
+        routerTerminalError = .signalingEnded
+        let active = subscribers.values.compactMap(\.mailbox)
         subscribers.removeAll()
-        active.forEach { $0.continuation.finish(throwing: WebRTCFactoryError.signalingEnded) }
+        pendingMessages.removeAll()
+        pendingOrder.removeAll()
+        pendingBytes = 0
+        announcedOffers.removeAll()
         incomingOfferContinuation.finish()
         readerTask = nil
+        for mailbox in active { await mailbox.finish(.signalingEnded) }
     }
+
+    func _testOnlyReceivedFrameCount() -> Int { receivedFrameCount }
 }
 
 public enum ConnectionAttemptError: Error, Equatable, Sendable {

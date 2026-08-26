@@ -116,3 +116,44 @@ this task. Those environment-dependent paths remain for the later integration
 harness; Task 6 verifies their exact attempt/candidate configuration, shared
 signaling ownership, real local WebRTC transport, authenticated key agreement,
 and forced relay policy in-process/unit scope.
+
+## Post-commit review follow-up — 2026-08-26
+
+An independent review of commit `938ad1d71cdf5d4434f0618b02d14270b625c5c1`
+found two important resource-bound gaps and two minor lifecycle gaps. All four
+were reproduced with red tests before implementation and corrected:
+
+- pending and live rendezvous signals are now bounded at 128 messages and 512
+  KiB per connection, with unmatched traffic also covered by a 4 MiB global
+  bound. A dequeue-accounted mailbox replaces the bare `AsyncThrowingStream`
+  buffer, so the 128-frame boundary preserves exact order while a 129th frame or
+  byte overflow fails before partial delivery with `signalingOverflow`. The peer
+  driver preserves that typed error and closes even if its data channel exists;
+- remote ICE candidates received before the remote description are capped at
+  128 candidates and 512 KiB per attempt; count or byte flooding returns the
+  typed `remoteCandidateOverflow`, clears pending candidates, closes the peer,
+  and terminates the signaling reader;
+- `await WebRTCSecureChannel.close()` now awaits a shared, idempotent transport
+  teardown task. The peer closes, its signal reader and every tracked candidate
+  send are cancelled and drained, and the retained driver/factory ownership is
+  released before close returns. A cancellation-aware blocked-sender regression
+  proves that no candidate is delivered after the close barrier;
+- suspended backpressure sends are capped at 128 waiters and 4 MiB of retained
+  frames. Excess sends fail with typed `overloaded`; individual cancellation and
+  channel close remove/resume waiters and release byte accounting.
+
+Fresh follow-up verification:
+
+- focused `ConnectionCoordinatorTests|WebRTCLoopbackTests`: 28 tests, 0 failures;
+- complete `swift test`: 104 tests, 0 failures, 0 unexpected failures;
+- authenticated 1 MiB ordered/reliable loopback: 20/20 consecutive passes;
+- `bash Scripts/build-app.sh`, direct bundled-framework load, `open`, XCFramework
+  `x86_64 arm64` slice check, and `git diff --check`: pass.
+
+The final independent follow-up review returned **Ready** with no critical,
+important, or minor findings. It independently passed the 28-test focused suite,
+the 104-test full suite, `git diff --check`, and ten consecutive repetitions of
+the close, backpressure, and live-signaling-overflow regressions.
+
+The live two-Mac/public STUN/deployed TURN/rendezvous integration boundary above
+is unchanged by this resource and lifecycle hardening.

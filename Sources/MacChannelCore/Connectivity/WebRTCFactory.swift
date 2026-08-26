@@ -83,6 +83,8 @@ public enum WebRTCFactoryError: Error, Equatable, Sendable {
     case sessionDescriptionFailed
     case iceFailed
     case signalingEnded
+    case signalingOverflow
+    case remoteCandidateOverflow
     case timeout
 }
 
@@ -260,7 +262,10 @@ private final class WebRTCPeerDriver: NSObject, RTCPeerConnectionDelegate, @unch
 
     func establish() async throws -> WebRTCSecureChannel { try await state.establish() }
     func timeout() async { await state.fail(.timeout) }
-    func abort() async { await state.fail(.signalingEnded) }
+    func abort() async {
+        await state.fail(.signalingEnded)
+        await state.close()
+    }
     func retainForLifetime() async { await state.retainDriver(self) }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
@@ -295,6 +300,9 @@ private final class WebRTCPeerDriver: NSObject, RTCPeerConnectionDelegate, @unch
 }
 
 private actor WebRTCPeerState {
+    private static let maximumPendingRemoteCandidates = 128
+    private static let maximumPendingRemoteCandidateBytes = 512 * 1024
+
     private let peer: PeerConnectionBox
     private let localIdentity: DeviceIdentity
     private let remoteDevice: DeviceID
@@ -307,8 +315,11 @@ private actor WebRTCPeerState {
     private var secureChannel: WebRTCSecureChannel?
     private var channelWaiters: [CheckedContinuation<WebRTCSecureChannel, Error>] = []
     private var pendingRemoteCandidates: [RTCIceCandidate] = []
+    private var pendingRemoteCandidateBytes = 0
     private var remoteDescriptionSet = false
     private var signalTask: Task<Void, Never>?
+    private var candidateSendTasks: [UUID: Task<Void, Never>] = [:]
+    private var teardownTask: Task<Void, Never>?
     private var driverOwner: WebRTCPeerDriver?
     private var terminalError: WebRTCFactoryError?
     private var closed = false
@@ -344,6 +355,8 @@ private actor WebRTCPeerState {
                     await self?.receivedSignal(message)
                 }
                 await self?.signalEnded()
+            } catch let error as WebRTCFactoryError {
+                await self?.signalFailed(error)
             } catch {
                 await self?.signalEnded()
             }
@@ -370,7 +383,7 @@ private actor WebRTCPeerState {
             try await channel.authenticate()
             return channel
         } catch {
-            close()
+            await close()
             throw error
         }
     }
@@ -381,13 +394,17 @@ private actor WebRTCPeerState {
 
     func generatedCandidate(sdp: String, lineIndex: Int32, mid: String?) {
         guard !closed else { return }
-        Task { [signaling, remoteDevice, connectionID] in
+        let taskID = UUID()
+        let task = Task { [weak self, signaling, remoteDevice, connectionID] in
+            guard !Task.isCancelled else { return }
             try? await signaling.send(
                 .candidate(sdp: sdp, sdpMLineIndex: lineIndex, sdpMid: mid),
                 to: remoteDevice,
                 connectionID: connectionID
             )
+            await self?.candidateSendFinished(taskID)
         }
+        candidateSendTasks[taskID] = task
     }
 
     func openedRemoteDataChannel(_ dataChannel: FactoryDataChannelBox) {
@@ -404,7 +421,7 @@ private actor WebRTCPeerState {
         if let secureChannel {
             Task { await secureChannel.close() }
         } else {
-            close()
+            Task { await close() }
         }
     }
 
@@ -434,7 +451,14 @@ private actor WebRTCPeerState {
             localIdentity: localIdentity,
             remoteDevice: remoteDevice,
             remotePublicKey: remotePublicKey,
-            closeTransport: { Task { await self.close() } }
+            closeTransport: { await self.close() },
+            testOnlyGenerateLocalCandidate: {
+                await self.generatedCandidate(
+                    sdp: "candidate:test 1 udp 1 192.168.1.20 7000 typ host",
+                    lineIndex: 0,
+                    mid: "0"
+                )
+            }
         )
         secureChannel = channel
         let waiters = channelWaiters
@@ -487,7 +511,17 @@ private actor WebRTCPeerState {
                 if remoteDescriptionSet {
                     try await addRemoteCandidate(candidate)
                 } else {
+                    let candidateBytes = sdp.utf8.count + (mid?.utf8.count ?? 0) + 32
+                    guard pendingRemoteCandidates.count < Self.maximumPendingRemoteCandidates,
+                          pendingRemoteCandidateBytes + candidateBytes <= Self.maximumPendingRemoteCandidateBytes
+                    else {
+                        pendingRemoteCandidates.removeAll(keepingCapacity: false)
+                        pendingRemoteCandidateBytes = 0
+                        fail(.remoteCandidateOverflow)
+                        return
+                    }
                     pendingRemoteCandidates.append(candidate)
+                    pendingRemoteCandidateBytes += candidateBytes
                 }
             }
         } catch {
@@ -497,6 +531,10 @@ private actor WebRTCPeerState {
 
     private func signalEnded() {
         if secureChannel == nil { fail(.signalingEnded) }
+    }
+
+    private func signalFailed(_ error: WebRTCFactoryError) {
+        if error == .signalingOverflow || secureChannel == nil { fail(error) }
     }
 
     private func createOffer() async throws -> RTCSessionDescription {
@@ -555,18 +593,43 @@ private actor WebRTCPeerState {
     private func flushRemoteCandidates() async throws {
         let candidates = pendingRemoteCandidates
         pendingRemoteCandidates.removeAll()
+        pendingRemoteCandidateBytes = 0
         for candidate in candidates { try await addRemoteCandidate(candidate) }
     }
 
-    fileprivate func close() {
-        guard !closed else { return }
-        closed = true
-        signalTask?.cancel()
-        signalTask = nil
-        peer.value.delegate = nil
-        peer.value.close()
+    fileprivate func close() async {
+        let teardown = beginTeardown()
+        await teardown.value
         secureChannel = nil
         driverOwner = nil
+    }
+
+    private func beginTeardown() -> Task<Void, Never> {
+        if let teardownTask { return teardownTask }
+        closed = true
+        var tasks: [Task<Void, Never>] = []
+        if let signalTask { tasks.append(signalTask) }
+        tasks.append(contentsOf: candidateSendTasks.values)
+        tasks.forEach { $0.cancel() }
+        signalTask = nil
+        candidateSendTasks.removeAll()
+        pendingRemoteCandidates.removeAll(keepingCapacity: false)
+        pendingRemoteCandidateBytes = 0
+        peer.value.delegate = nil
+        peer.value.close()
+        finishChannelWaiters()
+        let teardown = Task {
+            for task in tasks { await task.value }
+        }
+        teardownTask = teardown
+        return teardown
+    }
+
+    private func candidateSendFinished(_ taskID: UUID) {
+        candidateSendTasks.removeValue(forKey: taskID)
+    }
+
+    private func finishChannelWaiters() {
         let waiters = channelWaiters
         channelWaiters.removeAll()
         waiters.forEach { $0.resume(throwing: terminalError ?? WebRTCFactoryError.signalingEnded) }

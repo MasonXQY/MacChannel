@@ -9,6 +9,7 @@ public enum WebRTCSecureChannelError: Error, Equatable, Sendable {
     case invalidKeyRequest
     case transportClosed
     case sendFailed
+    case overloaded
 }
 
 struct WebRTCHandshakePublicMaterial: Sendable {
@@ -31,6 +32,7 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
     private let state: State
     private let frameStream: AsyncThrowingStream<Data, Error>
     private let callbacks = OrderedDataChannelCallbacks()
+    private let testOnlyGenerateLocalCandidate: @Sendable () async -> Void
 
     init(
         connectionID: UUID,
@@ -40,10 +42,12 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
         localIdentity: DeviceIdentity,
         remoteDevice: DeviceID,
         remotePublicKey: Data,
-        closeTransport: @escaping @Sendable () -> Void
+        closeTransport: @escaping @Sendable () async -> Void,
+        testOnlyGenerateLocalCandidate: @escaping @Sendable () async -> Void
     ) {
         self.route = route
         self.channel = channel
+        self.testOnlyGenerateLocalCandidate = testOnlyGenerateLocalCandidate
         isOrderedReliable = channel.isOrdered
             && channel.maxPacketLifeTime == UInt16.max
             && channel.maxRetransmits == UInt16.max
@@ -96,6 +100,18 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
 
     func _testOnlyHandshakePublicMaterial() async throws -> WebRTCHandshakePublicMaterial {
         try await state.handshakePublicMaterial()
+    }
+
+    func _testOnlyGenerateLocalCandidate() async {
+        await testOnlyGenerateLocalCandidate()
+    }
+
+    func _testOnlyForceBackpressure(_ forced: Bool) async {
+        await state._testOnlyForceBackpressure(forced)
+    }
+
+    func _testOnlyBackpressureWaiterCount() async -> Int {
+        await state._testOnlyBackpressureWaiterCount()
     }
 
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
@@ -175,6 +191,13 @@ private final class RTCDataChannelBox: @unchecked Sendable {
 private actor State {
     private static let handshakeMagic = Data("MACCHANNEL-HANDSHAKE-1\n".utf8)
     private static let hkdfSalt = Data("macchannel-webrtc-export-v1".utf8)
+    private static let maximumBackpressureWaiters = 128
+    private static let maximumSuspendedFrameBytes = 4 * 1024 * 1024
+
+    private struct BackpressureWaiter {
+        let frameBytes: Int
+        let continuation: CheckedContinuation<Void, Error>
+    }
 
     private struct HandshakeMessage: Codable {
         let type: String
@@ -210,7 +233,7 @@ private actor State {
     private let localNonce: Data
     private let localAgreementKey: P256.KeyAgreement.PrivateKey
     private let frameContinuation: AsyncThrowingStream<Data, Error>.Continuation
-    private let closeTransport: @Sendable () -> Void
+    private let closeTransport: @Sendable () async -> Void
     private var transcript: Data?
     private var remoteAgreementPublicKey: P256.KeyAgreement.PublicKey?
     private var helloSent = false
@@ -222,7 +245,10 @@ private actor State {
     private var closed = false
     private var terminalError: WebRTCSecureChannelError?
     private var authenticationWaiters: [CheckedContinuation<Void, Error>] = []
-    private var backpressureWaiters: [CheckedContinuation<Void, Error>] = []
+    private var backpressureWaiters: [UUID: BackpressureWaiter] = [:]
+    private var suspendedFrameBytes = 0
+    private var transportCloseTask: Task<Void, Never>?
+    private var testOnlyBackpressureForced = false
 
     init(
         channel: RTCDataChannelBox,
@@ -233,7 +259,7 @@ private actor State {
         remoteDevice: DeviceID,
         remotePublicKey: Data,
         frames: AsyncThrowingStream<Data, Error>.Continuation,
-        closeTransport: @escaping @Sendable () -> Void
+        closeTransport: @escaping @Sendable () async -> Void
     ) {
         self.channel = channel
         self.connectionID = connectionID
@@ -303,9 +329,10 @@ private actor State {
 
     func bufferedAmountChanged(_ amount: UInt64) {
         guard amount <= WebRTCSecureChannel.bufferedAmountLowThreshold else { return }
-        let waiters = backpressureWaiters
+        let waiters = backpressureWaiters.values
         backpressureWaiters.removeAll()
-        waiters.forEach { $0.resume() }
+        suspendedFrameBytes = 0
+        waiters.forEach { $0.continuation.resume() }
     }
 
     func callbackQueueOverflowed() {
@@ -315,10 +342,9 @@ private actor State {
     func sendApplication(_ data: Data) async throws {
         guard authenticated else { throw terminalError ?? .notAuthenticated }
         guard !closed else { throw WebRTCSecureChannelError.transportClosed }
-        while channel.value.bufferedAmount > WebRTCSecureChannel.bufferedAmountHighWaterMark {
-            try await withCheckedThrowingContinuation { continuation in
-                backpressureWaiters.append(continuation)
-            }
+        while testOnlyBackpressureForced
+                || channel.value.bufferedAmount > WebRTCSecureChannel.bufferedAmountHighWaterMark {
+            try await waitForBackpressure(frameBytes: data.count)
             guard !closed else { throw WebRTCSecureChannelError.transportClosed }
         }
         guard channel.value.sendData(RTCDataBuffer(data: data, isBinary: true)) else {
@@ -362,13 +388,55 @@ private actor State {
         )
     }
 
-    func close() {
-        guard !closed else { return }
-        closed = true
-        channel.value.delegate = nil
-        channel.value.close()
-        closeTransport()
-        finish(.transportClosed)
+    func _testOnlyForceBackpressure(_ forced: Bool) {
+        testOnlyBackpressureForced = forced
+    }
+
+    func _testOnlyBackpressureWaiterCount() -> Int {
+        backpressureWaiters.count
+    }
+
+    private func waitForBackpressure(frameBytes: Int) async throws {
+        guard backpressureWaiters.count < Self.maximumBackpressureWaiters,
+              suspendedFrameBytes + frameBytes <= Self.maximumSuspendedFrameBytes
+        else {
+            throw WebRTCSecureChannelError.overloaded
+        }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else if closed {
+                    continuation.resume(throwing: WebRTCSecureChannelError.transportClosed)
+                } else {
+                    backpressureWaiters[id] = BackpressureWaiter(
+                        frameBytes: frameBytes,
+                        continuation: continuation
+                    )
+                    suspendedFrameBytes += frameBytes
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelBackpressureWaiter(id) }
+        }
+    }
+
+    private func cancelBackpressureWaiter(_ id: UUID) {
+        guard let waiter = backpressureWaiters.removeValue(forKey: id) else { return }
+        suspendedFrameBytes -= waiter.frameBytes
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    func close() async {
+        if !closed {
+            closed = true
+            channel.value.delegate = nil
+            channel.value.close()
+            finish(.transportClosed)
+        }
+        let closeTask = beginTransportClose()
+        await closeTask.value
     }
 
     private func sendHelloIfNeeded() {
@@ -530,17 +598,26 @@ private actor State {
         closed = true
         channel.value.delegate = nil
         channel.value.close()
-        closeTransport()
+        _ = beginTransportClose()
         finish(error)
+    }
+
+    private func beginTransportClose() -> Task<Void, Never> {
+        if let transportCloseTask { return transportCloseTask }
+        let closeTransport = self.closeTransport
+        let task = Task { await closeTransport() }
+        transportCloseTask = task
+        return task
     }
 
     private func finish(_ error: WebRTCSecureChannelError) {
         let authWaiters = authenticationWaiters
         authenticationWaiters.removeAll()
         authWaiters.forEach { $0.resume(throwing: error) }
-        let pressureWaiters = backpressureWaiters
+        let pressureWaiters = backpressureWaiters.values
         backpressureWaiters.removeAll()
-        pressureWaiters.forEach { $0.resume(throwing: error) }
+        suspendedFrameBytes = 0
+        pressureWaiters.forEach { $0.continuation.resume(throwing: error) }
         frameContinuation.finish(throwing: error)
     }
 }
