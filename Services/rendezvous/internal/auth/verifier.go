@@ -663,6 +663,13 @@ type pendingRecord struct {
 	pendingExpired   bool
 }
 
+// BatchRecordResult distinguishes accepting a new signed artifact from a
+// presentation-state transition (for example, subject confirmation).
+type BatchRecordResult struct {
+	RecordNewlyAccepted bool
+	StateChanged        bool
+}
+
 type TrustRegistry struct {
 	mu                 sync.RWMutex
 	publicKeys         map[string][]byte
@@ -793,8 +800,8 @@ func (r *TrustRegistry) AuthenticateDeviceWithResult(deviceID string, publicKey 
 	if err != nil {
 		return false, err
 	}
-	for _, recordChanged := range changed {
-		if recordChanged {
+	for _, recordResult := range changed {
+		if recordResult.StateChanged {
 			return true, nil
 		}
 	}
@@ -802,10 +809,11 @@ func (r *TrustRegistry) AuthenticateDeviceWithResult(deviceID string, publicKey 
 }
 
 // PrepareConfirmBatch validates the complete batch and commits it as one
-// registry/store transaction. Its result aligns with records: true means that
-// record changed accepted state and may be fanned out. If any record is
-// invalid, no registry mutation, durable write, or result is produced.
-func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, records []SignedTrustRecord) ([]bool, error) {
+// registry/store transaction. Its results align with records and distinguish a
+// newly accepted signed artifact from a later confirmation-state transition.
+// If any record is invalid, no registry mutation, durable write, or result is
+// produced.
+func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, records []SignedTrustRecord) ([]BatchRecordResult, error) {
 	deviceID = strings.ToLower(deviceID)
 	if DeviceID(publicKey) != deviceID || len(records) > 256 {
 		return nil, ErrInvalidTrust
@@ -828,7 +836,7 @@ func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, r
 	if err != nil {
 		return nil, err
 	}
-	changesByHash := r.pendingChangesStateLocked(pending)
+	resultsByHash := r.pendingResultsLocked(pending)
 	if r.recordStore != nil && len(pending) > 0 {
 		toSave := make([]SignedTrustRecord, 0, len(pending))
 		for _, item := range pending {
@@ -843,25 +851,28 @@ func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, r
 	}
 
 	r.applyPendingLocked(pending)
-	results := make([]bool, len(records))
+	results := make([]BatchRecordResult, len(records))
 	seen := make(map[[32]byte]bool, len(records))
 	for index, record := range records {
 		hashInput := append(append([]byte{}, record.CanonicalPayload()...), record.Signature...)
 		hash := sha256.Sum256(hashInput)
 		if !seen[hash] {
-			results[index] = changesByHash[hash]
+			results[index] = resultsByHash[hash]
 			seen[hash] = true
 		}
 	}
 	return results, nil
 }
 
-func (r *TrustRegistry) pendingChangesStateLocked(pending []pendingRecord) map[[32]byte]bool {
-	changes := make(map[[32]byte]bool, len(pending))
+func (r *TrustRegistry) pendingResultsLocked(pending []pendingRecord) map[[32]byte]BatchRecordResult {
+	results := make(map[[32]byte]BatchRecordResult, len(pending))
 	for _, item := range pending {
-		changes[item.hash] = pendingRecordChangesStateLocked(r, item)
+		results[item.hash] = BatchRecordResult{
+			RecordNewlyAccepted: item.isNew,
+			StateChanged:        pendingRecordChangesStateLocked(r, item),
+		}
 	}
-	return changes
+	return results
 }
 
 func pendingRecordChangesStateLocked(r *TrustRegistry, item pendingRecord) bool {

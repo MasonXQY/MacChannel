@@ -2844,6 +2844,77 @@ func TestTrustUpdateBatchIsAtomicBeforeFanoutAndDurableConfirm(t *testing.T) {
 	}
 }
 
+func TestSecondPartyConfirmationDoesNotRefanAcceptedRecordToGraphPeers(t *testing.T) {
+	api := newTestAPI(t)
+	a := newIdentity(t)
+	b := newIdentity(t)
+	d := newIdentity(t)
+	aWS := api.authenticatedWebSocket(t, a, nil)
+	defer aWS.Close()
+	bWS := api.authenticatedWebSocket(t, b, nil)
+	defer bWS.Close()
+	dWS := api.authenticatedWebSocket(t, d, nil)
+	defer dWS.Close()
+
+	aToD := a.trustRecord(t, d, 1)
+	if err := aWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{aToD}}); err != nil {
+		t.Fatal(err)
+	}
+	readUntilTypeRejecting(t, aWS, "trust-ok", "trust-record")
+	readUntilType(t, dWS, "trust-record")
+	if err := dWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{aToD}}); err != nil {
+		t.Fatal(err)
+	}
+	readUntilTypeRejecting(t, dWS, "trust-ok", "trust-record")
+
+	aToB := a.trustRecord(t, b, 2)
+	if err := aWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{aToB}}); err != nil {
+		t.Fatal(err)
+	}
+	readUntilTypeRejecting(t, aWS, "trust-ok", "trust-record")
+	readUntilType(t, bWS, "trust-record")
+	if record := readUntilType(t, dWS, "trust-record"); trustRecordSubject(t, record) != b.id {
+		t.Fatalf("D record = %#v, want subject %s", record, b.id)
+	}
+	if err := bWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{aToB}}); err != nil {
+		t.Fatal(err)
+	}
+	readUntilTypeRejecting(t, bWS, "trust-ok", "trust-record")
+	if err := dWS.WriteJSON(map[string]any{"type": "signal", "to": a.id, "payload": []byte("still-alive")}); err != nil {
+		t.Fatal(err)
+	}
+	if routed := readUntilTypeRejecting(t, aWS, "signal", "trust-record"); routed["from"] != d.id {
+		t.Fatalf("A signal = %#v", routed)
+	}
+	expectNoFrameType(t, dWS, "trust-record")
+}
+
+func TestPrepareConfirmBatchPreservesNewAcceptanceAcrossRestart(t *testing.T) {
+	store := &memoryTrustRecordStore{}
+	a := newIdentity(t)
+	b := newIdentity(t)
+	first, err := auth.NewPersistentTrustRegistry(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := a.trustRecord(t, b, 1)
+	results, err := first.PrepareConfirmBatch(a.id, a.publicKey, []auth.SignedTrustRecord{record})
+	if err != nil || len(results) != 1 || !results[0].RecordNewlyAccepted {
+		t.Fatalf("first batch = %#v, err = %v", results, err)
+	}
+	restarted, err := auth.NewPersistentTrustRegistry(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err = restarted.PrepareConfirmBatch(a.id, a.publicKey, []auth.SignedTrustRecord{record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].RecordNewlyAccepted || results[0].StateChanged {
+		t.Fatalf("replayed batch = %#v", results)
+	}
+}
+
 func trustRecordSubject(t *testing.T, frame map[string]any) string {
 	t.Helper()
 	record, ok := frame["record"].(map[string]any)

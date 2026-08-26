@@ -100,6 +100,8 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     ) {
         self.directory = directory; self.trust = trust; self.renewalInterval = max(0.1, renewalInterval); self.beforeDirectoryApply = beforeDirectoryApply
     }
+    // Deinitialization cannot provide an ordered actor boundary. Normal callers
+    // must await stop(); this is only best-effort cleanup for abandoned owners.
     deinit {
         trustUpdateTask?.cancel()
         directoryTasks.values.forEach { $0.cancel() }
@@ -137,10 +139,26 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
         }
     }
     public func start() { queue.async { [weak self] in self?.startOnQueue() } }
-    public func stop() { queue.async { [weak self] in
-        guard let self else { return }
-        self.generation &+= 1; self.browser?.cancel(); self.browser = nil; self.renewalTimer?.cancel(); self.renewalTimer = nil; self.currentSightings = [:]; self.endDirectorySessionOnQueue(); self.cancelOwnedTasksOnQueue(); self.lifecycleState = .stopped
-    } }
+    /// Ordered lifecycle boundary: all future discovery applications carry an
+    /// ended token before this returns, and earlier token sightings are purged.
+    public func stop() async {
+        let sessionTask: Task<DeviceDirectory.LANDiscoverySessionToken?, Never>? = await withCheckedContinuation { (continuation: CheckedContinuation<Task<DeviceDirectory.LANDiscoverySessionToken?, Never>?, Never>) in
+            queue.async { [weak self] in
+                guard let self else { continuation.resume(returning: nil); return }
+                self.generation &+= 1
+                self.browser?.cancel(); self.browser = nil
+                self.renewalTimer?.cancel(); self.renewalTimer = nil
+                self.currentSightings = [:]
+                let task = self.directorySessionTask
+                self.directorySessionTask = nil
+                self.cancelOwnedTasksOnQueue()
+                self.lifecycleState = .stopped
+                continuation.resume(returning: task)
+            }
+        }
+        guard let sessionTask, let token = await sessionTask.value else { return }
+        await directory.endLANDiscoverySession(token)
+    }
 
     /// Internal test hook; production calls this only from the NWBrowser handler.
     func accept(endpoint: NWEndpoint, txtRecord: [String: String], generation: UInt64? = nil) {
@@ -187,7 +205,7 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     private func acceptOnQueue(endpoint: NWEndpoint, txtRecord: [String: String], generation: UInt64) {
         guard isCurrent(generation), case let .service(_, type, _, _) = endpoint, type == Self.serviceType, txtRecord["version"] == Self.protocolVersion, let hash = txtRecord["id"], let device = trust.device(matchingBonjourHash: hash) else { return }
         currentSightings[device] = endpoint
-        scheduleDirectoryApply(device: device, endpoint: endpoint, generation: generation)
+        scheduleDirectoryApply(device: device, endpoint: endpoint)
     }
     private func installRenewalTimer(generation: UInt64) {
         renewalTimer?.cancel()
@@ -195,11 +213,11 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
         timer.schedule(deadline: .now() + renewalInterval, repeating: renewalInterval)
         timer.setEventHandler { [weak self] in
             guard let self, self.isCurrent(generation) else { return }
-            for (device, endpoint) in self.currentSightings { self.scheduleDirectoryApply(device: device, endpoint: endpoint, generation: generation) }
+            for (device, endpoint) in self.currentSightings { self.scheduleDirectoryApply(device: device, endpoint: endpoint) }
         }
         renewalTimer = timer; timer.resume()
     }
-    private func scheduleDirectoryApply(device: DeviceID, endpoint: NWEndpoint, generation: UInt64) {
+    private func scheduleDirectoryApply(device: DeviceID, endpoint: NWEndpoint) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let sessionTask = directorySessionTask else { return }
         let identifier = UUID()
@@ -208,7 +226,6 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
             defer { self.removeDirectoryTask(identifier) }
             guard let token = await sessionTask.value else { return }
             if let beforeDirectoryApply { await beforeDirectoryApply() }
-            guard !Task.isCancelled else { return }
             await directory.applyLAN(device, endpoint: endpoint, token: token)
         }
         directoryTasks[identifier] = task

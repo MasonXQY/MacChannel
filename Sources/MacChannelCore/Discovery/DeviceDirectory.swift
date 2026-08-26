@@ -47,6 +47,7 @@ public actor DeviceDirectory {
     private struct LANSighting: Sendable {
         let endpoint: DeviceEndpoint
         let expiresAt: Date
+        let discoverySession: UUID?
     }
 
     private var trust: DeviceTrust
@@ -125,7 +126,8 @@ public actor DeviceDirectory {
             guard isEligible(device), !host.isEmpty, port != 0 else { return }
             lanSightings[device] = LANSighting(
                 endpoint: .hostPort(host: host, port: port),
-                expiresAt: now().addingTimeInterval(Self.lanLifetime)
+                expiresAt: now().addingTimeInterval(Self.lanLifetime),
+                discoverySession: nil
             )
 
         case let .bonjour(device, endpoint):
@@ -148,6 +150,10 @@ public actor DeviceDirectory {
     public func endLANDiscoverySession(_ token: LANDiscoverySessionToken) {
         guard activeLANDiscoverySession == token.value else { return }
         activeLANDiscoverySession = nil
+        let before = lanSightings.count
+        lanSightings = lanSightings.filter { $0.value.discoverySession != token.value }
+        scheduleExpiryRefresh()
+        if lanSightings.count != before { publishSnapshot() }
     }
 
     /// Atomically checks the discovery capability immediately before mutating
@@ -163,7 +169,8 @@ public actor DeviceDirectory {
         else { return }
         lanSightings[device] = LANSighting(
             endpoint: .bonjour(endpoint),
-            expiresAt: now().addingTimeInterval(Self.lanLifetime)
+            expiresAt: now().addingTimeInterval(Self.lanLifetime),
+            discoverySession: token.value
         )
         scheduleExpiryRefresh()
         publishSnapshot()

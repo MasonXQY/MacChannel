@@ -682,7 +682,7 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 			}
 			_ = peer.SendJSON(map[string]string{"type": "trust-ok"})
 			for index, record := range frame.Records {
-				if !changed[index] {
+				if !changed[index].RecordNewlyAccepted {
 					continue
 				}
 				issuer := strings.ToLower(record.Issuer)

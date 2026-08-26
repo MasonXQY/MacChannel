@@ -362,7 +362,7 @@ final class DeviceDirectoryTests: XCTestCase {
         let renewedSnapshot = await directory.snapshot()
         XCTAssertEqual(renewedSnapshot.first?.availability, .lan)
 
-        browser.stop()
+        await browser.stop()
         browser.accept(endpoint: endpoint, txtRecord: record, generation: 1)
         try await Task.sleep(for: .milliseconds(30))
         clock.advance(by: 16)
@@ -374,7 +374,7 @@ final class DeviceDirectoryTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(30))
         let restartedSnapshot = await directory.snapshot()
         XCTAssertEqual(restartedSnapshot.first?.availability, .lan)
-        browser.stop()
+        await browser.stop()
     }
 
     func testBonjourQueuedDirectoryApplyCannotRunAfterStop() async throws {
@@ -387,33 +387,30 @@ final class DeviceDirectoryTests: XCTestCase {
         browser.start()
         browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: peer))
         await gate.waitUntilBlocked()
-        browser.stop()
-        try await Task.sleep(for: .milliseconds(30))
+        await browser.stop()
+        let stoppedSnapshot = await directory.snapshot()
+        XCTAssertTrue(stoppedSnapshot.isEmpty)
         await gate.release()
-        try await Task.sleep(for: .milliseconds(30))
+        await Task.yield()
 
         let snapshot = await directory.snapshot()
         XCTAssertTrue(snapshot.isEmpty)
     }
 
-    func testDirectoryRejectsDiscoveryApplyAfterSessionTokenEnds() async {
+    func testDirectoryEndSessionPurgesEarlierApplyAndRejectsLaterApply() async {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))
-        let gate = BonjourApplyGate()
         let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
         let token = await directory.beginLANDiscoverySession()
-        let apply = Task {
-            await gate.block()
-            await directory.applyLAN(peer, endpoint: endpoint, token: token)
-        }
-
-        await gate.waitUntilBlocked()
+        await directory.applyLAN(peer, endpoint: endpoint, token: token)
+        let activeEndpoint = await directory.endpoint(for: peer)
+        XCTAssertEqual(activeEndpoint, .bonjour(endpoint))
         await directory.endLANDiscoverySession(token)
-        await gate.release()
-        await apply.value
-
-        let snapshot = await directory.snapshot()
-        XCTAssertTrue(snapshot.isEmpty)
+        let endedSnapshot = await directory.snapshot()
+        XCTAssertTrue(endedSnapshot.isEmpty)
+        await directory.applyLAN(peer, endpoint: endpoint, token: token)
+        let rejectedSnapshot = await directory.snapshot()
+        XCTAssertTrue(rejectedSnapshot.isEmpty)
     }
 
     func testBonjourObserveTrustAndStopRemainQueueSafeUnderConcurrency() async throws {
@@ -423,7 +420,7 @@ final class DeviceDirectoryTests: XCTestCase {
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<40 {
                 group.addTask { browser.observeTrust(repository) }
-                group.addTask { browser.stop() }
+                group.addTask { await browser.stop() }
             }
         }
         try await Task.sleep(for: .milliseconds(50))
