@@ -77,6 +77,7 @@ public protocol SecureChannel: Sendable {
     var route: ConnectionRoute { get }
     func send(_ frame: Data) async throws
     func frames() -> AsyncThrowingStream<Data, Error>
+    func exportKey(label: String, context: Data, length: Int) async throws -> Data
     func close() async
 }
 public protocol PeerConnector: Sendable {
@@ -405,7 +406,7 @@ Run before implementation: `swift test --filter ConnectionCoordinatorTests`
 
 Expected: compile failure naming `ConnectionCoordinator`.
 
-Wrap `RTCPeerConnection` and an ordered, reliable `RTCDataChannel`. Cap each data-channel message at 64 KiB, honor `bufferedAmountLowThreshold`, authenticate the remote device inside the data channel with a signed nonce, and expose all callbacks through an actor-backed `AsyncThrowingStream`.
+Wrap `RTCPeerConnection` and an ordered, reliable `RTCDataChannel`. Cap each data-channel message at 64 KiB, honor `bufferedAmountLowThreshold`, authenticate the remote device inside the data channel with a signed nonce, expose callbacks through an actor-backed `AsyncThrowingStream`, and implement `exportKey(label:context:length:)` from the authenticated handshake transcript using HKDF-SHA256.
 
 - [ ] **Step 4: Add loopback data-channel verification**
 
@@ -467,7 +468,7 @@ Represent paths as normalized relative UTF-8 components and reject absolute path
 
 - [ ] **Step 4: Implement transfer encryption and flow control**
 
-Derive a per-transfer symmetric key from the authenticated channel exporter plus `TransferID` via HKDF-SHA256. Seal every frame with AES-GCM using a unique nonce derived from transfer ID and monotonic frame sequence. Use 64 KiB chunks, at most 64 unacknowledged chunks, and ACK continuous ranges every 16 chunks or 250 ms.
+Derive a per-transfer symmetric key by calling `SecureChannel.exportKey(label: "macchannel-transfer-v1", context: encodedTransferID, length: 32)`. Seal every frame with AES-GCM using a unique nonce derived from transfer ID and monotonic frame sequence. Use 64 KiB chunks, at most 64 unacknowledged chunks, and ACK continuous ranges every 16 chunks or 250 ms.
 
 - [ ] **Step 5: Verify and commit**
 
