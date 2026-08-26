@@ -22,6 +22,8 @@ public actor PairingCoordinator: PairingHostEndpoint {
         let peerIdentityPublicKey: Data
         let transcript: Data
         let channelKey: SymmetricKey
+        let expiresAt: Date
+        let generation: UInt64
         var localConfirmed: Bool
         var issuedAuthorization: SignedTrustRecord?
     }
@@ -30,9 +32,14 @@ public actor PairingCoordinator: PairingHostEndpoint {
     private let displayName: String
     private let transport: any PairingTransport
     private let clock: any PairingClock
-    private var trustStore: TrustStore
+    private let trustRepository: TrustRepository
     private var hostedSession: HostedSession?
     private var pendingConfirmation: PendingConfirmation?
+    private var lifecycleGeneration: UInt64 = 0
+    private var codeCreationInProgress = false
+    private var joinInProgress = false
+    private var confirmationInProgress = false
+    private var commitInProgress = false
     private var state: PairingState = .idle
     private let stateContinuation: AsyncStream<PairingState>.Continuation
 
@@ -41,16 +48,16 @@ public actor PairingCoordinator: PairingHostEndpoint {
     public init(
         identity: DeviceIdentity,
         displayName: String = "Mac",
-        trustStore: TrustStore,
+        trustRepository: TrustRepository,
         transport: any PairingTransport,
         clock: any PairingClock = SystemPairingClock()
     ) throws {
-        guard trustStore.isOwned(by: identity) else {
+        guard trustRepository.ownerID == identity.id else {
             throw PairingError.invalidTrustStore
         }
         self.identity = identity
         self.displayName = displayName
-        self.trustStore = trustStore
+        self.trustRepository = trustRepository
         self.transport = transport
         self.clock = clock
         let stream = AsyncStream<PairingState>.makeStream()
@@ -64,6 +71,11 @@ public actor PairingCoordinator: PairingHostEndpoint {
     }
 
     public func createCode() async throws -> String {
+        guard !codeCreationInProgress, !joinInProgress, !commitInProgress else {
+            throw PairingError.operationInProgress
+        }
+        codeCreationInProgress = true
+        defer { codeCreationInProgress = false }
         if let previous = hostedSession {
             await transport.remove(code: previous.code)
         }
@@ -81,6 +93,8 @@ public actor PairingCoordinator: PairingHostEndpoint {
         )
         do {
             try await transport.publish(offer, endpoint: self)
+            lifecycleGeneration = try nextGeneration()
+            pendingConfirmation = nil
             hostedSession = HostedSession(
                 code: code,
                 expiresAt: expiresAt,
@@ -109,6 +123,11 @@ public actor PairingCoordinator: PairingHostEndpoint {
     }
 
     public func join(code: String) async throws -> PairingJoinResult {
+        guard !joinInProgress, !codeCreationInProgress, !commitInProgress, pendingConfirmation == nil else {
+            throw PairingError.operationInProgress
+        }
+        joinInProgress = true
+        defer { joinInProgress = false }
         transition(to: .joining)
         do {
             let offer = try await transport.lookup(code: code)
@@ -175,6 +194,7 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 displayName: offer.hostDisplayName,
                 availability: .internet
             )
+            lifecycleGeneration = try nextGeneration()
             pendingConfirmation = PendingConfirmation(
                 role: .joiner,
                 sessionID: response.sessionID,
@@ -183,6 +203,8 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 peerIdentityPublicKey: offer.hostIdentityPublicKey,
                 transcript: transcript,
                 channelKey: channelKey,
+                expiresAt: offer.expiresAt,
+                generation: lifecycleGeneration,
                 localConfirmed: false,
                 issuedAuthorization: nil
             )
@@ -195,13 +217,18 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 joiningEphemeralPublicKey: joiningEphemeralKey.publicKey.rawRepresentation
             )
         } catch {
-            transitionToFailure(error)
+            if pendingConfirmation == nil {
+                transitionToFailure(error)
+            }
             throw normalizedHandshakeError(error)
         }
     }
 
     public func accept(_ request: PairingJoinRequest) async throws -> PairingJoinResponse {
         do {
+            guard !codeCreationInProgress, !commitInProgress, pendingConfirmation == nil else {
+                throw PairingError.operationInProgress
+            }
             var session = try validatedSession(for: request.code)
             let joiningIdentityKey = try validatedIdentityKey(
                 id: request.joiningID,
@@ -262,6 +289,7 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 displayName: request.joiningDisplayName,
                 availability: .internet
             )
+            lifecycleGeneration = try nextGeneration()
             pendingConfirmation = PendingConfirmation(
                 role: .host,
                 sessionID: sessionID,
@@ -270,6 +298,8 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 peerIdentityPublicKey: request.joiningIdentityPublicKey,
                 transcript: transcript,
                 channelKey: channelKey,
+                expiresAt: session.expiresAt,
+                generation: lifecycleGeneration,
                 localConfirmed: false,
                 issuedAuthorization: nil
             )
@@ -284,20 +314,27 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 )
             )
         } catch {
-            transitionToFailure(error)
+            if pendingConfirmation == nil {
+                transitionToFailure(error)
+            }
             throw normalizedHandshakeError(error)
         }
     }
 
     @discardableResult
     public func confirmFingerprint(_ fingerprint: String) async throws -> SignedTrustRecord {
+        guard !confirmationInProgress, !codeCreationInProgress, !joinInProgress, !commitInProgress else {
+            throw PairingError.operationInProgress
+        }
+        confirmationInProgress = true
+        defer { confirmationInProgress = false }
         guard var pending = pendingConfirmation else {
             let error = PairingError.noPendingConfirmation
             transitionToFailure(error)
             throw error
         }
         guard pending.fingerprint == fingerprint else {
-            pendingConfirmation = nil
+            clearPendingIfMatching(pending)
             let error = PairingError.fingerprintMismatch
             transitionToFailure(error)
             throw error
@@ -313,7 +350,9 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 return try await confirmAsJoiner(pending)
             }
         } catch {
-            transitionToFailure(error)
+            if pendingMatches(pending) {
+                transitionToFailure(error)
+            }
             throw error
         }
     }
@@ -322,29 +361,48 @@ public actor PairingCoordinator: PairingHostEndpoint {
         state
     }
 
-    public func isTrusted(_ device: DeviceID) -> Bool {
-        trustStore.isTrusted(device)
+    public func isTrusted(_ device: DeviceID) async -> Bool {
+        await trustRepository.isTrusted(device)
     }
 
     private func confirmAsHost(
         _ suppliedPending: PendingConfirmation
     ) async throws -> SignedTrustRecord {
+        try validatePendingIsCurrentAndLive(suppliedPending)
         var pending = suppliedPending
+        let reservation = try await transport.reserveAuthorizationDelivery(for: pending.sessionID)
+        guard pendingMatches(pending), !codeCreationInProgress else {
+            await transport.cancelAuthorizationDelivery(reservation)
+            throw PairingError.staleOperation
+        }
+        do {
+            try validatePendingIsCurrentAndLive(pending)
+        } catch {
+            await transport.cancelAuthorizationDelivery(reservation)
+            throw error
+        }
+        commitInProgress = true
+        defer { commitInProgress = false }
         let authorization: SignedTrustRecord
-        if let existing = pending.issuedAuthorization {
-            authorization = existing
-        } else {
-            let sequence = try trustStore.nextIssuerSequence(for: identity)
-            authorization = try SignedTrustRecord.authorizing(
-                subject: pending.peer.id,
-                subjectPublicKey: pending.peerIdentityPublicKey,
-                signedBy: identity,
-                sequence: sequence,
-                timestamp: clock.now
-            )
-            try trustStore.authorize(authorization)
-            pending.issuedAuthorization = authorization
-            pendingConfirmation = pending
+        do {
+            if let existing = pending.issuedAuthorization {
+                authorization = existing
+            } else {
+                authorization = try await trustRepository.issueAuthorization(
+                    subject: pending.peer.id,
+                    subjectPublicKey: pending.peerIdentityPublicKey,
+                    timestamp: clock.now
+                )
+                guard pendingMatches(pending) else {
+                    await transport.cancelAuthorizationDelivery(reservation)
+                    throw PairingError.staleOperation
+                }
+                pending.issuedAuthorization = authorization
+                pendingConfirmation = pending
+            }
+        } catch {
+            await transport.cancelAuthorizationDelivery(reservation)
+            throw error
         }
 
         let message = try PairingCryptography.authorizationMessage(
@@ -361,8 +419,9 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 key: pending.channelKey
             )
         )
-        try await transport.deliverAuthorization(envelope)
-        pendingConfirmation = nil
+        try await transport.deliverAuthorization(envelope, reservation: reservation)
+        guard pendingMatches(pending), !codeCreationInProgress else { throw PairingError.staleOperation }
+        clearPendingIfMatching(pending)
         transition(to: .confirmed(pending.peer))
         return authorization
     }
@@ -370,7 +429,12 @@ public actor PairingCoordinator: PairingHostEndpoint {
     private func confirmAsJoiner(
         _ pending: PendingConfirmation
     ) async throws -> SignedTrustRecord {
+        try validatePendingIsCurrentAndLive(pending)
+        guard !codeCreationInProgress else { throw PairingError.staleOperation }
         let envelope = try await transport.authorization(for: pending.sessionID)
+        guard pendingMatches(pending), !codeCreationInProgress else {
+            throw PairingError.staleOperation
+        }
         guard envelope.sessionID == pending.sessionID else {
             throw PairingError.invalidHandshake
         }
@@ -396,11 +460,12 @@ public actor PairingCoordinator: PairingHostEndpoint {
         else {
             throw PairingError.invalidHandshake
         }
-        try trustStore.bootstrapFromConfirmedPairing(
-            envelope.authorization,
-            localIdentity: identity
-        )
-        pendingConfirmation = nil
+        try validatePendingIsCurrentAndLive(pending)
+        commitInProgress = true
+        defer { commitInProgress = false }
+        try await trustRepository.bootstrapFromConfirmedPairing(envelope.authorization)
+        guard pendingMatches(pending) else { throw PairingError.staleOperation }
+        clearPendingIfMatching(pending)
         transition(to: .confirmed(pending.peer))
         return envelope.authorization
     }
@@ -420,6 +485,27 @@ public actor PairingCoordinator: PairingHostEndpoint {
             throw PairingError.codeExpired
         }
         return session
+    }
+
+    private func nextGeneration() throws -> UInt64 {
+        let next = lifecycleGeneration.addingReportingOverflow(1)
+        guard !next.overflow else { throw PairingError.resourceExhausted }
+        return next.partialValue
+    }
+
+    private func pendingMatches(_ pending: PendingConfirmation) -> Bool {
+        pendingConfirmation?.sessionID == pending.sessionID
+            && pendingConfirmation?.generation == pending.generation
+    }
+
+    private func clearPendingIfMatching(_ pending: PendingConfirmation) {
+        guard pendingMatches(pending) else { return }
+        pendingConfirmation = nil
+    }
+
+    private func validatePendingIsCurrentAndLive(_ pending: PendingConfirmation) throws {
+        guard pendingMatches(pending) else { throw PairingError.staleOperation }
+        guard clock.now < pending.expiresAt else { throw PairingError.sessionExpired }
     }
 
     private func validatedIdentityKey(

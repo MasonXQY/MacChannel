@@ -155,6 +155,10 @@ public struct TrustStore: Sendable {
         owner == identity.id
     }
 
+    public var persistedGeneration: UInt64 {
+        snapshotGeneration
+    }
+
     public func nextIssuerSequence(for issuer: DeviceIdentity) throws -> UInt64 {
         guard isTrusted(issuer.id) else {
             throw TrustStoreError.untrustedIssuer(issuer.id)

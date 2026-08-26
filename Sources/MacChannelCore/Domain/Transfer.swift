@@ -45,6 +45,10 @@ public enum MacChannelError: Error, Equatable, Sendable {
     case pairingAuthorizationPending
     case pairingHandshakeFailed
     case pairingTrustFailed
+    case pairingSessionExpired
+    case pairingResourceExhausted
+    case pairingOperationInProgress
+    case pairingStaleOperation
     case connectionFailed
     case transferFailed
     case cancelled

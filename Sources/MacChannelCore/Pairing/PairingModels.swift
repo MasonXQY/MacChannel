@@ -11,6 +11,10 @@ public enum PairingError: Error, Equatable, Sendable {
     case invalidPeerIdentity
     case invalidHandshake
     case invalidTrustStore
+    case sessionExpired
+    case resourceExhausted
+    case operationInProgress
+    case staleOperation
 }
 
 extension PairingError {
@@ -32,6 +36,14 @@ extension PairingError {
             .pairingHandshakeFailed
         case .noPendingConfirmation, .invalidTrustStore:
             .pairingTrustFailed
+        case .sessionExpired:
+            .pairingSessionExpired
+        case .resourceExhausted:
+            .pairingResourceExhausted
+        case .operationInProgress:
+            .pairingOperationInProgress
+        case .staleOperation:
+            .pairingStaleOperation
         }
     }
 }
@@ -174,6 +186,28 @@ public struct PairingAuthorizationEnvelope: Sendable {
         self.sessionID = sessionID
         self.authorization = authorization
         self.channelTag = channelTag
+    }
+}
+
+public struct PairingDeliveryReservation: Hashable, Sendable {
+    public let id: UUID
+    public let sessionID: PairingSessionID
+
+    init(id: UUID = UUID(), sessionID: PairingSessionID) {
+        self.id = id
+        self.sessionID = sessionID
+    }
+}
+
+public struct PairingSessionStorageCounts: Equatable, Sendable {
+    public let routes: Int
+    public let deliveries: Int
+    public let reservations: Int
+
+    public init(routes: Int, deliveries: Int, reservations: Int) {
+        self.routes = routes
+        self.deliveries = deliveries
+        self.reservations = reservations
     }
 }
 
