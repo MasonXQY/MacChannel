@@ -94,3 +94,25 @@ func (h *Hub) Route(from, to string, payload []byte) error {
 	}
 	return target.SendJSON(Frame{Type: "signal", From: from, Payload: append([]byte(nil), payload...)})
 }
+
+// Deliver sends a control frame only to explicitly selected connected devices.
+// The router derives recipients from the trust graph before and after a signed
+// trust transition; this hub never broadens that privacy boundary.
+func (h *Hub) Deliver(recipients []string, value any) {
+	h.mu.RLock()
+	sinks := make([]Sink, 0, len(recipients))
+	seen := make(map[string]bool, len(recipients))
+	for _, deviceID := range recipients {
+		if seen[deviceID] {
+			continue
+		}
+		seen[deviceID] = true
+		if client, ok := h.clients[deviceID]; ok {
+			sinks = append(sinks, client.sink)
+		}
+	}
+	h.mu.RUnlock()
+	for _, sink := range sinks {
+		_ = sink.SendJSON(value)
+	}
+}

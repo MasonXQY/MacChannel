@@ -101,7 +101,9 @@ public actor DeviceDirectory {
     }
 
     public func apply(_ presence: DevicePresence) {
-        purgeExpiredSightings()
+        let expired = purgeExpiredSightings()
+        scheduleExpiryRefresh()
+        if expired { publishSnapshot() }
 
         switch presence {
         case let .internet(device, online):

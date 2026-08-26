@@ -660,10 +660,32 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 				_ = peer.SendJSON(map[string]string{"type": "signal-error", "code": code})
 			}
 		case "trust-update":
+			recipients := make(map[string]bool)
+			for _, candidate := range r.registry.DevicesInGraph(deviceID) {
+				recipients[candidate] = true
+			}
+			for _, record := range frame.Records {
+				recipients[strings.ToLower(record.Subject)] = true
+			}
 			if err := r.registry.AuthenticateDevice(deviceID, authentication.Envelope.PublicKey, frame.Records); err != nil {
 				_ = peer.SendJSON(map[string]string{"type": "trust-error", "code": "invalid_record"})
 			} else {
 				_ = peer.SendJSON(map[string]string{"type": "trust-ok"})
+				for _, candidate := range r.registry.DevicesInGraph(deviceID) {
+					recipients[candidate] = true
+				}
+				for _, record := range frame.Records {
+					subject := strings.ToLower(record.Subject)
+					for _, candidate := range r.registry.DevicesInGraph(subject) {
+						recipients[candidate] = true
+					}
+					recipients[subject] = true
+					routes := make([]string, 0, len(recipients))
+					for candidate := range recipients {
+						routes = append(routes, candidate)
+					}
+					r.signals.Deliver(routes, map[string]any{"type": "trust-record", "record": record})
+				}
 				r.presence.Refresh()
 			}
 		default:

@@ -176,6 +176,18 @@ final class DeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(snapshot.first?.availability, .internet)
     }
 
+    func testPresenceDisconnectDrainsOnlinePeersBeforeReplacementSession() async {
+        let peer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer))
+        let client = PresenceClient(directory: directory)
+
+        await client.receiveAuthenticated(.availability(device: peer, isOnline: true))
+        await client.disconnect()
+
+        let snapshot = await directory.snapshot()
+        XCTAssertTrue(snapshot.isEmpty)
+    }
+
     func testDevicesStreamPublishesDeduplicatedSnapshots() async {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))
@@ -227,6 +239,26 @@ final class DeviceDirectoryTests: XCTestCase {
         let waitingForExpiry = Task { await iterator.next() }
         await Task.yield()
         _ = await directory.snapshot()
+        let expired = await waitingForExpiry.value
+
+        XCTAssertTrue(expired?.isEmpty == true)
+    }
+
+    func testRejectedEventStillPublishesAlreadyExpiredPresence() async {
+        let peer = DeviceID(rawValue: UUID())
+        let untrusted = DeviceID(rawValue: UUID())
+        let clock = ManualDirectoryClock()
+        let directory = DeviceDirectory(trust: .allowing(peer), now: { clock.now })
+        let stream = await directory.devices()
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+        await directory.apply(.internet(peer, online: true))
+        _ = await iterator.next()
+        clock.advance(by: 46)
+
+        let waitingForExpiry = Task { await iterator.next() }
+        await Task.yield()
+        await directory.apply(.internet(untrusted, online: true))
         let expired = await waitingForExpiry.value
 
         XCTAssertTrue(expired?.isEmpty == true)
