@@ -616,3 +616,79 @@ rendezvous listening on 127.0.0.1:18087
 - A reverse proxy requires an explicitly trusted source boundary; arbitrary forwarding headers remain ignored.
 - TLS termination remains deployment scope.
 - Git used auto-selected committer identity `Mason Xu <mason@MasondeMac-Studio.local>`.
+
+---
+
+## Formal final-review barrier remediation — 2026-08-26
+
+### Status
+
+Fixed the final Important migration finding in commit `4d52798` (`fix: preserve migrated revocation barriers`). Targeted independent re-review approved the migration/runtime cleanup with no remaining Critical or Important findings.
+
+- Migration `005` immediately converts every incomplete authorization carrying `revocation_order > 0` into a non-expiring `pending_expired` tombstone.
+- Neither migration backfill nor runtime cleanup assigns ordinary unconfirmed-authorization expiry to a revocation-bearing compact row.
+- SQL deletion requires `action = 'authorize'`, `revocation_order = 0`, and no established-pair marker. Memory cleanup applies the same barrier rule.
+- The compact row and `trust_issuer_states.high_water` survive cleanup and restart. An older signed authorization remains rejected; recovery requires a higher issuer sequence and presentation by both participants.
+
+### TDD RED evidence
+
+```bash
+TEST_DATABASE_URL='postgresql://mason@localhost:5432/macchannel_task4_third_final_8266?sslmode=disable' \
+  go test ./internal/httpapi -run TestMigration005PreservesRevocationBarrierThroughIncompleteReauthorization -count=1 -v
+```
+
+```text
+upgraded tombstone rows=0 revocation=0 expired=false issuerRows=0
+FAIL
+```
+
+### Final GREEN evidence
+
+```bash
+TEST_DATABASE_URL='postgresql://mason@localhost:5432/macchannel_task4_barrier_8266?sslmode=disable' \
+  go test -race ./internal/httpapi -run 'TestMigration005PreservesRevocationBarrierThroughIncompleteReauthorization|TestPostgresExpiredReauthorizationRetainsRevocationAcrossRestart' -count=1 -v
+```
+
+```text
+--- PASS: TestPostgresExpiredReauthorizationRetainsRevocationAcrossRestart
+--- PASS: TestMigration005PreservesRevocationBarrierThroughIncompleteReauthorization
+PASS
+ok   macchannel/rendezvous/internal/httpapi  2.135s
+```
+
+Fresh PostgreSQL and reapply evidence:
+
+```bash
+dropdb --if-exists macchannel_task4_barrier_8266
+createdb macchannel_task4_barrier_8266
+# applied migrations 001-005, then reapplied additive migrations 002-005 with ON_ERROR_STOP=1
+```
+
+```text
+exit=0
+trust compact-state upgrade columns=4
+```
+
+Full verification:
+
+```bash
+cd Services/rendezvous
+go vet ./...
+go test -race ./... -count=1
+TEST_DATABASE_URL='postgresql://mason@localhost:5432/macchannel_task4_barrier_8266?sslmode=disable' go test -race ./... -count=1
+cd ../..
+swift test
+git diff --check
+```
+
+```text
+go vet: exit 0, no output
+memory Go race: all packages passed
+PostgreSQL Go race: exit=0; httpapi 4.166s, presence 1.875s, signal 2.155s
+Swift: Executed 47 tests, with 0 failures
+git diff --check: exit 0, no output
+```
+
+### Concerns
+
+Unchanged from the preceding report: local durable validation used PostgreSQL 16 rather than the planned PostgreSQL 17 deployment image; Swift HTTP adapter, trusted reverse-proxy configuration, and TLS termination remain later integration/deployment scope.
