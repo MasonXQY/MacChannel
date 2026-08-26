@@ -163,6 +163,32 @@ final class DeviceDirectoryTests: XCTestCase {
         await invalidFrame.stop()
     }
 
+    func testRendezvousSessionDeliversSignalWhilePresenceContinues() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = DeviceID(rawValue: UUID())
+        let socket = MemoryPresenceSocket(incoming: [
+            try frame(["type": "challenge", "nonce": Data(repeating: 8, count: 32).base64EncodedString(), "expiresAt": 1]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+            try frame(["type": "signal", "from": peer.rawValue.uuidString.lowercased(), "payload": Data("offer".utf8).base64EncodedString()]),
+            try frame(["type": "presence", "deviceID": peer.rawValue.uuidString.lowercased(), "availability": "internet"]),
+        ])
+        let directory = DeviceDirectory(trust: .allowing(peer, identity.id))
+        let session = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: socket, client: PresenceClient(directory: directory))
+        let signals = await session.signalFrames()
+        let presences = await session.presenceEvents()
+        var signalIterator = signals.makeAsyncIterator()
+        var presenceIterator = presences.makeAsyncIterator()
+
+        try await session.connect()
+        _ = try? await session.run()
+
+        let signal = await signalIterator.next()
+        let presence = await presenceIterator.next()
+        XCTAssertEqual(signal, RendezvousSignalFrame(from: peer, payload: Data("offer".utf8)))
+        XCTAssertEqual(presence, .availability(device: peer, isOnline: true))
+        await session.stop()
+    }
+
     func testPresenceHeartbeatRenewsOnlinePeers() async {
         let peer = DeviceID(rawValue: UUID())
         let clock = ManualDirectoryClock()

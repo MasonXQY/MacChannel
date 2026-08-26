@@ -13,6 +13,14 @@ public enum AuthenticatedPresenceError: Error, Equatable, Sendable {
     case transport(String)
 }
 
+public struct RendezvousSignalFrame: Equatable, Sendable {
+    public let from: DeviceID
+    public let payload: Data
+}
+
+public enum RendezvousTrustResult: Equatable, Sendable { case accepted, rejected }
+public struct RendezvousProtocolError: Equatable, Sendable { public let code: String }
+
 /// Narrow transport seam for URLSessionWebSocketTask and deterministic tests.
 public protocol PresenceWebSocket: Sendable {
     func send(_ data: Data) async throws
@@ -126,11 +134,43 @@ public actor AuthenticatedPresenceSession {
     private let client: PresenceClient
     private let trustRepository: TrustRepository?
     private var running = false
+    private var readerActive = false
+    private let presenceStream: AsyncStream<RendezvousPresenceEvent>
+    private let signalStream: AsyncStream<RendezvousSignalFrame>
+    private let trustResultStream: AsyncStream<RendezvousTrustResult>
+    private let protocolErrorStream: AsyncStream<RendezvousProtocolError>
+    private let trustRecordStream: AsyncStream<SignedTrustRecord>
+    private let presenceContinuation: AsyncStream<RendezvousPresenceEvent>.Continuation
+    private let signalContinuation: AsyncStream<RendezvousSignalFrame>.Continuation
+    private let trustResultContinuation: AsyncStream<RendezvousTrustResult>.Continuation
+    private let protocolErrorContinuation: AsyncStream<RendezvousProtocolError>.Continuation
+    private let trustRecordContinuation: AsyncStream<SignedTrustRecord>.Continuation
 
     public init(identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket, client: PresenceClient, trustRepository: TrustRepository? = nil) throws {
         guard origin.scheme?.lowercased() == "wss", origin.host != nil else { throw AuthenticatedPresenceError.insecureOrigin }
         self.identity = identity; self.origin = origin; self.socket = socket; self.client = client; self.trustRepository = trustRepository
+        var presenceContinuation: AsyncStream<RendezvousPresenceEvent>.Continuation!
+        presenceStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { presenceContinuation = $0 }
+        self.presenceContinuation = presenceContinuation
+        var signalContinuation: AsyncStream<RendezvousSignalFrame>.Continuation!
+        signalStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { signalContinuation = $0 }
+        self.signalContinuation = signalContinuation
+        var trustResultContinuation: AsyncStream<RendezvousTrustResult>.Continuation!
+        trustResultStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { trustResultContinuation = $0 }
+        self.trustResultContinuation = trustResultContinuation
+        var protocolErrorContinuation: AsyncStream<RendezvousProtocolError>.Continuation!
+        protocolErrorStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { protocolErrorContinuation = $0 }
+        self.protocolErrorContinuation = protocolErrorContinuation
+        var trustRecordContinuation: AsyncStream<SignedTrustRecord>.Continuation!
+        trustRecordStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { trustRecordContinuation = $0 }
+        self.trustRecordContinuation = trustRecordContinuation
     }
+
+    public func presenceEvents() -> AsyncStream<RendezvousPresenceEvent> { presenceStream }
+    public func signalFrames() -> AsyncStream<RendezvousSignalFrame> { signalStream }
+    public func trustResults() -> AsyncStream<RendezvousTrustResult> { trustResultStream }
+    public func protocolErrors() -> AsyncStream<RendezvousProtocolError> { protocolErrorStream }
+    public func verifiedTrustRecords() -> AsyncStream<SignedTrustRecord> { trustRecordStream }
 
     public func connect() async throws {
         await client.disconnect()
@@ -147,6 +187,9 @@ public actor AuthenticatedPresenceSession {
 
     public func run() async throws {
         guard running else { throw AuthenticatedPresenceError.authenticationRejected }
+        guard !readerActive else { throw AuthenticatedPresenceError.transport("reader_already_active") }
+        readerActive = true
+        defer { readerActive = false }
         do {
             while running {
                 let frame = try decodeFrame(try await receiveFrame())
@@ -155,15 +198,25 @@ public actor AuthenticatedPresenceSession {
                     guard let deviceID = frame.deviceID, let availability = frame.availability,
                           let uuid = UUID(uuidString: deviceID), availability == "internet" || availability == "offline"
                     else { throw AuthenticatedPresenceError.invalidFrame }
-                    await client.receiveAuthenticated(.availability(device: DeviceID(rawValue: uuid), isOnline: availability == "internet"))
+                    let event = RendezvousPresenceEvent.availability(device: DeviceID(rawValue: uuid), isOnline: availability == "internet")
+                    await client.receiveAuthenticated(event)
+                    presenceContinuation.yield(event)
                 case "trust-record":
                     guard let trustRepository, let record = frame.record else { throw AuthenticatedPresenceError.invalidFrame }
-                    try await trustRepository.ingest(try decodeTrustRecord(record))
-                case "signal", "signal-error", "trust-ok", "protocol-error":
-                    // ConnectionCoordinator consumes the same authenticated
-                    // socket's typed stream in Task 6; these legal frames must
-                    // not tear down presence while no consumer is attached yet.
-                    continue
+                    let signedRecord = try decodeTrustRecord(record)
+                    try await trustRepository.ingest(signedRecord)
+                    trustRecordContinuation.yield(signedRecord)
+                case "signal":
+                    guard let from = frame.from, let uuid = UUID(uuidString: from), let payload = frame.payload else { throw AuthenticatedPresenceError.invalidFrame }
+                    signalContinuation.yield(RendezvousSignalFrame(from: DeviceID(rawValue: uuid), payload: payload))
+                case "signal-error":
+                    guard let code = frame.code else { throw AuthenticatedPresenceError.invalidFrame }
+                    protocolErrorContinuation.yield(RendezvousProtocolError(code: code))
+                case "trust-ok": trustResultContinuation.yield(.accepted)
+                case "trust-error": trustResultContinuation.yield(.rejected)
+                case "protocol-error":
+                    guard let code = frame.code else { throw AuthenticatedPresenceError.invalidFrame }
+                    protocolErrorContinuation.yield(RendezvousProtocolError(code: code))
                 default:
                     throw AuthenticatedPresenceError.invalidFrame
                 }
@@ -208,7 +261,7 @@ public actor AuthenticatedPresenceSession {
     }
 
     private struct Challenge { let nonce: Data }
-    private struct Frame { let type: String; let deviceID: String?; let availability: String?; let record: [String: Any]? }
+    private struct Frame { let type: String; let deviceID: String?; let availability: String?; let record: [String: Any]?; let from: String?; let payload: Data?; let code: String? }
 
     private func decodeChallenge(_ data: Data) throws -> Challenge {
         let object = try strictObject(data, keys: ["type", "nonce", "expiresAt"])
@@ -221,7 +274,8 @@ public actor AuthenticatedPresenceSession {
     private func decodeFrame(_ data: Data) throws -> Frame {
         let object = try strictObject(data, keys: ["type", "deviceID", "availability", "code", "from", "payload", "record"])
         guard let type = object["type"] as? String else { throw AuthenticatedPresenceError.invalidFrame }
-        return Frame(type: type, deviceID: object["deviceID"] as? String, availability: object["availability"] as? String, record: object["record"] as? [String: Any])
+        let payload = (object["payload"] as? String).flatMap { Data(base64Encoded: $0) }
+        return Frame(type: type, deviceID: object["deviceID"] as? String, availability: object["availability"] as? String, record: object["record"] as? [String: Any], from: object["from"] as? String, payload: payload, code: object["code"] as? String)
     }
 
     private func strictObject(_ data: Data, keys: Set<String>) throws -> [String: Any] {
