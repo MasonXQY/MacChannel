@@ -15,6 +15,7 @@ public actor TrustRepository {
     private let ownerIdentity: DeviceIdentity
     private var store: TrustStore
     private var latestSnapshot: TrustStoreSnapshot?
+    private var updateSubscribers: [UUID: AsyncStream<TrustStore>.Continuation] = [:]
 
     public init(
         ownerIdentity: DeviceIdentity,
@@ -36,6 +37,26 @@ public actor TrustRepository {
         store.isTrusted(device)
     }
 
+    public func currentTrustStore() -> TrustStore {
+        store
+    }
+
+    /// Verified state changes only. Consumers receive the current store first,
+    /// then each atomically committed authorization, revocation, or ingestion.
+    public func updates() -> AsyncStream<TrustStore> {
+        let id = UUID()
+        var continuation: AsyncStream<TrustStore>.Continuation!
+        let stream = AsyncStream<TrustStore>(bufferingPolicy: .bufferingNewest(1)) {
+            continuation = $0
+        }
+        continuation.yield(store)
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeUpdateSubscriber(id) }
+        }
+        updateSubscribers[id] = continuation
+        return stream
+    }
+
     public func issueAuthorization(
         subject: DeviceID,
         subjectPublicKey: Data,
@@ -54,6 +75,7 @@ public actor TrustRepository {
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
         store = candidate
         latestSnapshot = snapshot
+        publishUpdate()
         return authorization
     }
 
@@ -63,6 +85,29 @@ public actor TrustRepository {
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
         store = candidate
         latestSnapshot = snapshot
+        publishUpdate()
+    }
+
+    @discardableResult
+    public func revoke(_ device: DeviceID) throws -> SignedTrustRecord {
+        var candidate = store
+        let record = try candidate.revoke(device, signedBy: ownerIdentity)
+        let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        store = candidate
+        latestSnapshot = snapshot
+        publishUpdate()
+        return record
+    }
+
+    /// Accept only an already signed trust record, then persist an owner-signed
+    /// local snapshot before exposing the resulting state to discovery.
+    public func ingest(_ record: SignedTrustRecord) throws {
+        var candidate = store
+        try candidate.ingest(record)
+        let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        store = candidate
+        latestSnapshot = snapshot
+        publishUpdate()
     }
 
     public func latestSignedSnapshot() throws -> TrustStoreSnapshot {
@@ -70,5 +115,15 @@ public actor TrustRepository {
             throw TrustRepositoryError.noPersistedSnapshot
         }
         return latestSnapshot
+    }
+
+    private func removeUpdateSubscriber(_ id: UUID) {
+        updateSubscribers.removeValue(forKey: id)
+    }
+
+    private func publishUpdate() {
+        for continuation in updateSubscribers.values {
+            continuation.yield(store)
+        }
     }
 }

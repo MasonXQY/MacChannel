@@ -1,7 +1,7 @@
 import Foundation
+import Network
 
-/// A fixed, locally derived view of devices that are allowed to be discovered.
-/// Revocations received at runtime are additionally applied by `DeviceDirectory`.
+/// A locally derived view of devices allowed by verified trust state.
 public struct DeviceTrust: Sendable {
     private let trustedIDs: Set<DeviceID>
 
@@ -17,6 +17,10 @@ public struct DeviceTrust: Sendable {
         trustedIDs.contains(device)
     }
 
+    public var deviceIDs: Set<DeviceID> {
+        trustedIDs
+    }
+
     public func device(matchingBonjourHash hash: String) -> DeviceID? {
         trustedIDs.first { BonjourPeerBrowser.deviceIDHash(for: $0) == hash }
     }
@@ -25,14 +29,13 @@ public struct DeviceTrust: Sendable {
 /// A network endpoint that is usable only while the peer has a fresh LAN sighting.
 public enum DeviceEndpoint: Hashable, Sendable {
     case hostPort(host: String, port: UInt16)
-    case bonjour(serviceName: String, type: String, domain: String)
+    case bonjour(NWEndpoint)
 }
 
 public enum DevicePresence: Equatable, Sendable {
     case internet(DeviceID, online: Bool)
     case lan(DeviceID, host: String, port: UInt16)
-    case bonjour(DeviceID, serviceName: String, type: String, domain: String)
-    case revoked(DeviceID)
+    case bonjour(DeviceID, endpoint: NWEndpoint)
 }
 
 /// Merges authenticated rendezvous presence with locally resolved Bonjour peers.
@@ -46,13 +49,14 @@ public actor DeviceDirectory {
         let expiresAt: Date
     }
 
-    private let trust: DeviceTrust
+    private var trust: DeviceTrust
     private let now: @Sendable () -> Date
-    private var revokedIDs: Set<DeviceID> = []
     private var lanSightings: [DeviceID: LANSighting] = [:]
     private var internetSightings: [DeviceID: Date] = [:]
     private var subscribers: [UUID: AsyncStream<[DeviceSummary]>.Continuation] = [:]
     private var expirationTask: Task<Void, Never>?
+    private var trustUpdateTask: Task<Void, Never>?
+    private var observedTrustRepository: TrustRepository?
 
     public init(
         trust: DeviceTrust,
@@ -60,6 +64,33 @@ public actor DeviceDirectory {
     ) {
         self.trust = trust
         self.now = now
+    }
+
+    deinit {
+        expirationTask?.cancel()
+        trustUpdateTask?.cancel()
+    }
+
+    /// Starts applying only verified, actor-owned trust state. Revocation is a
+    /// trust-state transition, never an unauthenticated presence frame.
+    public func observeTrust(_ repository: TrustRepository) async {
+        trustUpdateTask?.cancel()
+        observedTrustRepository = repository
+        synchronizeTrust(await repository.currentTrustStore())
+        let updates = await repository.updates()
+        trustUpdateTask = Task { [weak self] in
+            for await store in updates {
+                guard !Task.isCancelled else { return }
+                await self?.synchronizeTrust(store)
+            }
+        }
+    }
+
+    /// Synchronizes deterministically for lifecycle callers and tests while the
+    /// long-lived repository stream remains active in production.
+    public func waitForTrustUpdates() async {
+        guard let observedTrustRepository else { return }
+        synchronizeTrust(await observedTrustRepository.currentTrustStore())
     }
 
     public init(
@@ -73,12 +104,6 @@ public actor DeviceDirectory {
         purgeExpiredSightings()
 
         switch presence {
-        case let .revoked(device):
-            guard trust.isTrusted(device) else { return }
-            revokedIDs.insert(device)
-            lanSightings.removeValue(forKey: device)
-            internetSightings.removeValue(forKey: device)
-
         case let .internet(device, online):
             guard isEligible(device) else { return }
             if online {
@@ -94,12 +119,12 @@ public actor DeviceDirectory {
                 expiresAt: now().addingTimeInterval(Self.lanLifetime)
             )
 
-        case let .bonjour(device, serviceName, type, domain):
-            guard isEligible(device), type == BonjourPeerBrowser.serviceType,
-                  !serviceName.isEmpty, !domain.isEmpty
+        case let .bonjour(device, endpoint):
+            guard isEligible(device), case let .service(name, type, domain, _) = endpoint,
+                  type == BonjourPeerBrowser.serviceType, !name.isEmpty, !domain.isEmpty
             else { return }
             lanSightings[device] = LANSighting(
-                endpoint: .bonjour(serviceName: serviceName, type: type, domain: domain),
+                endpoint: .bonjour(endpoint),
                 expiresAt: now().addingTimeInterval(Self.lanLifetime)
             )
         }
@@ -118,16 +143,18 @@ public actor DeviceDirectory {
     }
 
     public func snapshot() -> [DeviceSummary] {
-        purgeExpiredSightings()
+        let changed = purgeExpiredSightings()
         scheduleExpiryRefresh()
+        if changed { publishSnapshot() }
         return makeSnapshot()
     }
 
     /// Produces the current state immediately, then one deduplicated snapshot
     /// for each accepted presence change or expiry observed by the directory.
     public func devices() -> AsyncStream<[DeviceSummary]> {
-        purgeExpiredSightings()
+        let changed = purgeExpiredSightings()
         scheduleExpiryRefresh()
+        if changed { publishSnapshot() }
         let id = UUID()
         var continuation: AsyncStream<[DeviceSummary]>.Continuation!
         let stream = AsyncStream<[DeviceSummary]>(bufferingPolicy: .bufferingNewest(1)) {
@@ -144,7 +171,9 @@ public actor DeviceDirectory {
     /// Returns the fresh LAN route for a device. Internet presence intentionally
     /// has no direct endpoint because it must use authenticated signaling/ICE.
     public func endpoint(for device: DeviceID) -> DeviceEndpoint? {
-        purgeExpiredSightings()
+        let changed = purgeExpiredSightings()
+        scheduleExpiryRefresh()
+        if changed { publishSnapshot() }
         guard isEligible(device) else { return nil }
         return lanSightings[device]?.endpoint
     }
@@ -154,7 +183,16 @@ public actor DeviceDirectory {
     }
 
     private func isEligible(_ device: DeviceID) -> Bool {
-        trust.isTrusted(device) && !revokedIDs.contains(device)
+        trust.isTrusted(device)
+    }
+
+    private func synchronizeTrust(_ store: TrustStore) {
+        trust = DeviceTrust(trustedIDs: store.trustedDeviceIDs)
+        // The verified snapshot is authoritative: re-authorization deliberately
+        // makes a peer eligible again, while any current revocation purges it.
+        _ = purgeExpiredSightings()
+        scheduleExpiryRefresh()
+        publishSnapshot()
     }
 
     @discardableResult
