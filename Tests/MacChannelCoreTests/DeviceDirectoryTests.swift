@@ -189,6 +189,59 @@ final class DeviceDirectoryTests: XCTestCase {
         await session.stop()
     }
 
+    func testRendezvousStreamsFinishOnTerminalReaderErrorAndStop() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = DeviceID(rawValue: UUID())
+        let terminalSocket = MemoryPresenceSocket(incoming: [
+            try frame(["type": "challenge", "nonce": Data(repeating: 9, count: 32).base64EncodedString(), "expiresAt": 1]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+        ])
+        let terminal = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: terminalSocket, client: PresenceClient(directory: DeviceDirectory(trust: .allowing(peer))))
+        let terminalStreams = (
+            await terminal.presenceEvents(), await terminal.signalFrames(), await terminal.trustResults(),
+            await terminal.protocolErrors(), await terminal.verifiedTrustRecords()
+        )
+        var presence = terminalStreams.0.makeAsyncIterator()
+        var signals = terminalStreams.1.makeAsyncIterator()
+        var results = terminalStreams.2.makeAsyncIterator()
+        var errors = terminalStreams.3.makeAsyncIterator()
+        var records = terminalStreams.4.makeAsyncIterator()
+        try await terminal.connect()
+        await XCTAssertThrowsErrorAsync(try await terminal.run()) { _ in }
+        let completedPresence = await presence.next()
+        let completedSignals = await signals.next()
+        let completedResults = await results.next()
+        let completedErrors = await errors.next()
+        let completedRecords = await records.next()
+        XCTAssertNil(completedPresence)
+        XCTAssertNil(completedSignals)
+        XCTAssertNil(completedResults)
+        XCTAssertNil(completedErrors)
+        XCTAssertNil(completedRecords)
+
+        let stopped = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: MemoryPresenceSocket(incoming: []), client: PresenceClient(directory: DeviceDirectory(trust: .allowing(peer))))
+        let stoppedStreams = (
+            await stopped.presenceEvents(), await stopped.signalFrames(), await stopped.trustResults(),
+            await stopped.protocolErrors(), await stopped.verifiedTrustRecords()
+        )
+        var stoppedPresence = stoppedStreams.0.makeAsyncIterator()
+        var stoppedSignals = stoppedStreams.1.makeAsyncIterator()
+        var stoppedResults = stoppedStreams.2.makeAsyncIterator()
+        var stoppedErrors = stoppedStreams.3.makeAsyncIterator()
+        var stoppedRecords = stoppedStreams.4.makeAsyncIterator()
+        await stopped.stop()
+        let stoppedPresenceValue = await stoppedPresence.next()
+        let stoppedSignal = await stoppedSignals.next()
+        let stoppedResult = await stoppedResults.next()
+        let stoppedError = await stoppedErrors.next()
+        let stoppedRecord = await stoppedRecords.next()
+        XCTAssertNil(stoppedPresenceValue)
+        XCTAssertNil(stoppedSignal)
+        XCTAssertNil(stoppedResult)
+        XCTAssertNil(stoppedError)
+        XCTAssertNil(stoppedRecord)
+    }
+
     func testPresenceHeartbeatRenewsOnlinePeers() async {
         let peer = DeviceID(rawValue: UUID())
         let clock = ManualDirectoryClock()
@@ -324,6 +377,39 @@ final class DeviceDirectoryTests: XCTestCase {
         browser.stop()
     }
 
+    func testBonjourQueuedDirectoryApplyCannotRunAfterStop() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer))
+        let gate = BonjourApplyGate()
+        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing(peer), renewalInterval: 5, beforeDirectoryApply: { await gate.block() })
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
+
+        browser.start()
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: peer))
+        await gate.waitUntilBlocked()
+        browser.stop()
+        try await Task.sleep(for: .milliseconds(30))
+        await gate.release()
+        try await Task.sleep(for: .milliseconds(30))
+
+        let snapshot = await directory.snapshot()
+        XCTAssertTrue(snapshot.isEmpty)
+    }
+
+    func testBonjourObserveTrustAndStopRemainQueueSafeUnderConcurrency() async throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let repository = try TrustRepository(ownerIdentity: owner, trustStore: TrustStore(owner: owner.id), persistedGeneration: 0)
+        let browser = BonjourPeerBrowser(directory: DeviceDirectory(trust: TrustStore(owner: owner.id)), trust: .allowing(owner.id))
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<40 {
+                group.addTask { browser.observeTrust(repository) }
+                group.addTask { browser.stop() }
+            }
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(browser.state(), .stopped)
+    }
+
     func testBonjourTXTRecordContainsOnlyHashedDeviceIDAndProtocolVersion() {
         let id = DeviceID(rawValue: UUID())
 
@@ -379,6 +465,34 @@ private actor MemoryPresenceSocket: PresenceWebSocket {
     }
     func close() async {}
     func sentFrame() throws -> Data { try XCTUnwrap(sent.first) }
+}
+
+private actor BonjourApplyGate {
+    private var blocked = false
+    private var released = false
+    private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func block() async {
+        blocked = true
+        let waiters = blockedWaiters
+        blockedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilBlocked() async {
+        guard !blocked else { return }
+        await withCheckedContinuation { blockedWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
 }
 
 private func frame(_ object: [String: Any]) throws -> Data {

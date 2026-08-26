@@ -145,6 +145,7 @@ public actor AuthenticatedPresenceSession {
     private let trustResultContinuation: AsyncStream<RendezvousTrustResult>.Continuation
     private let protocolErrorContinuation: AsyncStream<RendezvousProtocolError>.Continuation
     private let trustRecordContinuation: AsyncStream<SignedTrustRecord>.Continuation
+    private var streamsFinished = false
 
     public init(identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket, client: PresenceClient, trustRepository: TrustRepository? = nil) throws {
         guard origin.scheme?.lowercased() == "wss", origin.host != nil else { throw AuthenticatedPresenceError.insecureOrigin }
@@ -166,6 +167,8 @@ public actor AuthenticatedPresenceSession {
         self.trustRecordContinuation = trustRecordContinuation
     }
 
+    /// Streams belong to this session instance and finish exactly once when it
+    /// stops or its sole reader reaches a terminal transport/protocol error.
     public func presenceEvents() -> AsyncStream<RendezvousPresenceEvent> { presenceStream }
     public func signalFrames() -> AsyncStream<RendezvousSignalFrame> { signalStream }
     public func trustResults() -> AsyncStream<RendezvousTrustResult> { trustResultStream }
@@ -189,7 +192,10 @@ public actor AuthenticatedPresenceSession {
         guard running else { throw AuthenticatedPresenceError.authenticationRejected }
         guard !readerActive else { throw AuthenticatedPresenceError.transport("reader_already_active") }
         readerActive = true
-        defer { readerActive = false }
+        defer {
+            readerActive = false
+            if !running { finishStreams() }
+        }
         do {
             while running {
                 let frame = try decodeFrame(try await receiveFrame())
@@ -230,8 +236,19 @@ public actor AuthenticatedPresenceSession {
 
     public func stop() async {
         running = false
+        finishStreams()
         await client.disconnect()
         await socket.close()
+    }
+
+    private func finishStreams() {
+        guard !streamsFinished else { return }
+        streamsFinished = true
+        presenceContinuation.finish()
+        signalContinuation.finish()
+        trustResultContinuation.finish()
+        protocolErrorContinuation.finish()
+        trustRecordContinuation.finish()
     }
 
     private func receiveFrame() async throws -> Data {

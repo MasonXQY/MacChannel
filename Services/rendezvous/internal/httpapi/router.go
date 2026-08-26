@@ -660,32 +660,47 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 				_ = peer.SendJSON(map[string]string{"type": "signal-error", "code": code})
 			}
 		case "trust-update":
-			recipients := make(map[string]bool)
-			for _, candidate := range r.registry.DevicesInGraph(deviceID) {
-				recipients[candidate] = true
-			}
+			valid := true
 			for _, record := range frame.Records {
-				recipients[strings.ToLower(record.Subject)] = true
+				issuer := strings.ToLower(record.Issuer)
+				subject := strings.ToLower(record.Subject)
+				// Recipients are deliberately created for this record only.  The
+				// sender, issuer, subject, and their established graph peers before
+				// and after application are the complete privacy boundary.
+				recipients := make(map[string]bool)
+				for _, candidate := range r.registry.DevicesInGraph(issuer) {
+					recipients[candidate] = true
+				}
+				for _, candidate := range r.registry.DevicesInGraph(subject) {
+					recipients[candidate] = true
+				}
+				changed, err := r.registry.AuthenticateDeviceWithResult(deviceID, authentication.Envelope.PublicKey, []auth.SignedTrustRecord{record})
+				if err != nil {
+					valid = false
+					break
+				}
+				for _, candidate := range r.registry.DevicesInGraph(issuer) {
+					recipients[candidate] = true
+				}
+				for _, candidate := range r.registry.DevicesInGraph(subject) {
+					recipients[candidate] = true
+				}
+				recipients[issuer] = true
+				recipients[subject] = true
+				delete(recipients, deviceID) // Never echo a server-delivered record to its originator.
+				if !changed {
+					continue
+				}
+				routes := make([]string, 0, len(recipients))
+				for candidate := range recipients {
+					routes = append(routes, candidate)
+				}
+				r.signals.Deliver(routes, map[string]any{"type": "trust-record", "record": record})
 			}
-			if err := r.registry.AuthenticateDevice(deviceID, authentication.Envelope.PublicKey, frame.Records); err != nil {
+			if !valid {
 				_ = peer.SendJSON(map[string]string{"type": "trust-error", "code": "invalid_record"})
 			} else {
 				_ = peer.SendJSON(map[string]string{"type": "trust-ok"})
-				for _, candidate := range r.registry.DevicesInGraph(deviceID) {
-					recipients[candidate] = true
-				}
-				for _, record := range frame.Records {
-					subject := strings.ToLower(record.Subject)
-					for _, candidate := range r.registry.DevicesInGraph(subject) {
-						recipients[candidate] = true
-					}
-					recipients[subject] = true
-					routes := make([]string, 0, len(recipients))
-					for candidate := range recipients {
-						routes = append(routes, candidate)
-					}
-					r.signals.Deliver(routes, map[string]any{"type": "trust-record", "record": record})
-				}
 				r.presence.Refresh()
 			}
 		default:

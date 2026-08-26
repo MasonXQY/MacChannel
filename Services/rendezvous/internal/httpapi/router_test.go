@@ -2767,6 +2767,87 @@ func TestTrustUpdatesRefreshPresenceAndRevocationsHidePeers(t *testing.T) {
 	}
 }
 
+func TestTrustUpdateFanoutIsPerRecordNonEchoingAndReplaySafe(t *testing.T) {
+	api := newTestAPI(t)
+	owner := newIdentity(t)
+	b := newIdentity(t)
+	c := newIdentity(t)
+	ownerWS := api.authenticatedWebSocket(t, owner, nil)
+	defer ownerWS.Close()
+	bWS := api.authenticatedWebSocket(t, b, nil)
+	defer bWS.Close()
+	cWS := api.authenticatedWebSocket(t, c, nil)
+	defer cWS.Close()
+
+	toB := owner.trustRecord(t, b, 1)
+	toC := owner.trustRecord(t, c, 2)
+	if err := ownerWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{toB, toC}}); err != nil {
+		t.Fatal(err)
+	}
+	readUntilTypeRejecting(t, ownerWS, "trust-ok", "trust-record")
+	if received := readUntilType(t, bWS, "trust-record"); trustRecordSubject(t, received) != b.id {
+		t.Fatalf("B received record for %q, want %q", trustRecordSubject(t, received), b.id)
+	}
+	if received := readUntilType(t, cWS, "trust-record"); trustRecordSubject(t, received) != c.id {
+		t.Fatalf("C received record for %q, want %q", trustRecordSubject(t, received), c.id)
+	}
+
+	if err := ownerWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{toB}}); err != nil {
+		t.Fatal(err)
+	}
+	readUntilType(t, ownerWS, "trust-ok")
+	expectNoFrameType(t, ownerWS, "trust-record")
+	expectNoFrameType(t, bWS, "trust-record")
+	expectNoFrameType(t, cWS, "trust-record")
+}
+
+func trustRecordSubject(t *testing.T, frame map[string]any) string {
+	t.Helper()
+	record, ok := frame["record"].(map[string]any)
+	if !ok {
+		t.Fatalf("trust-record = %#v", frame)
+	}
+	subject, ok := record["subject"].(string)
+	if !ok {
+		t.Fatalf("trust-record subject = %#v", frame)
+	}
+	return subject
+}
+
+func expectNoFrameType(t *testing.T, connection *websocket.Conn, forbidden string) {
+	t.Helper()
+	connection.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	defer connection.SetReadDeadline(time.Time{})
+	for {
+		var frame map[string]any
+		err := connection.ReadJSON(&frame)
+		if err != nil {
+			return
+		}
+		if frame["type"] == forbidden {
+			t.Fatalf("unexpected %s: %#v", forbidden, frame)
+		}
+	}
+}
+
+func readUntilTypeRejecting(t *testing.T, connection *websocket.Conn, wanted, forbidden string) map[string]any {
+	t.Helper()
+	connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer connection.SetReadDeadline(time.Time{})
+	for {
+		var frame map[string]any
+		if err := connection.ReadJSON(&frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame["type"] == forbidden {
+			t.Fatalf("unexpected %s: %#v", forbidden, frame)
+		}
+		if frame["type"] == wanted {
+			return frame
+		}
+	}
+}
+
 func (a *testAPI) dialWebSocket(t *testing.T) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(a.server.URL, "http") + "/v1/ws"

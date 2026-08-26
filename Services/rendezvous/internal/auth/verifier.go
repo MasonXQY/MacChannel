@@ -780,28 +780,42 @@ func loadConsistentTrustSnapshot(ctx context.Context, store TrustRecordStore) ([
 }
 
 func (r *TrustRegistry) AuthenticateDevice(deviceID string, publicKey []byte, records []SignedTrustRecord) error {
+	_, err := r.authenticateDevice(deviceID, publicKey, records)
+	return err
+}
+
+// AuthenticateDeviceWithResult authenticates a device and reports whether the
+// submitted records changed the accepted trust state.  Callers use this to
+// avoid re-broadcasting byte-identical retry records while still forwarding a
+// second party's confirmation of a previously pending authorization.
+func (r *TrustRegistry) AuthenticateDeviceWithResult(deviceID string, publicKey []byte, records []SignedTrustRecord) (bool, error) {
+	return r.authenticateDevice(deviceID, publicKey, records)
+}
+
+func (r *TrustRegistry) authenticateDevice(deviceID string, publicKey []byte, records []SignedTrustRecord) (bool, error) {
 	deviceID = strings.ToLower(deviceID)
 	if DeviceID(publicKey) != deviceID || len(records) > 256 {
-		return ErrInvalidTrust
+		return false, ErrInvalidTrust
 	}
 	for _, record := range records {
 		if err := record.Validate(); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if r.recordStore != nil && r.refreshPersistent() != nil {
-		return ErrInvalidTrust
+		return false, ErrInvalidTrust
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if pinned, ok := r.publicKeys[deviceID]; ok && !equalBytes(pinned, publicKey) {
-		return ErrInvalidTrust
+		return false, ErrInvalidTrust
 	}
 	pending, err := r.preparePendingLocked(deviceID, records)
 	if err != nil {
-		return err
+		return false, err
 	}
+	changed := r.pendingChangesStateLocked(pending)
 	if r.recordStore != nil && len(pending) > 0 {
 		toSave := make([]SignedTrustRecord, 0, len(pending))
 		for _, item := range pending {
@@ -811,12 +825,23 @@ func (r *TrustRegistry) AuthenticateDevice(deviceID string, publicKey []byte, re
 		err := r.recordStore.Confirm(ctx, deviceID, toSave)
 		cancel()
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	r.applyPendingLocked(pending)
-	return nil
+	return changed, nil
+}
+
+func (r *TrustRegistry) pendingChangesStateLocked(pending []pendingRecord) bool {
+	for _, item := range pending {
+		edge := directedTrustEdge{issuer: strings.ToLower(item.record.Issuer), subject: strings.ToLower(item.record.Subject)}
+		current, exists := r.directional[edge]
+		if item.isNew || !exists || current.issuerConfirmed != item.issuerConfirmed || current.subjectConfirmed != item.subjectConfirmed {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []SignedTrustRecord) ([]pendingRecord, error) {
