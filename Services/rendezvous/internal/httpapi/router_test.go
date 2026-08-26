@@ -2396,6 +2396,101 @@ func TestMigration005UpgradesInFlightSessionAndExpiresOneSidedTrust(t *testing.T
 	}
 }
 
+func TestMigration005PreservesRevocationBarrierThroughIncompleteReauthorization(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE trust_pair_states, trust_issuer_states, trust_state_version,
+		device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 3)`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	olderAuthorization := host.trustRecord(t, joiner, 1)
+	incompleteReauthorization := host.trustRecord(t, joiner, 3)
+	encoded, err := json.Marshal(incompleteReauthorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashInput := append(append([]byte{}, incompleteReauthorization.CanonicalPayload()...), incompleteReauthorization.Signature...)
+	recordHash := sha256.Sum256(hashInput)
+	if _, err := database.Exec(`INSERT INTO trust_pair_states
+		(issuer_device_id, subject_device_id, record_hash, issuer_sequence, action, signed_record,
+		 issuer_confirmed, subject_confirmed, accepted_order, revocation_order,
+		 unconfirmed_expires_at, established_pair, pending_expired)
+		VALUES ($1,$2,$3,3,'authorize',$4,TRUE,FALSE,3,2,NULL,FALSE,FALSE)`,
+		host.id, joiner.id, recordHash[:], encoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_issuer_states
+		(issuer_device_id, high_water, rate_window_started_at, rate_window_updates)
+		VALUES ($1,3,$2,0)`, host.id, now); err != nil {
+		t.Fatal(err)
+	}
+	migration, err := os.ReadFile("../../../migrations/005_trust_and_handshake_upgrade.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(string(migration)); err != nil {
+		t.Fatal(err)
+	}
+	clock := &testClock{now: now.Add(11 * time.Minute)}
+	registry, err := auth.NewPostgresTrustRegistryWithConfig(context.Background(), database,
+		auth.TrustRegistryConfig{Clock: clock.Now, UnconfirmedTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Cleanup(context.Background(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var rows, issuerRows int
+	var revocationOrder uint64
+	var pendingExpired bool
+	if err := database.QueryRow(`SELECT COUNT(*), COALESCE(MAX(revocation_order), 0), COALESCE(BOOL_OR(pending_expired), FALSE)
+		FROM trust_pair_states WHERE issuer_device_id = $1 AND subject_device_id = $2`, host.id, joiner.id).Scan(
+		&rows, &revocationOrder, &pendingExpired); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM trust_issuer_states WHERE issuer_device_id = $1`, host.id).Scan(&issuerRows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 || revocationOrder != 2 || !pendingExpired || issuerRows != 1 {
+		t.Fatalf("upgraded tombstone rows=%d revocation=%d expired=%v issuerRows=%d",
+			rows, revocationOrder, pendingExpired, issuerRows)
+	}
+	restarted, err := auth.NewPostgresTrustRegistryWithConfig(context.Background(), database,
+		auth.TrustRegistryConfig{Clock: clock.Now, UnconfirmedTTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{olderAuthorization}); !errors.Is(err, auth.ErrInvalidTrust) {
+		t.Fatalf("older authorization replay error=%v, want invalid trust", err)
+	}
+	recovery := host.trustRecord(t, joiner, 4)
+	if err := restarted.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{recovery}); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.ShareGraph(host.id, joiner.id) {
+		t.Fatal("one-sided higher authorization crossed retained revocation")
+	}
+	if err := restarted.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{recovery}); err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.ShareGraph(host.id, joiner.id) {
+		t.Fatal("two-party higher authorization did not recover retained revocation")
+	}
+}
+
 func TestMigrationPreservesOnlyReciprocalLegacyTrustUntilNextMutation(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {

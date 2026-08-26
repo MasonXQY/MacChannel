@@ -915,7 +915,7 @@ func (r *TrustRegistry) purgeUnconfirmedLocked(now time.Time) {
 		if state.unconfirmedUntil.IsZero() || now.Before(state.unconfirmedUntil) {
 			continue
 		}
-		if state.established {
+		if state.established || state.revocationOrder > 0 {
 			state.issuerConfirmed = false
 			state.subjectConfirmed = false
 			state.unconfirmedUntil = time.Time{}
@@ -1502,7 +1502,7 @@ func bumpTrustVersion(ctx context.Context, tx *sql.Tx) error {
 func cleanupUnconfirmedTrust(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	expiredPending, err := tx.ExecContext(ctx, `UPDATE trust_pair_states SET
 		issuer_confirmed = FALSE, subject_confirmed = FALSE, unconfirmed_expires_at = NULL, pending_expired = TRUE
-		WHERE established_pair AND action = 'authorize' AND unconfirmed_expires_at IS NOT NULL
+		WHERE (established_pair OR revocation_order > 0) AND action = 'authorize' AND unconfirmed_expires_at IS NOT NULL
 		  AND unconfirmed_expires_at <= $1`, now.UTC())
 	if err != nil {
 		return err
@@ -1512,7 +1512,7 @@ func cleanupUnconfirmedTrust(ctx context.Context, tx *sql.Tx, now time.Time) err
 		return err
 	}
 	deleted, err := tx.ExecContext(ctx, `DELETE FROM trust_pair_states
-		WHERE action = 'authorize' AND NOT established_pair
+		WHERE action = 'authorize' AND NOT established_pair AND revocation_order = 0
 		  AND unconfirmed_expires_at IS NOT NULL AND unconfirmed_expires_at <= $1`, now.UTC())
 	if err != nil {
 		return err

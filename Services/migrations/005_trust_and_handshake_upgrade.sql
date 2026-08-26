@@ -57,12 +57,28 @@ WHERE EXISTS (
       AND peer_state.established_pair
 );
 
+-- A pre-005 incomplete authorization may already carry an earlier revocation
+-- barrier in the compact row. There is no trustworthy presentation timestamp
+-- to resume its TTL, so retain it as an expired tombstone immediately. This
+-- preserves both revocation_order and issuer high-water without allowing the
+-- late second presentation to resurrect the authorization.
+UPDATE trust_pair_states
+SET issuer_confirmed = FALSE,
+    subject_confirmed = FALSE,
+    unconfirmed_expires_at = NULL,
+    pending_expired = TRUE
+WHERE action = 'authorize'
+  AND revocation_order > 0
+  AND NOT (issuer_confirmed AND subject_confirmed);
+
 -- Old one-sided authorizations had no expiry. Give them a bounded grace period;
 -- reciprocal compatibility and already-confirmed rows remain durable.
 UPDATE trust_pair_states
 SET unconfirmed_expires_at = NOW() + INTERVAL '10 minutes'
 WHERE action = 'authorize'
   AND NOT established_pair
+  AND revocation_order = 0
+  AND NOT pending_expired
   AND unconfirmed_expires_at IS NULL;
 
 -- Notify live replicas that compatibility/admission state may have changed.
