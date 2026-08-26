@@ -83,13 +83,15 @@ public struct ReceiveSession: Sendable {
             let clock = ContinuousClock()
             var lastAcknowledgement = clock.now
             var announcedLocalPause = false
+            var controlSnapshot = await control?.snapshot()
             var peerPaused = false
             while true {
                 try await applyLocalControl(
                     on: channel,
                     cipher: crypto.receiverToSender,
                     sequence: &outboundSequence,
-                    announcedPause: &announcedLocalPause
+                    announcedPause: &announcedLocalPause,
+                    snapshot: &controlSnapshot
                 )
                 var timeout: Duration?
                 if chunksSinceAcknowledgement > 0 {
@@ -101,10 +103,16 @@ public struct ReceiveSession: Sendable {
                 } else {
                     timeout = nil
                 }
-                if control != nil {
-                    timeout = min(timeout ?? .milliseconds(20), .milliseconds(20))
+                let event = try await waitForTransferSessionEvent(
+                    reader: frameReader,
+                    control: control,
+                    after: controlSnapshot,
+                    timeout: timeout
+                )
+                if case .control(let changed) = event {
+                    controlSnapshot = changed
+                    continue
                 }
-                let event = try await frameReader.next(timeout: timeout)
                 if case .timeout = event {
                     if chunksSinceAcknowledgement > 0,
                         lastAcknowledgement.duration(to: clock.now) >= .milliseconds(250)
@@ -121,6 +129,20 @@ public struct ReceiveSession: Sendable {
                         lastAcknowledgement = clock.now
                     }
                     continue
+                }
+                try Task.checkCancellation()
+                if let control {
+                    let latest = await control.snapshot()
+                    if latest.revision != controlSnapshot?.revision {
+                        controlSnapshot = latest
+                        try await applyLocalControl(
+                            on: channel,
+                            cipher: crypto.receiverToSender,
+                            sequence: &outboundSequence,
+                            announcedPause: &announcedLocalPause,
+                            snapshot: &controlSnapshot
+                        )
+                    }
                 }
                 guard case .frame(let frame) = event else {
                     throw TransferProtocolError.channelEnded
@@ -215,13 +237,13 @@ public struct ReceiveSession: Sendable {
                     terminalFrame = nil
                 }
                 if let terminalFrame {
-                    try? await send(
+                    await sendTerminalFrameBestEffort(
                         terminalFrame,
                         transferID: transferID,
                         direction: .receiverToSender,
                         on: channel,
                         cipher: crypto.receiverToSender,
-                        sequence: &outboundSequence
+                        sequence: outboundSequence
                     )
                 }
             }
@@ -235,11 +257,19 @@ public struct ReceiveSession: Sendable {
         on channel: any SecureChannel,
         cipher: ChunkCipher,
         sequence: inout UInt64,
-        announcedPause: inout Bool
+        announcedPause: inout Bool,
+        snapshot: inout TransferSessionControl.Snapshot?
     ) async throws {
         guard let control else { return }
+        var current: TransferSessionControl.Snapshot
+        if let snapshot {
+            current = snapshot
+        } else {
+            current = await control.snapshot()
+        }
         while true {
-            switch await control.state() {
+            try Task.checkCancellation()
+            switch current.state {
             case .active:
                 if announcedPause {
                     try await send(
@@ -252,6 +282,7 @@ public struct ReceiveSession: Sendable {
                     )
                     announcedPause = false
                 }
+                snapshot = current
                 return
             case .paused:
                 if !announcedPause {
@@ -265,7 +296,7 @@ public struct ReceiveSession: Sendable {
                     )
                     announcedPause = true
                 }
-                try await Task.sleep(for: .milliseconds(10))
+                current = await control.waitForChange(after: current.revision)
             case .cancelled:
                 throw TransferProtocolError.cancelled
             }
@@ -312,12 +343,12 @@ public struct ReceiveSession: Sendable {
     }
 }
 
-private enum TransferReadEvent: Sendable {
+enum TransferReadEvent: Sendable {
     case frame(TransferFrame)
     case timeout
 }
 
-private final class TransferFrameReader: @unchecked Sendable {
+final class TransferFrameReader: @unchecked Sendable {
     private let inbox: TransferFrameInbox
     private let readerTask: Task<Void, Never>
 
@@ -329,9 +360,42 @@ private final class TransferFrameReader: @unchecked Sendable {
     ) {
         let inbox = TransferFrameInbox()
         self.inbox = inbox
-        readerTask = Task {
+        readerTask = Self.startReader(
+            iterator: stream.makeAsyncIterator(),
+            inbox: inbox,
+            transferID: transferID,
+            direction: direction,
+            cipher: cipher
+        )
+    }
+
+    init(
+        iterator: sending AsyncThrowingStream<Data, Error>.Iterator,
+        transferID: TransferID,
+        direction: TransferDirection,
+        cipher: ChunkCipher
+    ) {
+        let inbox = TransferFrameInbox()
+        self.inbox = inbox
+        readerTask = Self.startReader(
+            iterator: iterator,
+            inbox: inbox,
+            transferID: transferID,
+            direction: direction,
+            cipher: cipher
+        )
+    }
+
+    private static func startReader(
+        iterator initialIterator: sending AsyncThrowingStream<Data, Error>.Iterator,
+        inbox: TransferFrameInbox,
+        transferID: TransferID,
+        direction: TransferDirection,
+        cipher: ChunkCipher
+    ) -> Task<Void, Never> {
+        Task {
             var sequence: UInt64 = 0
-            var iterator = stream.makeAsyncIterator()
+            var iterator = initialIterator
             do {
                 while let wire = try await iterator.next() {
                     let plaintext = try cipher.openWire(
@@ -435,6 +499,43 @@ private actor TransferFrameInbox {
     }
 }
 
+enum TransferSessionEvent: Sendable {
+    case frame(TransferFrame)
+    case timeout
+    case control(TransferSessionControl.Snapshot)
+}
+
+func waitForTransferSessionEvent(
+    reader: TransferFrameReader,
+    control: TransferSessionControl?,
+    after snapshot: TransferSessionControl.Snapshot?,
+    timeout: Duration? = nil
+) async throws -> TransferSessionEvent {
+    guard let control, let snapshot else {
+        return try await mapReadEvent(reader.next(timeout: timeout))
+    }
+    return try await withThrowingTaskGroup(of: TransferSessionEvent.self) { group in
+        group.addTask {
+            try await mapReadEvent(reader.next(timeout: timeout))
+        }
+        group.addTask {
+            .control(await control.waitForChange(after: snapshot.revision))
+        }
+        defer { group.cancelAll() }
+        guard let event = try await group.next() else {
+            throw TransferProtocolError.channelEnded
+        }
+        return event
+    }
+}
+
+private func mapReadEvent(_ event: TransferReadEvent) -> TransferSessionEvent {
+    switch event {
+    case .frame(let frame): .frame(frame)
+    case .timeout: .timeout
+    }
+}
+
 private struct ResumePreparation {
     let destinationDirectory: URL
     let stagingDirectory: URL
@@ -453,15 +554,28 @@ private struct ResumePreparation {
         }
         let suffix = manifest.id.rawValue.uuidString.lowercased()
         let rootName = manifest.entries[0].relativePath.components[0]
+        let caseSensitive = try destinationVolumeSupportsCaseSensitiveNames(
+            self.destinationDirectory
+        )
+        let rootKey = destinationFilesystemKey([rootName], caseSensitive: caseSensitive)
         let preferredStagingName = ".macchannel-\(suffix).partial"
         let stagingName =
-            rootName == preferredStagingName
+            rootKey
+                == destinationFilesystemKey(
+                    [preferredStagingName], caseSensitive: caseSensitive)
             ? preferredStagingName + ".metadata" : preferredStagingName
+        let preferredMetadataName = ".macchannel-protocol-\(suffix)"
+        let metadataName =
+            rootKey
+                == destinationFilesystemKey(
+                    [preferredMetadataName], caseSensitive: caseSensitive)
+            ? preferredMetadataName + ".metadata" : preferredMetadataName
         stagingDirectory = self.destinationDirectory
             .appendingPathComponent(stagingName, isDirectory: true)
         tree = try DescriptorStagingTree(
             destinationDirectory: self.destinationDirectory,
-            stagingName: stagingName
+            stagingName: stagingName,
+            metadataName: metadataName
         )
         try tree.requireAbsentInDestination(rootName)
         var openedFiles: [UInt32: StagedFile] = [:]
@@ -478,12 +592,8 @@ private struct ResumePreparation {
         }
         files = openedFiles
         let fingerprint = try manifestFingerprint(manifest)
-        let preferredStateName = ".resume-state"
-        let stateName =
-            rootName == preferredStateName
-            ? preferredStateName + ".metadata" : preferredStateName
         let loaded = try ResumeStateStore.load(
-            named: stateName,
+            named: ".resume-state",
             fingerprint: fingerprint,
             manifest: manifest,
             tree: tree,
@@ -527,6 +637,7 @@ private struct ResumePreparation {
             )
         }
         try resumeStore.remove()
+        try tree.removeMetadataDirectory()
         let rootName = manifest.entries[0].relativePath.components[0]
         let isDirectory = manifest.entries[0].kind == .directory
         let finalRoot = destinationDirectory.appendingPathComponent(
@@ -538,10 +649,12 @@ private struct ResumePreparation {
 
 private final class DescriptorStagingTree: @unchecked Sendable {
     let rootDescriptor: Int32
+    let metadataDescriptor: Int32
     private let destinationDescriptor: Int32
     private let stagingName: String
+    private let metadataName: String
 
-    init(destinationDirectory: URL, stagingName: String) throws {
+    init(destinationDirectory: URL, stagingName: String, metadataName: String) throws {
         let destinationDescriptor = Darwin.open(
             destinationDirectory.path,
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
@@ -551,6 +664,7 @@ private final class DescriptorStagingTree: @unchecked Sendable {
         }
         self.destinationDescriptor = destinationDescriptor
         self.stagingName = stagingName
+        self.metadataName = metadataName
         if mkdirat(destinationDescriptor, stagingName, S_IRWXU) != 0, errno != EEXIST {
             Darwin.close(destinationDescriptor)
             throw TransferProtocolError.destinationEscape
@@ -574,9 +688,36 @@ private final class DescriptorStagingTree: @unchecked Sendable {
             Darwin.close(destinationDescriptor)
             throw TransferProtocolError.destinationEscape
         }
+        if mkdirat(rootDescriptor, metadataName, S_IRWXU) != 0, errno != EEXIST {
+            Darwin.close(rootDescriptor)
+            Darwin.close(destinationDescriptor)
+            throw TransferProtocolError.destinationEscape
+        }
+        metadataDescriptor = Darwin.openat(
+            rootDescriptor,
+            metadataName,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard metadataDescriptor >= 0 else {
+            Darwin.close(rootDescriptor)
+            Darwin.close(destinationDescriptor)
+            throw TransferProtocolError.destinationEscape
+        }
+        var metadataStatus = stat()
+        guard fstat(metadataDescriptor, &metadataStatus) == 0,
+            metadataStatus.st_mode & S_IFMT == S_IFDIR,
+            metadataStatus.st_uid == geteuid(),
+            metadataStatus.st_mode & 0o077 == 0
+        else {
+            Darwin.close(metadataDescriptor)
+            Darwin.close(rootDescriptor)
+            Darwin.close(destinationDescriptor)
+            throw TransferProtocolError.destinationEscape
+        }
     }
 
     deinit {
+        Darwin.close(metadataDescriptor)
         Darwin.close(rootDescriptor)
         Darwin.close(destinationDescriptor)
     }
@@ -621,6 +762,12 @@ private final class DescriptorStagingTree: @unchecked Sendable {
         let descriptor = try openDirectory(components, create: false)
         defer { Darwin.close(descriptor) }
         try setDescriptorModificationDate(descriptor, date: date)
+    }
+
+    func removeMetadataDirectory() throws {
+        guard fsync(metadataDescriptor) == 0,
+            unlinkat(rootDescriptor, metadataName, AT_REMOVEDIR) == 0
+        else { throw TransferProtocolError.destinationEscape }
     }
 
     func finalize(rootName: String) throws {
@@ -775,8 +922,9 @@ private final class ResumeStateStore: @unchecked Sendable {
         files: [UInt32: StagedFile]
     ) throws -> (store: ResumeStateStore, verified: Set<ChunkCoordinate>) {
         guard fingerprint.count == 32 else { throw TransferProtocolError.invalidResumeMap }
+        try removeStaleCheckpoints(from: tree)
         let descriptor = Darwin.openat(
-            tree.rootDescriptor,
+            tree.metadataDescriptor,
             name,
             O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
             S_IRUSR | S_IWUSR
@@ -887,7 +1035,7 @@ private final class ResumeStateStore: @unchecked Sendable {
     }
 
     func remove() throws {
-        guard unlinkat(tree.rootDescriptor, name, 0) == 0 else {
+        guard unlinkat(tree.metadataDescriptor, name, 0) == 0 else {
             throw TransferProtocolError.destinationEscape
         }
     }
@@ -911,7 +1059,7 @@ private final class ResumeStateStore: @unchecked Sendable {
         }
         let temporaryName = ".resume-checkpoint-\(UUID().uuidString.lowercased())"
         let temporaryDescriptor = Darwin.openat(
-            tree.rootDescriptor,
+            tree.metadataDescriptor,
             temporaryName,
             O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
             S_IRUSR | S_IWUSR
@@ -923,19 +1071,24 @@ private final class ResumeStateStore: @unchecked Sendable {
         defer {
             Darwin.close(temporaryDescriptor)
             if keepTemporary {
-                _ = unlinkat(tree.rootDescriptor, temporaryName, 0)
+                _ = unlinkat(tree.metadataDescriptor, temporaryName, 0)
             }
         }
         try writeAll(data, to: temporaryDescriptor, offset: 0)
         guard fsync(temporaryDescriptor) == 0,
-            renameat(tree.rootDescriptor, temporaryName, tree.rootDescriptor, name) == 0
+            renameat(
+                tree.metadataDescriptor,
+                temporaryName,
+                tree.metadataDescriptor,
+                name
+            ) == 0
         else { throw TransferProtocolError.destinationEscape }
-        guard fsync(tree.rootDescriptor) == 0 else {
+        guard fsync(tree.metadataDescriptor) == 0 else {
             throw TransferProtocolError.destinationEscape
         }
         keepTemporary = false
         let replacement = Darwin.openat(
-            tree.rootDescriptor,
+            tree.metadataDescriptor,
             name,
             O_RDWR | O_CLOEXEC | O_NOFOLLOW
         )
@@ -949,6 +1102,48 @@ private final class ResumeStateStore: @unchecked Sendable {
             throw TransferProtocolError.destinationEscape
         }
         return replacement
+    }
+
+    private static func removeStaleCheckpoints(from tree: DescriptorStagingTree) throws {
+        let duplicate = dup(tree.metadataDescriptor)
+        guard duplicate >= 0, let directory = fdopendir(duplicate) else {
+            if duplicate >= 0 { Darwin.close(duplicate) }
+            throw TransferProtocolError.destinationEscape
+        }
+        defer { closedir(directory) }
+        errno = 0
+        while let entry = readdir(directory) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                    String(cString: $0)
+                }
+            }
+            guard isRecognizedCheckpointName(name) else { continue }
+            var status = stat()
+            guard
+                fstatat(
+                    tree.metadataDescriptor,
+                    name,
+                    &status,
+                    AT_SYMLINK_NOFOLLOW
+                ) == 0,
+                status.st_mode & S_IFMT == S_IFREG,
+                status.st_uid == geteuid(),
+                status.st_nlink == 1,
+                unlinkat(tree.metadataDescriptor, name, 0) == 0
+            else { throw TransferProtocolError.destinationEscape }
+        }
+        guard errno == 0, fsync(tree.metadataDescriptor) == 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+    }
+
+    private static func isRecognizedCheckpointName(_ name: String) -> Bool {
+        let prefix = ".resume-checkpoint-"
+        guard name.hasPrefix(prefix) else { return false }
+        let suffix = String(name.dropFirst(prefix.count))
+        guard let identifier = UUID(uuidString: suffix) else { return false }
+        return suffix == identifier.uuidString.lowercased()
     }
 
     private static func recordChecksum(fingerprint: Data, body: Data) -> Data {

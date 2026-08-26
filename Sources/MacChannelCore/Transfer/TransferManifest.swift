@@ -237,29 +237,13 @@ public struct TransferManifest: Sendable {
     }
 
     func validateDestinationPaths(onVolumeContaining destination: URL) throws {
-        var volumeURL = destination.standardizedFileURL
-        while !FileManager.default.fileExists(atPath: volumeURL.path) {
-            let parent = volumeURL.deletingLastPathComponent()
-            guard parent.path != volumeURL.path else {
-                throw TransferProtocolError.destinationEscape
-            }
-            volumeURL = parent
-        }
-        let values = try volumeURL.resourceValues(forKeys: [
-            .volumeSupportsCaseSensitiveNamesKey
-        ])
-        guard let caseSensitive = values.volumeSupportsCaseSensitiveNames else {
-            throw TransferProtocolError.destinationEscape
-        }
-        let locale = Locale(identifier: "en_US_POSIX")
+        let caseSensitive = try destinationVolumeSupportsCaseSensitiveNames(destination)
         var seen: Set<String> = []
         for entry in entries {
-            let key = entry.relativePath.components.map { component in
-                let normalized = component.decomposedStringWithCanonicalMapping
-                return caseSensitive
-                    ? normalized
-                    : normalized.folding(options: [.caseInsensitive], locale: locale)
-            }.joined(separator: "/")
+            let key = destinationFilesystemKey(
+                entry.relativePath.components,
+                caseSensitive: caseSensitive
+            )
             guard seen.insert(key).inserted else {
                 throw TransferProtocolError.destinationPathCollision
             }
@@ -407,4 +391,32 @@ public struct TransferManifest: Sendable {
         return UInt32(count)
     }
 
+}
+
+func destinationVolumeSupportsCaseSensitiveNames(_ destination: URL) throws -> Bool {
+    var volumeURL = destination.standardizedFileURL
+    while !FileManager.default.fileExists(atPath: volumeURL.path) {
+        let parent = volumeURL.deletingLastPathComponent()
+        guard parent.path != volumeURL.path else {
+            throw TransferProtocolError.destinationEscape
+        }
+        volumeURL = parent
+    }
+    let values = try volumeURL.resourceValues(forKeys: [
+        .volumeSupportsCaseSensitiveNamesKey
+    ])
+    guard let caseSensitive = values.volumeSupportsCaseSensitiveNames else {
+        throw TransferProtocolError.destinationEscape
+    }
+    return caseSensitive
+}
+
+func destinationFilesystemKey(_ components: [String], caseSensitive: Bool) -> String {
+    let locale = Locale(identifier: "en_US_POSIX")
+    return components.map { component in
+        let normalized = component.decomposedStringWithCanonicalMapping
+        return caseSensitive
+            ? normalized
+            : normalized.folding(options: [.caseInsensitive], locale: locale)
+    }.joined(separator: "/")
 }

@@ -50,10 +50,16 @@ public struct SendSession: Sendable {
                 transfer: manifest.id,
                 receiverChallenge: challenge.bytes
             )
+            let frameReader = TransferFrameReader(
+                iterator: iterator,
+                transferID: manifest.id,
+                direction: .receiverToSender,
+                cipher: crypto.receiverToSender
+            )
             terminationCrypto = crypto
             try validateSources()
-            var inboundSequence: UInt64 = 0
             var announcedLocalPause = false
+            var controlSnapshot = await control?.snapshot()
 
             try await send(
                 .offer(manifest),
@@ -63,12 +69,20 @@ public struct SendSession: Sendable {
                 cipher: crypto.senderToReceiver,
                 sequence: &outboundSequence
             )
-            let acceptedFrame = try await receive(
-                from: &iterator,
-                transferID: manifest.id,
-                direction: .receiverToSender,
-                cipher: crypto.receiverToSender,
-                sequence: &inboundSequence
+            try await applyLocalControl(
+                on: channel,
+                cipher: crypto.senderToReceiver,
+                sequence: &outboundSequence,
+                announcedPause: &announcedLocalPause,
+                snapshot: &controlSnapshot
+            )
+            let acceptedFrame = try await nextFrame(
+                from: frameReader,
+                controlSnapshot: &controlSnapshot,
+                on: channel,
+                outboundCipher: crypto.senderToReceiver,
+                outboundSequence: &outboundSequence,
+                announcedPause: &announcedLocalPause
             )
             guard case .accept(let resumeMap) = acceptedFrame else {
                 throw protocolError(for: acceptedFrame)
@@ -87,7 +101,8 @@ public struct SendSession: Sendable {
                         on: channel,
                         cipher: crypto.senderToReceiver,
                         sequence: &outboundSequence,
-                        announcedPause: &announcedLocalPause
+                        announcedPause: &announcedLocalPause,
+                        snapshot: &controlSnapshot
                     )
                     let coordinate = ChunkCoordinate(
                         entryIndex: UInt32(entryOffset),
@@ -96,9 +111,12 @@ public struct SendSession: Sendable {
                     guard !resumeMap.contains(coordinate) else { continue }
                     while outstanding.count >= TransferProtocolLimits.maximumUnacknowledgedChunks {
                         try await receiveAcknowledgement(
-                            from: &iterator,
-                            cipher: crypto.receiverToSender,
-                            sequence: &inboundSequence,
+                            from: frameReader,
+                            controlSnapshot: &controlSnapshot,
+                            on: channel,
+                            outboundCipher: crypto.senderToReceiver,
+                            outboundSequence: &outboundSequence,
+                            announcedPause: &announcedLocalPause,
                             resumeMap: resumeMap,
                             sent: sentCoverage,
                             outstanding: &outstanding
@@ -144,12 +162,13 @@ public struct SendSession: Sendable {
             )
             var receiverCompleted = false
             while !receiverCompleted || !outstanding.isEmpty {
-                let frame = try await receive(
-                    from: &iterator,
-                    transferID: manifest.id,
-                    direction: .receiverToSender,
-                    cipher: crypto.receiverToSender,
-                    sequence: &inboundSequence
+                let frame = try await nextFrame(
+                    from: frameReader,
+                    controlSnapshot: &controlSnapshot,
+                    on: channel,
+                    outboundCipher: crypto.senderToReceiver,
+                    outboundSequence: &outboundSequence,
+                    announcedPause: &announcedLocalPause
                 )
                 switch frame {
                 case .ackRanges(let map):
@@ -163,9 +182,12 @@ public struct SendSession: Sendable {
                     receiverCompleted = true
                 case .pause:
                     try await waitForRemoteResume(
-                        from: &iterator,
-                        cipher: crypto.receiverToSender,
-                        sequence: &inboundSequence
+                        from: frameReader,
+                        controlSnapshot: &controlSnapshot,
+                        on: channel,
+                        outboundCipher: crypto.senderToReceiver,
+                        outboundSequence: &outboundSequence,
+                        announcedPause: &announcedLocalPause
                     )
                 case .cancel:
                     throw TransferProtocolError.cancelled
@@ -183,13 +205,13 @@ public struct SendSession: Sendable {
                         || (error as? TransferProtocolError) == .cancelled
                     ? .cancel
                     : .error(senderRemoteErrorCode(for: error))
-                try? await send(
+                await sendTerminalFrameBestEffort(
                     terminalFrame,
                     transferID: manifest.id,
                     direction: .senderToReceiver,
                     on: channel,
                     cipher: crypto.senderToReceiver,
-                    sequence: &outboundSequence
+                    sequence: outboundSequence
                 )
             }
             await channel.close()
@@ -202,11 +224,19 @@ public struct SendSession: Sendable {
         on channel: any SecureChannel,
         cipher: ChunkCipher,
         sequence: inout UInt64,
-        announcedPause: inout Bool
+        announcedPause: inout Bool,
+        snapshot: inout TransferSessionControl.Snapshot?
     ) async throws {
         guard let control else { return }
+        var current: TransferSessionControl.Snapshot
+        if let snapshot {
+            current = snapshot
+        } else {
+            current = await control.snapshot()
+        }
         while true {
-            switch await control.state() {
+            try Task.checkCancellation()
+            switch current.state {
             case .active:
                 if announcedPause {
                     try await send(
@@ -219,6 +249,7 @@ public struct SendSession: Sendable {
                     )
                     announcedPause = false
                 }
+                snapshot = current
                 return
             case .paused:
                 if !announcedPause {
@@ -232,7 +263,7 @@ public struct SendSession: Sendable {
                     )
                     announcedPause = true
                 }
-                try await Task.sleep(for: .milliseconds(10))
+                current = await control.waitForChange(after: current.revision)
             case .cancelled:
                 throw TransferProtocolError.cancelled
             }
@@ -240,17 +271,21 @@ public struct SendSession: Sendable {
     }
 
     private func waitForRemoteResume(
-        from iterator: inout AsyncThrowingStream<Data, Error>.Iterator,
-        cipher: ChunkCipher,
-        sequence: inout UInt64
+        from reader: TransferFrameReader,
+        controlSnapshot: inout TransferSessionControl.Snapshot?,
+        on channel: any SecureChannel,
+        outboundCipher: ChunkCipher,
+        outboundSequence: inout UInt64,
+        announcedPause: inout Bool
     ) async throws {
         while true {
-            let frame = try await receive(
-                from: &iterator,
-                transferID: manifest.id,
-                direction: .receiverToSender,
-                cipher: cipher,
-                sequence: &sequence
+            let frame = try await nextFrame(
+                from: reader,
+                controlSnapshot: &controlSnapshot,
+                on: channel,
+                outboundCipher: outboundCipher,
+                outboundSequence: &outboundSequence,
+                announcedPause: &announcedPause
             )
             switch frame {
             case .resume: return
@@ -283,20 +318,24 @@ public struct SendSession: Sendable {
     }
 
     private func receiveAcknowledgement(
-        from iterator: inout AsyncThrowingStream<Data, Error>.Iterator,
-        cipher: ChunkCipher,
-        sequence: inout UInt64,
+        from reader: TransferFrameReader,
+        controlSnapshot: inout TransferSessionControl.Snapshot?,
+        on channel: any SecureChannel,
+        outboundCipher: ChunkCipher,
+        outboundSequence: inout UInt64,
+        announcedPause: inout Bool,
         resumeMap: ResumeMap,
         sent: ChunkCoverage,
         outstanding: inout Set<ChunkCoordinate>
     ) async throws {
         while true {
-            let frame = try await receive(
-                from: &iterator,
-                transferID: manifest.id,
-                direction: .receiverToSender,
-                cipher: cipher,
-                sequence: &sequence
+            let frame = try await nextFrame(
+                from: reader,
+                controlSnapshot: &controlSnapshot,
+                on: channel,
+                outboundCipher: outboundCipher,
+                outboundSequence: &outboundSequence,
+                announcedPause: &announcedPause
             )
             switch frame {
             case .ackRanges(let map):
@@ -311,14 +350,63 @@ public struct SendSession: Sendable {
                 throw TransferProtocolError.cancelled
             case .pause:
                 try await waitForRemoteResume(
-                    from: &iterator,
-                    cipher: cipher,
-                    sequence: &sequence
+                    from: reader,
+                    controlSnapshot: &controlSnapshot,
+                    on: channel,
+                    outboundCipher: outboundCipher,
+                    outboundSequence: &outboundSequence,
+                    announcedPause: &announcedPause
                 )
             case .error(let remote):
                 throw mapRemoteError(remote)
             default:
                 throw TransferProtocolError.unexpectedFrame
+            }
+        }
+    }
+
+    private func nextFrame(
+        from reader: TransferFrameReader,
+        controlSnapshot: inout TransferSessionControl.Snapshot?,
+        on channel: any SecureChannel,
+        outboundCipher: ChunkCipher,
+        outboundSequence: inout UInt64,
+        announcedPause: inout Bool
+    ) async throws -> TransferFrame {
+        while true {
+            let event = try await waitForTransferSessionEvent(
+                reader: reader,
+                control: control,
+                after: controlSnapshot
+            )
+            switch event {
+            case .frame(let frame):
+                try Task.checkCancellation()
+                if let control {
+                    let latest = await control.snapshot()
+                    if latest.revision != controlSnapshot?.revision {
+                        controlSnapshot = latest
+                        try await applyLocalControl(
+                            on: channel,
+                            cipher: outboundCipher,
+                            sequence: &outboundSequence,
+                            announcedPause: &announcedPause,
+                            snapshot: &controlSnapshot
+                        )
+                    }
+                }
+                return frame
+            case .timeout:
+                continue
+            case .control(let changed):
+                controlSnapshot = changed
+                try await applyLocalControl(
+                    on: channel,
+                    cipher: outboundCipher,
+                    sequence: &outboundSequence,
+                    announcedPause: &announcedPause,
+                    snapshot: &controlSnapshot
+                )
             }
         }
     }
@@ -395,6 +483,59 @@ func send(
     try await channel.send(sealed.wireData)
     guard sequence < UInt64.max else { throw TransferProtocolError.replayOrOutOfOrder }
     sequence += 1
+}
+
+func sendTerminalFrameBestEffort(
+    _ frame: TransferFrame,
+    transferID: TransferID,
+    direction: TransferDirection,
+    on channel: any SecureChannel,
+    cipher: ChunkCipher,
+    sequence: UInt64
+) async {
+    guard
+        let sealed = try? cipher.seal(
+            frame.encode(),
+            transfer: transferID,
+            sequence: sequence,
+            direction: direction
+        )
+    else { return }
+    let completion = TerminalSendCompletion()
+    let sendTask = Task {
+        try? await channel.send(sealed.wireData)
+        await completion.finish()
+    }
+    let timeoutTask = Task {
+        try? await Task.sleep(for: .milliseconds(100))
+        await completion.finish()
+    }
+    await completion.wait()
+    sendTask.cancel()
+    timeoutTask.cancel()
+}
+
+private actor TerminalSendCompletion {
+    private var finished = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        guard !finished else { return }
+        await withCheckedContinuation { continuation in
+            if finished {
+                continuation.resume()
+            } else {
+                waiter = continuation
+            }
+        }
+    }
+
+    func finish() {
+        guard !finished else { return }
+        finished = true
+        waiter?.resume()
+        waiter = nil
+    }
 }
 
 func receive(

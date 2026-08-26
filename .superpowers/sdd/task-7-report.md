@@ -2,7 +2,7 @@
 
 ## Status
 
-Complete after the independent security follow-up. The protocol now provides
+Complete after two independent security follow-ups. The protocol now provides
 encrypted manifest/chunk transfer, bounded verified resumption, explicit session
 control, replay separation, immutable source pinning, crash-tolerant journals,
 and descriptor-relative receiver materialization over the audited
@@ -21,6 +21,11 @@ and descriptor-relative receiver materialization over the audited
   replay, torn and corrupt journal records, sender/receiver pause-resume-cancel,
   typed sender termination, bounded manifest/map limits, and staged hardlink
   replacement after the receiver has opened the file.
+- The second follow-up reproduced cancellation deadlocks at the local-pause,
+  remote-pause, ACK-window, receiver-read, and final-completion waits, plus a
+  permanently backpressured terminal send. Red tests also covered a recognized
+  crash-left checkpoint blocking finalization and manifest roots equivalent to
+  protocol metadata names on case-insensitive APFS.
 
 ## Implemented contract
 
@@ -57,24 +62,35 @@ and descriptor-relative receiver materialization over the audited
   A torn final record is discarded and the valid prefix is recovered. A corrupt
   complete record is rejected. Compaction uses a synchronized temporary
   checkpoint and atomic descriptor-relative rename.
+- Journal and checkpoint files live in a private protocol directory alongside,
+  rather than inside, the received manifest root. Both staging and metadata
+  directory names are compared with the same canonical/case filesystem key used
+  for destination validation. Case-equivalent manifest roots therefore cannot
+  alias protocol state. Resume initialization removes only exact, lowercase,
+  UUID-shaped `.resume-checkpoint-*` files after descriptor-relative regular-file,
+  owner, and link-count verification; unknown names are preserved and make final
+  cleanup fail closed.
 - Receiver staging uses private same-owner directories and descriptor-relative
   `mkdirat`/`openat` with `O_NOFOLLOW`. Staged files remain pinned, must be regular
   with link count one, and are rechecked for device/inode identity before final
   publication. `renameatx_np(RENAME_EXCL)` prevents final destination replacement.
 - `TransferSessionControl` makes pause, resume, and cancel operational from either
-  side. Cancellation maps to `cancelled`, while sender read/source/protocol errors
-  best-effort send typed terminal frames and always await `channel.close()` so the
-  peer terminates.
+  side. Revisioned continuations wake local paused waits immediately, and each
+  remote-resume, ACK, receiver-read, and final-completion wait races incoming
+  frames against control changes without adding another channel receiver.
+  Cancellation maps to `cancelled`. Typed terminal `cancel`/`error` transmission
+  is bounded to 100 ms, after which both sessions still await `channel.close()`;
+  permanent send backpressure cannot strand the peer or the session task.
 - Tamper, replay, duplicate, out-of-order, invalid ACK/resume, journal corruption,
   staged path replacement, and final digest failures all fail closed. Each side
   still has exactly one receiver for `channel.frames()`.
 
 ## Verification
 
-- `swift test --filter TransferProtocolTests`: 35 tests, 0 failures.
+- `swift test --filter TransferProtocolTests`: 44 tests, 0 failures.
 - `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures, including the
   ordered/reliable 1 MiB loopback and inclusive 64 KiB cap regressions.
-- `swift test`: 139 tests, 0 failures.
+- `swift test`: 148 tests, 0 failures.
 - `swift-format lint` with the repository's four-space style over all Task 7
   source and test files: exit 0, no diagnostics.
 - `git diff --check`: clean.
@@ -98,4 +114,6 @@ and descriptor-relative receiver materialization over the audited
 
 - Original implementation: `10268fb feat: add encrypted resumable transfers`.
 - Independent-review hardening: `fix: harden resumable transfer invariants`
-  (this report is committed with that follow-up).
+  (`890a307`).
+- Second independent-review hardening: `fix: make transfer cancellation and
+  resume cleanup fail safe` (this report is committed with that follow-up).
