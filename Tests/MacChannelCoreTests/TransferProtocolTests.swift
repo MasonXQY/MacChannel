@@ -309,6 +309,39 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging.path))
     }
 
+    func testResumeCheckpointIdentitySwapDoesNotDeleteReplacement() async throws {
+        let fixture = try await makeInterruptedResumeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let checkpointName = ".resume-checkpoint-\(UUID().uuidString.lowercased())"
+        let checkpoint = fixture.metadata.appendingPathComponent(checkpointName)
+        let displaced = fixture.metadata.appendingPathComponent(checkpointName + ".displaced")
+        let replacementBytes = Data("must not be deleted".utf8)
+        try Data("recognized stale checkpoint".utf8).write(to: checkpoint)
+        let channels = TestSecureChannelPair.make()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: fixture.manifest.id,
+                destinationDirectory: fixture.destination,
+                onStagingPrepared: { _ in },
+                onCheckpointValidated: { validatedName in
+                    guard validatedName == checkpointName else { return }
+                    try! FileManager.default.moveItem(at: checkpoint, to: displaced)
+                    try! replacementBytes.write(to: checkpoint)
+                }
+            ).run(on: channels.receiver)
+        }
+
+        _ = try? await SendSession(fixture.manifest).run(on: channels.sender)
+        do {
+            _ = try await receiver.value
+            XCTFail("Expected checkpoint identity swap to fail closed")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .destinationEscape)
+        }
+        XCTAssertEqual(try Data(contentsOf: checkpoint), replacementBytes)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: displaced.path))
+    }
+
     func testResumeInitializationNeverDeletesUnrecognizedCheckpointName() async throws {
         let fixture = try await makeInterruptedResumeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -407,6 +440,56 @@ final class TransferProtocolTests: XCTestCase {
             XCTAssertEqual(error as? TransferProtocolError, .destinationEscape)
         }
         XCTAssertEqual(try Data(contentsOf: outside), Data("outside remains".utf8))
+    }
+
+    func testReceiverDoesNotPublishAfterMetadataDirectoryIdentitySwap() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("metadata-swap.bin")
+        try Data("verified bytes".utf8).write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let metadataName =
+            ".macchannel-protocol-"
+            + manifest.id.rawValue.uuidString.lowercased()
+        let displacedName = metadataName + ".displaced"
+        let channels = TestSecureChannelPair.make()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination,
+                onStagingPrepared: { staging in
+                    let metadata = staging.appendingPathComponent(
+                        metadataName,
+                        isDirectory: true
+                    )
+                    let displaced = staging.appendingPathComponent(
+                        displacedName,
+                        isDirectory: true
+                    )
+                    try! FileManager.default.moveItem(at: metadata, to: displaced)
+                    try! FileManager.default.createDirectory(
+                        at: metadata,
+                        withIntermediateDirectories: false
+                    )
+                }
+            ).run(on: channels.receiver)
+        }
+
+        _ = try? await SendSession(manifest).run(on: channels.sender)
+        do {
+            _ = try await receiver.value
+            XCTFail("Expected metadata identity swap to fail closed")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .destinationEscape)
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: destination.appendingPathComponent("metadata-swap.bin").path
+            )
+        )
     }
 
     func testProtocolMetadataCannotCollideWithAValidSourceName() async throws {
@@ -1087,6 +1170,100 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertEqual(remotePauseError, .cancelled)
     }
 
+    func testFrameControlSelectionNeverDiscardsAlreadyDequeuedFrame() async throws {
+        let control = TransferSessionControl()
+        let staleSnapshot = await control.snapshot()
+        await control.pause()
+        let frames: [TransferFrame] = [
+            .chunk(
+                try TransferChunk(
+                    coordinate: ChunkCoordinate(entryIndex: 0, chunkIndex: 0),
+                    offset: 0,
+                    data: Data([1])
+                )
+            ),
+            .ackRanges(
+                try ResumeMap(ranges: [
+                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 1)
+                ])
+            ),
+            .complete,
+        ]
+
+        for expected in frames {
+            let reader = TransferFrameReader(bufferedFrames: [expected])
+            let event = try await waitForTransferSessionEvent(
+                reader: reader,
+                control: control,
+                after: staleSnapshot
+            )
+            guard case .frame(let actual) = event else {
+                return XCTFail("A ready authenticated frame must win without being discarded")
+            }
+            XCTAssertEqual(try actual.encode(), try expected.encode())
+        }
+    }
+
+    func testControlCancelWakesSenderWaitingForInitialChallenge() async throws {
+        let fixture = try makeManualSenderWaitFixture(name: "challenge-wait.bin")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let control = TransferSessionControl()
+        let completion = TestSessionCompletion()
+        let sender = Task {
+            do {
+                _ = try await SendSession(fixture.manifest, control: control)
+                    .run(on: fixture.channels.sender)
+                await completion.finish(nil)
+            } catch {
+                await completion.finish(error as? TransferProtocolError)
+            }
+        }
+
+        await control.cancel()
+        try await Task.sleep(for: .milliseconds(150))
+        let completedWithoutChallenge = await completion.isFinished
+        if !completedWithoutChallenge { await fixture.channels.receiver.close() }
+        await sender.value
+
+        XCTAssertTrue(completedWithoutChallenge)
+        let challengeError = await completion.protocolError
+        XCTAssertEqual(challengeError, .cancelled)
+    }
+
+    func testControlCancelWakesSenderBlockedOnOrdinarySend() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("blocked-offer.bin")
+        try Data().write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make(blockSenderAfter: 0)
+        let challenge = TransferReceiverChallenge.fresh(for: manifest.id)
+        try await channels.receiver.send(challenge.encode())
+        let control = TransferSessionControl()
+        let completion = TestSessionCompletion()
+        let sender = Task {
+            do {
+                _ = try await SendSession(manifest, control: control).run(on: channels.sender)
+                await completion.finish(nil)
+            } catch {
+                await completion.finish(error as? TransferProtocolError)
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+
+        await control.cancel()
+        try await Task.sleep(for: .milliseconds(250))
+        let completedDespiteBlockedOffer = await completion.isFinished
+        if !completedDespiteBlockedOffer { await channels.receiver.close() }
+        await sender.value
+
+        XCTAssertTrue(completedDespiteBlockedOffer)
+        let blockedOfferError = await completion.protocolError
+        XCTAssertEqual(blockedOfferError, .cancelled)
+    }
+
     func testControlCancelWakesSenderWhileLocallyPaused() async throws {
         let fixture = try makeManualSenderWaitFixture(name: "local-pause.bin")
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -1366,6 +1543,76 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertTrue(completedWithoutPeerFrame)
         let receiverError = await completion.protocolError
         XCTAssertEqual(receiverError, .cancelled)
+    }
+
+    func testControlCancelWakesReceiverWaitingForInitialOffer() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transferID = TransferID(rawValue: UUID())
+        let channels = TestSecureChannelPair.make()
+        let control = TransferSessionControl()
+        let completion = TestSessionCompletion()
+        let receiver = Task {
+            do {
+                _ = try await ReceiveSession(
+                    transferID: transferID,
+                    destinationDirectory: destination,
+                    control: control
+                ).run(on: channels.receiver)
+                await completion.finish(nil)
+            } catch {
+                await completion.finish(error as? TransferProtocolError)
+            }
+        }
+        var iterator = channels.sender.frames().makeAsyncIterator()
+        _ = try await iterator.next()
+
+        await control.cancel()
+        try await Task.sleep(for: .milliseconds(150))
+        let completedWithoutOffer = await completion.isFinished
+        if !completedWithoutOffer { await channels.sender.close() }
+        await receiver.value
+
+        XCTAssertTrue(completedWithoutOffer)
+        let offerError = await completion.protocolError
+        XCTAssertEqual(offerError, .cancelled)
+    }
+
+    func testControlCancelWakesReceiverBlockedOnChallengeSend() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let channels = TestSecureChannelPair.make(blockReceiverAfter: 0)
+        let control = TransferSessionControl()
+        let completion = TestSessionCompletion()
+        let receiver = Task {
+            do {
+                _ = try await ReceiveSession(
+                    transferID: TransferID(rawValue: UUID()),
+                    destinationDirectory: destination,
+                    control: control
+                ).run(on: channels.receiver)
+                await completion.finish(nil)
+            } catch {
+                await completion.finish(error as? TransferProtocolError)
+            }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+
+        await control.cancel()
+        try await Task.sleep(for: .milliseconds(150))
+        let completedDespiteBlockedChallenge = await completion.isFinished
+        if !completedDespiteBlockedChallenge { await channels.sender.close() }
+        await receiver.value
+
+        XCTAssertTrue(completedDespiteBlockedChallenge)
+        let challengeError = await completion.protocolError
+        XCTAssertEqual(challengeError, .cancelled)
     }
 
     func testSenderSourceFailureSendsTypedErrorAndClosesReceiver() async throws {
@@ -1920,7 +2167,8 @@ private enum TestSecureChannelPair {
     static func make(
         failSenderAfter: Int? = nil,
         key suppliedKey: Data? = nil,
-        blockSenderAfter: Int? = nil
+        blockSenderAfter: Int? = nil,
+        blockReceiverAfter: Int? = nil
     ) -> (
         sender: TestSecureChannel,
         receiver: TestSecureChannel
@@ -1933,7 +2181,11 @@ private enum TestSecureChannelPair {
             failAfter: failSenderAfter,
             blockAfter: blockSenderAfter
         )
-        let receiver = TestSecureChannel(key: key, failAfter: nil)
+        let receiver = TestSecureChannel(
+            key: key,
+            failAfter: nil,
+            blockAfter: blockReceiverAfter
+        )
         sender.connect(to: receiver)
         receiver.connect(to: sender)
         return (sender, receiver)

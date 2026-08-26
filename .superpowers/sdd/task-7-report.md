@@ -26,6 +26,11 @@ and descriptor-relative receiver materialization over the audited
   permanently backpressured terminal send. Red tests also covered a recognized
   crash-left checkpoint blocking finalization and manifest roots equivalent to
   protocol metadata names on case-insensitive APFS.
+- The final review then exposed a simultaneous frame/control selection race,
+  startup and ordinary-send cancellation gaps, and metadata cleanup identity
+  races. Deterministic red/green regressions now cover ready frame plus control,
+  initial challenge/offer waits, blocked ordinary sends in both directions,
+  checkpoint replacement, and metadata-directory replacement.
 
 ## Implemented contract
 
@@ -81,16 +86,27 @@ and descriptor-relative receiver materialization over the audited
   Cancellation maps to `cancelled`. Typed terminal `cancel`/`error` transmission
   is bounded to 100 ms, after which both sessions still await `channel.close()`;
   permanent send backpressure cannot strand the peer or the session task.
+- Frame/control selection drains both racers and preserves any authenticated
+  frame already removed from the bounded inbox. Startup reads and every ordinary
+  protocol send also observe control cancellation. Ambiguous send completion gets
+  a short bounded completion preference before cancellation proceeds, preserving
+  sequence correctness when a frame was already delivered.
+- Checkpoint cleanup pins and validates the opened file, rechecks pathname
+  identity immediately before unlink, and verifies link removal. Metadata
+  directory cleanup verifies its opened device/inode against the live name and
+  confirms that name is absent before publication. Root publication is the
+  explicit commit point; non-security staging-directory housekeeping after the
+  exclusive rename cannot turn a visible verified result into reported failure.
 - Tamper, replay, duplicate, out-of-order, invalid ACK/resume, journal corruption,
   staged path replacement, and final digest failures all fail closed. Each side
   still has exactly one receiver for `channel.frames()`.
 
 ## Verification
 
-- `swift test --filter TransferProtocolTests`: 44 tests, 0 failures.
+- `swift test --filter TransferProtocolTests`: 51 tests, 0 failures.
 - `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures, including the
   ordered/reliable 1 MiB loopback and inclusive 64 KiB cap regressions.
-- `swift test`: 148 tests, 0 failures.
+- `swift test`: 155 tests, 0 failures.
 - `swift-format lint` with the repository's four-space style over all Task 7
   source and test files: exit 0, no diagnostics.
 - `git diff --check`: clean.

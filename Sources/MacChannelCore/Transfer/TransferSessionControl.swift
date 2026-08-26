@@ -52,6 +52,15 @@ public actor TransferSessionControl {
         }
     }
 
+    func waitUntilCancelled() async throws {
+        var observed = snapshot()
+        while true {
+            try Task.checkCancellation()
+            if case .cancelled = observed.state { return }
+            observed = await waitForChange(after: observed.revision)
+        }
+    }
+
     private func transition(to newState: State) {
         guard currentState != .cancelled, currentState != newState else { return }
         currentState = newState

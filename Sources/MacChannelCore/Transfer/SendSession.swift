@@ -37,10 +37,11 @@ public struct SendSession: Sendable {
         var outboundSequence: UInt64 = 0
         var terminationCrypto: TransferCryptographicContext?
         do {
-            var iterator = channel.frames().makeAsyncIterator()
-            guard let challengeWire = try await iterator.next() else {
-                throw TransferProtocolError.channelEnded
-            }
+            let initial = try await receiveInitialWire(
+                from: channel.frames(),
+                control: control
+            )
+            let challengeWire = initial.wire
             let challenge = try TransferReceiverChallenge.decode(
                 challengeWire,
                 expectedTransferID: manifest.id
@@ -51,7 +52,7 @@ public struct SendSession: Sendable {
                 receiverChallenge: challenge.bytes
             )
             let frameReader = TransferFrameReader(
-                iterator: iterator,
+                iterator: initial.iterator,
                 transferID: manifest.id,
                 direction: .receiverToSender,
                 cipher: crypto.receiverToSender
@@ -67,7 +68,8 @@ public struct SendSession: Sendable {
                 direction: .senderToReceiver,
                 on: channel,
                 cipher: crypto.senderToReceiver,
-                sequence: &outboundSequence
+                sequence: &outboundSequence,
+                control: control
             )
             try await applyLocalControl(
                 on: channel,
@@ -141,7 +143,8 @@ public struct SendSession: Sendable {
                         direction: .senderToReceiver,
                         on: channel,
                         cipher: crypto.senderToReceiver,
-                        sequence: &outboundSequence
+                        sequence: &outboundSequence,
+                        control: control
                     )
                     sentCount += 1
                     await recorder?.recordSentChunk(coordinate)
@@ -158,7 +161,8 @@ public struct SendSession: Sendable {
                 direction: .senderToReceiver,
                 on: channel,
                 cipher: crypto.senderToReceiver,
-                sequence: &outboundSequence
+                sequence: &outboundSequence,
+                control: control
             )
             var receiverCompleted = false
             while !receiverCompleted || !outstanding.isEmpty {
@@ -245,7 +249,8 @@ public struct SendSession: Sendable {
                         direction: .senderToReceiver,
                         on: channel,
                         cipher: cipher,
-                        sequence: &sequence
+                        sequence: &sequence,
+                        control: control
                     )
                     announcedPause = false
                 }
@@ -259,7 +264,8 @@ public struct SendSession: Sendable {
                         direction: .senderToReceiver,
                         on: channel,
                         cipher: cipher,
-                        sequence: &sequence
+                        sequence: &sequence,
+                        control: control
                     )
                     announcedPause = true
                 }
@@ -472,7 +478,8 @@ func send(
     direction: TransferDirection,
     on channel: any SecureChannel,
     cipher: ChunkCipher,
-    sequence: inout UInt64
+    sequence: inout UInt64,
+    control: TransferSessionControl? = nil
 ) async throws {
     let sealed = try cipher.seal(
         frame.encode(),
@@ -480,9 +487,201 @@ func send(
         sequence: sequence,
         direction: direction
     )
-    try await channel.send(sealed.wireData)
+    try await sendWireRespectingCancellation(
+        sealed.wireData,
+        on: channel,
+        control: control
+    )
     guard sequence < UInt64.max else { throw TransferProtocolError.replayOrOutOfOrder }
     sequence += 1
+}
+
+func sendWireRespectingCancellation(
+    _ wire: Data,
+    on channel: any SecureChannel,
+    control: TransferSessionControl?
+) async throws {
+    guard let control else {
+        try await channel.send(wire)
+        return
+    }
+    let completion = TransferIOCompletion()
+    let sendTask = Task {
+        do {
+            try await channel.send(wire)
+            await completion.finish(.completed)
+        } catch {
+            await completion.finish(.failed(error))
+        }
+    }
+    let cancellationTask = Task {
+        do {
+            try await control.waitUntilCancelled()
+            await completion.finish(.cancelled)
+        } catch {}
+    }
+    let outcome = await withTaskCancellationHandler {
+        await completion.wait()
+    } onCancel: {
+        Task { await completion.finish(.cancelled) }
+    }
+    cancellationTask.cancel()
+    switch outcome {
+    case .completed:
+        return
+    case .failed(let error):
+        throw error
+    case .cancelled:
+        try? await Task.sleep(for: .milliseconds(20))
+        if let completed = await completion.completedIOOutcome() {
+            switch completed {
+            case .completed:
+                return
+            case .failed(let error):
+                throw error
+            case .cancelled:
+                break
+            }
+        }
+        sendTask.cancel()
+        throw TransferProtocolError.cancelled
+    }
+}
+
+private final class InitialWireResult: @unchecked Sendable {
+    let wire: Data
+    let iterator: AsyncThrowingStream<Data, Error>.Iterator
+
+    init(wire: Data, iterator: AsyncThrowingStream<Data, Error>.Iterator) {
+        self.wire = wire
+        self.iterator = iterator
+    }
+}
+
+private enum InitialWireOutcome: @unchecked Sendable {
+    case received(InitialWireResult)
+    case failed(Error)
+    case cancelled
+}
+
+private actor InitialWireCompletion {
+    private var outcome: InitialWireOutcome?
+    private var received: InitialWireResult?
+    private var waiter: CheckedContinuation<InitialWireOutcome, Never>?
+
+    func wait() async -> InitialWireOutcome {
+        if let outcome { return outcome }
+        return await withCheckedContinuation { continuation in
+            if let outcome {
+                continuation.resume(returning: outcome)
+            } else {
+                waiter = continuation
+            }
+        }
+    }
+
+    func finish(_ outcome: InitialWireOutcome) {
+        if case .received(let result) = outcome {
+            received = result
+        }
+        guard self.outcome == nil else { return }
+        self.outcome = outcome
+        waiter?.resume(returning: outcome)
+        waiter = nil
+    }
+
+    func receivedResult() -> InitialWireResult? { received }
+}
+
+private func receiveInitialWire(
+    from stream: AsyncThrowingStream<Data, Error>,
+    control: TransferSessionControl?
+) async throws -> InitialWireResult {
+    guard let control else {
+        var iterator = stream.makeAsyncIterator()
+        guard let wire = try await iterator.next() else {
+            throw TransferProtocolError.channelEnded
+        }
+        return InitialWireResult(wire: wire, iterator: iterator)
+    }
+    let completion = InitialWireCompletion()
+    let readTask = Task {
+        var iterator = stream.makeAsyncIterator()
+        do {
+            guard let wire = try await iterator.next() else {
+                await completion.finish(.failed(TransferProtocolError.channelEnded))
+                return
+            }
+            await completion.finish(
+                .received(InitialWireResult(wire: wire, iterator: iterator))
+            )
+        } catch {
+            await completion.finish(.failed(error))
+        }
+    }
+    let cancellationTask = Task {
+        do {
+            try await control.waitUntilCancelled()
+            await completion.finish(.cancelled)
+        } catch {}
+    }
+    let outcome = await withTaskCancellationHandler {
+        await completion.wait()
+    } onCancel: {
+        Task { await completion.finish(.cancelled) }
+    }
+    cancellationTask.cancel()
+    switch outcome {
+    case .received(let result):
+        return result
+    case .failed(let error):
+        throw error
+    case .cancelled:
+        try? await Task.sleep(for: .milliseconds(20))
+        if let received = await completion.receivedResult() {
+            return received
+        }
+        readTask.cancel()
+        throw TransferProtocolError.cancelled
+    }
+}
+
+private enum TransferIOOutcome: @unchecked Sendable {
+    case completed
+    case failed(Error)
+    case cancelled
+}
+
+private actor TransferIOCompletion {
+    private var outcome: TransferIOOutcome?
+    private var completedIO: TransferIOOutcome?
+    private var waiter: CheckedContinuation<TransferIOOutcome, Never>?
+
+    func wait() async -> TransferIOOutcome {
+        if let outcome { return outcome }
+        return await withCheckedContinuation { continuation in
+            if let outcome {
+                continuation.resume(returning: outcome)
+            } else {
+                waiter = continuation
+            }
+        }
+    }
+
+    func finish(_ outcome: TransferIOOutcome) {
+        switch outcome {
+        case .completed, .failed:
+            completedIO = outcome
+        case .cancelled:
+            break
+        }
+        guard self.outcome == nil else { return }
+        self.outcome = outcome
+        waiter?.resume(returning: outcome)
+        waiter = nil
+    }
+
+    func completedIOOutcome() -> TransferIOOutcome? { completedIO }
 }
 
 func sendTerminalFrameBestEffort(
