@@ -1,9 +1,15 @@
 package presence
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
+
+var ErrCapacity = errors.New("presence capacity reached")
 
 type TrustGraph interface {
 	ShareGraph(left, right string) bool
+	DevicesInGraph(deviceID string) []string
 }
 
 type Sink interface {
@@ -17,8 +23,9 @@ type Event struct {
 }
 
 type clientEntry struct {
-	token uint64
-	sink  Sink
+	token  uint64
+	sink   Sink
+	source string
 }
 
 type delivery struct {
@@ -27,31 +34,43 @@ type delivery struct {
 }
 
 type Hub struct {
-	mu        sync.Mutex
-	graph     TrustGraph
-	clients   map[string]clientEntry
-	visible   map[string]map[string]bool
-	nextToken uint64
+	mu             sync.Mutex
+	graph          TrustGraph
+	clients        map[string]clientEntry
+	visible        map[string]map[string]bool
+	sources        map[string]int
+	nextToken      uint64
+	globalLimit    int
+	perSourceLimit int
 }
 
 func NewHub(graph TrustGraph) *Hub {
 	return &Hub{
-		graph:   graph,
-		clients: make(map[string]clientEntry),
-		visible: make(map[string]map[string]bool),
+		graph:          graph,
+		clients:        make(map[string]clientEntry),
+		visible:        make(map[string]map[string]bool),
+		sources:        make(map[string]int),
+		globalLimit:    1024,
+		perSourceLimit: 32,
 	}
 }
 
-func (h *Hub) Connect(deviceID string, sink Sink) func() {
+func (h *Hub) Connect(deviceID, source string, sink Sink) (func(), error) {
 	h.mu.Lock()
+	if len(h.clients) >= h.globalLimit || h.sources[source] >= h.perSourceLimit {
+		h.mu.Unlock()
+		return nil, ErrCapacity
+	}
+	if _, exists := h.clients[deviceID]; exists {
+		h.mu.Unlock()
+		return nil, ErrCapacity
+	}
 	h.nextToken++
 	token := h.nextToken
-	if _, replacing := h.clients[deviceID]; replacing {
-		h.clearVisibilityLocked(deviceID)
-	}
-	h.clients[deviceID] = clientEntry{token: token, sink: sink}
+	h.clients[deviceID] = clientEntry{token: token, sink: sink, source: source}
+	h.sources[source]++
 	h.mu.Unlock()
-	h.Refresh()
+	h.RefreshDevice(deviceID)
 
 	var once sync.Once
 	return func() {
@@ -63,6 +82,10 @@ func (h *Hub) Connect(deviceID string, sink Sink) func() {
 				return
 			}
 			delete(h.clients, deviceID)
+			h.sources[current.source]--
+			if h.sources[current.source] == 0 {
+				delete(h.sources, current.source)
+			}
 			var deliveries []delivery
 			for peerID := range h.visible[deviceID] {
 				if peer, online := h.clients[peerID]; online {
@@ -76,7 +99,7 @@ func (h *Hub) Connect(deviceID string, sink Sink) func() {
 			h.mu.Unlock()
 			sendAll(deliveries)
 		})
-	}
+	}, nil
 }
 
 func (h *Hub) Refresh() {
@@ -85,25 +108,51 @@ func (h *Hub) Refresh() {
 	for deviceID := range h.clients {
 		identifiers = append(identifiers, deviceID)
 	}
+	h.mu.Unlock()
+	for _, deviceID := range identifiers {
+		h.RefreshDevice(deviceID)
+	}
+}
+
+func (h *Hub) RefreshDevice(deviceID string) {
+	graphPeers := h.graph.DevicesInGraph(deviceID)
+	allowed := make(map[string]bool, len(graphPeers))
+	for _, peerID := range graphPeers {
+		if peerID != deviceID {
+			allowed[peerID] = true
+		}
+	}
+	h.mu.Lock()
+	client, online := h.clients[deviceID]
+	if !online {
+		h.mu.Unlock()
+		return
+	}
+	candidates := make(map[string]bool, len(allowed)+len(h.visible[deviceID]))
+	for peerID := range allowed {
+		candidates[peerID] = true
+	}
+	for peerID := range h.visible[deviceID] {
+		candidates[peerID] = true
+	}
 	var deliveries []delivery
-	for leftIndex, leftID := range identifiers {
-		for _, rightID := range identifiers[leftIndex+1:] {
-			wasVisible := h.visible[leftID][rightID]
-			isVisible := h.graph.ShareGraph(leftID, rightID)
-			if wasVisible == isVisible {
-				continue
-			}
-			availability := "offline"
-			if isVisible {
-				availability = "internet"
-				h.setVisibleLocked(leftID, rightID)
-			} else {
-				h.clearPairLocked(leftID, rightID)
-			}
-			deliveries = append(deliveries,
-				delivery{sink: h.clients[leftID].sink, event: Event{Type: "presence", DeviceID: rightID, Availability: availability}},
-				delivery{sink: h.clients[rightID].sink, event: Event{Type: "presence", DeviceID: leftID, Availability: availability}},
-			)
+	for peerID := range candidates {
+		peer, peerOnline := h.clients[peerID]
+		wasVisible := h.visible[deviceID][peerID]
+		isVisible := allowed[peerID] && peerOnline
+		if wasVisible == isVisible {
+			continue
+		}
+		availability := "offline"
+		if isVisible {
+			availability = "internet"
+			h.setVisibleLocked(deviceID, peerID)
+		} else {
+			h.clearPairLocked(deviceID, peerID)
+		}
+		deliveries = append(deliveries, delivery{sink: client.sink, event: Event{Type: "presence", DeviceID: peerID, Availability: availability}})
+		if peerOnline {
+			deliveries = append(deliveries, delivery{sink: peer.sink, event: Event{Type: "presence", DeviceID: deviceID, Availability: availability}})
 		}
 	}
 	h.mu.Unlock()

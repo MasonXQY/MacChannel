@@ -2,9 +2,11 @@ package pairing
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -18,20 +20,43 @@ var (
 	ErrCapacity  = errors.New("pairing store capacity reached")
 	ErrCollision = errors.New("pairing code collision")
 	ErrInvalid   = errors.New("invalid pairing session")
+	ErrPending   = errors.New("pairing item pending")
+	ErrConflict  = errors.New("pairing item conflicts with committed state")
+	ErrForbidden = errors.New("pairing participant mismatch")
 )
 
 const (
 	defaultCapacity         = 1024
 	maximumEncryptedPayload = 64 * 1024
 	sourceFailureLimit      = 5
+	deviceFailureLimit      = 10
 	codeAttemptLimit        = 20
-	globalFailureLimit      = 100
+	creationSourceLimit     = 10
+	creationDeviceLimit     = 10
 	failureWindow           = 10 * time.Minute
+	authorizationMailboxTTL = 15 * time.Minute
 )
 
 type Store interface {
-	Create(ctx context.Context, code string, encryptedSessionPayload []byte, expiresAt time.Time) error
-	Consume(ctx context.Context, code, observedSource string, now time.Time) ([]byte, error)
+	CreateSession(ctx context.Context, code, hostDeviceID, observedSource string, encryptedSessionPayload []byte, expiresAt time.Time) error
+	Join(ctx context.Context, code, joinerDeviceID, observedSource string, encryptedJoinPayload []byte, now time.Time) (Session, error)
+	HostJoin(ctx context.Context, code, hostDeviceID string, now time.Time) (Session, error)
+	ReserveAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) (AuthorizationReservation, error)
+	CommitAuthorization(ctx context.Context, sessionID, hostDeviceID, reservationID string, encryptedAuthorization []byte, now time.Time) error
+	Authorization(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error)
+	Cleanup(ctx context.Context, now time.Time) error
+}
+
+type Session struct {
+	ID                      string
+	EncryptedSessionPayload []byte
+	EncryptedJoinPayload    []byte
+}
+
+type AuthorizationReservation struct {
+	ID        string
+	SessionID string
+	ExpiresAt time.Time
 }
 
 type StoreConfig struct {
@@ -40,24 +65,27 @@ type StoreConfig struct {
 }
 
 type storedSession struct {
-	codeHash                [32]byte
-	encryptedSessionPayload []byte
-	expiresAt               time.Time
-	consumedAt              *time.Time
-	attemptCount            int
-}
-
-type failureEvent struct {
-	source string
-	at     time.Time
+	codeHash                 [32]byte
+	sessionID                string
+	hostDeviceID             string
+	joinerDeviceID           string
+	encryptedSessionPayload  []byte
+	encryptedJoinPayload     []byte
+	expiresAt                time.Time
+	consumedAt               *time.Time
+	attemptCount             int
+	reservationID            string
+	reservedAt               *time.Time
+	encryptedAuthorization   []byte
+	authorizationCommittedAt *time.Time
+	authorizationRetrievedAt *time.Time
+	authorizationExpiresAt   *time.Time
 }
 
 type AttemptLimiter struct {
 	mu             sync.Mutex
 	sourceFailures map[string][]time.Time
-	globalFailures []failureEvent
 	sourceInFlight map[string]int
-	globalInFlight int
 }
 
 func NewAttemptLimiter() *AttemptLimiter {
@@ -71,13 +99,11 @@ func (l *AttemptLimiter) Reserve(observedSource string, now time.Time) (func(fai
 	source := normalizeObservedSource(observedSource)
 	l.mu.Lock()
 	l.purgeLocked(now)
-	if len(l.sourceFailures[source]) >= sourceFailureLimit || len(l.globalFailures) >= globalFailureLimit ||
-		l.sourceInFlight[source] >= sourceFailureLimit || l.globalInFlight >= 32 {
+	if len(l.sourceFailures[source]) >= sourceFailureLimit || l.sourceInFlight[source] >= sourceFailureLimit {
 		l.mu.Unlock()
 		return nil, ErrRateLimit
 	}
 	l.sourceInFlight[source]++
-	l.globalInFlight++
 	l.mu.Unlock()
 
 	var once sync.Once
@@ -88,13 +114,8 @@ func (l *AttemptLimiter) Reserve(observedSource string, now time.Time) (func(fai
 			if l.sourceInFlight[source] == 0 {
 				delete(l.sourceInFlight, source)
 			}
-			l.globalInFlight--
 			if failed {
 				l.sourceFailures[source] = append(l.sourceFailures[source], now)
-				l.globalFailures = append(l.globalFailures, failureEvent{source: source, at: now})
-				if len(l.globalFailures) > globalFailureLimit {
-					l.globalFailures = append([]failureEvent(nil), l.globalFailures[len(l.globalFailures)-globalFailureLimit:]...)
-				}
 			}
 			l.mu.Unlock()
 		})
@@ -114,13 +135,6 @@ func (l *AttemptLimiter) purgeLocked(now time.Time) {
 			l.sourceFailures[source] = append([]time.Time(nil), events[firstRecent:]...)
 		}
 	}
-	firstRecent := 0
-	for firstRecent < len(l.globalFailures) && !l.globalFailures[firstRecent].at.After(cutoff) {
-		firstRecent++
-	}
-	if firstRecent > 0 {
-		l.globalFailures = append([]failureEvent(nil), l.globalFailures[firstRecent:]...)
-	}
 }
 
 type MemoryStore struct {
@@ -130,7 +144,9 @@ type MemoryStore struct {
 	sessions       map[[32]byte]*storedSession
 	gone           map[[32]byte]time.Time
 	sourceFailures map[string][]time.Time
-	globalFailures []failureEvent
+	deviceFailures map[string][]time.Time
+	codeFailures   map[[32]byte][]time.Time
+	creationEvents map[string][]time.Time
 }
 
 func NewMemoryStore(config StoreConfig) *MemoryStore {
@@ -146,16 +162,32 @@ func NewMemoryStore(config StoreConfig) *MemoryStore {
 		sessions:       make(map[[32]byte]*storedSession),
 		gone:           make(map[[32]byte]time.Time),
 		sourceFailures: make(map[string][]time.Time),
+		deviceFailures: make(map[string][]time.Time),
+		codeFailures:   make(map[[32]byte][]time.Time),
+		creationEvents: make(map[string][]time.Time),
 	}
 }
 
 func (s *MemoryStore) Create(_ context.Context, code string, payload []byte, expiresAt time.Time) error {
+	return s.CreateSession(context.Background(), code, "test-host", "test-source", payload, expiresAt)
+}
+
+func (s *MemoryStore) CreateSession(_ context.Context, code, hostDeviceID, observedSource string, payload []byte, expiresAt time.Time) error {
 	if !validCode(code) || len(payload) == 0 || len(payload) > maximumEncryptedPayload {
+		return ErrInvalid
+	}
+	if hostDeviceID == "" {
 		return ErrInvalid
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.purgeLocked(s.clock())
+	now := s.clock()
+	s.purgeLocked(now)
+	sourceKey := "source:" + normalizeObservedSource(observedSource)
+	deviceKey := "device:" + strings.ToLower(hostDeviceID)
+	if len(s.creationEvents[sourceKey]) >= creationSourceLimit || len(s.creationEvents[deviceKey]) >= creationDeviceLimit {
+		return ErrRateLimit
+	}
 	if len(s.sessions) >= s.capacity {
 		return ErrCapacity
 	}
@@ -168,46 +200,180 @@ func (s *MemoryStore) Create(_ context.Context, code string, payload []byte, exp
 	}
 	s.sessions[hash] = &storedSession{
 		codeHash:                hash,
+		hostDeviceID:            strings.ToLower(hostDeviceID),
 		encryptedSessionPayload: append([]byte(nil), payload...),
 		expiresAt:               expiresAt,
 	}
+	s.creationEvents[sourceKey] = append(s.creationEvents[sourceKey], now)
+	s.creationEvents[deviceKey] = append(s.creationEvents[deviceKey], now)
 	return nil
 }
 
 func (s *MemoryStore) Consume(_ context.Context, code, observedSource string, now time.Time) ([]byte, error) {
+	session, err := s.Join(context.Background(), code, "test-joiner", observedSource, []byte("test-join"), now)
+	return session.EncryptedSessionPayload, err
+}
+
+func (s *MemoryStore) Join(_ context.Context, code, joinerDeviceID, observedSource string, encryptedJoinPayload []byte, now time.Time) (Session, error) {
 	observedSource = normalizeObservedSource(observedSource)
+	if joinerDeviceID == "" || len(encryptedJoinPayload) == 0 || len(encryptedJoinPayload) > maximumEncryptedPayload {
+		return Session{}, ErrInvalid
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeLocked(now)
-	if len(s.sourceFailures[observedSource]) >= sourceFailureLimit || len(s.globalFailures) >= globalFailureLimit {
-		return nil, ErrRateLimit
+	joinerDeviceID = strings.ToLower(joinerDeviceID)
+	hash := sha256.Sum256([]byte(code))
+	if len(s.sourceFailures[observedSource]) >= sourceFailureLimit || len(s.deviceFailures[joinerDeviceID]) >= deviceFailureLimit ||
+		len(s.codeFailures[hash]) >= codeAttemptLimit {
+		return Session{}, ErrRateLimit
 	}
 	if !validCode(code) {
-		s.recordFailureLocked(observedSource, now)
-		return nil, ErrNotFound
+		s.recordFailureLocked(observedSource, joinerDeviceID, hash, now)
+		return Session{}, ErrNotFound
 	}
-	hash := sha256.Sum256([]byte(code))
 	if _, recentlyGone := s.gone[hash]; recentlyGone {
-		return nil, ErrGone
+		return Session{}, ErrGone
 	}
 	session, ok := s.sessions[hash]
 	if !ok {
-		s.recordFailureLocked(observedSource, now)
-		return nil, ErrNotFound
+		s.recordFailureLocked(observedSource, joinerDeviceID, hash, now)
+		return Session{}, ErrNotFound
 	}
 	if session.attemptCount >= codeAttemptLimit {
-		return nil, ErrRateLimit
+		return Session{}, ErrRateLimit
 	}
 	session.attemptCount++
 	if !now.Before(session.expiresAt) || session.consumedAt != nil {
-		return nil, ErrGone
+		return Session{}, ErrGone
 	}
 	consumedAt := now
 	session.consumedAt = &consumedAt
-	payload := append([]byte(nil), session.encryptedSessionPayload...)
-	delete(s.sessions, hash)
-	s.addGoneLocked(hash, now)
-	return payload, nil
+	session.sessionID = newUUID()
+	session.joinerDeviceID = joinerDeviceID
+	session.encryptedJoinPayload = append([]byte(nil), encryptedJoinPayload...)
+	return Session{
+		ID:                      session.sessionID,
+		EncryptedSessionPayload: append([]byte(nil), session.encryptedSessionPayload...),
+		EncryptedJoinPayload:    append([]byte(nil), session.encryptedJoinPayload...),
+	}, nil
+}
+
+func (s *MemoryStore) HostJoin(_ context.Context, code, hostDeviceID string, now time.Time) (Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	hash := sha256.Sum256([]byte(code))
+	session, ok := s.sessions[hash]
+	if !ok {
+		if _, gone := s.gone[hash]; gone {
+			return Session{}, ErrGone
+		}
+		return Session{}, ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
+		return Session{}, ErrForbidden
+	}
+	if session.consumedAt == nil {
+		return Session{}, ErrPending
+	}
+	return Session{
+		ID:                      session.sessionID,
+		EncryptedSessionPayload: append([]byte(nil), session.encryptedSessionPayload...),
+		EncryptedJoinPayload:    append([]byte(nil), session.encryptedJoinPayload...),
+	}, nil
+}
+
+func (s *MemoryStore) ReserveAuthorization(_ context.Context, sessionID, hostDeviceID string, now time.Time) (AuthorizationReservation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil || session.consumedAt == nil {
+		return AuthorizationReservation{}, ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
+		return AuthorizationReservation{}, ErrForbidden
+	}
+	if session.reservationID != "" {
+		if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+			return AuthorizationReservation{}, ErrGone
+		}
+		return AuthorizationReservation{ID: session.reservationID, SessionID: sessionID, ExpiresAt: *session.authorizationExpiresAt}, nil
+	}
+	if !now.Before(session.expiresAt) {
+		return AuthorizationReservation{}, ErrGone
+	}
+	expiresAt := now.Add(authorizationMailboxTTL)
+	session.reservationID = newUUID()
+	session.reservedAt = timePointer(now)
+	session.authorizationExpiresAt = &expiresAt
+	return AuthorizationReservation{ID: session.reservationID, SessionID: sessionID, ExpiresAt: expiresAt}, nil
+}
+
+func (s *MemoryStore) CommitAuthorization(_ context.Context, sessionID, hostDeviceID, reservationID string, encryptedAuthorization []byte, now time.Time) error {
+	if len(encryptedAuthorization) == 0 || len(encryptedAuthorization) > maximumEncryptedPayload {
+		return ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) || session.reservationID != reservationID {
+		return ErrForbidden
+	}
+	if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+		return ErrGone
+	}
+	if session.authorizationCommittedAt != nil {
+		if !equalBytes(session.encryptedAuthorization, encryptedAuthorization) {
+			return ErrConflict
+		}
+		return nil
+	}
+	session.encryptedAuthorization = append([]byte(nil), encryptedAuthorization...)
+	session.authorizationCommittedAt = timePointer(now)
+	return nil
+}
+
+func (s *MemoryStore) Authorization(_ context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return nil, ErrNotFound
+	}
+	if session.joinerDeviceID != strings.ToLower(joinerDeviceID) {
+		return nil, ErrForbidden
+	}
+	if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+		return nil, ErrGone
+	}
+	if session.authorizationCommittedAt == nil {
+		return nil, ErrPending
+	}
+	if session.authorizationRetrievedAt != nil {
+		return nil, ErrGone
+	}
+	session.authorizationRetrievedAt = timePointer(now)
+	return append([]byte(nil), session.encryptedAuthorization...), nil
+}
+
+func (s *MemoryStore) Cleanup(_ context.Context, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	return nil
+}
+
+func (s *MemoryStore) sessionByIDLocked(sessionID string) *storedSession {
+	for _, session := range s.sessions {
+		if session.sessionID == sessionID {
+			return session
+		}
+	}
+	return nil
 }
 
 func (s *MemoryStore) purgeLocked(now time.Time) {
@@ -223,15 +389,27 @@ func (s *MemoryStore) purgeLocked(now time.Time) {
 			s.sourceFailures[source] = append([]time.Time(nil), events[firstRecent:]...)
 		}
 	}
-	firstRecent := 0
-	for firstRecent < len(s.globalFailures) && !s.globalFailures[firstRecent].at.After(cutoff) {
-		firstRecent++
+	for device, events := range s.deviceFailures {
+		s.deviceFailures[device] = recentEvents(events, cutoff)
+		if len(s.deviceFailures[device]) == 0 {
+			delete(s.deviceFailures, device)
+		}
 	}
-	if firstRecent > 0 {
-		s.globalFailures = append([]failureEvent(nil), s.globalFailures[firstRecent:]...)
+	for code, events := range s.codeFailures {
+		s.codeFailures[code] = recentEvents(events, cutoff)
+		if len(s.codeFailures[code]) == 0 {
+			delete(s.codeFailures, code)
+		}
+	}
+	for key, events := range s.creationEvents {
+		s.creationEvents[key] = recentEvents(events, cutoff)
+		if len(s.creationEvents[key]) == 0 {
+			delete(s.creationEvents, key)
+		}
 	}
 	for hash, session := range s.sessions {
-		if !now.Before(session.expiresAt) {
+		mailboxExpired := session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt)
+		if !now.Before(session.expiresAt) && mailboxExpired {
 			delete(s.sessions, hash)
 			s.addGoneLocked(hash, now)
 		}
@@ -258,33 +436,52 @@ func (s *MemoryStore) addGoneLocked(hash [32]byte, now time.Time) {
 	s.gone[hash] = now
 }
 
-func (s *MemoryStore) recordFailureLocked(source string, now time.Time) {
+func (s *MemoryStore) recordFailureLocked(source, device string, code [32]byte, now time.Time) {
 	s.sourceFailures[source] = append(s.sourceFailures[source], now)
-	s.globalFailures = append(s.globalFailures, failureEvent{source: source, at: now})
-	if len(s.globalFailures) > globalFailureLimit {
-		s.globalFailures = append([]failureEvent(nil), s.globalFailures[len(s.globalFailures)-globalFailureLimit:]...)
+	s.deviceFailures[device] = append(s.deviceFailures[device], now)
+	s.codeFailures[code] = append(s.codeFailures[code], now)
+}
+
+func recentEvents(events []time.Time, cutoff time.Time) []time.Time {
+	first := 0
+	for first < len(events) && !events[first].After(cutoff) {
+		first++
 	}
+	if first == len(events) {
+		return nil
+	}
+	return append([]time.Time(nil), events[first:]...)
 }
 
 type PostgresStore struct {
 	db       *sql.DB
 	capacity int
-	limiter  *AttemptLimiter
+	clock    func() time.Time
 }
 
 func NewPostgresStore(db *sql.DB, config StoreConfig) *PostgresStore {
 	if config.Capacity <= 0 {
 		config.Capacity = defaultCapacity
 	}
+	if config.Clock == nil {
+		config.Clock = time.Now
+	}
 	return &PostgresStore{
 		db:       db,
 		capacity: config.Capacity,
-		limiter:  NewAttemptLimiter(),
+		clock:    config.Clock,
 	}
 }
 
 func (s *PostgresStore) Create(ctx context.Context, code string, payload []byte, expiresAt time.Time) error {
+	return s.CreateSession(ctx, code, "test-host", "test-source", payload, expiresAt)
+}
+
+func (s *PostgresStore) CreateSession(ctx context.Context, code, hostDeviceID, observedSource string, payload []byte, expiresAt time.Time) error {
 	if !validCode(code) || len(payload) == 0 || len(payload) > maximumEncryptedPayload {
+		return ErrInvalid
+	}
+	if hostDeviceID == "" {
 		return ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -292,11 +489,33 @@ func (s *PostgresStore) Create(ctx context.Context, code string, payload []byte,
 		return err
 	}
 	defer tx.Rollback()
+	now := s.clock().UTC()
+	sourceHash := hashText(normalizeObservedSource(observedSource))
+	deviceID := strings.ToLower(hostDeviceID)
+	if err := lockPairingQuota(ctx, tx, "create-source:"+sourceHash); err != nil {
+		return err
+	}
+	if err := lockPairingQuota(ctx, tx, "create-device:"+deviceID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(1296255054)`); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE expires_at <= NOW()`); err != nil {
+	cutoff := now.Add(-failureWindow)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_creation_events WHERE occurred_at <= $1`, cutoff); err != nil {
 		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE expires_at <= $1
+		AND (authorization_expires_at IS NULL OR authorization_expires_at <= $1)`, now); err != nil {
+		return err
+	}
+	var sourceCreates, deviceCreates int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE source_hash = $1),
+		COUNT(*) FILTER (WHERE device_id = $2) FROM pairing_creation_events`, sourceHash, deviceID).Scan(&sourceCreates, &deviceCreates); err != nil {
+		return err
+	}
+	if sourceCreates >= creationSourceLimit || deviceCreates >= creationDeviceLimit {
+		return ErrRateLimit
 	}
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pairing_sessions`).Scan(&count); err != nil {
@@ -307,9 +526,9 @@ func (s *PostgresStore) Create(ctx context.Context, code string, payload []byte,
 	}
 	hash := sha256.Sum256([]byte(code))
 	result, err := tx.ExecContext(ctx, `
-		INSERT INTO pairing_sessions (code_hash, encrypted_session_payload, expires_at, attempt_count)
-		VALUES ($1, $2, $3, 0)
-		ON CONFLICT (code_hash) DO NOTHING`, hash[:], payload, expiresAt.UTC())
+		INSERT INTO pairing_sessions (code_hash, host_device_id, encrypted_session_payload, expires_at, attempt_count)
+		VALUES ($1, $2, $3, $4, 0)
+		ON CONFLICT (code_hash) DO NOTHING`, hash[:], deviceID, payload, expiresAt.UTC())
 	if err != nil {
 		return err
 	}
@@ -320,71 +539,325 @@ func (s *PostgresStore) Create(ctx context.Context, code string, payload []byte,
 	if inserted != 1 {
 		return ErrCollision
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO pairing_creation_events (source_hash, device_id, occurred_at)
+		VALUES ($1, $2, $3)`, sourceHash, deviceID, now); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func (s *PostgresStore) Consume(ctx context.Context, code, observedSource string, now time.Time) ([]byte, error) {
+	session, err := s.Join(ctx, code, "test-joiner", observedSource, []byte("test-join"), now)
+	return session.EncryptedSessionPayload, err
+}
+
+func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observedSource string, encryptedJoinPayload []byte, now time.Time) (Session, error) {
 	observedSource = normalizeObservedSource(observedSource)
-	release, err := s.limiter.Reserve(observedSource, now)
-	if err != nil {
-		return nil, err
+	if joinerDeviceID == "" || len(encryptedJoinPayload) == 0 || len(encryptedJoinPayload) > maximumEncryptedPayload {
+		return Session{}, ErrInvalid
 	}
-	failed := false
-	defer func() { release(failed) }()
-	if !validCode(code) {
-		failed = true
-		return nil, ErrNotFound
-	}
+	joinerDeviceID = strings.ToLower(joinerDeviceID)
+	sourceHash := hashText(observedSource)
+	codeHash := sha256.Sum256([]byte(code))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return Session{}, err
 	}
 	defer tx.Rollback()
-	hash := sha256.Sum256([]byte(code))
+	if err := lockPairingQuota(ctx, tx, "join-source:"+sourceHash); err != nil {
+		return Session{}, err
+	}
+	if err := lockPairingQuota(ctx, tx, "join-code:"+hexHash(codeHash)); err != nil {
+		return Session{}, err
+	}
+	if err := lockPairingQuota(ctx, tx, "join-device:"+joinerDeviceID); err != nil {
+		return Session{}, err
+	}
+	cutoff := now.Add(-failureWindow).UTC()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_attempt_failures WHERE occurred_at <= $1`, cutoff); err != nil {
+		return Session{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_attempt_reservations WHERE expires_at <= $1`, now.UTC()); err != nil {
+		return Session{}, err
+	}
+	var sourceFailures, codeFailures, deviceFailures int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE source_hash = $1),
+		COUNT(*) FILTER (WHERE code_hash = $2), COUNT(*) FILTER (WHERE device_id = $3)
+		FROM pairing_attempt_failures`, sourceHash, codeHash[:], joinerDeviceID).Scan(&sourceFailures, &codeFailures, &deviceFailures); err != nil {
+		return Session{}, err
+	}
+	var sourceReservations, codeReservations, deviceReservations int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE source_hash = $1),
+		COUNT(*) FILTER (WHERE code_hash = $2), COUNT(*) FILTER (WHERE device_id = $3)
+		FROM pairing_attempt_reservations`, sourceHash, codeHash[:], joinerDeviceID).Scan(
+		&sourceReservations, &codeReservations, &deviceReservations); err != nil {
+		return Session{}, err
+	}
+	if sourceFailures+sourceReservations >= sourceFailureLimit || codeFailures+codeReservations >= codeAttemptLimit ||
+		deviceFailures+deviceReservations >= deviceFailureLimit {
+		return Session{}, ErrRateLimit
+	}
+	reservationID := newUUID()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO pairing_attempt_reservations
+		(reservation_id, source_hash, code_hash, device_id, expires_at) VALUES ($1, $2, $3, $4, $5)`,
+		reservationID, sourceHash, codeHash[:], joinerDeviceID, now.Add(time.Minute).UTC()); err != nil {
+		return Session{}, err
+	}
+	finishFailure := func() error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pairing_attempt_failures
+			(source_hash, code_hash, device_id, occurred_at) VALUES ($1, $2, $3, $4)`,
+			sourceHash, codeHash[:], joinerDeviceID, now.UTC()); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM pairing_attempt_reservations WHERE reservation_id = $1`, reservationID)
+		return err
+	}
+	if !validCode(code) {
+		if err := finishFailure(); err != nil {
+			return Session{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Session{}, err
+		}
+		return Session{}, ErrNotFound
+	}
 	var payload []byte
 	var expiresAt time.Time
 	var consumedAt sql.NullTime
 	var attempts int
 	err = tx.QueryRowContext(ctx, `
 		SELECT encrypted_session_payload, expires_at, consumed_at, attempt_count
-		FROM pairing_sessions WHERE code_hash = $1 FOR UPDATE`, hash[:]).Scan(&payload, &expiresAt, &consumedAt, &attempts)
+		FROM pairing_sessions WHERE code_hash = $1 FOR UPDATE`, codeHash[:]).Scan(&payload, &expiresAt, &consumedAt, &attempts)
 	if errors.Is(err, sql.ErrNoRows) {
-		failed = true
+		if err := finishFailure(); err != nil {
+			return Session{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Session{}, err
+		}
+		return Session{}, ErrNotFound
+	}
+	if err != nil {
+		return Session{}, err
+	}
+	if attempts >= codeAttemptLimit {
+		return Session{}, ErrRateLimit
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET attempt_count = attempt_count + 1 WHERE code_hash = $1`, codeHash[:]); err != nil {
+		return Session{}, err
+	}
+	if !now.Before(expiresAt) || consumedAt.Valid {
+		if err := finishFailure(); err != nil {
+			return Session{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Session{}, err
+		}
+		return Session{}, ErrGone
+	}
+	sessionID := newUUID()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE pairing_sessions SET consumed_at = $2, session_id = $3,
+			joiner_device_id = $4, encrypted_join_payload = $5
+		WHERE code_hash = $1 AND consumed_at IS NULL`, codeHash[:], now.UTC(), sessionID,
+		joinerDeviceID, encryptedJoinPayload)
+	if err != nil {
+		return Session{}, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return Session{}, err
+	}
+	if updated != 1 {
+		return Session{}, ErrGone
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_attempt_reservations WHERE reservation_id = $1`, reservationID); err != nil {
+		return Session{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Session{}, err
+	}
+	return Session{ID: sessionID, EncryptedSessionPayload: payload, EncryptedJoinPayload: append([]byte(nil), encryptedJoinPayload...)}, nil
+}
+
+func (s *PostgresStore) HostJoin(ctx context.Context, code, hostDeviceID string, now time.Time) (Session, error) {
+	hash := sha256.Sum256([]byte(code))
+	var session Session
+	var sessionID sql.NullString
+	var storedHost string
+	var expiresAt time.Time
+	var consumedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		SELECT session_id, host_device_id, encrypted_session_payload, encrypted_join_payload, expires_at, consumed_at
+		FROM pairing_sessions WHERE code_hash = $1`, hash[:]).Scan(
+		&sessionID, &storedHost, &session.EncryptedSessionPayload, &session.EncryptedJoinPayload, &expiresAt, &consumedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, ErrNotFound
+	}
+	if err != nil {
+		return Session{}, err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) {
+		return Session{}, ErrForbidden
+	}
+	if !now.Before(expiresAt) {
+		return Session{}, ErrGone
+	}
+	if !consumedAt.Valid {
+		return Session{}, ErrPending
+	}
+	session.ID = sessionID.String
+	return session, nil
+}
+
+func (s *PostgresStore) ReserveAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) (AuthorizationReservation, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AuthorizationReservation{}, err
+	}
+	defer tx.Rollback()
+	var storedHost string
+	var sessionExpires time.Time
+	var reservationID sql.NullString
+	var authorizationExpires sql.NullTime
+	err = tx.QueryRowContext(ctx, `
+		SELECT host_device_id, expires_at, authorization_reservation_id, authorization_expires_at
+		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
+		&storedHost, &sessionExpires, &reservationID, &authorizationExpires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuthorizationReservation{}, ErrNotFound
+	}
+	if err != nil {
+		return AuthorizationReservation{}, err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) {
+		return AuthorizationReservation{}, ErrForbidden
+	}
+	if reservationID.Valid {
+		if !authorizationExpires.Valid || !now.Before(authorizationExpires.Time) {
+			return AuthorizationReservation{}, ErrGone
+		}
+		return AuthorizationReservation{ID: reservationID.String, SessionID: sessionID, ExpiresAt: authorizationExpires.Time}, tx.Commit()
+	}
+	if !now.Before(sessionExpires) {
+		return AuthorizationReservation{}, ErrGone
+	}
+	id := newUUID()
+	expiresAt := now.Add(authorizationMailboxTTL)
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET
+		authorization_reservation_id = $2, authorization_reserved_at = $3, authorization_expires_at = $4
+		WHERE session_id = $1`, sessionID, id, now.UTC(), expiresAt.UTC()); err != nil {
+		return AuthorizationReservation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AuthorizationReservation{}, err
+	}
+	return AuthorizationReservation{ID: id, SessionID: sessionID, ExpiresAt: expiresAt}, nil
+}
+
+func (s *PostgresStore) CommitAuthorization(ctx context.Context, sessionID, hostDeviceID, reservationID string, encryptedAuthorization []byte, now time.Time) error {
+	if len(encryptedAuthorization) == 0 || len(encryptedAuthorization) > maximumEncryptedPayload {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedHost, storedReservation string
+	var expiresAt time.Time
+	var committedAt sql.NullTime
+	var storedPayload []byte
+	err = tx.QueryRowContext(ctx, `SELECT host_device_id, authorization_reservation_id,
+		authorization_expires_at, authorization_committed_at, encrypted_authorization
+		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
+		&storedHost, &storedReservation, &expiresAt, &committedAt, &storedPayload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) || storedReservation != reservationID {
+		return ErrForbidden
+	}
+	if !now.Before(expiresAt) {
+		return ErrGone
+	}
+	if committedAt.Valid {
+		if !equalBytes(storedPayload, encryptedAuthorization) {
+			return ErrConflict
+		}
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET encrypted_authorization = $2,
+		authorization_committed_at = $3 WHERE session_id = $1`, sessionID, encryptedAuthorization, now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresStore) Authorization(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var storedJoiner string
+	var expiresAt sql.NullTime
+	var committedAt, retrievedAt sql.NullTime
+	var payload []byte
+	err = tx.QueryRowContext(ctx, `SELECT joiner_device_id, authorization_expires_at,
+		authorization_committed_at, authorization_retrieved_at, encrypted_authorization
+		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
+		&storedJoiner, &expiresAt, &committedAt, &retrievedAt, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	if attempts >= codeAttemptLimit {
-		return nil, ErrRateLimit
+	if storedJoiner != strings.ToLower(joinerDeviceID) {
+		return nil, ErrForbidden
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET attempt_count = attempt_count + 1 WHERE code_hash = $1`, hash[:]); err != nil {
-		return nil, err
-	}
-	if !now.Before(expiresAt) || consumedAt.Valid {
-		failed = true
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
+	if !expiresAt.Valid || !now.Before(expiresAt.Time) || retrievedAt.Valid {
 		return nil, ErrGone
 	}
-	result, err := tx.ExecContext(ctx, `
-		UPDATE pairing_sessions SET consumed_at = $2
-		WHERE code_hash = $1 AND consumed_at IS NULL`, hash[:], now.UTC())
-	if err != nil {
-		return nil, err
+	if !committedAt.Valid {
+		return nil, ErrPending
 	}
-	updated, err := result.RowsAffected()
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET authorization_retrieved_at = $2
+		WHERE session_id = $1 AND authorization_retrieved_at IS NULL`, sessionID, now.UTC()); err != nil {
 		return nil, err
-	}
-	if updated != 1 {
-		return nil, ErrGone
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return payload, nil
+}
+
+func (s *PostgresStore) Cleanup(ctx context.Context, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions
+		WHERE (authorization_expires_at IS NOT NULL AND authorization_expires_at <= $1)
+		   OR (authorization_expires_at IS NULL AND expires_at <= $1)`, now.UTC()); err != nil {
+		return err
+	}
+	cutoff := now.Add(-failureWindow).UTC()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_creation_events WHERE occurred_at <= $1`, cutoff); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_attempt_failures WHERE occurred_at <= $1`, cutoff); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_attempt_reservations WHERE expires_at <= $1`, now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func validCode(code string) bool {
@@ -404,4 +877,41 @@ func normalizeObservedSource(source string) string {
 		return strings.ToLower(host)
 	}
 	return strings.ToLower(source)
+}
+
+func hashText(value string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(value)))
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func hexHash(value [32]byte) string {
+	return fmt.Sprintf("%x", value[:])
+}
+
+func lockPairingQuota(ctx context.Context, tx *sql.Tx, key string) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key)
+	return err
+}
+
+func newUUID() string {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		panic("crypto/rand unavailable")
+	}
+	bytes[6] = (bytes[6] & 0x0f) | 0x40
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
+}
+
+func timePointer(value time.Time) *time.Time { return &value }
+
+func equalBytes(left, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	difference := byte(0)
+	for index := range left {
+		difference |= left[index] ^ right[index]
+	}
+	return difference == 0
 }

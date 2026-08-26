@@ -99,27 +99,52 @@ type WebSocketAuthentication struct {
 }
 
 type VerifierConfig struct {
-	Clock             func() time.Time
-	FreshnessWindow   time.Duration
-	ChallengeCapacity int
-	ReplayCapacity    int
+	Clock                      func() time.Time
+	FreshnessWindow            time.Duration
+	ChallengeCapacity          int
+	ChallengePerSourceCapacity int
+	ReplayCapacity             int
+	ReplayPerSourceCapacity    int
+	ReplayPerDeviceCapacity    int
+	ReplayStore                ReplayStore
 }
 
-type nonceEntry struct {
-	key       string
-	expiresAt time.Time
+type ReplayLimits struct {
+	ChallengeGlobal    int
+	ChallengePerSource int
+	ReplayGlobal       int
+	ReplayPerSource    int
+	ReplayPerDevice    int
+}
+
+type ReplayStore interface {
+	StoreChallenge(ctx context.Context, challengeHash, sourceHash string, now, expiresAt time.Time, limits ReplayLimits) error
+	ConsumeChallenge(ctx context.Context, challengeHash, sourceHash string, now time.Time) error
+	RememberReplay(ctx context.Context, nonceHash, sourceHash, deviceID string, now, expiresAt time.Time, limits ReplayLimits) error
+	Cleanup(ctx context.Context, now time.Time) error
+}
+
+type replayEntry struct {
+	expiresAt  time.Time
+	sourceHash string
+	deviceID   string
+}
+
+type MemoryReplayStore struct {
+	mu         sync.Mutex
+	challenges map[string]replayEntry
+	replays    map[string]replayEntry
+}
+
+func NewMemoryReplayStore() *MemoryReplayStore {
+	return &MemoryReplayStore{challenges: make(map[string]replayEntry), replays: make(map[string]replayEntry)}
 }
 
 type Verifier struct {
-	mu                sync.Mutex
-	clock             func() time.Time
-	freshnessWindow   time.Duration
-	challengeCapacity int
-	replayCapacity    int
-	challenges        map[string]time.Time
-	challengeOrder    []nonceEntry
-	replays           map[string]time.Time
-	replayOrder       []nonceEntry
+	clock           func() time.Time
+	freshnessWindow time.Duration
+	limits          ReplayLimits
+	replayStore     ReplayStore
 }
 
 func NewVerifier(config VerifierConfig) *Verifier {
@@ -132,65 +157,75 @@ func NewVerifier(config VerifierConfig) *Verifier {
 	if config.ChallengeCapacity <= 0 {
 		config.ChallengeCapacity = 4096
 	}
+	if config.ChallengePerSourceCapacity <= 0 {
+		config.ChallengePerSourceCapacity = 16
+	}
 	if config.ReplayCapacity <= 0 {
 		config.ReplayCapacity = 16_384
 	}
+	if config.ReplayPerSourceCapacity <= 0 {
+		config.ReplayPerSourceCapacity = 256
+	}
+	if config.ReplayPerDeviceCapacity <= 0 {
+		config.ReplayPerDeviceCapacity = 256
+	}
+	if config.ReplayStore == nil {
+		config.ReplayStore = NewMemoryReplayStore()
+	}
 	return &Verifier{
-		clock:             config.Clock,
-		freshnessWindow:   config.FreshnessWindow,
-		challengeCapacity: config.ChallengeCapacity,
-		replayCapacity:    config.ReplayCapacity,
-		challenges:        make(map[string]time.Time),
-		replays:           make(map[string]time.Time),
+		clock:           config.Clock,
+		freshnessWindow: config.FreshnessWindow,
+		limits: ReplayLimits{
+			ChallengeGlobal: config.ChallengeCapacity, ChallengePerSource: config.ChallengePerSourceCapacity,
+			ReplayGlobal: config.ReplayCapacity, ReplayPerSource: config.ReplayPerSourceCapacity,
+			ReplayPerDevice: config.ReplayPerDeviceCapacity,
+		},
+		replayStore: config.ReplayStore,
 	}
 }
 
 func (v *Verifier) IssueChallenge() (Challenge, error) {
+	return v.IssueChallengeFor(context.Background(), "local")
+}
+
+func (v *Verifier) IssueChallengeFor(ctx context.Context, observedSource string) (Challenge, error) {
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return Challenge{}, err
 	}
 	now := v.clock()
 	expiresAt := now.Add(v.freshnessWindow)
-	key := base64.RawStdEncoding.EncodeToString(nonce)
-
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.purgeLocked(now)
-	if len(v.challenges) >= v.challengeCapacity {
-		v.evictOldestChallengeLocked()
+	if err := v.replayStore.StoreChallenge(ctx, hashEvidence(nonce), hashSource(observedSource), now, expiresAt, v.limits); err != nil {
+		return Challenge{}, err
 	}
-	v.challenges[key] = expiresAt
-	v.challengeOrder = append(v.challengeOrder, nonceEntry{key: key, expiresAt: expiresAt})
 	return Challenge{Type: "challenge", Nonce: nonce, ExpiresAtMillis: expiresAt.UnixMilli()}, nil
 }
 
 func (v *Verifier) VerifyHTTP(envelope Envelope) error {
+	return v.VerifyHTTPFrom(context.Background(), envelope, "local")
+}
+
+func (v *Verifier) VerifyHTTPFrom(ctx context.Context, envelope Envelope, observedSource string) error {
 	now := v.clock()
 	if err := v.validate(envelope, now); err != nil {
 		return err
 	}
-	return v.rememberReplay(envelope, now)
+	return v.rememberReplay(ctx, envelope, observedSource, now)
 }
 
 func (v *Verifier) VerifyChallenge(envelope Envelope) error {
+	return v.VerifyChallengeFrom(context.Background(), envelope, "local")
+}
+
+func (v *Verifier) VerifyChallengeFrom(ctx context.Context, envelope Envelope, observedSource string) error {
 	now := v.clock()
-	key := base64.RawStdEncoding.EncodeToString(envelope.Nonce)
-	v.mu.Lock()
-	v.purgeLocked(now)
-	expiresAt, ok := v.challenges[key]
-	if ok {
-		delete(v.challenges, key)
-		v.removeChallengeOrderLocked(key)
-	}
-	v.mu.Unlock()
-	if !ok || !now.Before(expiresAt) {
-		return ErrInvalidChallenge
-	}
 	if err := v.validate(envelope, now); err != nil {
 		return err
 	}
-	return v.rememberReplay(envelope, now)
+	if err := v.replayStore.ConsumeChallenge(ctx, hashEvidence(envelope.Nonce), hashSource(observedSource), now); err != nil {
+		return err
+	}
+	return v.rememberReplay(ctx, envelope, observedSource, now)
 }
 
 func (v *Verifier) validate(envelope Envelope, now time.Time) error {
@@ -213,59 +248,225 @@ func (v *Verifier) validate(envelope Envelope, now time.Time) error {
 	return nil
 }
 
-func (v *Verifier) rememberReplay(envelope Envelope, now time.Time) error {
+func (v *Verifier) rememberReplay(ctx context.Context, envelope Envelope, observedSource string, now time.Time) error {
 	digest := sha256.Sum256(append(append([]byte(strings.ToLower(envelope.DeviceID)), 0), envelope.Nonce...))
 	key := hex.EncodeToString(digest[:])
 	expiresAt := now.Add(v.freshnessWindow)
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.purgeLocked(now)
-	if _, exists := v.replays[key]; exists {
-		return ErrRepeatedNonce
+	return v.replayStore.RememberReplay(ctx, key, hashSource(observedSource), strings.ToLower(envelope.DeviceID), now, expiresAt, v.limits)
+}
+
+func (v *Verifier) Cleanup(ctx context.Context, now time.Time) error {
+	return v.replayStore.Cleanup(ctx, now)
+}
+
+func hashEvidence(value []byte) string {
+	digest := sha256.Sum256(value)
+	return hex.EncodeToString(digest[:])
+}
+
+func hashSource(source string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(source))))
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *MemoryReplayStore) StoreChallenge(_ context.Context, challengeHash, sourceHash string, now, expiresAt time.Time, limits ReplayLimits) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	if _, exists := s.challenges[challengeHash]; exists {
+		return ErrInvalidChallenge
 	}
-	if len(v.replays) >= v.replayCapacity {
+	if len(s.challenges) >= limits.ChallengeGlobal || countReplayEntries(s.challenges, sourceHash, "") >= limits.ChallengePerSource {
 		return ErrReplayCapacity
 	}
-	v.replays[key] = expiresAt
-	v.replayOrder = append(v.replayOrder, nonceEntry{key: key, expiresAt: expiresAt})
+	s.challenges[challengeHash] = replayEntry{expiresAt: expiresAt, sourceHash: sourceHash}
 	return nil
 }
 
-func (v *Verifier) purgeLocked(now time.Time) {
-	for len(v.challengeOrder) > 0 && !now.Before(v.challengeOrder[0].expiresAt) {
-		entry := v.challengeOrder[0]
-		v.challengeOrder = v.challengeOrder[1:]
-		if expiry, ok := v.challenges[entry.key]; ok && expiry.Equal(entry.expiresAt) {
-			delete(v.challenges, entry.key)
+func (s *MemoryReplayStore) ConsumeChallenge(_ context.Context, challengeHash, sourceHash string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	entry, exists := s.challenges[challengeHash]
+	if !exists || entry.sourceHash != sourceHash || !now.Before(entry.expiresAt) {
+		return ErrInvalidChallenge
+	}
+	delete(s.challenges, challengeHash)
+	return nil
+}
+
+func (s *MemoryReplayStore) RememberReplay(_ context.Context, nonceHash, sourceHash, deviceID string, now, expiresAt time.Time, limits ReplayLimits) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	if _, exists := s.replays[nonceHash]; exists {
+		return ErrRepeatedNonce
+	}
+	if len(s.replays) >= limits.ReplayGlobal || countReplayEntries(s.replays, sourceHash, "") >= limits.ReplayPerSource ||
+		countReplayEntries(s.replays, "", deviceID) >= limits.ReplayPerDevice {
+		return ErrReplayCapacity
+	}
+	s.replays[nonceHash] = replayEntry{expiresAt: expiresAt, sourceHash: sourceHash, deviceID: deviceID}
+	return nil
+}
+
+func (s *MemoryReplayStore) Cleanup(_ context.Context, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	return nil
+}
+
+func (s *MemoryReplayStore) purgeLocked(now time.Time) {
+	for key, entry := range s.challenges {
+		if !now.Before(entry.expiresAt) {
+			delete(s.challenges, key)
 		}
 	}
-	for len(v.replayOrder) > 0 && !now.Before(v.replayOrder[0].expiresAt) {
-		entry := v.replayOrder[0]
-		v.replayOrder = v.replayOrder[1:]
-		if expiry, ok := v.replays[entry.key]; ok && expiry.Equal(entry.expiresAt) {
-			delete(v.replays, entry.key)
+	for key, entry := range s.replays {
+		if !now.Before(entry.expiresAt) {
+			delete(s.replays, key)
 		}
 	}
 }
 
-func (v *Verifier) evictOldestChallengeLocked() {
-	for len(v.challengeOrder) > 0 {
-		entry := v.challengeOrder[0]
-		v.challengeOrder = v.challengeOrder[1:]
-		if expiry, ok := v.challenges[entry.key]; ok && expiry.Equal(entry.expiresAt) {
-			delete(v.challenges, entry.key)
-			return
+func countReplayEntries(entries map[string]replayEntry, sourceHash, deviceID string) int {
+	count := 0
+	for _, entry := range entries {
+		if (sourceHash == "" || entry.sourceHash == sourceHash) && (deviceID == "" || entry.deviceID == deviceID) {
+			count++
 		}
 	}
+	return count
 }
 
-func (v *Verifier) removeChallengeOrderLocked(key string) {
-	for index, entry := range v.challengeOrder {
-		if entry.key == key {
-			v.challengeOrder = append(v.challengeOrder[:index], v.challengeOrder[index+1:]...)
-			return
-		}
+type PostgresReplayStore struct {
+	database *sql.DB
+}
+
+func NewPostgresReplayStore(database *sql.DB) *PostgresReplayStore {
+	return &PostgresReplayStore{database: database}
+}
+
+func (s *PostgresReplayStore) StoreChallenge(ctx context.Context, challengeHash, sourceHash string, _ time.Time, expiresAt time.Time, limits ReplayLimits) error {
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
+	defer tx.Rollback()
+	if err := lockQuota(ctx, tx, "challenge:global"); err != nil {
+		return err
+	}
+	if err := lockQuota(ctx, tx, "challenge:"+sourceHash); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_challenges WHERE expires_at <= NOW()`); err != nil {
+		return err
+	}
+	var globalCount, sourceCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE source_hash = $1) FROM auth_challenges`, sourceHash).Scan(&globalCount, &sourceCount); err != nil {
+		return err
+	}
+	if globalCount >= limits.ChallengeGlobal || sourceCount >= limits.ChallengePerSource {
+		return ErrReplayCapacity
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO auth_challenges (challenge_hash, source_hash, expires_at)
+		VALUES ($1, $2, $3) ON CONFLICT (challenge_hash) DO NOTHING`, challengeHash, sourceHash, expiresAt.UTC())
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted != 1 {
+		return ErrInvalidChallenge
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresReplayStore) ConsumeChallenge(ctx context.Context, challengeHash, sourceHash string, now time.Time) error {
+	result, err := s.database.ExecContext(ctx, `DELETE FROM auth_challenges
+		WHERE challenge_hash = $1 AND source_hash = $2 AND expires_at > $3`, challengeHash, sourceHash, now.UTC())
+	if err != nil {
+		return err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if deleted != 1 {
+		return ErrInvalidChallenge
+	}
+	return nil
+}
+
+func (s *PostgresReplayStore) RememberReplay(ctx context.Context, nonceHash, sourceHash, deviceID string, _ time.Time, expiresAt time.Time, limits ReplayLimits) error {
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := lockQuota(ctx, tx, "replay:global"); err != nil {
+		return err
+	}
+	if err := lockQuota(ctx, tx, "replay:"+sourceHash); err != nil {
+		return err
+	}
+	if err := lockQuota(ctx, tx, "device:"+deviceID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_replay_nonces WHERE expires_at <= NOW()`); err != nil {
+		return err
+	}
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM auth_replay_nonces WHERE nonce_hash = $1)`, nonceHash).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return ErrRepeatedNonce
+	}
+	var globalCount, sourceCount, deviceCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE source_hash = $1),
+		COUNT(*) FILTER (WHERE device_id = $2) FROM auth_replay_nonces`, sourceHash, deviceID).Scan(&globalCount, &sourceCount, &deviceCount); err != nil {
+		return err
+	}
+	if globalCount >= limits.ReplayGlobal || sourceCount >= limits.ReplayPerSource || deviceCount >= limits.ReplayPerDevice {
+		return ErrReplayCapacity
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO auth_replay_nonces (nonce_hash, source_hash, device_id, expires_at)
+		VALUES ($1, $2, $3, $4) ON CONFLICT (nonce_hash) DO NOTHING`, nonceHash, sourceHash, deviceID, expiresAt.UTC())
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted != 1 {
+		return ErrRepeatedNonce
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresReplayStore) Cleanup(ctx context.Context, now time.Time) error {
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_challenges WHERE expires_at <= $1`, now.UTC()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_replay_nonces WHERE expires_at <= $1`, now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func lockQuota(ctx context.Context, tx *sql.Tx, key string) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, key)
+	return err
 }
 
 func DeviceID(publicKey []byte) string {
@@ -395,9 +596,14 @@ func (r SignedTrustRecord) Validate() error {
 	return nil
 }
 
-type trustEdge struct {
-	left  string
-	right string
+type directedTrustEdge struct {
+	issuer  string
+	subject string
+}
+
+type directionalTrustState struct {
+	action   TrustAction
+	sequence uint64
 }
 
 type TrustRecordStore interface {
@@ -412,35 +618,18 @@ type PersistedTrustRecord struct {
 }
 
 type pendingRecord struct {
-	record    SignedTrustRecord
-	hash      [32]byte
-	isNew     bool
-	issuerOK  bool
-	subjectOK bool
-}
-
-type recordConfirmation struct {
-	issuer  bool
-	subject bool
-}
-
-func edgeFor(left, right string) trustEdge {
-	left = strings.ToLower(left)
-	right = strings.ToLower(right)
-	if left > right {
-		left, right = right, left
-	}
-	return trustEdge{left: left, right: right}
+	record SignedTrustRecord
+	hash   [32]byte
+	isNew  bool
 }
 
 type TrustRegistry struct {
 	mu             sync.RWMutex
 	publicKeys     map[string][]byte
-	edges          map[trustEdge]bool
-	edgeSequence   map[trustEdge]uint64
+	directional    map[directedTrustEdge]directionalTrustState
+	adjacency      map[string]map[string]bool
 	issuerSequence map[string]uint64
 	records        map[[32]byte]SignedTrustRecord
-	confirmations  map[[32]byte]recordConfirmation
 	maxRecords     int
 	recordStore    TrustRecordStore
 }
@@ -448,11 +637,10 @@ type TrustRegistry struct {
 func NewTrustRegistry() *TrustRegistry {
 	return &TrustRegistry{
 		publicKeys:     make(map[string][]byte),
-		edges:          make(map[trustEdge]bool),
-		edgeSequence:   make(map[trustEdge]uint64),
+		directional:    make(map[directedTrustEdge]directionalTrustState),
+		adjacency:      make(map[string]map[string]bool),
 		issuerSequence: make(map[string]uint64),
 		records:        make(map[[32]byte]SignedTrustRecord),
-		confirmations:  make(map[[32]byte]recordConfirmation),
 		maxRecords:     16_384,
 	}
 }
@@ -514,7 +702,6 @@ func (r *TrustRegistry) AuthenticateDevice(deviceID string, publicKey []byte, re
 		}
 	}
 
-	r.publicKeys[deviceID] = append([]byte(nil), publicKey...)
 	r.applyPendingLocked(pending)
 	return nil
 }
@@ -530,20 +717,13 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 		}
 		batchHashes[recordHash] = struct{}{}
 		issuer := strings.ToLower(record.Issuer)
-		subject := strings.ToLower(record.Subject)
-		if record.Action == TrustRevoke && presentedBy != issuer {
+		if presentedBy != issuer {
 			return nil, ErrInvalidTrust
 		}
-		if presentedBy != issuer && presentedBy != subject {
-			return nil, ErrInvalidTrust
-		}
-		confirmation := r.confirmations[recordHash]
 		pending = append(pending, pendingRecord{
-			record:    record,
-			hash:      recordHash,
-			isNew:     r.records[recordHash].Signature == nil,
-			issuerOK:  confirmation.issuer || presentedBy == issuer,
-			subjectOK: confirmation.subject || presentedBy == subject,
+			record: record,
+			hash:   recordHash,
+			isNew:  r.records[recordHash].Signature == nil,
 		})
 	}
 	newCount := 0
@@ -589,6 +769,9 @@ func (r *TrustRegistry) prepareRestoreLocked(persisted []PersistedTrustRecord) (
 	pending := make([]pendingRecord, 0, len(persisted))
 	seen := make(map[[32]byte]struct{}, len(persisted))
 	for _, item := range persisted {
+		if !item.IssuerConfirmed {
+			continue
+		}
 		hashInput := append(append([]byte{}, item.Record.CanonicalPayload()...), item.Record.Signature...)
 		hash := sha256.Sum256(hashInput)
 		if _, duplicate := seen[hash]; duplicate {
@@ -597,7 +780,6 @@ func (r *TrustRegistry) prepareRestoreLocked(persisted []PersistedTrustRecord) (
 		seen[hash] = struct{}{}
 		pending = append(pending, pendingRecord{
 			record: item.Record, hash: hash, isNew: true,
-			issuerOK: item.IssuerConfirmed, subjectOK: item.SubjectConfirmed,
 		})
 	}
 	sort.Slice(pending, func(left, right int) bool {
@@ -628,21 +810,30 @@ func (r *TrustRegistry) applyPendingLocked(pending []pendingRecord) {
 			r.publicKeys[subject] = append([]byte(nil), record.SubjectPublicKey...)
 			r.issuerSequence[issuer] = record.IssuerSequence
 			r.records[recordHash] = record
-		}
-		confirmation := recordConfirmation{issuer: pendingRecord.issuerOK, subject: pendingRecord.subjectOK}
-		r.confirmations[recordHash] = confirmation
-		edge := edgeFor(issuer, subject)
-		if record.IssuerSequence < r.edgeSequence[edge] {
-			continue
-		}
-		if record.Action == TrustAuthorize && confirmation.issuer && confirmation.subject {
-			r.edges[edge] = true
-			r.edgeSequence[edge] = record.IssuerSequence
-		} else if record.Action == TrustRevoke && confirmation.issuer {
-			delete(r.edges, edge)
-			r.edgeSequence[edge] = record.IssuerSequence
+			r.directional[directedTrustEdge{issuer: issuer, subject: subject}] = directionalTrustState{
+				action: record.Action, sequence: record.IssuerSequence,
+			}
+			r.refreshPairLocked(issuer, subject)
 		}
 	}
+}
+
+func (r *TrustRegistry) refreshPairLocked(left, right string) {
+	leftToRight := r.directional[directedTrustEdge{issuer: left, subject: right}]
+	rightToLeft := r.directional[directedTrustEdge{issuer: right, subject: left}]
+	if leftToRight.action == TrustAuthorize && rightToLeft.action == TrustAuthorize {
+		if r.adjacency[left] == nil {
+			r.adjacency[left] = make(map[string]bool)
+		}
+		if r.adjacency[right] == nil {
+			r.adjacency[right] = make(map[string]bool)
+		}
+		r.adjacency[left][right] = true
+		r.adjacency[right][left] = true
+		return
+	}
+	delete(r.adjacency[left], right)
+	delete(r.adjacency[right], left)
 }
 
 func (r *TrustRegistry) ShareGraph(left, right string) bool {
@@ -659,17 +850,12 @@ func (r *TrustRegistry) ShareGraph(left, right string) bool {
 	if _, ok := r.publicKeys[right]; !ok {
 		return false
 	}
-	adjacency := make(map[string][]string)
-	for edge := range r.edges {
-		adjacency[edge.left] = append(adjacency[edge.left], edge.right)
-		adjacency[edge.right] = append(adjacency[edge.right], edge.left)
-	}
 	seen := map[string]bool{left: true}
 	queue := []string{left}
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
-		for _, next := range adjacency[current] {
+		for next := range r.adjacency[current] {
 			if next == right {
 				return true
 			}
@@ -683,19 +869,26 @@ func (r *TrustRegistry) ShareGraph(left, right string) bool {
 }
 
 func (r *TrustRegistry) DevicesInGraph(deviceID string) []string {
+	deviceID = strings.ToLower(deviceID)
 	r.mu.RLock()
-	devices := make([]string, 0, len(r.publicKeys))
-	for candidate := range r.publicKeys {
-		devices = append(devices, candidate)
-	}
-	r.mu.RUnlock()
-	sort.Strings(devices)
-	result := devices[:0]
-	for _, candidate := range devices {
-		if r.ShareGraph(deviceID, candidate) {
-			result = append(result, candidate)
+	defer r.mu.RUnlock()
+	seen := map[string]bool{deviceID: true}
+	queue := []string{deviceID}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for peer := range r.adjacency[current] {
+			if !seen[peer] {
+				seen[peer] = true
+				queue = append(queue, peer)
+			}
 		}
 	}
+	result := make([]string, 0, len(seen))
+	for candidate := range seen {
+		result = append(result, candidate)
+	}
+	sort.Strings(result)
 	return result
 }
 

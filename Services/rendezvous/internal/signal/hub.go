@@ -9,6 +9,7 @@ var (
 	ErrForbidden  = errors.New("devices do not share a trust graph")
 	ErrOffline    = errors.New("target device is offline")
 	ErrFrameLarge = errors.New("signaling frame is too large")
+	ErrCapacity   = errors.New("signaling capacity reached")
 )
 
 const MaximumFrameSize = 64 * 1024
@@ -28,29 +29,54 @@ type Frame struct {
 }
 
 type Hub struct {
-	mu      sync.RWMutex
-	graph   TrustGraph
-	clients map[string]Sink
+	mu             sync.RWMutex
+	graph          TrustGraph
+	clients        map[string]clientEntry
+	sources        map[string]int
+	globalLimit    int
+	perSourceLimit int
+	nextToken      uint64
+}
+
+type clientEntry struct {
+	sink   Sink
+	source string
+	token  uint64
 }
 
 func NewHub(graph TrustGraph) *Hub {
-	return &Hub{graph: graph, clients: make(map[string]Sink)}
+	return &Hub{graph: graph, clients: make(map[string]clientEntry), sources: make(map[string]int), globalLimit: 1024, perSourceLimit: 32}
 }
 
-func (h *Hub) Register(deviceID string, sink Sink) func() {
+func (h *Hub) Register(deviceID, source string, sink Sink) (func(), error) {
 	h.mu.Lock()
-	h.clients[deviceID] = sink
+	if len(h.clients) >= h.globalLimit || h.sources[source] >= h.perSourceLimit {
+		h.mu.Unlock()
+		return nil, ErrCapacity
+	}
+	if _, exists := h.clients[deviceID]; exists {
+		h.mu.Unlock()
+		return nil, ErrCapacity
+	}
+	h.nextToken++
+	token := h.nextToken
+	h.clients[deviceID] = clientEntry{sink: sink, source: source, token: token}
+	h.sources[source]++
 	h.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			h.mu.Lock()
-			if current, ok := h.clients[deviceID]; ok && current == sink {
+			if current, ok := h.clients[deviceID]; ok && current.token == token {
 				delete(h.clients, deviceID)
+				h.sources[current.source]--
+				if h.sources[current.source] == 0 {
+					delete(h.sources, current.source)
+				}
 			}
 			h.mu.Unlock()
 		})
-	}
+	}, nil
 }
 
 func (h *Hub) Route(from, to string, payload []byte) error {
@@ -61,7 +87,7 @@ func (h *Hub) Route(from, to string, payload []byte) error {
 		return ErrForbidden
 	}
 	h.mu.RLock()
-	target := h.clients[to]
+	target := h.clients[to].sink
 	h.mu.RUnlock()
 	if target == nil {
 		return ErrOffline

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -22,32 +23,97 @@ import (
 )
 
 const (
-	WebSocketProtocol = "macchannel.auth.v1"
-	maximumBodySize   = 128 * 1024
-	webSocketAuthTTL  = 10 * time.Second
+	WebSocketProtocol        = "macchannel.auth.v1"
+	maximumBodySize          = 128 * 1024
+	webSocketAuthTTL         = 10 * time.Second
+	webSocketPongWait        = 90 * time.Second
+	webSocketPingEvery       = 30 * time.Second
+	webSocketMaximumLifetime = 24 * time.Hour
 )
 
 var webSocketAuthPayload = []byte(`{"type":"websocket-auth-v1"}`)
 
+var errConnectionCapacity = errors.New("authenticated connection capacity reached")
+
+type connectionLimits struct {
+	Global    int
+	PerSource int
+	PerDevice int
+}
+
+type connectionLimiter struct {
+	mu      sync.Mutex
+	limits  connectionLimits
+	total   int
+	sources map[string]int
+	devices map[string]int
+}
+
+func newConnectionLimiter(limits connectionLimits) *connectionLimiter {
+	if limits.Global <= 0 {
+		limits.Global = 1024
+	}
+	if limits.PerSource <= 0 {
+		limits.PerSource = 32
+	}
+	if limits.PerDevice <= 0 {
+		limits.PerDevice = 1
+	}
+	return &connectionLimiter{limits: limits, sources: make(map[string]int), devices: make(map[string]int)}
+}
+
+func (l *connectionLimiter) Acquire(source, deviceID string) (func(), error) {
+	l.mu.Lock()
+	if l.total >= l.limits.Global || l.sources[source] >= l.limits.PerSource || l.devices[deviceID] >= l.limits.PerDevice {
+		l.mu.Unlock()
+		return nil, errConnectionCapacity
+	}
+	l.total++
+	l.sources[source]++
+	l.devices[deviceID]++
+	l.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.total--
+			l.sources[source]--
+			l.devices[deviceID]--
+			if l.sources[source] == 0 {
+				delete(l.sources, source)
+			}
+			if l.devices[deviceID] == 0 {
+				delete(l.devices, deviceID)
+			}
+		})
+	}, nil
+}
+
 type Config struct {
-	Clock      func() time.Time
-	Verifier   *auth.Verifier
-	Registry   *auth.TrustRegistry
-	Pairings   pairing.Store
-	Presence   *presence.Hub
-	Signals    *signal.Hub
-	PairingTTL time.Duration
+	Clock                   func() time.Time
+	Verifier                *auth.Verifier
+	Registry                *auth.TrustRegistry
+	Pairings                pairing.Store
+	Presence                *presence.Hub
+	Signals                 *signal.Hub
+	PairingTTL              time.Duration
+	WebSocketGlobalLimit    int
+	WebSocketPerSourceLimit int
+	WebSocketPerDeviceLimit int
+	AllowedWebSocketOrigins []string
 }
 
 type Router struct {
-	clock      func() time.Time
-	verifier   *auth.Verifier
-	registry   *auth.TrustRegistry
-	pairings   pairing.Store
-	presence   *presence.Hub
-	signals    *signal.Hub
-	pairingTTL time.Duration
-	upgrader   websocket.Upgrader
+	clock       func() time.Time
+	verifier    *auth.Verifier
+	registry    *auth.TrustRegistry
+	pairings    pairing.Store
+	presence    *presence.Hub
+	signals     *signal.Hub
+	pairingTTL  time.Duration
+	connections *connectionLimiter
+	upgrader    websocket.Upgrader
 }
 
 func NewRouter(config Config) http.Handler {
@@ -72,6 +138,7 @@ func NewRouter(config Config) http.Handler {
 	if config.PairingTTL <= 0 || config.PairingTTL > 5*time.Minute {
 		config.PairingTTL = 5 * time.Minute
 	}
+	allowedOrigins := normalizedOrigins(config.AllowedWebSocketOrigins)
 	router := &Router{
 		clock:      config.Clock,
 		verifier:   config.Verifier,
@@ -80,11 +147,13 @@ func NewRouter(config Config) http.Handler {
 		presence:   config.Presence,
 		signals:    config.Signals,
 		pairingTTL: config.PairingTTL,
+		connections: newConnectionLimiter(connectionLimits{
+			Global: config.WebSocketGlobalLimit, PerSource: config.WebSocketPerSourceLimit, PerDevice: config.WebSocketPerDeviceLimit,
+		}),
 		upgrader: websocket.Upgrader{
 			Subprotocols: []string{WebSocketProtocol},
 			CheckOrigin: func(request *http.Request) bool {
-				origin := request.Header.Get("Origin")
-				return origin == "" || sameOrigin(origin, request.Host)
+				return webSocketOriginAllowed(request.Header.Get("Origin"), request.Host, allowedOrigins)
 			},
 		},
 	}
@@ -92,6 +161,10 @@ func NewRouter(config Config) http.Handler {
 	mux.HandleFunc("GET /healthz", router.health)
 	mux.HandleFunc("POST /v1/pairing", router.createPairing)
 	mux.HandleFunc("POST /v1/pairing/{code}/join", router.joinPairing)
+	mux.HandleFunc("POST /v1/pairing/{code}/host", router.hostPairing)
+	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/reserve", router.reserveAuthorization)
+	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization", router.commitAuthorization)
+	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/retrieve", router.retrieveAuthorization)
 	mux.HandleFunc("GET /v1/ws", router.webSocket)
 	return securityHeaders(mux)
 }
@@ -119,12 +192,17 @@ func (r *Router) createPairing(writer http.ResponseWriter, request *http.Request
 			writeError(writer, http.StatusInternalServerError, "internal_error")
 			return
 		}
-		err = r.pairings.Create(request.Context(), code, payload.EncryptedSessionPayload, expiresAt)
+		err = r.pairings.CreateSession(request.Context(), code, envelope.DeviceID, observedSource(request), payload.EncryptedSessionPayload, expiresAt)
 		if errors.Is(err, pairing.ErrCollision) {
 			continue
 		}
 		if errors.Is(err, pairing.ErrCapacity) {
 			writeError(writer, http.StatusServiceUnavailable, "capacity_reached")
+			return
+		}
+		if errors.Is(err, pairing.ErrRateLimit) {
+			writer.Header().Set("Retry-After", "600")
+			writeError(writer, http.StatusTooManyRequests, "rate_limited")
 			return
 		}
 		if err != nil {
@@ -155,7 +233,7 @@ func (r *Router) joinPairing(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	storedPayload, err := r.pairings.Consume(request.Context(), code, observedSource(request), r.clock())
+	session, err := r.pairings.Join(request.Context(), code, envelope.DeviceID, observedSource(request), payload.EncryptedJoinPayload, r.clock())
 	switch {
 	case errors.Is(err, pairing.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "pairing_not_found")
@@ -168,18 +246,128 @@ func (r *Router) joinPairing(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusInternalServerError, "internal_error")
 	default:
 		writeJSON(writer, http.StatusOK, map[string]any{
-			"encryptedSessionPayload": storedPayload,
+			"sessionID":               session.ID,
+			"encryptedSessionPayload": session.EncryptedSessionPayload,
 		})
 	}
 }
 
+func (r *Router) hostPairing(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	code := request.PathValue("code")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.Code != code {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	session, err := r.pairings.HostJoin(request.Context(), code, envelope.DeviceID, r.clock())
+	if writePairingError(writer, err) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"sessionID": session.ID, "encryptedJoinPayload": session.EncryptedJoinPayload,
+	})
+}
+
+func (r *Router) reserveAuthorization(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		SessionID string `json:"sessionID"`
+	}
+	sessionID := request.PathValue("sessionID")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.SessionID != sessionID {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	reservation, err := r.pairings.ReserveAuthorization(request.Context(), sessionID, envelope.DeviceID, r.clock())
+	if writePairingError(writer, err) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"reservationID": reservation.ID, "expiresAt": reservation.ExpiresAt.UnixMilli(),
+	})
+}
+
+func (r *Router) commitAuthorization(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		SessionID              string `json:"sessionID"`
+		ReservationID          string `json:"reservationID"`
+		EncryptedAuthorization []byte `json:"encryptedAuthorization"`
+	}
+	sessionID := request.PathValue("sessionID")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.SessionID != sessionID {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	err := r.pairings.CommitAuthorization(request.Context(), sessionID, envelope.DeviceID, payload.ReservationID, payload.EncryptedAuthorization, r.clock())
+	if writePairingError(writer, err) {
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (r *Router) retrieveAuthorization(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		SessionID string `json:"sessionID"`
+	}
+	sessionID := request.PathValue("sessionID")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.SessionID != sessionID {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	authorization, err := r.pairings.Authorization(request.Context(), sessionID, envelope.DeviceID, r.clock())
+	if writePairingError(writer, err) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"encryptedAuthorization": authorization})
+}
+
+func writePairingError(writer http.ResponseWriter, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, pairing.ErrPending):
+		writeError(writer, http.StatusTooEarly, "pairing_pending")
+	case errors.Is(err, pairing.ErrGone):
+		writeError(writer, http.StatusGone, "pairing_gone")
+	case errors.Is(err, pairing.ErrForbidden):
+		writeError(writer, http.StatusForbidden, "pairing_forbidden")
+	case errors.Is(err, pairing.ErrNotFound):
+		writeError(writer, http.StatusNotFound, "pairing_not_found")
+	case errors.Is(err, pairing.ErrConflict):
+		writeError(writer, http.StatusConflict, "pairing_conflict")
+	case errors.Is(err, pairing.ErrInvalid):
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+	default:
+		writeError(writer, http.StatusInternalServerError, "internal_error")
+	}
+	return true
+}
+
 func (r *Router) authenticateHTTP(writer http.ResponseWriter, request *http.Request) (auth.Envelope, bool) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maximumBodySize)
 	var envelope auth.Envelope
 	if err := decodeStrict(request.Body, &envelope, maximumBodySize); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_request")
 		return auth.Envelope{}, false
 	}
-	if err := r.verifier.VerifyHTTP(envelope); err != nil {
+	if err := r.verifier.VerifyHTTPFrom(request.Context(), envelope, observedSource(request)); err != nil {
 		writeError(writer, http.StatusUnauthorized, "authentication_failed")
 		return auth.Envelope{}, false
 	}
@@ -199,7 +387,8 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 	peer := &webSocketPeer{connection: connection}
 	connection.SetReadLimit(maximumBodySize)
 	_ = connection.SetReadDeadline(time.Now().Add(webSocketAuthTTL))
-	challenge, err := r.verifier.IssueChallenge()
+	source := observedSource(request)
+	challenge, err := r.verifier.IssueChallengeFor(request.Context(), source)
 	if err != nil || peer.SendJSON(challenge) != nil {
 		return
 	}
@@ -208,23 +397,55 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
 		return
 	}
-	if err := r.verifier.VerifyChallenge(authentication.Envelope); err != nil ||
+	if err := r.verifier.VerifyChallengeFrom(request.Context(), authentication.Envelope, source); err != nil ||
 		!bytes.Equal(authentication.Envelope.Payload, webSocketAuthPayload) ||
 		r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, authentication.TrustRecords) != nil {
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
 		return
 	}
 	deviceID := strings.ToLower(authentication.Envelope.DeviceID)
-	_ = connection.SetReadDeadline(time.Time{})
+	releaseConnection, err := r.connections.Acquire(source, deviceID)
+	if err != nil {
+		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "capacity_reached"})
+		return
+	}
+	defer releaseConnection()
+	lifetimeDeadline := time.Now().Add(webSocketMaximumLifetime)
+	_ = connection.SetReadDeadline(earlierDeadline(time.Now().Add(webSocketPongWait), lifetimeDeadline))
 	connection.SetPongHandler(func(string) error {
-		return connection.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return connection.SetReadDeadline(earlierDeadline(time.Now().Add(webSocketPongWait), lifetimeDeadline))
 	})
-	unregisterSignal := r.signals.Register(deviceID, peer)
+	donePinging := make(chan struct{})
+	defer close(donePinging)
+	go func() {
+		ticker := time.NewTicker(webSocketPingEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if peer.SendPing() != nil {
+					_ = connection.Close()
+					return
+				}
+			case <-donePinging:
+				return
+			}
+		}
+	}()
+	unregisterSignal, err := r.signals.Register(deviceID, source, peer)
+	if err != nil {
+		_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
+		return
+	}
 	defer unregisterSignal()
 	if err := peer.SendJSON(map[string]string{"type": "auth-ok", "deviceID": deviceID}); err != nil {
 		return
 	}
-	disconnectPresence := r.presence.Connect(deviceID, peer)
+	disconnectPresence, err := r.presence.Connect(deviceID, source, peer)
+	if err != nil {
+		_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
+		return
+	}
 	defer disconnectPresence()
 
 	for {
@@ -274,6 +495,13 @@ func (p *webSocketPeer) SendJSON(value any) error {
 	return p.connection.WriteJSON(value)
 }
 
+func (p *webSocketPeer) SendPing() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	deadline := time.Now().Add(10 * time.Second)
+	return p.connection.WriteControl(websocket.PingMessage, nil, deadline)
+}
+
 func randomPairingCode() (string, error) {
 	value, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
 	if err != nil {
@@ -316,9 +544,45 @@ func hasProtocol(request *http.Request, expected string) bool {
 	return false
 }
 
-func sameOrigin(origin, host string) bool {
-	origin = strings.TrimPrefix(strings.TrimPrefix(origin, "https://"), "http://")
-	return strings.TrimSuffix(origin, "/") == host
+func normalizedOrigins(values []string) map[string]bool {
+	result := make(map[string]bool, len(values))
+	for _, value := range values {
+		if normalized, ok := normalizeOrigin(value); ok {
+			result[normalized] = true
+		}
+	}
+	return result
+}
+
+func webSocketOriginAllowed(origin, requestHost string, configured map[string]bool) bool {
+	if origin == "" {
+		return true
+	}
+	normalized, ok := normalizeOrigin(origin)
+	if !ok {
+		return false
+	}
+	if configured[normalized] {
+		return true
+	}
+	parsed, _ := url.Parse(normalized)
+	return strings.EqualFold(parsed.Host, requestHost)
+}
+
+func normalizeOrigin(value string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+		parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", false
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), true
+}
+
+func earlierDeadline(left, right time.Time) time.Time {
+	if left.Before(right) {
+		return left
+	}
+	return right
 }
 
 func securityHeaders(next http.Handler) http.Handler {

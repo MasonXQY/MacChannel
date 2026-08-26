@@ -179,6 +179,10 @@ func newTestAPI(t *testing.T) *testAPI {
 }
 
 func (a *testAPI) signedRequest(t *testing.T, payload any) auth.Envelope {
+	return a.signedRequestAs(t, a.identity, payload)
+}
+
+func (a *testAPI) signedRequestAs(t *testing.T, identity testIdentity, payload any) auth.Envelope {
 	t.Helper()
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -188,7 +192,7 @@ func (a *testAPI) signedRequest(t *testing.T, payload any) auth.Envelope {
 	if _, err := rand.Read(nonce); err != nil {
 		t.Fatal(err)
 	}
-	return a.identity.envelope(t, a.clock.Now(), nonce, encoded)
+	return identity.envelope(t, a.clock.Now(), nonce, encoded)
 }
 
 func (a *testAPI) doEnvelope(t *testing.T, method, path string, envelope auth.Envelope, headers map[string]string) *http.Response {
@@ -355,6 +359,217 @@ func TestSignedJoinCannotBeRedirectedToAnotherCode(t *testing.T) {
 	api.joinPairing(t, secondCode, signedJoinRequest(t, api, secondCode), http.StatusOK)
 }
 
+func TestPreTrustPairingAuthorizationMailboxLifecycle(t *testing.T) {
+	api := newTestAPI(t)
+	host := api.identity
+	joiner := newIdentity(t)
+	code := api.createPairing(t, signedCreateRequest(t, api))
+
+	joinResponse := api.doEnvelope(t, http.MethodPost, "/v1/pairing/"+code+"/join", api.signedRequestAs(t, joiner, map[string]any{
+		"code": code, "encryptedJoinPayload": []byte("opaque-join-request"),
+	}), nil)
+	defer joinResponse.Body.Close()
+	if joinResponse.StatusCode != http.StatusOK {
+		t.Fatalf("join status = %d, body = %s", joinResponse.StatusCode, readBody(joinResponse.Body))
+	}
+	var joined struct {
+		SessionID               string `json:"sessionID"`
+		EncryptedSessionPayload []byte `json:"encryptedSessionPayload"`
+	}
+	if err := json.NewDecoder(joinResponse.Body).Decode(&joined); err != nil {
+		t.Fatal(err)
+	}
+	if joined.SessionID == "" || string(joined.EncryptedSessionPayload) != "opaque-host-offer" {
+		t.Fatalf("join response = %#v", joined)
+	}
+
+	hostResponse := api.doEnvelope(t, http.MethodPost, "/v1/pairing/"+code+"/host", api.signedRequestAs(t, host, map[string]any{
+		"code": code,
+	}), nil)
+	defer hostResponse.Body.Close()
+	if hostResponse.StatusCode != http.StatusOK {
+		t.Fatalf("host receive status = %d, body = %s", hostResponse.StatusCode, readBody(hostResponse.Body))
+	}
+	var hostRequest struct {
+		SessionID            string `json:"sessionID"`
+		EncryptedJoinPayload []byte `json:"encryptedJoinPayload"`
+	}
+	if err := json.NewDecoder(hostResponse.Body).Decode(&hostRequest); err != nil {
+		t.Fatal(err)
+	}
+	if hostRequest.SessionID != joined.SessionID || string(hostRequest.EncryptedJoinPayload) != "opaque-join-request" {
+		t.Fatalf("host request = %#v", hostRequest)
+	}
+
+	reservePath := "/v1/pairing/sessions/" + joined.SessionID + "/authorization/reserve"
+	reserve := func() string {
+		response := api.doEnvelope(t, http.MethodPost, reservePath, api.signedRequestAs(t, host, map[string]any{
+			"sessionID": joined.SessionID,
+		}), nil)
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("reserve status = %d, body = %s", response.StatusCode, readBody(response.Body))
+		}
+		var result struct {
+			ReservationID string `json:"reservationID"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		return result.ReservationID
+	}
+	reservationID := reserve()
+	if reservationID == "" || reserve() != reservationID {
+		t.Fatal("reservation was not stable and idempotent")
+	}
+
+	retrievePath := "/v1/pairing/sessions/" + joined.SessionID + "/authorization/retrieve"
+	pending := api.doEnvelope(t, http.MethodPost, retrievePath, api.signedRequestAs(t, joiner, map[string]any{
+		"sessionID": joined.SessionID,
+	}), nil)
+	pending.Body.Close()
+	if pending.StatusCode != http.StatusTooEarly {
+		t.Fatalf("pending retrieve status = %d, want 425", pending.StatusCode)
+	}
+
+	commitPath := "/v1/pairing/sessions/" + joined.SessionID + "/authorization"
+	commit := func(payload []byte) int {
+		response := api.doEnvelope(t, http.MethodPost, commitPath, api.signedRequestAs(t, host, map[string]any{
+			"sessionID": joined.SessionID, "reservationID": reservationID,
+			"encryptedAuthorization": payload,
+		}), nil)
+		response.Body.Close()
+		return response.StatusCode
+	}
+	if status := commit([]byte("opaque-authorization")); status != http.StatusNoContent {
+		t.Fatalf("commit status = %d", status)
+	}
+	if status := commit([]byte("opaque-authorization")); status != http.StatusNoContent {
+		t.Fatalf("idempotent commit status = %d", status)
+	}
+
+	retrieved := api.doEnvelope(t, http.MethodPost, retrievePath, api.signedRequestAs(t, joiner, map[string]any{
+		"sessionID": joined.SessionID,
+	}), nil)
+	defer retrieved.Body.Close()
+	if retrieved.StatusCode != http.StatusOK {
+		t.Fatalf("retrieve status = %d, body = %s", retrieved.StatusCode, readBody(retrieved.Body))
+	}
+	var authorization struct {
+		EncryptedAuthorization []byte `json:"encryptedAuthorization"`
+	}
+	if err := json.NewDecoder(retrieved.Body).Decode(&authorization); err != nil {
+		t.Fatal(err)
+	}
+	if string(authorization.EncryptedAuthorization) != "opaque-authorization" {
+		t.Fatalf("authorization = %q", authorization.EncryptedAuthorization)
+	}
+	replayed := api.doEnvelope(t, http.MethodPost, retrievePath, api.signedRequestAs(t, joiner, map[string]any{
+		"sessionID": joined.SessionID,
+	}), nil)
+	replayed.Body.Close()
+	if replayed.StatusCode != http.StatusGone {
+		t.Fatalf("replayed retrieve status = %d, want 410", replayed.StatusCode)
+	}
+}
+
+func TestAuthorizationReservationSurvivesPairingExpiryUntilMailboxExpiry(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
+	store := pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now})
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	if err := store.CreateSession(context.Background(), "123456", host.id, "203.0.113.1", []byte("offer"), clock.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.Join(context.Background(), "123456", joiner.id, "203.0.113.2", []byte("join"), clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveAuthorization(context.Background(), session.ID, host.id, clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Minute)
+	if err := store.Cleanup(context.Background(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), clock.Now()); err != nil {
+		t.Fatalf("reserved commit after pairing expiry: %v", err)
+	}
+	if payload, err := store.Authorization(context.Background(), session.ID, joiner.id, clock.Now()); err != nil || string(payload) != "authorization" {
+		t.Fatalf("mailbox retrieval payload=%q err=%v", payload, err)
+	}
+	clock.Advance(13 * time.Minute)
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), clock.Now()); !errors.Is(err, pairing.ErrGone) {
+		t.Fatalf("commit at mailbox expiry error=%v, want gone", err)
+	}
+}
+
+func TestPostgresPairingProtocolSurvivesRestartAtEveryPhase(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE pairing_sessions, pairing_creation_events, pairing_attempt_failures, pairing_attempt_reservations`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	clock := func() time.Time { return now }
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	store := pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	if err := store.CreateSession(context.Background(), "123456", host.id, "203.0.113.1", []byte("offer"), now.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	if _, err := store.HostJoin(context.Background(), "123456", host.id, now); !errors.Is(err, pairing.ErrPending) {
+		t.Fatalf("host poll before join error=%v, want pending", err)
+	}
+	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	session, err := store.Join(context.Background(), "123456", joiner.id, "203.0.113.2", []byte("join"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	hostView, err := store.HostJoin(context.Background(), "123456", host.id, now)
+	if err != nil || hostView.ID != session.ID || string(hostView.EncryptedJoinPayload) != "join" {
+		t.Fatalf("host view=%+v err=%v", hostView, err)
+	}
+	reservation, err := store.ReserveAuthorization(context.Background(), session.ID, host.id, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	if _, err := store.Authorization(context.Background(), session.ID, joiner.id, now); !errors.Is(err, pairing.ErrPending) {
+		t.Fatalf("retrieval before commit error=%v, want pending", err)
+	}
+	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), now); err != nil {
+		t.Fatal(err)
+	}
+	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), now); err != nil {
+		t.Fatalf("response-loss retry: %v", err)
+	}
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("different"), now); !errors.Is(err, pairing.ErrConflict) {
+		t.Fatalf("conflicting retry error=%v, want conflict", err)
+	}
+	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	payload, err := store.Authorization(context.Background(), session.ID, joiner.id, now)
+	if err != nil || string(payload) != "authorization" {
+		t.Fatalf("retrieval payload=%q err=%v", payload, err)
+	}
+	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
+	if _, err := store.Authorization(context.Background(), session.ID, joiner.id, now); !errors.Is(err, pairing.ErrGone) {
+		t.Fatalf("one-use retrieval error=%v, want gone", err)
+	}
+}
+
 func TestRepeatedHTTPEnvelopeNonceIsRejected(t *testing.T) {
 	api := newTestAPI(t)
 	envelope := signedCreateRequest(t, api)
@@ -404,16 +619,67 @@ func TestWebSocketRejectsStaleEnvelopeAfterChallenge(t *testing.T) {
 	}
 }
 
+func TestConfiguredWebSocketOriginsUseExactParsedOrigins(t *testing.T) {
+	server := httptest.NewServer(NewRouter(Config{AllowedWebSocketOrigins: []string{"https://console.example"}}))
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/ws"
+	dial := func(origin string) (*websocket.Conn, *http.Response, error) {
+		dialer := *websocket.DefaultDialer
+		dialer.Subprotocols = []string{WebSocketProtocol}
+		headers := http.Header{}
+		headers.Set("Origin", origin)
+		return dialer.Dial(wsURL, headers)
+	}
+	accepted, _, err := dial("https://console.example")
+	if err != nil {
+		t.Fatalf("configured origin rejected: %v", err)
+	}
+	accepted.Close()
+	for _, origin := range []string{"https://console.example/path", "https://console.example@evil.test", "not a url"} {
+		connection, response, err := dial(origin)
+		if connection != nil {
+			connection.Close()
+		}
+		if err == nil || response == nil || response.StatusCode != http.StatusForbidden {
+			t.Fatalf("origin %q: err=%v response=%v, want 403", origin, err, response)
+		}
+	}
+}
+
+func TestAuthenticatedConnectionLimitsArePartitioned(t *testing.T) {
+	limiter := newConnectionLimiter(connectionLimits{Global: 2, PerSource: 1, PerDevice: 1})
+	releaseFirst, err := limiter.Acquire("203.0.113.1", "device-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFirst()
+	if _, err := limiter.Acquire("203.0.113.1", "device-b"); !errors.Is(err, errConnectionCapacity) {
+		t.Fatalf("same-source error = %v, want capacity", err)
+	}
+	if _, err := limiter.Acquire("203.0.113.2", "device-a"); !errors.Is(err, errConnectionCapacity) {
+		t.Fatalf("same-device error = %v, want capacity", err)
+	}
+	releaseSecond, err := limiter.Acquire("203.0.113.2", "device-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseSecond()
+	if _, err := limiter.Acquire("203.0.113.3", "device-c"); !errors.Is(err, errConnectionCapacity) {
+		t.Fatalf("global error = %v, want capacity", err)
+	}
+}
+
 func TestPresenceAndSignalsAreConfinedToTrustGraph(t *testing.T) {
 	api := newTestAPI(t)
 	owner := newIdentity(t)
 	peer := newIdentity(t)
 	outsider := newIdentity(t)
-	record := owner.trustRecord(t, peer, 1)
+	ownerRecord := owner.trustRecord(t, peer, 1)
+	peerRecord := peer.trustRecord(t, owner, 1)
 
-	ownerWS := api.authenticatedWebSocket(t, owner, []auth.SignedTrustRecord{record})
+	ownerWS := api.authenticatedWebSocket(t, owner, []auth.SignedTrustRecord{ownerRecord})
 	defer ownerWS.Close()
-	peerWS := api.authenticatedWebSocket(t, peer, []auth.SignedTrustRecord{record})
+	peerWS := api.authenticatedWebSocket(t, peer, []auth.SignedTrustRecord{peerRecord})
 	defer peerWS.Close()
 	outsiderWS := api.authenticatedWebSocket(t, outsider, nil)
 	defer outsiderWS.Close()
@@ -518,6 +784,63 @@ func TestSourceAttemptReservationsAreAtomicAndBounded(t *testing.T) {
 	}
 }
 
+func TestPairingCreationAndFailuresUsePartitionedQuotas(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	clock := &testClock{now: now}
+	store := pairing.NewMemoryStore(pairing.StoreConfig{Capacity: 64, Clock: clock.Now})
+	for index := range 10 {
+		code := fmt.Sprintf("%06d", index)
+		if err := store.CreateSession(context.Background(), code, fmt.Sprintf("host-%d", index), "203.0.113.1", []byte("opaque"), now.Add(time.Minute)); err != nil {
+			t.Fatalf("create %d: %v", index, err)
+		}
+	}
+	if err := store.CreateSession(context.Background(), "000010", "host-10", "203.0.113.1", []byte("opaque"), now.Add(time.Minute)); !errors.Is(err, pairing.ErrRateLimit) {
+		t.Fatalf("same-source create error = %v, want rate limit", err)
+	}
+	if err := store.CreateSession(context.Background(), "000011", "other-host", "203.0.113.2", []byte("opaque"), now.Add(time.Minute)); err != nil {
+		t.Fatalf("unrelated source was starved: %v", err)
+	}
+	for range 5 {
+		_, _ = store.Join(context.Background(), "999999", "joiner-a", "198.51.100.1", []byte("opaque"), now)
+	}
+	if _, err := store.Join(context.Background(), "999998", "joiner-a", "198.51.100.1", []byte("opaque"), now); !errors.Is(err, pairing.ErrRateLimit) {
+		t.Fatalf("same-source join error = %v, want rate limit", err)
+	}
+	if _, err := store.Join(context.Background(), "999998", "joiner-b", "198.51.100.2", []byte("opaque"), now); !errors.Is(err, pairing.ErrNotFound) {
+		t.Fatalf("unrelated source join error = %v, want not found", err)
+	}
+}
+
+func TestPostgresPairingFailuresSurviveStoreRestart(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE pairing_sessions, pairing_creation_events, pairing_attempt_failures, pairing_attempt_reservations`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	joiner := newIdentity(t)
+	first := pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: func() time.Time { return now }})
+	for range 5 {
+		if _, err := first.Join(context.Background(), "999999", joiner.id, "198.51.100.9", []byte("opaque"), now); !errors.Is(err, pairing.ErrNotFound) {
+			t.Fatalf("failure seed: %v", err)
+		}
+	}
+	restarted := pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: func() time.Time { return now }})
+	if _, err := restarted.Join(context.Background(), "999998", joiner.id, "198.51.100.9", []byte("opaque"), now); !errors.Is(err, pairing.ErrRateLimit) {
+		t.Fatalf("restart lost source failures: %v", err)
+	}
+	if _, err := restarted.Join(context.Background(), "999998", newIdentity(t).id, "198.51.100.10", []byte("opaque"), now); !errors.Is(err, pairing.ErrNotFound) {
+		t.Fatalf("unrelated partition was locked out: %v", err)
+	}
+}
+
 func TestTrustRecordBatchCannotLowerIssuerSequence(t *testing.T) {
 	registry := auth.NewTrustRegistry()
 	owner := newIdentity(t)
@@ -553,6 +876,104 @@ func TestReplayEvidenceIsNeverEvictedWhileFresh(t *testing.T) {
 	}
 	if err := verifier.VerifyHTTP(first); !errors.Is(err, auth.ErrRepeatedNonce) {
 		t.Fatalf("replay error = %v, want repeated nonce", err)
+	}
+}
+
+func TestReplayCapacityIsPartitionedByObservedSource(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
+	verifier := auth.NewVerifier(auth.VerifierConfig{
+		Clock:                   clock.Now,
+		FreshnessWindow:         time.Minute,
+		ReplayCapacity:          2,
+		ReplayPerSourceCapacity: 1,
+	})
+	identity := newIdentity(t)
+	first := identity.envelope(t, clock.Now(), bytes.Repeat([]byte{1}, 32), []byte("one"))
+	second := identity.envelope(t, clock.Now(), bytes.Repeat([]byte{2}, 32), []byte("two"))
+	third := identity.envelope(t, clock.Now(), bytes.Repeat([]byte{3}, 32), []byte("three"))
+	if err := verifier.VerifyHTTPFrom(context.Background(), first, "203.0.113.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.VerifyHTTPFrom(context.Background(), second, "203.0.113.1"); !errors.Is(err, auth.ErrReplayCapacity) {
+		t.Fatalf("same-source error = %v, want replay capacity", err)
+	}
+	if err := verifier.VerifyHTTPFrom(context.Background(), third, "203.0.113.2"); err != nil {
+		t.Fatalf("unrelated source was starved: %v", err)
+	}
+}
+
+func TestPostgresReplayEvidenceIsSharedAcrossVerifierInstances(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE auth_replay_nonces, auth_challenges`); err != nil {
+		t.Fatal(err)
+	}
+	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
+	first := auth.NewVerifier(auth.VerifierConfig{Clock: clock.Now, ReplayStore: auth.NewPostgresReplayStore(database)})
+	second := auth.NewVerifier(auth.VerifierConfig{Clock: clock.Now, ReplayStore: auth.NewPostgresReplayStore(database)})
+	identity := newIdentity(t)
+	envelope := identity.envelope(t, clock.Now(), bytes.Repeat([]byte{7}, 32), []byte("request"))
+	if err := first.VerifyHTTPFrom(context.Background(), envelope, "203.0.113.7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.VerifyHTTPFrom(context.Background(), envelope, "203.0.113.7"); !errors.Is(err, auth.ErrRepeatedNonce) {
+		t.Fatalf("second verifier replay error = %v, want repeated nonce", err)
+	}
+	challenge, err := first.IssueChallengeFor(context.Background(), "203.0.113.8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := identity.envelope(t, clock.Now(), challenge.Nonce, webSocketAuthPayload)
+	if err := second.VerifyChallengeFrom(context.Background(), authentication, "203.0.113.8"); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.VerifyChallengeFrom(context.Background(), authentication, "203.0.113.8"); !errors.Is(err, auth.ErrInvalidChallenge) {
+		t.Fatalf("consumed challenge error = %v, want invalid challenge", err)
+	}
+	if _, err := database.Exec(`TRUNCATE auth_replay_nonces`); err != nil {
+		t.Fatal(err)
+	}
+	const replicas = 16
+	envelopes := make([]auth.Envelope, replicas)
+	verifiers := make([]*auth.Verifier, replicas)
+	for index := range replicas {
+		envelopes[index] = newIdentity(t).envelope(t, clock.Now(), bytes.Repeat([]byte{byte(index + 16)}, 32), []byte("concurrent"))
+		verifiers[index] = auth.NewVerifier(auth.VerifierConfig{
+			Clock: clock.Now, ReplayStore: auth.NewPostgresReplayStore(database), ReplayCapacity: 4,
+			ReplayPerSourceCapacity: 1, ReplayPerDeviceCapacity: 1,
+		})
+	}
+	start := make(chan struct{})
+	results := make(chan error, replicas)
+	var wait sync.WaitGroup
+	for index := range replicas {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			results <- verifiers[index].VerifyHTTPFrom(context.Background(), envelopes[index], fmt.Sprintf("198.51.100.%d", index))
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, auth.ErrReplayCapacity) {
+			t.Fatalf("concurrent verifier error: %v", err)
+		}
+	}
+	if successes != 4 {
+		t.Fatalf("global replay successes = %d, want exactly 4", successes)
 	}
 }
 
@@ -606,20 +1027,49 @@ func TestSwiftDeviceIdentifierWireShapeAuthenticatesHTTP(t *testing.T) {
 	}
 }
 
+func TestHTTPBodiesRejectTrailingJSONAndOversize(t *testing.T) {
+	api := newTestAPI(t)
+	for name, body := range map[string][]byte{
+		"trailing": append(mustJSON(t, signedCreateRequest(t, api)), []byte(` {}`)...),
+		"oversize": append(mustJSON(t, signedCreateRequest(t, api)), bytes.Repeat([]byte(" "), maximumBodySize)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			response, err := http.Post(api.server.URL+"/v1/pairing", "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", response.StatusCode)
+			}
+		})
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func TestTrustRegistryRestoresValidatedRecords(t *testing.T) {
 	ctx := context.Background()
 	store := &memoryTrustRecordStore{}
 	owner := newIdentity(t)
 	peer := newIdentity(t)
-	record := owner.trustRecord(t, peer, 1)
+	ownerRecord := owner.trustRecord(t, peer, 1)
+	peerRecord := peer.trustRecord(t, owner, 1)
 	first, err := auth.NewPersistentTrustRegistry(ctx, store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.AuthenticateDevice(owner.id, owner.publicKey, []auth.SignedTrustRecord{record}); err != nil {
+	if err := first.AuthenticateDevice(owner.id, owner.publicKey, []auth.SignedTrustRecord{ownerRecord}); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.AuthenticateDevice(peer.id, peer.publicKey, []auth.SignedTrustRecord{record}); err != nil {
+	if err := first.AuthenticateDevice(peer.id, peer.publicKey, []auth.SignedTrustRecord{peerRecord}); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := auth.NewPersistentTrustRegistry(ctx, store)
@@ -646,18 +1096,19 @@ func TestPostgresTrustRegistryPersistsTwoPhaseAuthorization(t *testing.T) {
 	}
 	owner := newIdentity(t)
 	peer := newIdentity(t)
-	record := owner.trustRecord(t, peer, 1)
+	ownerRecord := owner.trustRecord(t, peer, 1)
+	peerRecord := peer.trustRecord(t, owner, 1)
 	registry, err := auth.NewPostgresTrustRegistry(context.Background(), database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.AuthenticateDevice(owner.id, owner.publicKey, []auth.SignedTrustRecord{record}); err != nil {
+	if err := registry.AuthenticateDevice(owner.id, owner.publicKey, []auth.SignedTrustRecord{ownerRecord}); err != nil {
 		t.Fatal(err)
 	}
 	if registry.ShareGraph(owner.id, peer.id) {
 		t.Fatal("one-sided persistent authorization became routable")
 	}
-	if err := registry.AuthenticateDevice(peer.id, peer.publicKey, []auth.SignedTrustRecord{record}); err != nil {
+	if err := registry.AuthenticateDevice(peer.id, peer.publicKey, []auth.SignedTrustRecord{peerRecord}); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := auth.NewPostgresTrustRegistry(context.Background(), database)
@@ -669,7 +1120,7 @@ func TestPostgresTrustRegistryPersistsTwoPhaseAuthorization(t *testing.T) {
 	}
 }
 
-func TestAuthorizationRequiresIssuerAndSubjectPresentation(t *testing.T) {
+func TestAuthorizationRequiresReciprocalDirectionalRecords(t *testing.T) {
 	registry := auth.NewTrustRegistry()
 	issuer := newIdentity(t)
 	subject := newIdentity(t)
@@ -683,11 +1134,79 @@ func TestAuthorizationRequiresIssuerAndSubjectPresentation(t *testing.T) {
 	if registry.ShareGraph(issuer.id, subject.id) {
 		t.Fatal("issuer unilaterally connected an unconsenting subject")
 	}
-	if err := registry.AuthenticateDevice(subject.id, subject.publicKey, []auth.SignedTrustRecord{record}); err != nil {
+	reciprocal := subject.trustRecord(t, issuer, 1)
+	if err := registry.AuthenticateDevice(subject.id, subject.publicKey, []auth.SignedTrustRecord{reciprocal}); err != nil {
 		t.Fatal(err)
 	}
 	if !registry.ShareGraph(issuer.id, subject.id) {
 		t.Fatal("mutually presented authorization did not connect peers")
+	}
+}
+
+func TestDirectionalTrustSequencesRemainIndependentAcrossRestart(t *testing.T) {
+	store := &memoryTrustRecordStore{}
+	a := newIdentity(t)
+	b := newIdentity(t)
+	registry, err := auth.NewPersistentTrustRegistry(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aAuthorizesB := a.trustRecord(t, b, 100)
+	bAuthorizesA := b.trustRecord(t, a, 1)
+	if err := registry.AuthenticateDevice(a.id, a.publicKey, []auth.SignedTrustRecord{aAuthorizesB}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(b.id, b.publicKey, []auth.SignedTrustRecord{bAuthorizesA}); err != nil {
+		t.Fatal(err)
+	}
+	if !registry.ShareGraph(a.id, b.id) {
+		t.Fatal("reciprocal directional authorizations did not create a route")
+	}
+	bRevokesA := b.trustRecordAction(t, a, 2, auth.TrustRevoke)
+	if err := registry.AuthenticateDevice(b.id, b.publicKey, []auth.SignedTrustRecord{bRevokesA}); err != nil {
+		t.Fatal(err)
+	}
+	if registry.ShareGraph(a.id, b.id) {
+		t.Fatal("B sequence 2 revocation was incorrectly compared with A sequence 100")
+	}
+	restored, err := auth.NewPersistentTrustRegistry(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ShareGraph(a.id, b.id) {
+		t.Fatal("directional revocation was lost on restart")
+	}
+	bReauthorizesA := b.trustRecord(t, a, 3)
+	if err := restored.AuthenticateDevice(b.id, b.publicKey, []auth.SignedTrustRecord{bReauthorizesA}); err != nil {
+		t.Fatal(err)
+	}
+	if !restored.ShareGraph(a.id, b.id) {
+		t.Fatal("same-issuer later authorization did not restore route")
+	}
+}
+
+func TestDirectionalRestoreHonorsLowerSequenceFromDifferentIssuer(t *testing.T) {
+	a := newIdentity(t)
+	b := newIdentity(t)
+	aAuthorizesB := a.trustRecord(t, b, 100)
+	bRevokesA := b.trustRecordAction(t, a, 1, auth.TrustRevoke)
+	store := &memoryTrustRecordStore{records: []auth.PersistedTrustRecord{
+		{Record: aAuthorizesB, IssuerConfirmed: true},
+		{Record: bRevokesA, IssuerConfirmed: true},
+	}}
+	restored, err := auth.NewPersistentTrustRegistry(context.Background(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ShareGraph(a.id, b.id) {
+		t.Fatal("A sequence 100 overrode B sequence 1 revocation during restore")
+	}
+	bAuthorizesA := b.trustRecord(t, a, 2)
+	if err := restored.AuthenticateDevice(b.id, b.publicKey, []auth.SignedTrustRecord{bAuthorizesA}); err != nil {
+		t.Fatal(err)
+	}
+	if !restored.ShareGraph(a.id, b.id) {
+		t.Fatal("same-issuer later authorization did not replace its revocation")
 	}
 }
 
@@ -705,7 +1224,8 @@ func TestTrustUpdatesRefreshPresenceAndRevocationsHidePeers(t *testing.T) {
 		t.Fatal(err)
 	}
 	readUntilType(t, ownerWS, "trust-ok")
-	if err := peerWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{authorization}}); err != nil {
+	reciprocal := peer.trustRecord(t, owner, 1)
+	if err := peerWS.WriteJSON(map[string]any{"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{reciprocal}}); err != nil {
 		t.Fatal(err)
 	}
 	readUntilType(t, peerWS, "trust-ok")
