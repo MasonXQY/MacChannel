@@ -41,23 +41,31 @@ public struct VolumeReceiveCapacityProvider: ReceiveCapacityProviding {
     }
 }
 
-private final class ReceiveTransferLease: @unchecked Sendable {
+final class ReceiveTransferLease: @unchecked Sendable {
+    private let incomingDirectory: URL
     private let parentDescriptor: Int32
     private let descriptor: Int32
     private let name: String
+    private let parentDevice: dev_t
+    private let parentInode: ino_t
     private let device: dev_t
     private let inode: ino_t
     private var removeOnDeinit = true
 
     private init(
+        incomingDirectory: URL,
         parentDescriptor: Int32,
         descriptor: Int32,
         name: String,
+        parentStatus: stat,
         status: stat
     ) {
+        self.incomingDirectory = incomingDirectory
         self.parentDescriptor = parentDescriptor
         self.descriptor = descriptor
         self.name = name
+        parentDevice = parentStatus.st_dev
+        parentInode = parentStatus.st_ino
         device = status.st_dev
         inode = status.st_ino
     }
@@ -71,13 +79,23 @@ private final class ReceiveTransferLease: @unchecked Sendable {
 
     static func acquire(
         transferID: TransferID,
-        incomingDirectory: URL
+        incomingDirectory: URL,
+        onLocked: @Sendable (URL) throws -> Void = { _ in }
     ) throws -> ReceiveTransferLease {
         let parent = Darwin.open(
             incomingDirectory.path,
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
         )
         guard parent >= 0 else { throw ReceiveStoreError.stagingUnavailable }
+        var parentStatus = stat()
+        guard fstat(parent, &parentStatus) == 0,
+            parentStatus.st_mode & S_IFMT == S_IFDIR,
+            parentStatus.st_uid == geteuid(),
+            parentStatus.st_mode & 0o077 == 0
+        else {
+            Darwin.close(parent)
+            throw ReceiveStoreError.stagingUnavailable
+        }
         let name = ".macchannel-lease-\(transferID.rawValue.uuidString.lowercased())"
         let descriptor = Darwin.openat(
             parent,
@@ -106,21 +124,114 @@ private final class ReceiveTransferLease: @unchecked Sendable {
             Darwin.close(parent)
             throw busy ? ReceiveStoreError.transferBusy : ReceiveStoreError.stagingUnavailable
         }
-        return ReceiveTransferLease(
+        do {
+            try onLocked(incomingDirectory.appendingPathComponent(name))
+        } catch {
+            _ = flock(descriptor, LOCK_UN)
+            Darwin.close(descriptor)
+            Darwin.close(parent)
+            throw error
+        }
+        var named = stat()
+        guard fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            named.st_mode & S_IFMT == S_IFREG,
+            named.st_uid == geteuid(),
+            named.st_nlink == 1,
+            named.st_dev == status.st_dev,
+            named.st_ino == status.st_ino
+        else {
+            _ = flock(descriptor, LOCK_UN)
+            Darwin.close(descriptor)
+            Darwin.close(parent)
+            throw ReceiveStoreError.stagingUnavailable
+        }
+        let lease = ReceiveTransferLease(
+            incomingDirectory: incomingDirectory.standardizedFileURL,
             parentDescriptor: parent,
             descriptor: descriptor,
             name: name,
+            parentStatus: parentStatus,
             status: status
         )
+        try lease.requireHeld(error: .stagingUnavailable)
+        return lease
     }
 
     func requireHeld() throws {
+        try requireHeld(error: .transferBusy)
+    }
+
+    private func requireHeld(error: ReceiveStoreError) throws {
+        var parent = stat()
+        var path = stat()
         var status = stat()
-        guard fstat(descriptor, &status) == 0,
+        var named = stat()
+        guard fstat(parentDescriptor, &parent) == 0,
+            parent.st_mode & S_IFMT == S_IFDIR,
+            parent.st_dev == parentDevice,
+            parent.st_ino == parentInode,
+            lstat(incomingDirectory.path, &path) == 0,
+            path.st_mode & S_IFMT == S_IFDIR,
+            path.st_dev == parentDevice,
+            path.st_ino == parentInode,
+            fstat(descriptor, &status) == 0,
             status.st_mode & S_IFMT == S_IFREG,
             status.st_dev == device,
-            status.st_ino == inode
-        else { throw ReceiveStoreError.transferBusy }
+            status.st_ino == inode,
+            status.st_nlink == 1,
+            fstatat(parentDescriptor, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            named.st_mode & S_IFMT == S_IFREG,
+            named.st_uid == geteuid(),
+            named.st_nlink == 1,
+            named.st_dev == device,
+            named.st_ino == inode
+        else { throw error }
+    }
+
+    func stagingDirectoryExists(transferID: TransferID) throws -> Bool {
+        try requireHeld()
+        let name = transferID.rawValue.uuidString.lowercased()
+        var status = stat()
+        if fstatat(parentDescriptor, name, &status, AT_SYMLINK_NOFOLLOW) != 0 {
+            guard errno == ENOENT else { throw ReceiveStoreError.stagingUnavailable }
+            try requireHeld()
+            return false
+        }
+        guard status.st_mode & S_IFMT == S_IFDIR,
+            status.st_uid == geteuid(),
+            status.st_mode & 0o077 == 0
+        else { throw ReceiveStoreError.stagingUnavailable }
+        try requireHeld()
+        return true
+    }
+
+    func makeStagingTree(stagingName: String, metadataName: String) throws
+        -> DescriptorStagingTree
+    {
+        try requireHeld()
+        let tree = try DescriptorStagingTree(
+            destinationDescriptor: parentDescriptor,
+            stagingName: stagingName,
+            metadataName: metadataName
+        )
+        try requireHeld()
+        return tree
+    }
+
+    func removeExpiredQuarantines() throws {
+        try requireHeld()
+        try secureRemoveExpiredQuarantines(incomingDescriptor: parentDescriptor)
+        try requireHeld()
+    }
+
+    func removeStagingDirectory(transferID: TransferID) throws -> Bool {
+        try requireHeld()
+        let removed = try secureRemoveStagingDirectory(
+            transferID: transferID,
+            incomingDescriptor: parentDescriptor
+        )
+        try requireHeld()
+        return removed
     }
 
     func preserveForTransfer() {
@@ -383,6 +494,101 @@ private enum SourceBindingStore {
     }
 }
 
+private enum CancellationIntentStore {
+    private static let magic = Data([0x4d, 0x43, 0x43, 0x49])  // MCCI
+    private static let version: UInt8 = 1
+    private static let name = ".cancellation-intent"
+    private static let temporaryName = ".cancellation-intent.tmp"
+    private static let bodyBytes = 4 + 1 + 32
+    private static let totalBytes = bodyBytes + 32
+
+    static func exists(fingerprint: Data, tree: DescriptorStagingTree) throws -> Bool {
+        guard fingerprint.count == 32 else { throw ReceiveStoreError.invalidManifest }
+        try removeIfPresent(named: temporaryName, tree: tree)
+        let descriptor = Darwin.openat(
+            tree.metadataDescriptor,
+            name,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+        )
+        if descriptor < 0 {
+            guard errno == ENOENT else { throw ReceiveStoreError.stagingUnavailable }
+            return false
+        }
+        defer { Darwin.close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_nlink == 1,
+            status.st_size == totalBytes
+        else { throw ReceiveStoreError.stagingUnavailable }
+        let data = try readPublicationData(descriptor, length: totalBytes)
+        let body = data.prefix(bodyBytes)
+        guard body.prefix(4) == magic,
+            body[4] == version,
+            Data(body.dropFirst(5)) == fingerprint,
+            Data(SHA256.hash(data: body)) == data.suffix(32)
+        else { throw ReceiveStoreError.stagingUnavailable }
+        return true
+    }
+
+    static func record(fingerprint: Data, tree: DescriptorStagingTree) throws {
+        guard fingerprint.count == 32 else { throw ReceiveStoreError.invalidManifest }
+        try removeIfPresent(named: temporaryName, tree: tree)
+        var body = magic
+        body.append(version)
+        body.append(fingerprint)
+        var data = body
+        data.append(Data(SHA256.hash(data: body)))
+        let descriptor = Darwin.openat(
+            tree.metadataDescriptor,
+            temporaryName,
+            O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR
+        )
+        guard descriptor >= 0 else { throw ReceiveStoreError.stagingUnavailable }
+        var keepTemporary = true
+        defer {
+            Darwin.close(descriptor)
+            if keepTemporary { _ = unlinkat(tree.metadataDescriptor, temporaryName, 0) }
+        }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_nlink == 1
+        else { throw ReceiveStoreError.stagingUnavailable }
+        try writePublicationData(data, descriptor: descriptor)
+        guard fsync(descriptor) == 0,
+            renameat(
+                tree.metadataDescriptor,
+                temporaryName,
+                tree.metadataDescriptor,
+                name
+            ) == 0,
+            fsync(tree.metadataDescriptor) == 0
+        else { throw ReceiveStoreError.stagingUnavailable }
+        keepTemporary = false
+    }
+
+    private static func removeIfPresent(
+        named name: String,
+        tree: DescriptorStagingTree
+    ) throws {
+        var status = stat()
+        if fstatat(tree.metadataDescriptor, name, &status, AT_SYMLINK_NOFOLLOW) != 0 {
+            guard errno == ENOENT else { throw ReceiveStoreError.stagingUnavailable }
+            return
+        }
+        guard status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_nlink == 1,
+            unlinkat(tree.metadataDescriptor, name, 0) == 0,
+            fsync(tree.metadataDescriptor) == 0
+        else { throw ReceiveStoreError.stagingUnavailable }
+    }
+}
+
 private func readPublicationData(_ descriptor: Int32, length: Int) throws -> Data {
     var data = Data(count: length)
     var consumed = 0
@@ -429,9 +635,15 @@ enum PublicationCleanupStep: CaseIterable, Sendable {
     case stagingRemoved
 }
 
+enum CancellationCleanupStep: Sendable {
+    case intentRecorded
+    case stagingDiscarded
+}
+
 public actor ReceiveStore {
     private enum State {
         case receiving
+        case cancelling
         case published(URL)
         case reconciled(URL)
         case finished
@@ -499,9 +711,6 @@ public actor ReceiveStore {
         } catch {
             throw ReceiveStoreError.invalidManifest
         }
-        let aggregate = try manifestAggregateBytes(manifest)
-        try policy.authorize(source: source, aggregateBytes: aggregate)
-
         let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -510,18 +719,7 @@ public actor ReceiveStore {
             (suppliedIncoming
             ?? applicationSupport.appendingPathComponent("Incoming", isDirectory: true))
             .standardizedFileURL
-        let destination = directories.directory(for: source).standardizedFileURL
-        let destinationHandle = try prepareWritableDestination(destination)
         try preparePrivateIncomingDirectory(incoming)
-        do {
-            try manifest.validateDestinationPaths(onVolumeContaining: destination)
-        } catch {
-            throw ReceiveStoreError.invalidManifest
-        }
-        guard try directoriesShareVolume(incoming, destination) else {
-            throw ReceiveStoreError.atomicPlacementUnavailable
-        }
-
         let database: TransferDatabase
         if let suppliedDatabase {
             database = suppliedDatabase
@@ -530,14 +728,43 @@ public actor ReceiveStore {
                 url: applicationSupport.appendingPathComponent("transfers.sqlite3")
             )
         }
+        let knownPhase = try await database.phase(for: manifest.id)
         let lease = try ReceiveTransferLease.acquire(
             transferID: manifest.id,
             incomingDirectory: incoming
         )
-        let resuming = try stagingDirectoryExists(
-            transferID: manifest.id,
-            incomingDirectory: incoming
-        )
+        let resuming = try lease.stagingDirectoryExists(transferID: manifest.id)
+        if knownPhase == .cancelling || knownPhase == .cancelled || knownPhase == .completed {
+            do {
+                try lease.removeExpiredQuarantines()
+                if resuming {
+                    _ = try lease.removeStagingDirectory(transferID: manifest.id)
+                }
+                if knownPhase == .cancelling {
+                    try await database.markPhase(.cancelled, for: manifest.id, at: Date())
+                }
+                try lease.removeAfterTerminalState()
+            } catch let error as ReceiveStoreError {
+                throw error
+            } catch {
+                throw ReceiveStoreError.stagingUnavailable
+            }
+            throw ReceiveStoreError.alreadyFinished
+        }
+
+        let aggregate = try manifestAggregateBytes(manifest)
+        try policy.authorize(source: source, aggregateBytes: aggregate)
+        let destination = directories.directory(for: source).standardizedFileURL
+        let destinationHandle = try prepareWritableDestination(destination)
+        do {
+            try manifest.validateDestinationPaths(onVolumeContaining: destination)
+        } catch {
+            throw ReceiveStoreError.invalidManifest
+        }
+        guard try directoriesShareVolume(incoming, destination) else {
+            throw ReceiveStoreError.atomicPlacementUnavailable
+        }
+        try lease.requireHeld()
         if !resuming {
             try requireCapacity(
                 remaining: aggregate,
@@ -545,19 +772,10 @@ public actor ReceiveStore {
                 provider: capacity
             )
         }
-        let recordedPhase = try await database.recordPrepared(
-            manifest: manifest,
-            source: source,
-            route: route,
-            at: Date()
-        )
-        if recordedPhase == .completed, !resuming {
-            throw ReceiveStoreError.alreadyFinished
-        }
 
         let rootName = manifest.entries[0].relativePath.components[0]
         let suffix = manifest.id.rawValue.uuidString.lowercased()
-        let caseSensitive = try destinationVolumeSupportsCaseSensitiveNames(incoming)
+        let caseSensitive = try destinationVolumeSupportsCaseSensitiveNames(destination)
         let rootKey = destinationFilesystemKey([rootName], caseSensitive: caseSensitive)
         let preferredMetadata = ".macchannel-storage-metadata"
         let metadataName =
@@ -568,19 +786,17 @@ public actor ReceiveStore {
                 ) ? preferredMetadata + ".private" : preferredMetadata
         let tree: DescriptorStagingTree
         do {
-            tree = try DescriptorStagingTree(
-                destinationDirectory: incoming,
+            tree = try lease.makeStagingTree(
                 stagingName: suffix,
                 metadataName: metadataName
             )
         } catch {
-            if recordedPhase != .completed {
-                _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
-            }
             throw ReceiveStoreError.stagingUnavailable
         }
         var files: [UInt32: StagedFile] = [:]
-        var publicationCommitted = recordedPhase == .completed
+        var publicationCommitted = knownPhase == .completed
+        var cancellationRecovery = false
+        var databasePrepared = false
         do {
             let fingerprint = try manifestFingerprint(manifest)
             try ResumeStateStore.requireCompatible(
@@ -590,8 +806,94 @@ public actor ReceiveStore {
             )
             let intent = try PublicationIntent.load(fingerprint: fingerprint, tree: tree)
             let rootExists = try tree.containsRootEntry(rootName)
-            if recordedPhase != .completed {
+            if knownPhase != .completed {
                 try SourceBindingStore.ensure(source: source, resuming: resuming, tree: tree)
+            }
+            let hasCancellationIntent = try CancellationIntentStore.exists(
+                fingerprint: fingerprint,
+                tree: tree
+            )
+            if resuming, rootExists {
+                try tree.requireExactEntries(
+                    manifest.entries,
+                    caseSensitive: caseSensitive
+                )
+            } else if resuming, intent == nil, knownPhase != .completed {
+                throw ReceiveStoreError.stagingUnavailable
+            }
+            if rootExists {
+                for (index, entry) in manifest.entries.enumerated() {
+                    switch entry.kind {
+                    case .directory:
+                        if !resuming {
+                            try tree.ensureDirectory(entry.relativePath.components)
+                        }
+                    case .file:
+                        files[UInt32(index)] = try tree.openFile(
+                            entry.relativePath.components,
+                            create: !resuming
+                        )
+                    }
+                }
+            } else if !resuming {
+                for (index, entry) in manifest.entries.enumerated() {
+                    switch entry.kind {
+                    case .directory:
+                        try tree.ensureDirectory(entry.relativePath.components)
+                    case .file:
+                        files[UInt32(index)] = try tree.openFile(
+                            entry.relativePath.components,
+                            create: true
+                        )
+                    }
+                }
+            }
+            let loaded: (store: ResumeStateStore, verified: Set<ChunkCoordinate>)?
+            if rootExists || !resuming {
+                loaded = try ResumeStateStore.load(
+                    named: ".resume-state",
+                    fingerprint: fingerprint,
+                    manifest: manifest,
+                    tree: tree,
+                    files: files,
+                    onCheckpointValidated: nil
+                )
+            } else {
+                loaded = nil
+            }
+            if loaded != nil {
+                var metadataEntries: Set<String> = [".resume-state", ".source-binding"]
+                if intent != nil { metadataEntries.insert(".publication-intent") }
+                if hasCancellationIntent { metadataEntries.insert(".cancellation-intent") }
+                try tree.requireExactStagingRoot(
+                    manifestRootName: rootName,
+                    metadataEntries: metadataEntries
+                )
+            }
+
+            let recordedPhase = try await database.recordPrepared(
+                manifest: manifest,
+                source: source,
+                route: route,
+                at: Date()
+            )
+            databasePrepared = true
+            if recordedPhase == .cancelling {
+                cancellationRecovery = true
+                try tree.discard()
+                try await database.markPhase(.cancelled, for: manifest.id, at: Date())
+                try lease.removeAfterTerminalState()
+                throw ReceiveStoreError.alreadyFinished
+            }
+            if hasCancellationIntent {
+                cancellationRecovery = true
+                if recordedPhase != .cancelling {
+                    try await database.markPhase(.cancelling, for: manifest.id, at: Date())
+                }
+                try tree.discard()
+                try await database.markPhase(.cancelled, for: manifest.id, at: Date())
+                try lease.removeAfterTerminalState()
+                throw ReceiveStoreError.alreadyFinished
             }
             if let intent {
                 let published = try recoverPublishedCandidate(
@@ -606,11 +908,7 @@ public actor ReceiveStore {
                         try await database.markPhase(.completed, for: manifest.id, at: Date())
                         publicationCommitted = true
                     }
-                    if rootExists {
-                        try tree.discard()
-                    } else {
-                        try cleanupPublishedStaging(tree: tree)
-                    }
+                    try tree.discard()
                     try lease.removeAfterTerminalState()
                     return ReceiveStore(
                         manifest: manifest,
@@ -637,37 +935,11 @@ public actor ReceiveStore {
             }
             if recordedPhase == .completed {
                 guard !rootExists else { throw ReceiveStoreError.stagingUnavailable }
-                try cleanupPublishedStaging(tree: tree)
+                try tree.discard()
                 try lease.removeAfterTerminalState()
                 throw ReceiveStoreError.alreadyFinished
             }
-            if resuming {
-                try tree.requireExactEntries(
-                    manifest.entries,
-                    caseSensitive: caseSensitive
-                )
-            }
-            for (index, entry) in manifest.entries.enumerated() {
-                switch entry.kind {
-                case .directory:
-                    if !resuming {
-                        try tree.ensureDirectory(entry.relativePath.components)
-                    }
-                case .file:
-                    files[UInt32(index)] = try tree.openFile(
-                        entry.relativePath.components,
-                        create: !resuming
-                    )
-                }
-            }
-            let loaded = try ResumeStateStore.load(
-                named: ".resume-state",
-                fingerprint: fingerprint,
-                manifest: manifest,
-                tree: tree,
-                files: files,
-                onCheckpointValidated: nil
-            )
+            guard let loaded else { throw ReceiveStoreError.stagingUnavailable }
             let store = ReceiveStore(
                 manifest: manifest,
                 source: source,
@@ -701,13 +973,17 @@ public actor ReceiveStore {
             lease.preserveForTransfer()
             return store
         } catch let error as ReceiveStoreError {
-            if !publicationCommitted {
+            if databasePrepared, !publicationCommitted, !cancellationRecovery {
                 _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
+            } else if !resuming, !databasePrepared {
+                try? tree.discard()
             }
             throw error
         } catch {
-            if !publicationCommitted {
+            if databasePrepared, !publicationCommitted, !cancellationRecovery {
                 _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
+            } else if !resuming, !databasePrepared {
+                try? tree.discard()
             }
             throw ReceiveStoreError.stagingUnavailable
         }
@@ -816,6 +1092,7 @@ public actor ReceiveStore {
 
     func finalize(
         onPublishedBeforeHistory: @Sendable () throws -> Void,
+        onPublicationIntentRecorded: @Sendable () throws -> Void = {},
         onCleanupStep: @escaping @Sendable (PublicationCleanupStep) throws -> Void
     ) async throws -> URL {
         switch state {
@@ -827,9 +1104,12 @@ public actor ReceiveStore {
             return output
         case .finished:
             throw ReceiveStoreError.alreadyFinished
+        case .cancelling:
+            throw ReceiveStoreError.alreadyFinished
         case .receiving:
             break
         }
+        try lease.requireHeld()
         for (index, entry) in manifest.entries.enumerated() where entry.kind == .file {
             guard let file = files[UInt32(index)] else {
                 throw ReceiveStoreError.invalidManifest
@@ -859,6 +1139,22 @@ public actor ReceiveStore {
         do {
             try destinationHandle.requirePathIdentity()
             try tree.requireStagingPathIdentity()
+            let intent = try PublicationIntent.load(
+                fingerprint: preparedFingerprint,
+                tree: tree
+            )
+            guard
+                try !CancellationIntentStore.exists(
+                    fingerprint: preparedFingerprint,
+                    tree: tree
+                )
+            else { throw TransferProtocolError.destinationEscape }
+            var metadataEntries: Set<String> = [".resume-state", ".source-binding"]
+            if intent != nil { metadataEntries.insert(".publication-intent") }
+            try tree.requireExactStagingRoot(
+                manifestRootName: manifest.entries[0].relativePath.components[0],
+                metadataEntries: metadataEntries
+            )
             try tree.requireExactEntries(
                 manifest.entries,
                 caseSensitive: try destinationVolumeSupportsCaseSensitiveNames(incomingDirectory)
@@ -887,6 +1183,9 @@ public actor ReceiveStore {
                             fingerprint: self.preparedFingerprint,
                             tree: self.tree
                         )
+                        try onPublicationIntentRecorded()
+                        try self.lease.requireHeld()
+                        try self.destinationHandle.requirePathIdentity()
                     }
                 )
                 destinationHandle.unlockPublication()
@@ -919,15 +1218,31 @@ public actor ReceiveStore {
     }
 
     public func cancel() async throws {
-        guard case .receiving = state else { return }
-        do {
-            try tree.discard()
-        } catch {
-            throw ReceiveStoreError.stagingUnavailable
+        try await cancel(onCleanupStep: { _ in })
+    }
+
+    func cancel(
+        onCleanupStep: @escaping @Sendable (CancellationCleanupStep) throws -> Void
+    ) async throws {
+        switch state {
+        case .receiving:
+            try lease.requireHeld()
+            try await database.markPhase(.cancelling, for: manifest.id, at: Date())
+            state = .cancelling
+            try CancellationIntentStore.record(fingerprint: preparedFingerprint, tree: tree)
+            try onCleanupStep(.intentRecorded)
+        case .cancelling:
+            break
+        case .published, .reconciled, .finished:
+            return
         }
+        try lease.requireHeld()
+        try await database.markPhase(.cancelling, for: manifest.id, at: Date())
+        do { try tree.discard() } catch { throw ReceiveStoreError.stagingUnavailable }
         state = .finished
+        try onCleanupStep(.stagingDiscarded)
         try await database.markPhase(.cancelled, for: manifest.id, at: Date())
-        try? lease.removeAfterTerminalState()
+        try lease.removeAfterTerminalState()
     }
 
     public func markFailed(at date: Date = Date()) async throws {
@@ -990,11 +1305,6 @@ public actor ReceiveStore {
             .appendingPathComponent("MacChannel/Incoming", isDirectory: true))
             .standardizedFileURL
         guard FileManager.default.fileExists(atPath: incoming.path) else { return [] }
-        do {
-            try secureRemoveExpiredQuarantines(incomingDirectory: incoming)
-        } catch {
-            throw ReceiveStoreError.stagingUnavailable
-        }
         let threshold = now.addingTimeInterval(-7 * 86_400)
         let candidates = try await database.failedTransfers(updatedBefore: threshold)
         var removed: [TransferID] = []
@@ -1009,10 +1319,9 @@ public actor ReceiveStore {
                 } catch ReceiveStoreError.transferBusy {
                     continue
                 }
-                if try secureRemoveStagingDirectory(
-                    transferID: id,
-                    incomingDirectory: incoming
-                ) {
+                try lease.requireHeld()
+                try lease.removeExpiredQuarantines()
+                if try lease.removeStagingDirectory(transferID: id) {
                     removed.append(id)
                 }
                 try? lease.removeAfterTerminalState()
@@ -1090,14 +1399,6 @@ private func recoverPublishedCandidate(
         if required { throw error }
         return false
     }
-}
-
-private func cleanupPublishedStaging(tree: DescriptorStagingTree) throws {
-    try ResumeStateStore.remove(named: ".resume-state", tree: tree)
-    try SourceBindingStore.remove(tree: tree)
-    try PublicationIntent.remove(tree: tree)
-    try tree.removeMetadataDirectory(onValidated: nil)
-    try tree.removeEmptyStagingDirectory()
 }
 
 private func performPublicationCleanup(_ operation: () throws -> Void) throws {
@@ -1237,27 +1538,4 @@ private func directoriesShareVolume(_ first: URL, _ second: URL) throws -> Bool 
         throw ReceiveStoreError.atomicPlacementUnavailable
     }
     return firstStatus.st_dev == secondStatus.st_dev
-}
-
-private func stagingDirectoryExists(
-    transferID: TransferID,
-    incomingDirectory: URL
-) throws -> Bool {
-    let parent = Darwin.open(
-        incomingDirectory.path,
-        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
-    )
-    guard parent >= 0 else { throw ReceiveStoreError.stagingUnavailable }
-    defer { Darwin.close(parent) }
-    let name = transferID.rawValue.uuidString.lowercased()
-    var status = stat()
-    if fstatat(parent, name, &status, AT_SYMLINK_NOFOLLOW) != 0 {
-        guard errno == ENOENT else { throw ReceiveStoreError.stagingUnavailable }
-        return false
-    }
-    guard status.st_mode & S_IFMT == S_IFDIR,
-        status.st_uid == geteuid(),
-        status.st_mode & 0o077 == 0
-    else { throw ReceiveStoreError.stagingUnavailable }
-    return true
 }

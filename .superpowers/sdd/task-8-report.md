@@ -25,6 +25,12 @@ existing destination, and can resume safely after process or database loss.
   directory-stream offset caused by `dup`; the scanner now opens an independent
   directory description, and the focused cancellation/expiry test passed five
   consecutive runs before the complete suites were repeated.
+- Follow-up review added red tests for cancellation crashes before and after
+  staging discard, partial-tree restart, zero-capacity recovery, revoked policy,
+  unavailable destinations, lease-file and Incoming-directory replacement,
+  late Incoming/destination swaps at the publication commit boundary,
+  cancellation phase regression, malicious legacy schemas, unexpected private
+  staging state, repeated case/Unicode collision scans, and extreme timestamps.
 
 ## Implemented contract
 
@@ -42,6 +48,9 @@ existing destination, and can resume safely after process or database loss.
   opened and revalidated without following symlinks. The destination and staging
   must be on the same volume.
 - A cross-process per-transfer lease prevents two stores from sharing staging.
+  The lease binds both its file and the exact Incoming directory device/inode;
+  staging creation, resume inspection, and cleanup all descend from that pinned
+  directory descriptor. Replacing either pathname fails closed.
   The source identity is independently bound in private staging metadata, so a
   missing or replaced history database cannot reassign partial content to a
   different trusted source.
@@ -51,11 +60,15 @@ existing destination, and can resume safely after process or database loss.
   verify the written chunk by reading from the pinned descriptor.
 - Resume accepts only a compatible journal and exact manifest membership. It
   reconstructs SQLite verified ranges from descriptor-revalidated journal state;
-  database state is never treated as proof that bytes are valid.
+  database state is never treated as proof that bytes are valid. Existing source
+  binding, manifest shape, journal records, and exact private metadata are fully
+  validated before a missing or replacement database is changed.
 - Finalization requires every chunk, each complete file hash, the exact staged
   tree, and the prepared manifest fingerprint to match. A durable private
   publication intent records the chosen candidate before an exclusive atomic
-  rename. Both staging and destination parents are synced, and the published
+  rename. Immediately after the intent is synced and before the rename, both the
+  pinned Incoming lease and configured destination pathname identities are
+  rechecked. Both staging and destination parents are synced, and the published
   result is reverified.
 - Existing case- or Unicode-equivalent names are never overwritten. Collisions
   become `name 2.ext`, `name 3.ext`, and so on, with Unicode-safe truncation to
@@ -64,30 +77,45 @@ existing destination, and can resume safely after process or database loss.
   every later cleanup boundary without creating a duplicate. Metadata retirement
   and expired-staging deletion use restartable descriptor-validated quarantines,
   reject identity or type changes, and sync their parent directories.
+- Cancellation first commits a monotonic SQLite `cancelling` phase, then writes
+  and syncs a checksummed private cancellation intent before staging discard.
+  Restart completes descriptor-relative quarantine cleanup even when staging was
+  partially removed, the destination is unavailable, policy changed, or capacity
+  is zero, and only then commits `cancelled`. Completed history similarly treats
+  residual private staging as disposable cleanup rather than requiring an intact
+  receive tree.
 - SQLite uses WAL mode, full synchronization, foreign keys, strict transactional
   schema migration, and mode `0600` even for an existing database. The
   `transfers`, `entries`, and `verified_ranges` tables store only transfer/peer
   identity, display name, aggregate size, timestamps, route, phase, entry shape,
   and verified ranges. They contain no content, keys, file paths, hashes, or
-  digests. Immutable transfer identity cannot be rewritten by later snapshots.
+  digests. Version-zero databases are accepted only when `sqlite_master`, table
+  columns, indexes, and foreign keys exactly match the canonical privacy-safe
+  schema; `user_version` advances only inside the validated transaction.
+  Immutable transfer identity and durable terminal/cancelling phases cannot be
+  rewritten by later snapshots or general phase updates.
 - Completion and cancellation clear private staging. Failed staging expires at
   exactly seven days or older; live leased transfers and newer failures remain.
+- Modification dates must be finite and exactly representable as platform
+  `time_t` seconds plus nanoseconds; adversarial magnitudes fail validation
+  without a trapping integer conversion.
 
 ## Verification
 
-- `swift test --filter ReceiveStoreTests`: 28 tests, 0 failures.
-- Focused cancellation/expiry regression: 5 consecutive runs, 0 failures.
+- `swift test --filter ReceiveStoreTests`: 53 tests, 0 failures.
 - `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
-- `swift test`: 187 tests, 0 failures.
+- `swift test`: 212 tests, 0 failures.
 - `bash Scripts/build-app.sh`: successful packaged-app build.
-- `swift-format lint --strict` over the Task 8 source and test files: clean.
+- `swift-format lint --strict` with the repository's four-space configuration
+  over the Task 8 source and test files: clean.
 - `git diff --check`: clean.
 
 ## Independent review and constraints
 
-- The final independent review found no remaining actionable issue and assessed
-  the implementation as ready to merge after verifying the independent directory
-  scanner correction.
+- Independent review drove the cancellation, schema, staging-root, timestamp,
+  directory-scan, and lease-binding hardening above. The final follow-up review
+  found no remaining P1/P2 issue and assessed the formatted implementation as
+  ready to merge after all focused and complete verification gates passed.
 - Safe publication requires the staging and destination directories to reside on
   the same filesystem. A configuration that cannot provide this invariant fails
   before receiving content rather than falling back to a non-atomic copy.
@@ -100,4 +128,6 @@ existing destination, and can resume safely after process or database loss.
 
 ## Commit
 
-- `feat: safely persist received files` (this report is committed with Task 8).
+- `feat: safely persist received files`
+- `fix: harden receive storage recovery` (follow-up review corrections and this
+  report)

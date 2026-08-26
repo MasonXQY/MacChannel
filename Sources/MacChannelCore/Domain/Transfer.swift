@@ -4,6 +4,7 @@ public enum TransferPhase: String, Codable, Sendable {
     case transferring
     case paused
     case verifying
+    case cancelling
     case completed
     case failed
     case cancelled

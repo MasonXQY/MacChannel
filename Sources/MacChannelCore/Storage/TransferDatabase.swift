@@ -151,7 +151,12 @@ public actor TransferDatabase {
         at date: Date
     ) throws {
         let update = try statement(
-            "UPDATE transfers SET updated_at = ?, route = ?, phase = ? WHERE id = ?"
+            """
+            UPDATE transfers SET updated_at = ?, route = ?, phase = ?
+            WHERE id = ?
+              AND phase IN ('preparing', 'connecting', 'transferring', 'paused',
+                            'verifying', 'failed')
+            """
         )
         defer { sqlite3_finalize(update) }
         try bind(date.timeIntervalSince1970, to: update, at: 1)
@@ -179,10 +184,8 @@ public actor TransferDatabase {
                 snapshot,
                 displayFilename: displayFilename
             ) {
-                if oldPhase == .completed || oldPhase == .cancelled {
-                    guard snapshot.phase == oldPhase else {
-                        throw ReceiveStoreError.databaseFailure
-                    }
+                guard isAllowedPhaseTransition(from: oldPhase, to: snapshot.phase) else {
+                    throw ReceiveStoreError.databaseFailure
                 }
                 let update = try statement(
                     """
@@ -260,6 +263,20 @@ public actor TransferDatabase {
         }
         guard result == SQLITE_DONE else { throw ReceiveStoreError.databaseFailure }
         return try ResumeMap(ranges: ranges)
+    }
+
+    func phase(for transfer: TransferID) throws -> TransferPhase? {
+        let query = try statement("SELECT phase FROM transfers WHERE id = ?")
+        defer { sqlite3_finalize(query) }
+        try bind(transfer.rawValue.uuidString.lowercased(), to: query, at: 1)
+        let first = sqlite3_step(query)
+        if first == SQLITE_DONE { return nil }
+        guard first == SQLITE_ROW,
+            let value = textColumn(query, 0),
+            let phase = TransferPhase(rawValue: value),
+            sqlite3_step(query) == SQLITE_DONE
+        else { throw ReceiveStoreError.databaseFailure }
+        return phase
     }
 
     public func replaceVerifiedRanges(for transfer: TransferID, with map: ResumeMap) throws {
@@ -350,6 +367,9 @@ public actor TransferDatabase {
 
     func markPhase(_ phase: TransferPhase, for transfer: TransferID, at date: Date) throws {
         try transaction {
+            guard let oldPhase = try self.phase(for: transfer),
+                isAllowedPhaseTransition(from: oldPhase, to: phase)
+            else { throw ReceiveStoreError.databaseFailure }
             let update = try statement(
                 "UPDATE transfers SET phase = ?, updated_at = ? WHERE id = ?"
             )
@@ -456,48 +476,375 @@ public actor TransferDatabase {
         }
         let version = sqlite3_column_int(query, 0)
         guard version <= schemaVersion else { throw ReceiveStoreError.databaseFailure }
-        if version == schemaVersion { return }
 
         try execute(database, sql: "BEGIN IMMEDIATE")
         do {
-            try execute(
-                database,
-                sql: """
-                    CREATE TABLE IF NOT EXISTS transfers (
-                        id TEXT PRIMARY KEY NOT NULL,
-                        peer_id TEXT NOT NULL,
-                        display_filename TEXT NOT NULL,
-                        aggregate_size INTEGER NOT NULL CHECK (aggregate_size >= 0),
-                        completed_bytes INTEGER NOT NULL CHECK (completed_bytes >= 0),
-                        created_at REAL NOT NULL,
-                        updated_at REAL NOT NULL,
-                        route TEXT NOT NULL,
-                        phase TEXT NOT NULL
-                    ) STRICT;
-                    CREATE TABLE IF NOT EXISTS entries (
-                        transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
-                        entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
-                        size INTEGER NOT NULL CHECK (size >= 0),
-                        chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
-                        PRIMARY KEY (transfer_id, entry_index)
-                    ) STRICT;
-                    CREATE TABLE IF NOT EXISTS verified_ranges (
-                        transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
-                        entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
-                        lower_bound INTEGER NOT NULL CHECK (lower_bound >= 0),
-                        upper_bound INTEGER NOT NULL CHECK (upper_bound > lower_bound),
-                        PRIMARY KEY (transfer_id, entry_index, lower_bound)
-                    ) STRICT;
-                    CREATE INDEX IF NOT EXISTS transfers_phase_updated
-                    ON transfers(phase, updated_at);
-                    PRAGMA user_version = 1;
-                    """
-            )
+            if version == 0 {
+                try execute(database, sql: createSchemaSQL)
+            }
+            try validateSchema(database)
+            if version == 0 {
+                try execute(database, sql: "PRAGMA user_version = 1")
+            }
             try execute(database, sql: "COMMIT")
         } catch {
             _ = try? execute(database, sql: "ROLLBACK")
             throw error
         }
+    }
+
+    private static let createSchemaSQL = """
+        CREATE TABLE IF NOT EXISTS transfers (
+            id TEXT PRIMARY KEY NOT NULL,
+            peer_id TEXT NOT NULL,
+            display_filename TEXT NOT NULL,
+            aggregate_size INTEGER NOT NULL CHECK (aggregate_size >= 0),
+            completed_bytes INTEGER NOT NULL CHECK (completed_bytes >= 0),
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            route TEXT NOT NULL,
+            phase TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS entries (
+            transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+            entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+            size INTEGER NOT NULL CHECK (size >= 0),
+            chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
+            PRIMARY KEY (transfer_id, entry_index)
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS verified_ranges (
+            transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+            entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+            lower_bound INTEGER NOT NULL CHECK (lower_bound >= 0),
+            upper_bound INTEGER NOT NULL CHECK (upper_bound > lower_bound),
+            PRIMARY KEY (transfer_id, entry_index, lower_bound)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS transfers_phase_updated
+        ON transfers(phase, updated_at);
+        """
+
+    private struct SchemaColumn: Equatable {
+        let name: String
+        let type: String
+        let notNull: Bool
+        let primaryKeyPosition: Int32
+    }
+
+    private struct SchemaIndex: Equatable, Hashable {
+        let name: String
+        let unique: Bool
+        let origin: String
+        let partial: Bool
+    }
+
+    private struct SchemaForeignKey: Equatable {
+        let table: String
+        let from: String
+        let to: String
+        let onUpdate: String
+        let onDelete: String
+        let match: String
+    }
+
+    private static func validateSchema(_ database: OpaquePointer) throws {
+        let expectedSQL = [
+            "transfers": """
+            CREATE TABLE transfers (
+                id TEXT PRIMARY KEY NOT NULL,
+                peer_id TEXT NOT NULL,
+                display_filename TEXT NOT NULL,
+                aggregate_size INTEGER NOT NULL CHECK (aggregate_size >= 0),
+                completed_bytes INTEGER NOT NULL CHECK (completed_bytes >= 0),
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                route TEXT NOT NULL,
+                phase TEXT NOT NULL
+            ) STRICT
+            """,
+            "entries": """
+            CREATE TABLE entries (
+                transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+                entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+                size INTEGER NOT NULL CHECK (size >= 0),
+                chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
+                PRIMARY KEY (transfer_id, entry_index)
+            ) STRICT
+            """,
+            "verified_ranges": """
+            CREATE TABLE verified_ranges (
+                transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+                entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+                lower_bound INTEGER NOT NULL CHECK (lower_bound >= 0),
+                upper_bound INTEGER NOT NULL CHECK (upper_bound > lower_bound),
+                PRIMARY KEY (transfer_id, entry_index, lower_bound)
+            ) STRICT
+            """,
+            "transfers_phase_updated": """
+            CREATE INDEX transfers_phase_updated ON transfers(phase, updated_at)
+            """,
+        ]
+        let objects = try schemaObjects(database)
+        guard Set(objects.keys) == Set(expectedSQL.keys) else {
+            throw ReceiveStoreError.databaseFailure
+        }
+        for (name, expected) in expectedSQL {
+            guard let actual = objects[name],
+                normalizedSchemaSQL(actual) == normalizedSchemaSQL(expected)
+            else { throw ReceiveStoreError.databaseFailure }
+        }
+
+        try requireColumns(
+            database,
+            table: "transfers",
+            expected: [
+                SchemaColumn(name: "id", type: "TEXT", notNull: true, primaryKeyPosition: 1),
+                SchemaColumn(name: "peer_id", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+                SchemaColumn(
+                    name: "display_filename", type: "TEXT", notNull: true,
+                    primaryKeyPosition: 0),
+                SchemaColumn(
+                    name: "aggregate_size", type: "INTEGER", notNull: true,
+                    primaryKeyPosition: 0),
+                SchemaColumn(
+                    name: "completed_bytes", type: "INTEGER", notNull: true,
+                    primaryKeyPosition: 0),
+                SchemaColumn(
+                    name: "created_at", type: "REAL", notNull: true, primaryKeyPosition: 0),
+                SchemaColumn(
+                    name: "updated_at", type: "REAL", notNull: true, primaryKeyPosition: 0),
+                SchemaColumn(name: "route", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+                SchemaColumn(name: "phase", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+            ]
+        )
+        try requireColumns(
+            database,
+            table: "entries",
+            expected: [
+                SchemaColumn(
+                    name: "transfer_id", type: "TEXT", notNull: true,
+                    primaryKeyPosition: 1),
+                SchemaColumn(
+                    name: "entry_index", type: "INTEGER", notNull: true,
+                    primaryKeyPosition: 2),
+                SchemaColumn(name: "size", type: "INTEGER", notNull: true, primaryKeyPosition: 0),
+                SchemaColumn(
+                    name: "chunk_count", type: "INTEGER", notNull: true,
+                    primaryKeyPosition: 0),
+            ]
+        )
+        try requireColumns(
+            database,
+            table: "verified_ranges",
+            expected: [
+                SchemaColumn(
+                    name: "transfer_id", type: "TEXT", notNull: true,
+                    primaryKeyPosition: 1),
+                SchemaColumn(
+                    name: "entry_index", type: "INTEGER", notNull: true,
+                    primaryKeyPosition: 2),
+                SchemaColumn(
+                    name: "lower_bound", type: "INTEGER", notNull: true,
+                    primaryKeyPosition: 3),
+                SchemaColumn(
+                    name: "upper_bound", type: "INTEGER", notNull: true,
+                    primaryKeyPosition: 0),
+            ]
+        )
+
+        try requireIndexes(
+            database,
+            table: "transfers",
+            expected: [
+                SchemaIndex(
+                    name: "sqlite_autoindex_transfers_1", unique: true, origin: "pk",
+                    partial: false),
+                SchemaIndex(
+                    name: "transfers_phase_updated", unique: false, origin: "c", partial: false),
+            ]
+        )
+        try requireIndexes(
+            database,
+            table: "entries",
+            expected: [
+                SchemaIndex(
+                    name: "sqlite_autoindex_entries_1", unique: true, origin: "pk",
+                    partial: false)
+            ]
+        )
+        try requireIndexes(
+            database,
+            table: "verified_ranges",
+            expected: [
+                SchemaIndex(
+                    name: "sqlite_autoindex_verified_ranges_1", unique: true, origin: "pk",
+                    partial: false)
+            ]
+        )
+        guard
+            try indexColumns(database, name: "transfers_phase_updated")
+                == ["phase", "updated_at"]
+        else { throw ReceiveStoreError.databaseFailure }
+
+        try requireForeignKeys(database, table: "transfers", expected: [])
+        let transferForeignKey = SchemaForeignKey(
+            table: "transfers",
+            from: "transfer_id",
+            to: "id",
+            onUpdate: "NO ACTION",
+            onDelete: "CASCADE",
+            match: "NONE"
+        )
+        try requireForeignKeys(database, table: "entries", expected: [transferForeignKey])
+        try requireForeignKeys(
+            database,
+            table: "verified_ranges",
+            expected: [transferForeignKey]
+        )
+    }
+
+    private static func schemaObjects(_ database: OpaquePointer) throws -> [String: String] {
+        let query = try prepare(
+            database,
+            sql: """
+                SELECT name, sql FROM sqlite_master
+                WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'view', 'trigger')
+                ORDER BY name
+                """
+        )
+        defer { sqlite3_finalize(query) }
+        var objects: [String: String] = [:]
+        var result = sqlite3_step(query)
+        while result == SQLITE_ROW {
+            guard let name = staticTextColumn(query, 0),
+                let sql = staticTextColumn(query, 1),
+                objects.updateValue(sql, forKey: name) == nil
+            else { throw ReceiveStoreError.databaseFailure }
+            result = sqlite3_step(query)
+        }
+        guard result == SQLITE_DONE else { throw ReceiveStoreError.databaseFailure }
+        return objects
+    }
+
+    private static func requireColumns(
+        _ database: OpaquePointer,
+        table: String,
+        expected: [SchemaColumn]
+    ) throws {
+        let query = try prepare(database, sql: "PRAGMA table_info(\(table))")
+        defer { sqlite3_finalize(query) }
+        var columns: [SchemaColumn] = []
+        var result = sqlite3_step(query)
+        while result == SQLITE_ROW {
+            guard let name = staticTextColumn(query, 1),
+                let type = staticTextColumn(query, 2),
+                sqlite3_column_type(query, 4) == SQLITE_NULL
+            else { throw ReceiveStoreError.databaseFailure }
+            columns.append(
+                SchemaColumn(
+                    name: name,
+                    type: type,
+                    notNull: sqlite3_column_int(query, 3) == 1,
+                    primaryKeyPosition: sqlite3_column_int(query, 5)
+                ))
+            result = sqlite3_step(query)
+        }
+        guard result == SQLITE_DONE, columns == expected else {
+            throw ReceiveStoreError.databaseFailure
+        }
+    }
+
+    private static func requireIndexes(
+        _ database: OpaquePointer,
+        table: String,
+        expected: Set<SchemaIndex>
+    ) throws {
+        let query = try prepare(database, sql: "PRAGMA index_list(\(table))")
+        defer { sqlite3_finalize(query) }
+        var indexes: Set<SchemaIndex> = []
+        var result = sqlite3_step(query)
+        while result == SQLITE_ROW {
+            guard let name = staticTextColumn(query, 1),
+                let origin = staticTextColumn(query, 3)
+            else { throw ReceiveStoreError.databaseFailure }
+            indexes.insert(
+                SchemaIndex(
+                    name: name,
+                    unique: sqlite3_column_int(query, 2) == 1,
+                    origin: origin,
+                    partial: sqlite3_column_int(query, 4) == 1
+                ))
+            result = sqlite3_step(query)
+        }
+        guard result == SQLITE_DONE, indexes == expected else {
+            throw ReceiveStoreError.databaseFailure
+        }
+    }
+
+    private static func indexColumns(_ database: OpaquePointer, name: String) throws -> [String] {
+        let query = try prepare(database, sql: "PRAGMA index_info(\(name))")
+        defer { sqlite3_finalize(query) }
+        var columns: [String] = []
+        var result = sqlite3_step(query)
+        while result == SQLITE_ROW {
+            guard sqlite3_column_int(query, 0) == columns.count,
+                let column = staticTextColumn(query, 2)
+            else { throw ReceiveStoreError.databaseFailure }
+            columns.append(column)
+            result = sqlite3_step(query)
+        }
+        guard result == SQLITE_DONE else { throw ReceiveStoreError.databaseFailure }
+        return columns
+    }
+
+    private static func requireForeignKeys(
+        _ database: OpaquePointer,
+        table: String,
+        expected: [SchemaForeignKey]
+    ) throws {
+        let query = try prepare(database, sql: "PRAGMA foreign_key_list(\(table))")
+        defer { sqlite3_finalize(query) }
+        var keys: [SchemaForeignKey] = []
+        var result = sqlite3_step(query)
+        while result == SQLITE_ROW {
+            guard sqlite3_column_int(query, 1) == 0,
+                let referencedTable = staticTextColumn(query, 2),
+                let from = staticTextColumn(query, 3),
+                let to = staticTextColumn(query, 4),
+                let onUpdate = staticTextColumn(query, 5),
+                let onDelete = staticTextColumn(query, 6),
+                let match = staticTextColumn(query, 7)
+            else { throw ReceiveStoreError.databaseFailure }
+            keys.append(
+                SchemaForeignKey(
+                    table: referencedTable,
+                    from: from,
+                    to: to,
+                    onUpdate: onUpdate,
+                    onDelete: onDelete,
+                    match: match
+                ))
+            result = sqlite3_step(query)
+        }
+        guard result == SQLITE_DONE, keys == expected else {
+            throw ReceiveStoreError.databaseFailure
+        }
+    }
+
+    private static func prepare(_ database: OpaquePointer, sql: String) throws -> OpaquePointer {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+            let statement
+        else { throw ReceiveStoreError.databaseFailure }
+        return statement
+    }
+
+    private static func staticTextColumn(_ statement: OpaquePointer, _ index: Int32) -> String? {
+        guard let text = sqlite3_column_text(statement, index) else { return nil }
+        return String(cString: text)
+    }
+
+    private static func normalizedSchemaSQL(_ sql: String) -> String {
+        sql.lowercased().filter { !$0.isWhitespace }
     }
 
     private static func execute(_ database: OpaquePointer, sql: String) throws {
@@ -636,6 +983,20 @@ public actor TransferDatabase {
         guard sqlite3_step(query) == SQLITE_ROW,
             sqlite3_step(query) == SQLITE_DONE
         else { throw ReceiveStoreError.databaseFailure }
+    }
+
+    private func isAllowedPhaseTransition(
+        from oldPhase: TransferPhase,
+        to newPhase: TransferPhase
+    ) -> Bool {
+        switch oldPhase {
+        case .completed, .cancelled:
+            return newPhase == oldPhase
+        case .cancelling:
+            return newPhase == .cancelling || newPhase == .cancelled
+        default:
+            return true
+        }
     }
 
     private func stepDone(_ statement: OpaquePointer) throws {
