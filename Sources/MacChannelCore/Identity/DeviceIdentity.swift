@@ -19,7 +19,10 @@ public struct DeviceIdentity {
     }
 
     public static func loadOrCreate(keychain: any SecretStore) throws -> DeviceIdentity {
-        if let storedPrivateKey = try keychain.data(for: privateKeyAccount) {
+        if let storedPrivateKey = try keychain.data(
+            for: privateKeyAccount,
+            policy: KeychainStore.identityPolicy
+        ) {
             do {
                 return try DeviceIdentity(
                     privateKey: P256.Signing.PrivateKey(rawRepresentation: storedPrivateKey)
@@ -30,7 +33,11 @@ public struct DeviceIdentity {
         }
 
         let identity = try ephemeral()
-        try keychain.store(identity.privateKey.rawRepresentation, for: privateKeyAccount)
+        try keychain.store(
+            identity.privateKey.rawRepresentation,
+            for: privateKeyAccount,
+            policy: KeychainStore.identityPolicy
+        )
         return identity
     }
 

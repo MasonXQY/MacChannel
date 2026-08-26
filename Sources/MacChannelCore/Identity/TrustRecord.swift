@@ -6,6 +6,15 @@ public enum TrustAction: String, Codable, Sendable {
     case revoke
 }
 
+public enum TrustRecordValidationError: Error, Equatable {
+    case invalidTimestamp
+    case invalidIssuerPublicKey
+    case invalidSubjectPublicKey
+    case invalidIssuerIdentity
+    case invalidSubjectIdentity
+    case invalidSignature
+}
+
 public struct SignedTrustRecord: Codable, Sendable {
     public let issuer: DeviceID
     public let issuerPublicKey: Data
@@ -49,15 +58,25 @@ public struct SignedTrustRecord: Codable, Sendable {
         )
     }
 
-    func hasValidSignature() -> Bool {
-        guard DeviceIdentity.deviceID(for: issuerPublicKey) == issuer,
-              DeviceIdentity.deviceID(for: subjectPublicKey) == subject,
-              let publicKey = try? P256.Signing.PublicKey(rawRepresentation: issuerPublicKey),
-              let signature = try? P256.Signing.ECDSASignature(derRepresentation: signature)
-        else {
-            return false
+    public func validated() throws {
+        let payload = try canonicalPayload()
+        guard let issuerKey = try? P256.Signing.PublicKey(rawRepresentation: issuerPublicKey) else {
+            throw TrustRecordValidationError.invalidIssuerPublicKey
         }
-        return publicKey.isValidSignature(signature, for: canonicalPayload())
+        guard let _ = try? P256.Signing.PublicKey(rawRepresentation: subjectPublicKey) else {
+            throw TrustRecordValidationError.invalidSubjectPublicKey
+        }
+        guard DeviceIdentity.deviceID(for: issuerPublicKey) == issuer else {
+            throw TrustRecordValidationError.invalidIssuerIdentity
+        }
+        guard DeviceIdentity.deviceID(for: subjectPublicKey) == subject else {
+            throw TrustRecordValidationError.invalidSubjectIdentity
+        }
+        guard let parsedSignature = try? P256.Signing.ECDSASignature(derRepresentation: signature),
+              issuerKey.isValidSignature(parsedSignature, for: payload)
+        else {
+            throw TrustRecordValidationError.invalidSignature
+        }
     }
 
     private static func signed(
@@ -91,7 +110,7 @@ public struct SignedTrustRecord: Codable, Sendable {
         )
     }
 
-    private func canonicalPayload() -> Data {
+    private func canonicalPayload() throws -> Data {
         struct Payload: Encodable {
             let action: String
             let issuer: String
@@ -109,10 +128,21 @@ public struct SignedTrustRecord: Codable, Sendable {
             issuerSequence: issuerSequence,
             subject: subject.rawValue.uuidString.lowercased(),
             subjectPublicKey: subjectPublicKey.base64EncodedString(),
-            timestampMilliseconds: Int64((timestamp.timeIntervalSince1970 * 1_000).rounded(.down))
+            timestampMilliseconds: try timestampMilliseconds()
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try! encoder.encode(payload)
+        return try encoder.encode(payload)
+    }
+
+    private func timestampMilliseconds() throws -> Int64 {
+        let milliseconds = timestamp.timeIntervalSince1970 * 1_000
+        guard milliseconds.isFinite,
+              milliseconds > Double(Int64.min),
+              milliseconds < Double(Int64.max)
+        else {
+            throw TrustRecordValidationError.invalidTimestamp
+        }
+        return Int64(milliseconds.rounded(.down))
     }
 }
