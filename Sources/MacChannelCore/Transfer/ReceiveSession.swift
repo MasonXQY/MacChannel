@@ -14,6 +14,7 @@ public struct ReceiveSession: Sendable {
     private let control: TransferSessionControl?
     private let onStagingPrepared: (@Sendable (URL) -> Void)?
     private let onCheckpointValidated: (@Sendable (String) -> Void)?
+    private let onMetadataValidated: (@Sendable (String) -> Void)?
 
     public init(
         transferID: TransferID,
@@ -25,6 +26,7 @@ public struct ReceiveSession: Sendable {
         self.control = control
         onStagingPrepared = nil
         onCheckpointValidated = nil
+        onMetadataValidated = nil
     }
 
     init(
@@ -32,13 +34,15 @@ public struct ReceiveSession: Sendable {
         destinationDirectory: URL,
         control: TransferSessionControl? = nil,
         onStagingPrepared: @escaping @Sendable (URL) -> Void,
-        onCheckpointValidated: (@Sendable (String) -> Void)? = nil
+        onCheckpointValidated: (@Sendable (String) -> Void)? = nil,
+        onMetadataValidated: (@Sendable (String) -> Void)? = nil
     ) {
         self.transferID = transferID
         self.destinationDirectory = destinationDirectory
         self.control = control
         self.onStagingPrepared = onStagingPrepared
         self.onCheckpointValidated = onCheckpointValidated
+        self.onMetadataValidated = onMetadataValidated
     }
 
     public func run(on channel: any SecureChannel) async throws -> TransferReceiveResult {
@@ -230,16 +234,27 @@ public struct ReceiveSession: Sendable {
                         )
                     }
                     try preparation.verifyCompletedFiles(manifest)
-                    let receivedURLs = try preparation.finalize(manifest)
-                    try await send(
+                    let receivedURLs = try preparation.finalize(
+                        manifest,
+                        onMetadataValidated: onMetadataValidated
+                    )
+                    // Publication is the session commit point. Completion is a
+                    // bounded notification: failure or cancellation here must
+                    // not report that committed destination as a failed receive.
+                    let notification = await sendTerminalFrameBestEffort(
                         .complete,
                         transferID: transferID,
                         direction: .receiverToSender,
                         on: channel,
                         cipher: crypto.receiverToSender,
-                        sequence: &outboundSequence,
-                        control: control
+                        sequence: outboundSequence
                     )
+                    switch notification {
+                    case .sent:
+                        break
+                    case .failed, .timedOut:
+                        await channel.close()
+                    }
                     return TransferReceiveResult(
                         transferID: transferID,
                         receivedURLs: receivedURLs
@@ -701,7 +716,10 @@ private struct ResumePreparation {
         }
     }
 
-    func finalize(_ manifest: TransferManifest) throws -> [URL] {
+    func finalize(
+        _ manifest: TransferManifest,
+        onMetadataValidated: (@Sendable (String) -> Void)?
+    ) throws -> [URL] {
         for (index, entry) in manifest.entries.enumerated() where entry.kind == .file {
             guard let file = files[UInt32(index)] else {
                 throw TransferProtocolError.destinationEscape
@@ -716,7 +734,7 @@ private struct ResumePreparation {
             )
         }
         try resumeStore.remove()
-        try tree.removeMetadataDirectory()
+        try tree.removeMetadataDirectory(onValidated: onMetadataValidated)
         let rootName = manifest.entries[0].relativePath.components[0]
         let isDirectory = manifest.entries[0].kind == .directory
         let finalRoot = destinationDirectory.appendingPathComponent(
@@ -847,33 +865,94 @@ private final class DescriptorStagingTree: @unchecked Sendable {
         try setDescriptorModificationDate(descriptor, date: date)
     }
 
-    func removeMetadataDirectory() throws {
+    func removeMetadataDirectory(
+        onValidated: (@Sendable (String) -> Void)?
+    ) throws {
+        try requireMetadataDirectoryEmpty()
         guard fsync(metadataDescriptor) == 0 else {
             throw TransferProtocolError.destinationEscape
         }
+        let quarantineName = ".macchannel-metadata-retired-\(UUID().uuidString.lowercased())"
+        guard
+            renameatx_np(
+                rootDescriptor,
+                metadataName,
+                rootDescriptor,
+                quarantineName,
+                UInt32(RENAME_EXCL)
+            ) == 0
+        else { throw TransferProtocolError.destinationEscape }
+        let quarantineDescriptor = Darwin.openat(
+            rootDescriptor,
+            quarantineName,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard quarantineDescriptor >= 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+        defer { Darwin.close(quarantineDescriptor) }
+        var quarantinedStatus = stat()
+        guard
+            fstat(quarantineDescriptor, &quarantinedStatus) == 0,
+            quarantinedStatus.st_mode & S_IFMT == S_IFDIR,
+            quarantinedStatus.st_dev == metadataDevice,
+            quarantinedStatus.st_ino == metadataInode
+        else { throw TransferProtocolError.destinationEscape }
+        onValidated?(quarantineName)
         var namedStatus = stat()
         guard
             fstatat(
                 rootDescriptor,
-                metadataName,
+                quarantineName,
                 &namedStatus,
                 AT_SYMLINK_NOFOLLOW
             ) == 0,
             namedStatus.st_mode & S_IFMT == S_IFDIR,
             namedStatus.st_dev == metadataDevice,
             namedStatus.st_ino == metadataInode,
-            unlinkat(rootDescriptor, metadataName, AT_REMOVEDIR) == 0
+            unlinkat(rootDescriptor, quarantineName, AT_REMOVEDIR) == 0
         else { throw TransferProtocolError.destinationEscape }
         var replacement = stat()
         guard
             fstatat(
                 rootDescriptor,
-                metadataName,
+                quarantineName,
                 &replacement,
                 AT_SYMLINK_NOFOLLOW
             ) != 0,
             errno == ENOENT
         else { throw TransferProtocolError.destinationEscape }
+    }
+
+    private func requireMetadataDirectoryEmpty() throws {
+        let independentDescriptor = Darwin.openat(
+            metadataDescriptor,
+            ".",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard independentDescriptor >= 0,
+            let directory = fdopendir(independentDescriptor)
+        else {
+            if independentDescriptor >= 0 { Darwin.close(independentDescriptor) }
+            throw TransferProtocolError.destinationEscape
+        }
+        errno = 0
+        var foundEntry = false
+        while let entry = readdir(directory) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                    String(cString: $0)
+                }
+            }
+            if name != ".", name != ".." {
+                foundEntry = true
+                break
+            }
+        }
+        let readError = errno
+        guard closedir(directory) == 0, readError == 0, !foundEntry else {
+            throw TransferProtocolError.destinationEscape
+        }
     }
 
     func finalize(rootName: String) throws {
@@ -1221,12 +1300,18 @@ private final class ResumeStateStore: @unchecked Sendable {
         from tree: DescriptorStagingTree,
         onCheckpointValidated: (@Sendable (String) -> Void)?
     ) throws {
-        let duplicate = dup(tree.metadataDescriptor)
-        guard duplicate >= 0, let directory = fdopendir(duplicate) else {
-            if duplicate >= 0 { Darwin.close(duplicate) }
+        let independentDescriptor = Darwin.openat(
+            tree.metadataDescriptor,
+            ".",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard independentDescriptor >= 0,
+            let directory = fdopendir(independentDescriptor)
+        else {
+            if independentDescriptor >= 0 { Darwin.close(independentDescriptor) }
             throw TransferProtocolError.destinationEscape
         }
-        defer { closedir(directory) }
+        var names: [String] = []
         errno = 0
         while let entry = readdir(directory) {
             let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
@@ -1234,51 +1319,84 @@ private final class ResumeStateStore: @unchecked Sendable {
                     String(cString: $0)
                 }
             }
-            guard isRecognizedCheckpointName(name) else { continue }
-            let checkpoint = Darwin.openat(
-                tree.metadataDescriptor,
-                name,
-                O_RDONLY | O_CLOEXEC | O_NOFOLLOW
-            )
-            guard checkpoint >= 0 else {
-                throw TransferProtocolError.destinationEscape
-            }
-            defer { Darwin.close(checkpoint) }
-            var status = stat()
-            var namedStatus = stat()
-            guard
-                fstat(checkpoint, &status) == 0,
-                status.st_mode & S_IFMT == S_IFREG,
-                status.st_uid == geteuid(),
-                status.st_nlink == 1
-            else { throw TransferProtocolError.destinationEscape }
-            onCheckpointValidated?(name)
-            guard
-                fstatat(
-                    tree.metadataDescriptor,
-                    name,
-                    &namedStatus,
-                    AT_SYMLINK_NOFOLLOW
-                ) == 0,
-                namedStatus.st_mode & S_IFMT == S_IFREG,
-                namedStatus.st_dev == status.st_dev,
-                namedStatus.st_ino == status.st_ino,
-                unlinkat(tree.metadataDescriptor, name, 0) == 0,
-                fstat(checkpoint, &status) == 0,
-                status.st_nlink == 0
-            else { throw TransferProtocolError.destinationEscape }
+            if isRecognizedCheckpointName(name) { names.append(name) }
         }
-        guard errno == 0, fsync(tree.metadataDescriptor) == 0 else {
+        let readError = errno
+        guard closedir(directory) == 0, readError == 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+        guard names.count <= TransferProtocolLimits.maximumManifestEntries else {
+            throw TransferProtocolError.manifestTooLarge
+        }
+        for name in names {
+            try removeStaleCheckpoint(
+                named: name,
+                from: tree,
+                onCheckpointValidated: onCheckpointValidated
+            )
+        }
+        guard fsync(tree.metadataDescriptor) == 0 else {
             throw TransferProtocolError.destinationEscape
         }
     }
 
+    private static func removeStaleCheckpoint(
+        named name: String,
+        from tree: DescriptorStagingTree,
+        onCheckpointValidated: (@Sendable (String) -> Void)?
+    ) throws {
+        let quarantineName = ".resume-retired-\(UUID().uuidString.lowercased())"
+        guard
+            renameatx_np(
+                tree.metadataDescriptor,
+                name,
+                tree.metadataDescriptor,
+                quarantineName,
+                UInt32(RENAME_EXCL)
+            ) == 0
+        else { throw TransferProtocolError.destinationEscape }
+        let checkpoint = Darwin.openat(
+            tree.metadataDescriptor,
+            quarantineName,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard checkpoint >= 0 else {
+            throw TransferProtocolError.destinationEscape
+        }
+        defer { Darwin.close(checkpoint) }
+        var status = stat()
+        var namedStatus = stat()
+        guard
+            fstat(checkpoint, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_nlink == 1
+        else { throw TransferProtocolError.destinationEscape }
+        onCheckpointValidated?(quarantineName)
+        guard
+            fstatat(
+                tree.metadataDescriptor,
+                quarantineName,
+                &namedStatus,
+                AT_SYMLINK_NOFOLLOW
+            ) == 0,
+            namedStatus.st_mode & S_IFMT == S_IFREG,
+            namedStatus.st_dev == status.st_dev,
+            namedStatus.st_ino == status.st_ino,
+            unlinkat(tree.metadataDescriptor, quarantineName, 0) == 0,
+            fstat(checkpoint, &status) == 0,
+            status.st_nlink == 0
+        else { throw TransferProtocolError.destinationEscape }
+    }
+
     private static func isRecognizedCheckpointName(_ name: String) -> Bool {
-        let prefix = ".resume-checkpoint-"
-        guard name.hasPrefix(prefix) else { return false }
-        let suffix = String(name.dropFirst(prefix.count))
-        guard let identifier = UUID(uuidString: suffix) else { return false }
-        return suffix == identifier.uuidString.lowercased()
+        for prefix in [".resume-checkpoint-", ".resume-retired-"] {
+            guard name.hasPrefix(prefix) else { continue }
+            let suffix = String(name.dropFirst(prefix.count))
+            guard let identifier = UUID(uuidString: suffix) else { return false }
+            return suffix == identifier.uuidString.lowercased()
+        }
+        return false
     }
 
     private static func recordChecksum(fingerprint: Data, body: Data) -> Data {

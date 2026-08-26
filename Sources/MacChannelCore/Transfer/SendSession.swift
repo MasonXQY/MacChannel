@@ -481,19 +481,23 @@ func send(
     sequence: inout UInt64,
     control: TransferSessionControl? = nil
 ) async throws {
+    guard sequence < UInt64.max else { throw TransferProtocolError.replayOrOutOfOrder }
+    let reservedSequence = sequence
     let sealed = try cipher.seal(
         frame.encode(),
         transfer: transferID,
-        sequence: sequence,
+        sequence: reservedSequence,
         direction: direction
     )
+    // Once ciphertext exists, transport delivery is inherently ambiguous until
+    // the send returns. Burn the nonce before awaiting I/O so cancellation can
+    // never reuse it for a terminal frame that races a delivered send.
+    sequence += 1
     try await sendWireRespectingCancellation(
         sealed.wireData,
         on: channel,
         control: control
     )
-    guard sequence < UInt64.max else { throw TransferProtocolError.replayOrOutOfOrder }
-    sequence += 1
 }
 
 func sendWireRespectingCancellation(
@@ -684,6 +688,13 @@ private actor TransferIOCompletion {
     func completedIOOutcome() -> TransferIOOutcome? { completedIO }
 }
 
+enum TerminalSendOutcome: Sendable {
+    case sent
+    case failed
+    case timedOut
+}
+
+@discardableResult
 func sendTerminalFrameBestEffort(
     _ frame: TransferFrame,
     transferID: TransferID,
@@ -691,7 +702,7 @@ func sendTerminalFrameBestEffort(
     on channel: any SecureChannel,
     cipher: ChunkCipher,
     sequence: UInt64
-) async {
+) async -> TerminalSendOutcome {
     guard
         let sealed = try? cipher.seal(
             frame.encode(),
@@ -699,40 +710,48 @@ func sendTerminalFrameBestEffort(
             sequence: sequence,
             direction: direction
         )
-    else { return }
+    else { return .failed }
     let completion = TerminalSendCompletion()
     let sendTask = Task {
-        try? await channel.send(sealed.wireData)
-        await completion.finish()
+        do {
+            try await channel.send(sealed.wireData)
+            await completion.finish(.sent)
+        } catch {
+            await completion.finish(.failed)
+        }
     }
     let timeoutTask = Task {
         try? await Task.sleep(for: .milliseconds(100))
-        await completion.finish()
+        await completion.finish(.timedOut)
     }
-    await completion.wait()
+    let outcome = await completion.wait()
     sendTask.cancel()
-    timeoutTask.cancel()
+    // Let the bounded timer finish naturally. Cancelling a sleeping task after
+    // the send wins can surface an otherwise irrelevant CancellationError to a
+    // caller's task-local test/error machinery.
+    _ = timeoutTask
+    return outcome
 }
 
 private actor TerminalSendCompletion {
-    private var finished = false
-    private var waiter: CheckedContinuation<Void, Never>?
+    private var outcome: TerminalSendOutcome?
+    private var waiter: CheckedContinuation<TerminalSendOutcome, Never>?
 
-    func wait() async {
-        guard !finished else { return }
-        await withCheckedContinuation { continuation in
-            if finished {
-                continuation.resume()
+    func wait() async -> TerminalSendOutcome {
+        if let outcome { return outcome }
+        return await withCheckedContinuation { continuation in
+            if let outcome {
+                continuation.resume(returning: outcome)
             } else {
                 waiter = continuation
             }
         }
     }
 
-    func finish() {
-        guard !finished else { return }
-        finished = true
-        waiter?.resume()
+    func finish(_ outcome: TerminalSendOutcome) {
+        guard self.outcome == nil else { return }
+        self.outcome = outcome
+        waiter?.resume(returning: outcome)
         waiter = nil
     }
 }

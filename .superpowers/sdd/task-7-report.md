@@ -2,7 +2,7 @@
 
 ## Status
 
-Complete after two independent security follow-ups. The protocol now provides
+Complete after repeated independent security follow-ups. The protocol now provides
 encrypted manifest/chunk transfer, bounded verified resumption, explicit session
 control, replay separation, immutable source pinning, crash-tolerant journals,
 and descriptor-relative receiver materialization over the audited
@@ -31,6 +31,12 @@ and descriptor-relative receiver materialization over the audited
   races. Deterministic red/green regressions now cover ready frame plus control,
   initial challenge/offer waits, blocked ordinary sends in both directions,
   checkpoint replacement, and metadata-directory replacement.
+- The last adversarial pass found that a transport can deliver ciphertext and
+  delay returning long enough for cancellation to race a terminal frame. It also
+  found deletion races in pathname-based cleanup and an inconsistent result when
+  the completion notification fails after publication. Regressions now delay a
+  send after delivery, swap private quarantine names, and fail the final receiver
+  notification after the destination has been atomically published.
 
 ## Implemented contract
 
@@ -72,8 +78,10 @@ and descriptor-relative receiver materialization over the audited
   directory names are compared with the same canonical/case filesystem key used
   for destination validation. Case-equivalent manifest roots therefore cannot
   alias protocol state. Resume initialization removes only exact, lowercase,
-  UUID-shaped `.resume-checkpoint-*` files after descriptor-relative regular-file,
-  owner, and link-count verification; unknown names are preserved and make final
+  UUID-shaped `.resume-checkpoint-*` and crash-left `.resume-retired-*` files.
+  Each recognized file is first atomically moved to a fresh private quarantine
+  name, then descriptor-validated as a same-owner, single-link regular file before
+  deletion. Unknown names are preserved at their original paths and make final
   cleanup fail closed.
 - Receiver staging uses private same-owner directories and descriptor-relative
   `mkdirat`/`openat` with `O_NOFOLLOW`. Staged files remain pinned, must be regular
@@ -88,25 +96,29 @@ and descriptor-relative receiver materialization over the audited
   permanent send backpressure cannot strand the peer or the session task.
 - Frame/control selection drains both racers and preserves any authenticated
   frame already removed from the bounded inbox. Startup reads and every ordinary
-  protocol send also observe control cancellation. Ambiguous send completion gets
-  a short bounded completion preference before cancellation proceeds, preserving
-  sequence correctness when a frame was already delivered.
-- Checkpoint cleanup pins and validates the opened file, rechecks pathname
-  identity immediately before unlink, and verifies link removal. Metadata
-  directory cleanup verifies its opened device/inode against the live name and
-  confirms that name is absent before publication. Root publication is the
-  explicit commit point; non-security staging-directory housekeeping after the
-  exclusive rename cannot turn a visible verified result into reported failure.
+  protocol send also observe control cancellation. Every encrypted sequence is
+  reserved and burned before transport I/O starts, so an ambiguously delivered
+  send can never reuse its AES-GCM nonce for a racing terminal frame.
+- Checkpoint cleanup atomically quarantines a recognized name before opening,
+  validating, and deleting the quarantined inode. Metadata cleanup first requires
+  the pinned directory to be empty, atomically moves it to an unpredictable
+  quarantine name, validates that directory against the original descriptor, and
+  only then removes it. Root publication is the explicit commit point; the final
+  authenticated `complete` notification is bounded best effort. Notification
+  failure or cancellation therefore cannot turn a visible verified result into a
+  reported receive failure; failure/timeout explicitly closes the channel so the
+  sender also terminates. Non-security staging housekeeping is likewise best
+  effort after the exclusive rename.
 - Tamper, replay, duplicate, out-of-order, invalid ACK/resume, journal corruption,
   staged path replacement, and final digest failures all fail closed. Each side
   still has exactly one receiver for `channel.frames()`.
 
 ## Verification
 
-- `swift test --filter TransferProtocolTests`: 51 tests, 0 failures.
+- `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
 - `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures, including the
   ordered/reliable 1 MiB loopback and inclusive 64 KiB cap regressions.
-- `swift test`: 155 tests, 0 failures.
+- `swift test`: 159 tests, 0 failures.
 - `swift-format lint` with the repository's four-space style over all Task 7
   source and test files: exit 0, no diagnostics.
 - `git diff --check`: clean.
@@ -132,4 +144,8 @@ and descriptor-relative receiver materialization over the audited
 - Independent-review hardening: `fix: harden resumable transfer invariants`
   (`890a307`).
 - Second independent-review hardening: `fix: make transfer cancellation and
-  resume cleanup fail safe` (this report is committed with that follow-up).
+  resume cleanup fail safe` (`8012458`).
+- Follow-up cancellation/cleanup race hardening: `fix: close transfer
+  cancellation races` (`a42687b`).
+- Final nonce/quarantine/commit-point hardening: `fix: prevent ambiguous transfer
+  send and cleanup races` (this report is committed with that follow-up).
