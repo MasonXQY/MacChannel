@@ -378,13 +378,21 @@ public protocol ConnectionAttempting: Sendable {
     func connect(to device: DeviceID, route: ConnectionRoute) async throws -> any SecureChannel
 }
 
+public protocol TransferAwareConnectionAttempting: ConnectionAttempting {
+    func connect(
+        to device: DeviceID,
+        route: ConnectionRoute,
+        transferID: TransferID
+    ) async throws -> any SecureChannel
+}
+
 public enum ConnectionCoordinatorError: Error, Equatable, Sendable {
     case allRoutesFailed
 }
 
 /// Applies the product's fixed route policy. Each attempt owns a fresh peer
 /// connection so failed ICE state cannot leak into the next route.
-public struct ConnectionCoordinator: PeerConnector, Sendable {
+public struct ConnectionCoordinator: TransferAwarePeerConnector, Sendable {
     private let attempts: any ConnectionAttempting
 
     public init(attempts: any ConnectionAttempting) {
@@ -410,8 +418,31 @@ public struct ConnectionCoordinator: PeerConnector, Sendable {
     }
 
     public func connect(to device: DeviceID) async throws -> any SecureChannel {
+        try await connectAcrossRoutes(to: device, transferID: nil)
+    }
+
+    public func connect(
+        to device: DeviceID,
+        transferID: TransferID
+    ) async throws -> any SecureChannel {
+        try await connectAcrossRoutes(to: device, transferID: transferID)
+    }
+
+    private func connectAcrossRoutes(
+        to device: DeviceID,
+        transferID: TransferID?
+    ) async throws -> any SecureChannel {
         for route in [ConnectionRoute.lan, .directInternet, .relay] {
             do {
+                if let transferID,
+                    let transferAttempts = attempts as? any TransferAwareConnectionAttempting
+                {
+                    return try await transferAttempts.connect(
+                        to: device,
+                        route: route,
+                        transferID: transferID
+                    )
+                }
                 return try await attempts.connect(to: device, route: route)
             } catch is CancellationError {
                 throw CancellationError()
@@ -427,7 +458,7 @@ public struct ConnectionCoordinator: PeerConnector, Sendable {
     }
 }
 
-public actor WebRTCConnectionAttempts: ConnectionAttempting {
+public actor WebRTCConnectionAttempts: TransferAwareConnectionAttempting {
     private let directory: DeviceDirectory
     private let identity: DeviceIdentity
     private let trustRepository: TrustRepository
@@ -451,7 +482,26 @@ public actor WebRTCConnectionAttempts: ConnectionAttempting {
         self.factory = factory
     }
 
-    public func connect(to device: DeviceID, route: ConnectionRoute) async throws -> any SecureChannel {
+    public func connect(
+        to device: DeviceID,
+        route: ConnectionRoute
+    ) async throws -> any SecureChannel {
+        try await connect(to: device, route: route, connectionID: UUID())
+    }
+
+    public func connect(
+        to device: DeviceID,
+        route: ConnectionRoute,
+        transferID: TransferID
+    ) async throws -> any SecureChannel {
+        try await connect(to: device, route: route, connectionID: transferID.rawValue)
+    }
+
+    private func connect(
+        to device: DeviceID,
+        route: ConnectionRoute,
+        connectionID: UUID
+    ) async throws -> any SecureChannel {
         if route == .lan, await directory.endpoint(for: device) == nil {
             throw ConnectionAttemptError.routeUnavailable
         }
@@ -462,7 +512,7 @@ public actor WebRTCConnectionAttempts: ConnectionAttempting {
             localIdentity: identity,
             remoteDevice: device,
             remotePublicKey: remotePublicKey,
-            connectionID: UUID(),
+            connectionID: connectionID,
             role: .offerer,
             route: route,
             ice: ice,
@@ -478,7 +528,13 @@ public actor WebRTCConnectionAttempts: ConnectionAttempting {
 
 /// Accepts offers discovered by `RendezvousWebRTCSignaling` and produces the
 /// authenticated receive-side channels needed by transfer orchestration.
-public actor WebRTCConnectionListener {
+public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
+    private enum Consumer: Equatable {
+        case none
+        case legacyChannels
+        case transferConnections
+    }
+
     private struct Acceptance {
         let remoteDevice: DeviceID
         let task: Task<Void, Never>
@@ -495,9 +551,13 @@ public actor WebRTCConnectionListener {
     private let factory: any WebRTCChannelFactory
     private let channelStream: AsyncThrowingStream<WebRTCSecureChannel, Error>
     private let channelContinuation: AsyncThrowingStream<WebRTCSecureChannel, Error>.Continuation
+    private let transferStream: AsyncThrowingStream<IncomingTransferConnection, Error>
+    private let transferContinuation:
+        AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation
     private var readerTask: Task<Void, Never>?
     private var acceptanceTasks: [UUID: Acceptance] = [:]
     private var stopped = false
+    private var consumer = Consumer.none
 
     public init(
         directory: DeviceDirectory,
@@ -514,23 +574,30 @@ public actor WebRTCConnectionListener {
         self.ice = ice
         self.factory = factory
         var continuation: AsyncThrowingStream<WebRTCSecureChannel, Error>.Continuation!
-        channelStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(32)) { continuation = $0 }
+        channelStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(32)) {
+            continuation = $0
+        }
         channelContinuation = continuation
+        var transferContinuation:
+            AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation!
+        transferStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(32)) {
+            transferContinuation = $0
+        }
+        self.transferContinuation = transferContinuation
     }
 
     deinit { readerTask?.cancel() }
 
     public func channels() async -> AsyncThrowingStream<WebRTCSecureChannel, Error> {
-        if !stopped, readerTask == nil {
-            let offers = await signaling.incomingOffers()
-            readerTask = Task { [weak self] in
-                for await offer in offers {
-                    guard !Task.isCancelled else { return }
-                    await self?.beginAccepting(offer)
-                }
-            }
-        }
+        if consumer == .none { consumer = .legacyChannels }
+        await beginReadingIfNeeded()
         return channelStream
+    }
+
+    public func connections() async -> AsyncThrowingStream<IncomingTransferConnection, Error> {
+        if consumer == .none { consumer = .transferConnections }
+        await beginReadingIfNeeded()
+        return transferStream
     }
 
     public func stop() {
@@ -538,9 +605,21 @@ public actor WebRTCConnectionListener {
         stopped = true
         readerTask?.cancel()
         readerTask = nil
-        acceptanceTasks.values.forEach { $0.task.cancel() }
+        for acceptance in acceptanceTasks.values { acceptance.task.cancel() }
         acceptanceTasks.removeAll()
         channelContinuation.finish()
+        transferContinuation.finish()
+    }
+
+    private func beginReadingIfNeeded() async {
+        guard !stopped, readerTask == nil else { return }
+        let offers = await signaling.incomingOffers()
+        readerTask = Task { [weak self] in
+            for await offer in offers {
+                guard !Task.isCancelled else { return }
+                await self?.beginAccepting(offer)
+            }
+        }
     }
 
     private func beginAccepting(_ offer: IncomingWebRTCOffer) {
@@ -563,7 +642,9 @@ public actor WebRTCConnectionListener {
 
     private func accept(_ offer: IncomingWebRTCOffer) async {
         if offer.route == .lan, await directory.endpoint(for: offer.remoteDevice) == nil { return }
-        guard let remotePublicKey = await trustRepository.publicKey(for: offer.remoteDevice) else { return }
+        guard let remotePublicKey = await trustRepository.publicKey(for: offer.remoteDevice) else {
+            return
+        }
         do {
             let channel = try await factory.connect(
                 localIdentity: identity,
@@ -583,15 +664,37 @@ public actor WebRTCConnectionListener {
                 await channel.close()
                 return
             }
-            switch channelContinuation.yield(channel) {
-            case .enqueued:
-                break
-            case .dropped(let dropped):
-                await dropped.close()
-                await channel.close()
-            case .terminated:
-                await channel.close()
-            @unknown default:
+            switch consumer {
+            case .legacyChannels:
+                switch channelContinuation.yield(channel) {
+                case .enqueued:
+                    break
+                case .dropped(let dropped):
+                    await dropped.close()
+                    await channel.close()
+                case .terminated:
+                    await channel.close()
+                @unknown default:
+                    await channel.close()
+                }
+            case .transferConnections:
+                let connection = IncomingTransferConnection(
+                    source: offer.remoteDevice,
+                    transferID: TransferID(rawValue: offer.connectionID),
+                    channel: channel
+                )
+                switch transferContinuation.yield(connection) {
+                case .enqueued:
+                    break
+                case .dropped(let dropped):
+                    await dropped.channel.close()
+                    await channel.close()
+                case .terminated:
+                    await channel.close()
+                @unknown default:
+                    await channel.close()
+                }
+            case .none:
                 await channel.close()
             }
         } catch {

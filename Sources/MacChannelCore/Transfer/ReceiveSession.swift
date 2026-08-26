@@ -9,9 +9,19 @@ public struct TransferReceiveResult: Equatable, Sendable {
 }
 
 public struct ReceiveSession: Sendable {
+    private struct DurableStorage: Sendable {
+        let source: DeviceID
+        let policy: ReceivePolicy
+        let directories: DownloadDirectory
+        let database: TransferDatabase
+        let incomingDirectory: URL?
+        let capacity: any ReceiveCapacityProviding
+    }
+
     private let transferID: TransferID
     private let destinationDirectory: URL
     private let control: TransferSessionControl?
+    private let durableStorage: DurableStorage?
     private let onStagingPrepared: (@Sendable (URL) -> Void)?
     private let onCheckpointValidated: (@Sendable (String) -> Void)?
     private let onMetadataValidated: (@Sendable (String) -> Void)?
@@ -24,6 +34,7 @@ public struct ReceiveSession: Sendable {
         self.transferID = transferID
         self.destinationDirectory = destinationDirectory
         self.control = control
+        durableStorage = nil
         onStagingPrepared = nil
         onCheckpointValidated = nil
         onMetadataValidated = nil
@@ -40,14 +51,44 @@ public struct ReceiveSession: Sendable {
         self.transferID = transferID
         self.destinationDirectory = destinationDirectory
         self.control = control
+        durableStorage = nil
         self.onStagingPrepared = onStagingPrepared
         self.onCheckpointValidated = onCheckpointValidated
         self.onMetadataValidated = onMetadataValidated
     }
 
+    /// Uses the hardened receive store for policy authorization, durable resume
+    /// journals, database history, and atomic final publication.
+    public init(
+        transferID: TransferID,
+        source: DeviceID,
+        policy: ReceivePolicy,
+        directories: DownloadDirectory = DownloadDirectory(),
+        database: TransferDatabase,
+        incomingDirectory: URL? = nil,
+        capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
+        control: TransferSessionControl? = nil
+    ) {
+        self.transferID = transferID
+        destinationDirectory = directories.directory(for: source)
+        self.control = control
+        durableStorage = DurableStorage(
+            source: source,
+            policy: policy,
+            directories: directories,
+            database: database,
+            incomingDirectory: incomingDirectory,
+            capacity: capacity
+        )
+        onStagingPrepared = nil
+        onCheckpointValidated = nil
+        onMetadataValidated = nil
+    }
+
     public func run(on channel: any SecureChannel) async throws -> TransferReceiveResult {
         var outboundSequence: UInt64 = 0
         var terminationCrypto: TransferCryptographicContext?
+        var receiveStorage: ReceiveSessionStorage?
         do {
             let challenge = TransferReceiverChallenge.fresh(for: transferID)
             try await sendWireRespectingCancellation(
@@ -96,13 +137,31 @@ public struct ReceiveSession: Sendable {
             }
             try validateReceivedManifest(manifest)
             try manifest.validateDestinationPaths(onVolumeContaining: destinationDirectory)
-            var preparation = try ResumePreparation(
-                manifest: manifest,
-                destinationDirectory: destinationDirectory,
-                onCheckpointValidated: onCheckpointValidated
-            )
-            onStagingPrepared?(preparation.stagingDirectory)
-            var verified = try VerifiedChunks(preparation.verified)
+            if let durableStorage {
+                let store = try await ReceiveStore.prepare(
+                    manifest: manifest,
+                    source: durableStorage.source,
+                    policy: durableStorage.policy,
+                    directories: durableStorage.directories,
+                    database: durableStorage.database,
+                    route: channel.route,
+                    incomingDirectory: durableStorage.incomingDirectory,
+                    capacity: durableStorage.capacity
+                )
+                receiveStorage = .durable(store)
+            } else {
+                let preparation = try ResumePreparation(
+                    manifest: manifest,
+                    destinationDirectory: destinationDirectory,
+                    onCheckpointValidated: onCheckpointValidated
+                )
+                onStagingPrepared?(preparation.stagingDirectory)
+                receiveStorage = .legacy(preparation)
+            }
+            guard var storage = receiveStorage else {
+                throw TransferProtocolError.destinationEscape
+            }
+            var verified = try VerifiedChunks(await storage.resumeMap())
             try await send(
                 .accept(verified.map),
                 transferID: transferID,
@@ -194,8 +253,8 @@ public struct ReceiveSession: Sendable {
                         throw TransferProtocolError.replayOrOutOfOrder
                     }
                     try validate(chunk: chunk, manifest: manifest)
-                    let digest = try preparation.writeAndVerify(chunk, manifest: manifest)
-                    try preparation.resumeStore.append(chunk.coordinate, digest: digest)
+                    try await storage.write(chunk, manifest: manifest)
+                    receiveStorage = storage
                     try verified.insert(chunk.coordinate)
                     chunksSinceAcknowledgement += 1
                     let following = nextMissing(
@@ -233,11 +292,11 @@ public struct ReceiveSession: Sendable {
                             control: control
                         )
                     }
-                    try preparation.verifyCompletedFiles(manifest)
-                    let receivedURLs = try preparation.finalize(
+                    let receivedURLs = try await storage.finalize(
                         manifest,
                         onMetadataValidated: onMetadataValidated
                     )
+                    receiveStorage = storage
                     // Publication is the session commit point. Completion is a
                     // bounded notification: failure or cancellation here must
                     // not report that committed destination as a failed receive.
@@ -274,6 +333,14 @@ public struct ReceiveSession: Sendable {
                 }
             }
         } catch {
+            let cancelled =
+                error is CancellationError
+                || (error as? TransferProtocolError) == .cancelled
+            if cancelled {
+                await receiveStorage?.cancel()
+            } else {
+                await receiveStorage?.markFailed()
+            }
             if let crypto = terminationCrypto {
                 let terminalFrame: TransferFrame?
                 if error is CancellationError
@@ -373,6 +440,60 @@ public struct ReceiveSession: Sendable {
         guard chunk.offset == expectedOffset, chunk.data.count == expectedLength else {
             throw TransferProtocolError.invalidChunk
         }
+    }
+}
+
+private enum ReceiveSessionStorage: Sendable {
+    case legacy(ResumePreparation)
+    case durable(ReceiveStore)
+
+    func resumeMap() async throws -> ResumeMap {
+        switch self {
+        case .legacy(let preparation):
+            return try VerifiedChunks(preparation.verified).map
+        case .durable(let store):
+            return try await store.resumeMap()
+        }
+    }
+
+    mutating func write(_ chunk: TransferChunk, manifest: TransferManifest) async throws {
+        switch self {
+        case .legacy(var preparation):
+            let digest = try preparation.writeAndVerify(chunk, manifest: manifest)
+            try preparation.resumeStore.append(chunk.coordinate, digest: digest)
+            self = .legacy(preparation)
+        case .durable(let store):
+            try await store.write(
+                chunk.data,
+                index: chunk.coordinate.chunkIndex,
+                entry: chunk.coordinate.entryIndex
+            )
+        }
+    }
+
+    mutating func finalize(
+        _ manifest: TransferManifest,
+        onMetadataValidated: (@Sendable (String) -> Void)?
+    ) async throws -> [URL] {
+        switch self {
+        case .legacy(let preparation):
+            try preparation.verifyCompletedFiles(manifest)
+            let urls = try preparation.finalize(
+                manifest,
+                onMetadataValidated: onMetadataValidated
+            )
+            return urls
+        case .durable(let store):
+            return [try await store.finalize()]
+        }
+    }
+
+    func cancel() async {
+        if case .durable(let store) = self { try? await store.cancel() }
+    }
+
+    func markFailed() async {
+        if case .durable(let store) = self { try? await store.markFailed() }
     }
 }
 
@@ -1764,6 +1885,22 @@ private struct VerifiedChunks {
     init(_ coordinates: Set<ChunkCoordinate>) throws {
         self.coordinates = coordinates
         map = try Self.makeMap(from: coordinates)
+    }
+
+    init(_ map: ResumeMap) throws {
+        var coordinates: Set<ChunkCoordinate> = []
+        for range in map.ranges {
+            for chunkIndex in range.lowerBound..<range.upperBound {
+                coordinates.insert(
+                    ChunkCoordinate(
+                        entryIndex: range.entryIndex,
+                        chunkIndex: chunkIndex
+                    )
+                )
+            }
+        }
+        self.coordinates = coordinates
+        self.map = try Self.makeMap(from: coordinates)
     }
 
     func contains(_ coordinate: ChunkCoordinate) -> Bool {
