@@ -39,10 +39,16 @@ const (
 
 type Store interface {
 	CreateSession(ctx context.Context, code, hostDeviceID, observedSource string, encryptedSessionPayload []byte, expiresAt time.Time) error
+	Remove(ctx context.Context, code, hostDeviceID string, now time.Time) error
+	Lookup(ctx context.Context, code, deviceID, observedSource string, now time.Time) ([]byte, error)
 	Join(ctx context.Context, code, joinerDeviceID, observedSource string, encryptedJoinPayload []byte, now time.Time) (Session, error)
 	HostJoin(ctx context.Context, code, hostDeviceID string, now time.Time) (Session, error)
+	CommitJoinResponse(ctx context.Context, sessionID, hostDeviceID string, response []byte, now time.Time) error
+	JoinResponse(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error)
 	ReserveAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) (AuthorizationReservation, error)
 	CommitAuthorization(ctx context.Context, sessionID, hostDeviceID, reservationID string, encryptedAuthorization []byte, now time.Time) error
+	DeliveryStatus(ctx context.Context, sessionID, hostDeviceID, reservationID string, now time.Time) (string, error)
+	CancelAuthorization(ctx context.Context, sessionID, hostDeviceID, reservationID string, now time.Time) error
 	Authorization(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error)
 	Cleanup(ctx context.Context, now time.Time) error
 }
@@ -51,6 +57,7 @@ type Session struct {
 	ID                      string
 	EncryptedSessionPayload []byte
 	EncryptedJoinPayload    []byte
+	ExpiresAt               time.Time
 }
 
 type AuthorizationReservation struct {
@@ -72,10 +79,16 @@ type storedSession struct {
 	encryptedSessionPayload  []byte
 	encryptedJoinPayload     []byte
 	expiresAt                time.Time
+	sessionExpiresAt         *time.Time
 	consumedAt               *time.Time
+	removedAt                *time.Time
 	attemptCount             int
+	encryptedJoinResponse    []byte
+	joinResponseCommittedAt  *time.Time
 	reservationID            string
+	canceledReservationID    string
 	reservedAt               *time.Time
+	reservationExpiresAt     *time.Time
 	encryptedAuthorization   []byte
 	authorizationCommittedAt *time.Time
 	authorizationRetrievedAt *time.Time
@@ -209,9 +222,59 @@ func (s *MemoryStore) CreateSession(_ context.Context, code, hostDeviceID, obser
 	return nil
 }
 
+func (s *MemoryStore) Remove(_ context.Context, code, hostDeviceID string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	hash := sha256.Sum256([]byte(code))
+	session, ok := s.sessions[hash]
+	if !ok {
+		if _, gone := s.gone[hash]; gone {
+			return nil
+		}
+		return ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
+		return ErrForbidden
+	}
+	if session.removedAt == nil {
+		session.removedAt = timePointer(now)
+	}
+	return nil
+}
+
 func (s *MemoryStore) Consume(_ context.Context, code, observedSource string, now time.Time) ([]byte, error) {
 	session, err := s.Join(context.Background(), code, "test-joiner", observedSource, []byte("test-join"), now)
 	return session.EncryptedSessionPayload, err
+}
+
+func (s *MemoryStore) Lookup(_ context.Context, code, deviceID, observedSource string, now time.Time) ([]byte, error) {
+	observedSource = normalizeObservedSource(observedSource)
+	deviceID = strings.ToLower(deviceID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(now)
+	hash := sha256.Sum256([]byte(code))
+	if len(s.sourceFailures[observedSource]) >= sourceFailureLimit || len(s.deviceFailures[deviceID]) >= deviceFailureLimit ||
+		len(s.codeFailures[hash]) >= codeAttemptLimit {
+		return nil, ErrRateLimit
+	}
+	if !validCode(code) {
+		s.recordFailureLocked(observedSource, deviceID, hash, now)
+		return nil, ErrNotFound
+	}
+	session, ok := s.sessions[hash]
+	if !ok {
+		if _, gone := s.gone[hash]; gone {
+			return nil, ErrGone
+		}
+		s.recordFailureLocked(observedSource, deviceID, hash, now)
+		return nil, ErrNotFound
+	}
+	if session.removedAt != nil || session.consumedAt != nil || !now.Before(session.expiresAt) {
+		return nil, ErrGone
+	}
+	return append([]byte(nil), session.encryptedSessionPayload...), nil
 }
 
 func (s *MemoryStore) Join(_ context.Context, code, joinerDeviceID, observedSource string, encryptedJoinPayload []byte, now time.Time) (Session, error) {
@@ -240,6 +303,9 @@ func (s *MemoryStore) Join(_ context.Context, code, joinerDeviceID, observedSour
 		s.recordFailureLocked(observedSource, joinerDeviceID, hash, now)
 		return Session{}, ErrNotFound
 	}
+	if session.removedAt != nil {
+		return Session{}, ErrGone
+	}
 	if session.attemptCount >= codeAttemptLimit {
 		return Session{}, ErrRateLimit
 	}
@@ -248,7 +314,9 @@ func (s *MemoryStore) Join(_ context.Context, code, joinerDeviceID, observedSour
 		return Session{}, ErrGone
 	}
 	consumedAt := now
+	sessionExpiresAt := now.Add(5 * time.Minute)
 	session.consumedAt = &consumedAt
+	session.sessionExpiresAt = &sessionExpiresAt
 	session.sessionID = newUUID()
 	session.joinerDeviceID = joinerDeviceID
 	session.encryptedJoinPayload = append([]byte(nil), encryptedJoinPayload...)
@@ -256,6 +324,7 @@ func (s *MemoryStore) Join(_ context.Context, code, joinerDeviceID, observedSour
 		ID:                      session.sessionID,
 		EncryptedSessionPayload: append([]byte(nil), session.encryptedSessionPayload...),
 		EncryptedJoinPayload:    append([]byte(nil), session.encryptedJoinPayload...),
+		ExpiresAt:               sessionExpiresAt,
 	}, nil
 }
 
@@ -274,14 +343,73 @@ func (s *MemoryStore) HostJoin(_ context.Context, code, hostDeviceID string, now
 	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
 		return Session{}, ErrForbidden
 	}
+	if session.removedAt != nil {
+		return Session{}, ErrGone
+	}
 	if session.consumedAt == nil {
 		return Session{}, ErrPending
+	}
+	if session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
+		return Session{}, ErrGone
 	}
 	return Session{
 		ID:                      session.sessionID,
 		EncryptedSessionPayload: append([]byte(nil), session.encryptedSessionPayload...),
 		EncryptedJoinPayload:    append([]byte(nil), session.encryptedJoinPayload...),
+		ExpiresAt:               *session.sessionExpiresAt,
 	}, nil
+}
+
+func (s *MemoryStore) CommitJoinResponse(_ context.Context, sessionID, hostDeviceID string, response []byte, now time.Time) error {
+	if len(response) == 0 || len(response) > maximumEncryptedPayload {
+		return ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
+		return ErrForbidden
+	}
+	if session.removedAt != nil {
+		return ErrGone
+	}
+	if session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
+		return ErrGone
+	}
+	if session.joinResponseCommittedAt != nil {
+		if !equalBytes(session.encryptedJoinResponse, response) {
+			return ErrConflict
+		}
+		return nil
+	}
+	session.encryptedJoinResponse = append([]byte(nil), response...)
+	session.joinResponseCommittedAt = timePointer(now)
+	return nil
+}
+
+func (s *MemoryStore) JoinResponse(_ context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return nil, ErrNotFound
+	}
+	if session.joinerDeviceID != strings.ToLower(joinerDeviceID) {
+		return nil, ErrForbidden
+	}
+	if session.removedAt != nil {
+		return nil, ErrGone
+	}
+	if session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
+		return nil, ErrGone
+	}
+	if session.joinResponseCommittedAt == nil {
+		return nil, ErrPending
+	}
+	return append([]byte(nil), session.encryptedJoinResponse...), nil
 }
 
 func (s *MemoryStore) ReserveAuthorization(_ context.Context, sessionID, hostDeviceID string, now time.Time) (AuthorizationReservation, error) {
@@ -294,19 +422,22 @@ func (s *MemoryStore) ReserveAuthorization(_ context.Context, sessionID, hostDev
 	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
 		return AuthorizationReservation{}, ErrForbidden
 	}
+	if session.removedAt != nil {
+		return AuthorizationReservation{}, ErrGone
+	}
 	if session.reservationID != "" {
-		if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+		if session.reservationExpiresAt == nil || !now.Before(*session.reservationExpiresAt) {
 			return AuthorizationReservation{}, ErrGone
 		}
-		return AuthorizationReservation{ID: session.reservationID, SessionID: sessionID, ExpiresAt: *session.authorizationExpiresAt}, nil
+		return AuthorizationReservation{ID: session.reservationID, SessionID: sessionID, ExpiresAt: *session.reservationExpiresAt}, nil
 	}
-	if !now.Before(session.expiresAt) {
+	if session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
 		return AuthorizationReservation{}, ErrGone
 	}
 	expiresAt := now.Add(authorizationMailboxTTL)
 	session.reservationID = newUUID()
 	session.reservedAt = timePointer(now)
-	session.authorizationExpiresAt = &expiresAt
+	session.reservationExpiresAt = &expiresAt
 	return AuthorizationReservation{ID: session.reservationID, SessionID: sessionID, ExpiresAt: expiresAt}, nil
 }
 
@@ -323,7 +454,10 @@ func (s *MemoryStore) CommitAuthorization(_ context.Context, sessionID, hostDevi
 	if session.hostDeviceID != strings.ToLower(hostDeviceID) || session.reservationID != reservationID {
 		return ErrForbidden
 	}
-	if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+	if session.removedAt != nil {
+		return ErrGone
+	}
+	if session.reservationExpiresAt == nil || !now.Before(*session.reservationExpiresAt) {
 		return ErrGone
 	}
 	if session.authorizationCommittedAt != nil {
@@ -334,6 +468,56 @@ func (s *MemoryStore) CommitAuthorization(_ context.Context, sessionID, hostDevi
 	}
 	session.encryptedAuthorization = append([]byte(nil), encryptedAuthorization...)
 	session.authorizationCommittedAt = timePointer(now)
+	mailboxExpiresAt := now.Add(authorizationMailboxTTL)
+	session.authorizationExpiresAt = &mailboxExpiresAt
+	return nil
+}
+
+func (s *MemoryStore) DeliveryStatus(_ context.Context, sessionID, hostDeviceID, reservationID string, now time.Time) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return "", ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) || session.reservationID != reservationID {
+		return "", ErrForbidden
+	}
+	if session.removedAt != nil {
+		return "", ErrGone
+	}
+	if session.authorizationCommittedAt != nil {
+		if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+			return "", ErrGone
+		}
+		return "committed", nil
+	}
+	if session.reservationExpiresAt == nil || !now.Before(*session.reservationExpiresAt) {
+		return "", ErrGone
+	}
+	return "reserved", nil
+}
+
+func (s *MemoryStore) CancelAuthorization(_ context.Context, sessionID, hostDeviceID, reservationID string, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return nil
+	}
+	if session.hostDeviceID == strings.ToLower(hostDeviceID) && session.canceledReservationID == reservationID {
+		return nil
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) || session.reservationID != reservationID {
+		return ErrForbidden
+	}
+	if session.authorizationCommittedAt != nil {
+		return nil
+	}
+	session.canceledReservationID = session.reservationID
+	session.reservationID = ""
+	session.reservedAt = nil
+	session.reservationExpiresAt = nil
 	return nil
 }
 
@@ -347,11 +531,20 @@ func (s *MemoryStore) Authorization(_ context.Context, sessionID, joinerDeviceID
 	if session.joinerDeviceID != strings.ToLower(joinerDeviceID) {
 		return nil, ErrForbidden
 	}
-	if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+	if session.removedAt != nil {
 		return nil, ErrGone
 	}
 	if session.authorizationCommittedAt == nil {
-		return nil, ErrPending
+		if session.reservationExpiresAt != nil && now.Before(*session.reservationExpiresAt) {
+			return nil, ErrPending
+		}
+		if session.sessionExpiresAt != nil && now.Before(*session.sessionExpiresAt) {
+			return nil, ErrPending
+		}
+		return nil, ErrGone
+	}
+	if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+		return nil, ErrGone
 	}
 	if session.authorizationRetrievedAt != nil {
 		return nil, ErrGone
@@ -408,8 +601,7 @@ func (s *MemoryStore) purgeLocked(now time.Time) {
 		}
 	}
 	for hash, session := range s.sessions {
-		mailboxExpired := session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt)
-		if !now.Before(session.expiresAt) && mailboxExpired {
+		if !now.Before(sessionRetentionExpiry(session)) {
 			delete(s.sessions, hash)
 			s.addGoneLocked(hash, now)
 		}
@@ -419,6 +611,16 @@ func (s *MemoryStore) purgeLocked(now time.Time) {
 			delete(s.gone, hash)
 		}
 	}
+}
+
+func sessionRetentionExpiry(session *storedSession) time.Time {
+	expiresAt := session.expiresAt
+	for _, candidate := range []*time.Time{session.sessionExpiresAt, session.reservationExpiresAt, session.authorizationExpiresAt} {
+		if candidate != nil && candidate.After(expiresAt) {
+			expiresAt = *candidate
+		}
+	}
+	return expiresAt
 }
 
 func (s *MemoryStore) addGoneLocked(hash [32]byte, now time.Time) {
@@ -505,8 +707,9 @@ func (s *PostgresStore) CreateSession(ctx context.Context, code, hostDeviceID, o
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_creation_events WHERE occurred_at <= $1`, cutoff); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE expires_at <= $1
-		AND (authorization_expires_at IS NULL OR authorization_expires_at <= $1)`, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE GREATEST(expires_at,
+		COALESCE(session_expires_at, '-infinity'), COALESCE(authorization_reservation_expires_at, '-infinity'),
+		COALESCE(authorization_expires_at, '-infinity')) <= $1`, now); err != nil {
 		return err
 	}
 	var sourceCreates, deviceCreates int
@@ -546,9 +749,112 @@ func (s *PostgresStore) CreateSession(ctx context.Context, code, hostDeviceID, o
 	return tx.Commit()
 }
 
+func (s *PostgresStore) Remove(ctx context.Context, code, hostDeviceID string, now time.Time) error {
+	hash := sha256.Sum256([]byte(code))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedHost string
+	var removedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT host_device_id, removed_at FROM pairing_sessions
+		WHERE code_hash = $1 FOR UPDATE`, hash[:]).Scan(&storedHost, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) {
+		return ErrForbidden
+	}
+	if !removedAt.Valid {
+		if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET removed_at = $2 WHERE code_hash = $1`, hash[:], now.UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *PostgresStore) Consume(ctx context.Context, code, observedSource string, now time.Time) ([]byte, error) {
 	session, err := s.Join(ctx, code, "test-joiner", observedSource, []byte("test-join"), now)
 	return session.EncryptedSessionPayload, err
+}
+
+func (s *PostgresStore) Lookup(ctx context.Context, code, deviceID, observedSource string, now time.Time) ([]byte, error) {
+	if deviceID == "" {
+		return nil, ErrInvalid
+	}
+	deviceID = strings.ToLower(deviceID)
+	sourceHash := hashText(normalizeObservedSource(observedSource))
+	hash := sha256.Sum256([]byte(code))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	for _, quota := range []string{"attempt-source:" + sourceHash, "attempt-code:" + hexHash(hash), "attempt-device:" + deviceID} {
+		if err := lockPairingQuota(ctx, tx, quota); err != nil {
+			return nil, err
+		}
+	}
+	cutoff := now.Add(-failureWindow).UTC()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_attempt_failures WHERE occurred_at <= $1`, cutoff); err != nil {
+		return nil, err
+	}
+	var sourceFailures, codeFailures, deviceFailures int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FILTER (WHERE source_hash = $1),
+		COUNT(*) FILTER (WHERE code_hash = $2), COUNT(*) FILTER (WHERE device_id = $3)
+		FROM pairing_attempt_failures`, sourceHash, hash[:], deviceID).Scan(
+		&sourceFailures, &codeFailures, &deviceFailures); err != nil {
+		return nil, err
+	}
+	if sourceFailures >= sourceFailureLimit || codeFailures >= codeAttemptLimit || deviceFailures >= deviceFailureLimit {
+		return nil, ErrRateLimit
+	}
+	recordFailure := func() error {
+		_, insertErr := tx.ExecContext(ctx, `INSERT INTO pairing_attempt_failures
+			(source_hash, code_hash, device_id, occurred_at) VALUES ($1, $2, $3, $4)`,
+			sourceHash, hash[:], deviceID, now.UTC())
+		return insertErr
+	}
+	if !validCode(code) {
+		if err := recordFailure(); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, ErrNotFound
+	}
+	var payload []byte
+	var expiresAt time.Time
+	var consumedAt, removedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT encrypted_session_payload, expires_at, consumed_at, removed_at
+		FROM pairing_sessions WHERE code_hash = $1 FOR UPDATE`, hash[:]).Scan(&payload, &expiresAt, &consumedAt, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		if err := recordFailure(); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !validCode(code) || !now.Before(expiresAt) || consumedAt.Valid || removedAt.Valid {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, ErrGone
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observedSource string, encryptedJoinPayload []byte, now time.Time) (Session, error) {
@@ -564,13 +870,13 @@ func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observed
 		return Session{}, err
 	}
 	defer tx.Rollback()
-	if err := lockPairingQuota(ctx, tx, "join-source:"+sourceHash); err != nil {
+	if err := lockPairingQuota(ctx, tx, "attempt-source:"+sourceHash); err != nil {
 		return Session{}, err
 	}
-	if err := lockPairingQuota(ctx, tx, "join-code:"+hexHash(codeHash)); err != nil {
+	if err := lockPairingQuota(ctx, tx, "attempt-code:"+hexHash(codeHash)); err != nil {
 		return Session{}, err
 	}
-	if err := lockPairingQuota(ctx, tx, "join-device:"+joinerDeviceID); err != nil {
+	if err := lockPairingQuota(ctx, tx, "attempt-device:"+joinerDeviceID); err != nil {
 		return Session{}, err
 	}
 	cutoff := now.Add(-failureWindow).UTC()
@@ -623,11 +929,11 @@ func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observed
 	}
 	var payload []byte
 	var expiresAt time.Time
-	var consumedAt sql.NullTime
+	var consumedAt, removedAt sql.NullTime
 	var attempts int
 	err = tx.QueryRowContext(ctx, `
-		SELECT encrypted_session_payload, expires_at, consumed_at, attempt_count
-		FROM pairing_sessions WHERE code_hash = $1 FOR UPDATE`, codeHash[:]).Scan(&payload, &expiresAt, &consumedAt, &attempts)
+		SELECT encrypted_session_payload, expires_at, consumed_at, removed_at, attempt_count
+		FROM pairing_sessions WHERE code_hash = $1 FOR UPDATE`, codeHash[:]).Scan(&payload, &expiresAt, &consumedAt, &removedAt, &attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := finishFailure(); err != nil {
 			return Session{}, err
@@ -646,7 +952,7 @@ func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observed
 	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET attempt_count = attempt_count + 1 WHERE code_hash = $1`, codeHash[:]); err != nil {
 		return Session{}, err
 	}
-	if !now.Before(expiresAt) || consumedAt.Valid {
+	if !now.Before(expiresAt) || consumedAt.Valid || removedAt.Valid {
 		if err := finishFailure(); err != nil {
 			return Session{}, err
 		}
@@ -656,11 +962,12 @@ func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observed
 		return Session{}, ErrGone
 	}
 	sessionID := newUUID()
+	sessionExpiresAt := now.Add(5 * time.Minute)
 	result, err := tx.ExecContext(ctx, `
 		UPDATE pairing_sessions SET consumed_at = $2, session_id = $3,
-			joiner_device_id = $4, encrypted_join_payload = $5
+			joiner_device_id = $4, encrypted_join_payload = $5, session_expires_at = $6
 		WHERE code_hash = $1 AND consumed_at IS NULL`, codeHash[:], now.UTC(), sessionID,
-		joinerDeviceID, encryptedJoinPayload)
+		joinerDeviceID, encryptedJoinPayload, sessionExpiresAt.UTC())
 	if err != nil {
 		return Session{}, err
 	}
@@ -677,7 +984,7 @@ func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observed
 	if err := tx.Commit(); err != nil {
 		return Session{}, err
 	}
-	return Session{ID: sessionID, EncryptedSessionPayload: payload, EncryptedJoinPayload: append([]byte(nil), encryptedJoinPayload...)}, nil
+	return Session{ID: sessionID, EncryptedSessionPayload: payload, EncryptedJoinPayload: append([]byte(nil), encryptedJoinPayload...), ExpiresAt: sessionExpiresAt}, nil
 }
 
 func (s *PostgresStore) HostJoin(ctx context.Context, code, hostDeviceID string, now time.Time) (Session, error) {
@@ -686,11 +993,14 @@ func (s *PostgresStore) HostJoin(ctx context.Context, code, hostDeviceID string,
 	var sessionID sql.NullString
 	var storedHost string
 	var expiresAt time.Time
-	var consumedAt sql.NullTime
+	var sessionExpiresAt sql.NullTime
+	var consumedAt, removedAt sql.NullTime
 	err := s.db.QueryRowContext(ctx, `
-		SELECT session_id, host_device_id, encrypted_session_payload, encrypted_join_payload, expires_at, consumed_at
+		SELECT session_id, host_device_id, encrypted_session_payload, encrypted_join_payload, expires_at, consumed_at,
+		       session_expires_at, removed_at
 		FROM pairing_sessions WHERE code_hash = $1`, hash[:]).Scan(
-		&sessionID, &storedHost, &session.EncryptedSessionPayload, &session.EncryptedJoinPayload, &expiresAt, &consumedAt)
+		&sessionID, &storedHost, &session.EncryptedSessionPayload, &session.EncryptedJoinPayload, &expiresAt, &consumedAt,
+		&sessionExpiresAt, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -700,14 +1010,94 @@ func (s *PostgresStore) HostJoin(ctx context.Context, code, hostDeviceID string,
 	if storedHost != strings.ToLower(hostDeviceID) {
 		return Session{}, ErrForbidden
 	}
-	if !now.Before(expiresAt) {
+	if removedAt.Valid {
 		return Session{}, ErrGone
 	}
 	if !consumedAt.Valid {
+		if !now.Before(expiresAt) {
+			return Session{}, ErrGone
+		}
 		return Session{}, ErrPending
 	}
+	if !sessionExpiresAt.Valid || !now.Before(sessionExpiresAt.Time) {
+		return Session{}, ErrGone
+	}
 	session.ID = sessionID.String
+	session.ExpiresAt = sessionExpiresAt.Time
 	return session, nil
+}
+
+func (s *PostgresStore) CommitJoinResponse(ctx context.Context, sessionID, hostDeviceID string, response []byte, now time.Time) error {
+	if len(response) == 0 || len(response) > maximumEncryptedPayload {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedHost string
+	var expiresAt time.Time
+	var committedAt, removedAt sql.NullTime
+	var stored []byte
+	err = tx.QueryRowContext(ctx, `SELECT host_device_id, session_expires_at,
+		join_response_committed_at, encrypted_join_response, removed_at FROM pairing_sessions
+		WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(&storedHost, &expiresAt, &committedAt, &stored, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) {
+		return ErrForbidden
+	}
+	if removedAt.Valid {
+		return ErrGone
+	}
+	if !now.Before(expiresAt) {
+		return ErrGone
+	}
+	if committedAt.Valid {
+		if !equalBytes(stored, response) {
+			return ErrConflict
+		}
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET encrypted_join_response = $2,
+		join_response_committed_at = $3 WHERE session_id = $1`, sessionID, response, now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresStore) JoinResponse(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error) {
+	var storedJoiner string
+	var expiresAt time.Time
+	var committedAt, removedAt sql.NullTime
+	var response []byte
+	err := s.db.QueryRowContext(ctx, `SELECT joiner_device_id, session_expires_at,
+		join_response_committed_at, encrypted_join_response, removed_at FROM pairing_sessions
+		WHERE session_id = $1`, sessionID).Scan(&storedJoiner, &expiresAt, &committedAt, &response, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if storedJoiner != strings.ToLower(joinerDeviceID) {
+		return nil, ErrForbidden
+	}
+	if removedAt.Valid {
+		return nil, ErrGone
+	}
+	if !now.Before(expiresAt) {
+		return nil, ErrGone
+	}
+	if !committedAt.Valid {
+		return nil, ErrPending
+	}
+	return response, nil
 }
 
 func (s *PostgresStore) ReserveAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) (AuthorizationReservation, error) {
@@ -719,11 +1109,12 @@ func (s *PostgresStore) ReserveAuthorization(ctx context.Context, sessionID, hos
 	var storedHost string
 	var sessionExpires time.Time
 	var reservationID sql.NullString
-	var authorizationExpires sql.NullTime
+	var reservationExpires, removedAt sql.NullTime
 	err = tx.QueryRowContext(ctx, `
-		SELECT host_device_id, expires_at, authorization_reservation_id, authorization_expires_at
+		SELECT host_device_id, session_expires_at, authorization_reservation_id,
+		       authorization_reservation_expires_at, removed_at
 		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
-		&storedHost, &sessionExpires, &reservationID, &authorizationExpires)
+		&storedHost, &sessionExpires, &reservationID, &reservationExpires, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthorizationReservation{}, ErrNotFound
 	}
@@ -733,11 +1124,14 @@ func (s *PostgresStore) ReserveAuthorization(ctx context.Context, sessionID, hos
 	if storedHost != strings.ToLower(hostDeviceID) {
 		return AuthorizationReservation{}, ErrForbidden
 	}
+	if removedAt.Valid {
+		return AuthorizationReservation{}, ErrGone
+	}
 	if reservationID.Valid {
-		if !authorizationExpires.Valid || !now.Before(authorizationExpires.Time) {
+		if !reservationExpires.Valid || !now.Before(reservationExpires.Time) {
 			return AuthorizationReservation{}, ErrGone
 		}
-		return AuthorizationReservation{ID: reservationID.String, SessionID: sessionID, ExpiresAt: authorizationExpires.Time}, tx.Commit()
+		return AuthorizationReservation{ID: reservationID.String, SessionID: sessionID, ExpiresAt: reservationExpires.Time}, tx.Commit()
 	}
 	if !now.Before(sessionExpires) {
 		return AuthorizationReservation{}, ErrGone
@@ -745,7 +1139,7 @@ func (s *PostgresStore) ReserveAuthorization(ctx context.Context, sessionID, hos
 	id := newUUID()
 	expiresAt := now.Add(authorizationMailboxTTL)
 	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET
-		authorization_reservation_id = $2, authorization_reserved_at = $3, authorization_expires_at = $4
+		authorization_reservation_id = $2, authorization_reserved_at = $3, authorization_reservation_expires_at = $4
 		WHERE session_id = $1`, sessionID, id, now.UTC(), expiresAt.UTC()); err != nil {
 		return AuthorizationReservation{}, err
 	}
@@ -765,13 +1159,13 @@ func (s *PostgresStore) CommitAuthorization(ctx context.Context, sessionID, host
 	}
 	defer tx.Rollback()
 	var storedHost, storedReservation string
-	var expiresAt time.Time
-	var committedAt sql.NullTime
+	var reservationExpiresAt time.Time
+	var committedAt, removedAt sql.NullTime
 	var storedPayload []byte
 	err = tx.QueryRowContext(ctx, `SELECT host_device_id, authorization_reservation_id,
-		authorization_expires_at, authorization_committed_at, encrypted_authorization
+		authorization_reservation_expires_at, authorization_committed_at, encrypted_authorization, removed_at
 		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
-		&storedHost, &storedReservation, &expiresAt, &committedAt, &storedPayload)
+		&storedHost, &storedReservation, &reservationExpiresAt, &committedAt, &storedPayload, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -781,7 +1175,10 @@ func (s *PostgresStore) CommitAuthorization(ctx context.Context, sessionID, host
 	if storedHost != strings.ToLower(hostDeviceID) || storedReservation != reservationID {
 		return ErrForbidden
 	}
-	if !now.Before(expiresAt) {
+	if removedAt.Valid {
+		return ErrGone
+	}
+	if !now.Before(reservationExpiresAt) {
 		return ErrGone
 	}
 	if committedAt.Valid {
@@ -790,8 +1187,82 @@ func (s *PostgresStore) CommitAuthorization(ctx context.Context, sessionID, host
 		}
 		return tx.Commit()
 	}
+	mailboxExpiresAt := now.Add(authorizationMailboxTTL)
 	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET encrypted_authorization = $2,
-		authorization_committed_at = $3 WHERE session_id = $1`, sessionID, encryptedAuthorization, now.UTC()); err != nil {
+		authorization_committed_at = $3, authorization_expires_at = $4 WHERE session_id = $1`,
+		sessionID, encryptedAuthorization, now.UTC(), mailboxExpiresAt.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresStore) DeliveryStatus(ctx context.Context, sessionID, hostDeviceID, reservationID string, now time.Time) (string, error) {
+	var storedHost, storedReservation string
+	var reservationExpires, mailboxExpires sql.NullTime
+	var committedAt, removedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, `SELECT host_device_id, authorization_reservation_id,
+		authorization_reservation_expires_at, authorization_committed_at, authorization_expires_at, removed_at
+		FROM pairing_sessions WHERE session_id = $1`, sessionID).Scan(
+		&storedHost, &storedReservation, &reservationExpires, &committedAt, &mailboxExpires, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) || storedReservation != reservationID {
+		return "", ErrForbidden
+	}
+	if removedAt.Valid {
+		return "", ErrGone
+	}
+	if committedAt.Valid {
+		if !mailboxExpires.Valid || !now.Before(mailboxExpires.Time) {
+			return "", ErrGone
+		}
+		return "committed", nil
+	}
+	if !reservationExpires.Valid || !now.Before(reservationExpires.Time) {
+		return "", ErrGone
+	}
+	return "reserved", nil
+}
+
+func (s *PostgresStore) CancelAuthorization(ctx context.Context, sessionID, hostDeviceID, reservationID string, _ time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedHost string
+	var storedReservation, canceledReservation sql.NullString
+	var committedAt, removedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT host_device_id, authorization_reservation_id,
+		authorization_canceled_reservation_id, authorization_committed_at, removed_at
+		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
+		&storedHost, &storedReservation, &canceledReservation, &committedAt, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if storedHost == strings.ToLower(hostDeviceID) && removedAt.Valid {
+		return ErrGone
+	}
+	if storedHost == strings.ToLower(hostDeviceID) && canceledReservation.Valid && canceledReservation.String == reservationID {
+		return tx.Commit()
+	}
+	if storedHost != strings.ToLower(hostDeviceID) || !storedReservation.Valid || storedReservation.String != reservationID {
+		return ErrForbidden
+	}
+	if committedAt.Valid {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET
+		authorization_canceled_reservation_id = authorization_reservation_id,
+		authorization_reservation_id = NULL, authorization_reserved_at = NULL,
+		authorization_reservation_expires_at = NULL WHERE session_id = $1`, sessionID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -804,13 +1275,14 @@ func (s *PostgresStore) Authorization(ctx context.Context, sessionID, joinerDevi
 	}
 	defer tx.Rollback()
 	var storedJoiner string
-	var expiresAt sql.NullTime
-	var committedAt, retrievedAt sql.NullTime
+	var mailboxExpires, reservationExpires, sessionExpires sql.NullTime
+	var committedAt, retrievedAt, removedAt sql.NullTime
 	var payload []byte
 	err = tx.QueryRowContext(ctx, `SELECT joiner_device_id, authorization_expires_at,
-		authorization_committed_at, authorization_retrieved_at, encrypted_authorization
+		authorization_reservation_expires_at, session_expires_at,
+		authorization_committed_at, authorization_retrieved_at, encrypted_authorization, removed_at
 		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
-		&storedJoiner, &expiresAt, &committedAt, &retrievedAt, &payload)
+		&storedJoiner, &mailboxExpires, &reservationExpires, &sessionExpires, &committedAt, &retrievedAt, &payload, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -820,11 +1292,17 @@ func (s *PostgresStore) Authorization(ctx context.Context, sessionID, joinerDevi
 	if storedJoiner != strings.ToLower(joinerDeviceID) {
 		return nil, ErrForbidden
 	}
-	if !expiresAt.Valid || !now.Before(expiresAt.Time) || retrievedAt.Valid {
+	if removedAt.Valid {
 		return nil, ErrGone
 	}
 	if !committedAt.Valid {
-		return nil, ErrPending
+		if (reservationExpires.Valid && now.Before(reservationExpires.Time)) || (sessionExpires.Valid && now.Before(sessionExpires.Time)) {
+			return nil, ErrPending
+		}
+		return nil, ErrGone
+	}
+	if !mailboxExpires.Valid || !now.Before(mailboxExpires.Time) || retrievedAt.Valid {
+		return nil, ErrGone
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET authorization_retrieved_at = $2
 		WHERE session_id = $1 AND authorization_retrieved_at IS NULL`, sessionID, now.UTC()); err != nil {
@@ -842,9 +1320,9 @@ func (s *PostgresStore) Cleanup(ctx context.Context, now time.Time) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions
-		WHERE (authorization_expires_at IS NOT NULL AND authorization_expires_at <= $1)
-		   OR (authorization_expires_at IS NULL AND expires_at <= $1)`, now.UTC()); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE GREATEST(expires_at,
+		COALESCE(session_expires_at, '-infinity'), COALESCE(authorization_reservation_expires_at, '-infinity'),
+		COALESCE(authorization_expires_at, '-infinity')) <= $1`, now.UTC()); err != nil {
 		return err
 	}
 	cutoff := now.Add(-failureWindow).UTC()

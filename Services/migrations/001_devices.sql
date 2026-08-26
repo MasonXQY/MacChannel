@@ -8,10 +8,16 @@ CREATE TABLE pairing_sessions (
     encrypted_session_payload BYTEA NOT NULL CHECK (octet_length(encrypted_session_payload) BETWEEN 1 AND 65536),
     encrypted_join_payload BYTEA CHECK (encrypted_join_payload IS NULL OR octet_length(encrypted_join_payload) BETWEEN 1 AND 65536),
     expires_at TIMESTAMPTZ NOT NULL,
+    session_expires_at TIMESTAMPTZ,
     consumed_at TIMESTAMPTZ,
+    removed_at TIMESTAMPTZ,
     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0 AND attempt_count <= 20),
+    encrypted_join_response BYTEA CHECK (encrypted_join_response IS NULL OR octet_length(encrypted_join_response) BETWEEN 1 AND 65536),
+    join_response_committed_at TIMESTAMPTZ,
     authorization_reservation_id UUID,
+    authorization_canceled_reservation_id UUID,
     authorization_reserved_at TIMESTAMPTZ,
+    authorization_reservation_expires_at TIMESTAMPTZ,
     encrypted_authorization BYTEA CHECK (encrypted_authorization IS NULL OR octet_length(encrypted_authorization) BETWEEN 1 AND 65536),
     authorization_committed_at TIMESTAMPTZ,
     authorization_retrieved_at TIMESTAMPTZ,
@@ -19,6 +25,8 @@ CREATE TABLE pairing_sessions (
 );
 
 CREATE INDEX pairing_sessions_expiry_idx ON pairing_sessions (expires_at);
+CREATE INDEX pairing_sessions_session_expiry_idx ON pairing_sessions (session_expires_at)
+    WHERE session_expires_at IS NOT NULL;
 CREATE UNIQUE INDEX pairing_sessions_session_id_idx ON pairing_sessions (session_id)
     WHERE session_id IS NOT NULL;
 CREATE INDEX pairing_sessions_authorization_expiry_idx ON pairing_sessions (authorization_expires_at)
@@ -101,5 +109,40 @@ CREATE TABLE device_revocations (
 );
 
 CREATE INDEX device_revocations_subject_idx ON device_revocations (subject_device_id);
+
+
+CREATE SEQUENCE trust_event_order_seq;
+
+CREATE TABLE trust_issuer_states (
+    issuer_device_id UUID PRIMARY KEY,
+    high_water NUMERIC(20, 0) NOT NULL CHECK (high_water >= 0),
+    rate_window_started_at TIMESTAMPTZ NOT NULL,
+    rate_window_updates INTEGER NOT NULL CHECK (rate_window_updates >= 0)
+);
+
+CREATE TABLE trust_pair_states (
+    issuer_device_id UUID NOT NULL,
+    subject_device_id UUID NOT NULL,
+    record_hash BYTEA NOT NULL CHECK (octet_length(record_hash) = 32),
+    issuer_sequence NUMERIC(20, 0) NOT NULL CHECK (issuer_sequence >= 0),
+    action TEXT NOT NULL CHECK (action IN ('authorize', 'revoke')),
+    signed_record BYTEA NOT NULL,
+    issuer_confirmed BOOLEAN NOT NULL,
+    subject_confirmed BOOLEAN NOT NULL,
+    accepted_order BIGINT NOT NULL CHECK (accepted_order > 0),
+    revocation_order BIGINT NOT NULL DEFAULT 0 CHECK (revocation_order >= 0),
+    PRIMARY KEY (issuer_device_id, subject_device_id),
+    UNIQUE (record_hash)
+);
+
+CREATE INDEX trust_pair_states_subject_idx ON trust_pair_states (subject_device_id);
+
+CREATE TABLE trust_state_version (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    version BIGINT NOT NULL CHECK (version >= 0)
+);
+
+INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0);
+
 
 COMMIT;

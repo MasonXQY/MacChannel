@@ -21,8 +21,15 @@ ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS host_device_id UUID;
 ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS joiner_device_id UUID;
 ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS encrypted_join_payload BYTEA
     CHECK (encrypted_join_payload IS NULL OR octet_length(encrypted_join_payload) BETWEEN 1 AND 65536);
+ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS session_expires_at TIMESTAMPTZ;
+ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ;
+ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS encrypted_join_response BYTEA
+    CHECK (encrypted_join_response IS NULL OR octet_length(encrypted_join_response) BETWEEN 1 AND 65536);
+ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS join_response_committed_at TIMESTAMPTZ;
 ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS authorization_reservation_id UUID;
+ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS authorization_canceled_reservation_id UUID;
 ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS authorization_reserved_at TIMESTAMPTZ;
+ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS authorization_reservation_expires_at TIMESTAMPTZ;
 ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS encrypted_authorization BYTEA
     CHECK (encrypted_authorization IS NULL OR octet_length(encrypted_authorization) BETWEEN 1 AND 65536);
 ALTER TABLE pairing_sessions ADD COLUMN IF NOT EXISTS authorization_committed_at TIMESTAMPTZ;
@@ -34,6 +41,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS pairing_sessions_session_id_idx ON pairing_ses
     WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS pairing_sessions_authorization_expiry_idx ON pairing_sessions (authorization_expires_at)
     WHERE authorization_expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS pairing_sessions_session_expiry_idx ON pairing_sessions (session_expires_at)
+    WHERE session_expires_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS pairing_creation_events (
     source_hash CHAR(64) NOT NULL,

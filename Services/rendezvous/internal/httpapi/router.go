@@ -160,13 +160,37 @@ func NewRouter(config Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", router.health)
 	mux.HandleFunc("POST /v1/pairing", router.createPairing)
+	mux.HandleFunc("DELETE /v1/pairing/{code}", router.removePairing)
+	mux.HandleFunc("POST /v1/pairing/{code}/lookup", router.lookupPairing)
 	mux.HandleFunc("POST /v1/pairing/{code}/join", router.joinPairing)
 	mux.HandleFunc("POST /v1/pairing/{code}/host", router.hostPairing)
+	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/response", router.joinResponse)
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/reserve", router.reserveAuthorization)
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization", router.commitAuthorization)
+	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/status", router.authorizationStatus)
+	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/cancel", router.cancelAuthorization)
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/retrieve", router.retrieveAuthorization)
 	mux.HandleFunc("GET /v1/ws", router.webSocket)
 	return securityHeaders(mux)
+}
+
+func (r *Router) removePairing(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	code := request.PathValue("code")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.Code != code {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if writePairingError(writer, r.pairings.Remove(request.Context(), code, envelope.DeviceID, r.clock())) {
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (r *Router) health(writer http.ResponseWriter, _ *http.Request) {
@@ -179,20 +203,49 @@ func (r *Router) createPairing(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	var payload struct {
+		Code                    string `json:"code"`
 		EncryptedSessionPayload []byte `json:"encryptedSessionPayload"`
+		HostOffer               []byte `json:"hostOffer"`
 	}
-	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || len(payload.EncryptedSessionPayload) == 0 {
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	offer := payload.HostOffer
+	if len(offer) == 0 {
+		offer = payload.EncryptedSessionPayload
+	}
+	if len(offer) == 0 {
 		writeError(writer, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	expiresAt := r.clock().Add(r.pairingTTL)
+	if payload.Code != "" {
+		err := r.pairings.CreateSession(request.Context(), payload.Code, envelope.DeviceID, observedSource(request), offer, expiresAt)
+		switch {
+		case errors.Is(err, pairing.ErrCollision):
+			writeError(writer, http.StatusConflict, "pairing_code_unavailable")
+		case errors.Is(err, pairing.ErrCapacity):
+			writeError(writer, http.StatusServiceUnavailable, "capacity_reached")
+		case errors.Is(err, pairing.ErrRateLimit):
+			writer.Header().Set("Retry-After", "600")
+			writeError(writer, http.StatusTooManyRequests, "rate_limited")
+		case err != nil:
+			writeError(writer, http.StatusBadRequest, "invalid_request")
+		default:
+			writeJSON(writer, http.StatusCreated, map[string]any{
+				"code": payload.Code, "expiresAt": expiresAt.UnixMilli(),
+			})
+		}
+		return
+	}
 	for range 16 {
 		code, err := randomPairingCode()
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, "internal_error")
 			return
 		}
-		err = r.pairings.CreateSession(request.Context(), code, envelope.DeviceID, observedSource(request), payload.EncryptedSessionPayload, expiresAt)
+		err = r.pairings.CreateSession(request.Context(), code, envelope.DeviceID, observedSource(request), offer, expiresAt)
 		if errors.Is(err, pairing.ErrCollision) {
 			continue
 		}
@@ -218,6 +271,26 @@ func (r *Router) createPairing(writer http.ResponseWriter, request *http.Request
 	writeError(writer, http.StatusServiceUnavailable, "capacity_reached")
 }
 
+func (r *Router) lookupPairing(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	code := request.PathValue("code")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.Code != code {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	offer, err := r.pairings.Lookup(request.Context(), code, envelope.DeviceID, observedSource(request), r.clock())
+	if writePairingError(writer, err) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"hostOffer": offer})
+}
+
 func (r *Router) joinPairing(writer http.ResponseWriter, request *http.Request) {
 	envelope, ok := r.authenticateHTTP(writer, request)
 	if !ok {
@@ -226,14 +299,23 @@ func (r *Router) joinPairing(writer http.ResponseWriter, request *http.Request) 
 	var payload struct {
 		Code                 string `json:"code"`
 		EncryptedJoinPayload []byte `json:"encryptedJoinPayload"`
+		JoinRequest          []byte `json:"joinRequest"`
 	}
 	code := request.PathValue("code")
-	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil ||
-		len(payload.EncryptedJoinPayload) == 0 || payload.Code != code {
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.Code != code {
 		writeError(writer, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	session, err := r.pairings.Join(request.Context(), code, envelope.DeviceID, observedSource(request), payload.EncryptedJoinPayload, r.clock())
+	joinRequest := payload.JoinRequest
+	transportStyle := len(joinRequest) > 0
+	if !transportStyle {
+		joinRequest = payload.EncryptedJoinPayload
+	}
+	if len(joinRequest) == 0 {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	session, err := r.pairings.Join(request.Context(), code, envelope.DeviceID, observedSource(request), joinRequest, r.clock())
 	switch {
 	case errors.Is(err, pairing.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "pairing_not_found")
@@ -245,9 +327,14 @@ func (r *Router) joinPairing(writer http.ResponseWriter, request *http.Request) 
 	case err != nil:
 		writeError(writer, http.StatusInternalServerError, "internal_error")
 	default:
-		writeJSON(writer, http.StatusOK, map[string]any{
+		status := http.StatusOK
+		if transportStyle {
+			status = http.StatusAccepted
+		}
+		writeJSON(writer, status, map[string]any{
 			"sessionID":               session.ID,
 			"encryptedSessionPayload": session.EncryptedSessionPayload,
+			"sessionExpiresAt":        session.ExpiresAt.UnixMilli(),
 		})
 	}
 }
@@ -271,7 +358,36 @@ func (r *Router) hostPairing(writer http.ResponseWriter, request *http.Request) 
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"sessionID": session.ID, "encryptedJoinPayload": session.EncryptedJoinPayload,
+		"joinRequest": session.EncryptedJoinPayload, "sessionExpiresAt": session.ExpiresAt.UnixMilli(),
 	})
+}
+
+func (r *Router) joinResponse(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		SessionID    string `json:"sessionID"`
+		JoinResponse []byte `json:"joinResponse"`
+	}
+	sessionID := request.PathValue("sessionID")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.SessionID != sessionID {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if len(payload.JoinResponse) > 0 {
+		if writePairingError(writer, r.pairings.CommitJoinResponse(request.Context(), sessionID, envelope.DeviceID, payload.JoinResponse, r.clock())) {
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	response, err := r.pairings.JoinResponse(request.Context(), sessionID, envelope.DeviceID, r.clock())
+	if writePairingError(writer, err) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"joinResponse": response})
 }
 
 func (r *Router) reserveAuthorization(writer http.ResponseWriter, request *http.Request) {
@@ -292,7 +408,8 @@ func (r *Router) reserveAuthorization(writer http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"reservationID": reservation.ID, "expiresAt": reservation.ExpiresAt.UnixMilli(),
+		"id": reservation.ID, "reservationID": reservation.ID, "sessionID": reservation.SessionID,
+		"expiresAt": reservation.ExpiresAt.UnixMilli(),
 	})
 }
 
@@ -303,16 +420,77 @@ func (r *Router) commitAuthorization(writer http.ResponseWriter, request *http.R
 	}
 	var payload struct {
 		SessionID              string `json:"sessionID"`
+		ID                     string `json:"id"`
 		ReservationID          string `json:"reservationID"`
 		EncryptedAuthorization []byte `json:"encryptedAuthorization"`
+		AuthorizationEnvelope  []byte `json:"authorizationEnvelope"`
 	}
 	sessionID := request.PathValue("sessionID")
 	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.SessionID != sessionID {
 		writeError(writer, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	err := r.pairings.CommitAuthorization(request.Context(), sessionID, envelope.DeviceID, payload.ReservationID, payload.EncryptedAuthorization, r.clock())
+	authorization := payload.AuthorizationEnvelope
+	if len(authorization) == 0 {
+		authorization = payload.EncryptedAuthorization
+	}
+	reservationID := payload.ID
+	if reservationID == "" {
+		reservationID = payload.ReservationID
+	}
+	err := r.pairings.CommitAuthorization(request.Context(), sessionID, envelope.DeviceID, reservationID, authorization, r.clock())
 	if writePairingError(writer, err) {
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (r *Router) authorizationStatus(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		SessionID     string `json:"sessionID"`
+		ID            string `json:"id"`
+		ReservationID string `json:"reservationID"`
+	}
+	sessionID := request.PathValue("sessionID")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.SessionID != sessionID {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	reservationID := payload.ID
+	if reservationID == "" {
+		reservationID = payload.ReservationID
+	}
+	status, err := r.pairings.DeliveryStatus(request.Context(), sessionID, envelope.DeviceID, reservationID, r.clock())
+	if writePairingError(writer, err) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"status": status})
+}
+
+func (r *Router) cancelAuthorization(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		SessionID     string `json:"sessionID"`
+		ID            string `json:"id"`
+		ReservationID string `json:"reservationID"`
+	}
+	sessionID := request.PathValue("sessionID")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.SessionID != sessionID {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	reservationID := payload.ID
+	if reservationID == "" {
+		reservationID = payload.ReservationID
+	}
+	if writePairingError(writer, r.pairings.CancelAuthorization(request.Context(), sessionID, envelope.DeviceID, reservationID, r.clock())) {
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
@@ -335,7 +513,9 @@ func (r *Router) retrieveAuthorization(writer http.ResponseWriter, request *http
 	if writePairingError(writer, err) {
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"encryptedAuthorization": authorization})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"encryptedAuthorization": authorization, "authorizationEnvelope": authorization,
+	})
 }
 
 func writePairingError(writer http.ResponseWriter, err error) bool {
@@ -352,6 +532,9 @@ func writePairingError(writer http.ResponseWriter, err error) bool {
 		writeError(writer, http.StatusNotFound, "pairing_not_found")
 	case errors.Is(err, pairing.ErrConflict):
 		writeError(writer, http.StatusConflict, "pairing_conflict")
+	case errors.Is(err, pairing.ErrRateLimit):
+		writer.Header().Set("Retry-After", "600")
+		writeError(writer, http.StatusTooManyRequests, "rate_limited")
 	case errors.Is(err, pairing.ErrInvalid):
 		writeError(writer, http.StatusBadRequest, "invalid_request")
 	default:
