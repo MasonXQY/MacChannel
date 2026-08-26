@@ -94,7 +94,7 @@ public struct ReceiveSession: Sendable {
             guard case .offer(let manifest) = first, manifest.id == transferID else {
                 throw protocolError(for: first)
             }
-            try validateManifest(manifest)
+            try validateReceivedManifest(manifest)
             try manifest.validateDestinationPaths(onVolumeContaining: destinationDirectory)
             var preparation = try ResumePreparation(
                 manifest: manifest,
@@ -351,24 +351,6 @@ public struct ReceiveSession: Sendable {
             case .cancelled:
                 throw TransferProtocolError.cancelled
             }
-        }
-    }
-
-    private func validateManifest(_ manifest: TransferManifest) throws {
-        try manifest.validateProtocolLimits()
-        let root = manifest.entries[0].relativePath.components[0]
-        var directories: Set<RelativePath> = []
-        var seen: Set<RelativePath> = []
-        for entry in manifest.entries {
-            guard entry.relativePath.components[0] == root,
-                seen.insert(entry.relativePath).inserted
-            else { throw TransferProtocolError.invalidFrame }
-            if entry.relativePath.components.count > 1 {
-                let parent = try RelativePath(
-                    components: Array(entry.relativePath.components.dropLast()))
-                guard directories.contains(parent) else { throw TransferProtocolError.invalidFrame }
-            }
-            if entry.kind == .directory { directories.insert(entry.relativePath) }
         }
     }
 
@@ -744,7 +726,7 @@ private struct ResumePreparation {
     }
 }
 
-private final class DescriptorStagingTree: @unchecked Sendable {
+final class DescriptorStagingTree: @unchecked Sendable {
     let rootDescriptor: Int32
     let metadataDescriptor: Int32
     private let destinationDescriptor: Int32
@@ -752,6 +734,8 @@ private final class DescriptorStagingTree: @unchecked Sendable {
     private let metadataName: String
     private let metadataDevice: dev_t
     private let metadataInode: ino_t
+    private let stagingDevice: dev_t
+    private let stagingInode: ino_t
 
     init(destinationDirectory: URL, stagingName: String, metadataName: String) throws {
         let destinationDescriptor = Darwin.open(
@@ -786,6 +770,15 @@ private final class DescriptorStagingTree: @unchecked Sendable {
             Darwin.close(rootDescriptor)
             Darwin.close(destinationDescriptor)
             throw TransferProtocolError.destinationEscape
+        }
+        stagingDevice = status.st_dev
+        stagingInode = status.st_ino
+        do {
+            try removeStaleMetadataRetirements(rootDescriptor: rootDescriptor)
+        } catch {
+            Darwin.close(rootDescriptor)
+            Darwin.close(destinationDescriptor)
+            throw error
         }
         if mkdirat(rootDescriptor, metadataName, S_IRWXU) != 0, errno != EEXIST {
             Darwin.close(rootDescriptor)
@@ -831,6 +824,18 @@ private final class DescriptorStagingTree: @unchecked Sendable {
         guard errno == ENOENT else { throw TransferProtocolError.destinationEscape }
     }
 
+    func containsRootEntry(_ name: String) throws -> Bool {
+        var status = stat()
+        if fstatat(rootDescriptor, name, &status, AT_SYMLINK_NOFOLLOW) != 0 {
+            guard errno == ENOENT else { throw TransferProtocolError.destinationEscape }
+            return false
+        }
+        guard status.st_uid == geteuid(),
+            status.st_mode & S_IFMT == S_IFREG || status.st_mode & S_IFMT == S_IFDIR
+        else { throw TransferProtocolError.destinationEscape }
+        return true
+    }
+
     func ensureDirectory(_ components: [String]) throws {
         let descriptor = try openDirectory(components, create: true)
         Darwin.close(descriptor)
@@ -866,7 +871,7 @@ private final class DescriptorStagingTree: @unchecked Sendable {
     }
 
     func removeMetadataDirectory(
-        onValidated: (@Sendable (String) -> Void)?
+        onValidated: (@Sendable (String) throws -> Void)?
     ) throws {
         try requireMetadataDirectoryEmpty()
         guard fsync(metadataDescriptor) == 0 else {
@@ -898,7 +903,7 @@ private final class DescriptorStagingTree: @unchecked Sendable {
             quarantinedStatus.st_dev == metadataDevice,
             quarantinedStatus.st_ino == metadataInode
         else { throw TransferProtocolError.destinationEscape }
-        onValidated?(quarantineName)
+        try onValidated?(quarantineName)
         var namedStatus = stat()
         guard
             fstatat(
@@ -976,6 +981,120 @@ private final class DescriptorStagingTree: @unchecked Sendable {
         _ = unlinkat(destinationDescriptor, stagingName, AT_REMOVEDIR)
     }
 
+    func finalize(
+        rootName: String,
+        isDirectory: Bool,
+        destinationDirectory: URL,
+        destinationDescriptor descriptor: Int32,
+        onCandidate: (String) throws -> Void = { _ in }
+    ) throws -> URL {
+        let destination = destinationDirectory.standardizedFileURL
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFDIR,
+            status.st_uid == geteuid(),
+            status.st_mode & S_IWUSR != 0
+        else { throw TransferProtocolError.destinationEscape }
+        try requireStagingPathIdentity()
+
+        var number = 1
+        let configuredNameMaximum = fpathconf(descriptor, _PC_NAME_MAX)
+        guard configuredNameMaximum > 0 else { throw TransferProtocolError.destinationEscape }
+        let nameMaximum = Int(configuredNameMaximum)
+        while number <= 10_000 {
+            let candidate = numberedReceiveName(
+                rootName,
+                number: number,
+                maximumBytes: nameMaximum
+            )
+            if try directoryContainsEquivalentName(descriptor, candidate: candidate) {
+                number += 1
+                continue
+            }
+            try onCandidate(candidate)
+            if renameatx_np(
+                rootDescriptor,
+                rootName,
+                descriptor,
+                candidate,
+                UInt32(RENAME_EXCL)
+            ) == 0 {
+                guard fsync(rootDescriptor) == 0, fsync(descriptor) == 0 else {
+                    throw TransferProtocolError.destinationEscape
+                }
+                return destination.appendingPathComponent(candidate, isDirectory: isDirectory)
+            }
+            if errno == EEXIST {
+                number += 1
+                continue
+            }
+            throw TransferProtocolError.destinationEscape
+        }
+        throw TransferProtocolError.destinationExists
+    }
+
+    func removeEmptyStagingDirectory() throws {
+        var current = stat()
+        if fstatat(destinationDescriptor, stagingName, &current, AT_SYMLINK_NOFOLLOW) != 0 {
+            guard errno == ENOENT else { throw TransferProtocolError.destinationEscape }
+            return
+        }
+        guard current.st_mode & S_IFMT == S_IFDIR,
+            current.st_dev == stagingDevice,
+            current.st_ino == stagingInode,
+            unlinkat(destinationDescriptor, stagingName, AT_REMOVEDIR) == 0,
+            fsync(destinationDescriptor) == 0
+        else { throw TransferProtocolError.destinationEscape }
+    }
+
+    func discard() throws {
+        try requireStagingPathIdentity()
+        try removeDirectoryContents(descriptor: rootDescriptor)
+        var current = stat()
+        guard fstatat(destinationDescriptor, stagingName, &current, AT_SYMLINK_NOFOLLOW) == 0,
+            current.st_mode & S_IFMT == S_IFDIR,
+            current.st_dev == stagingDevice,
+            current.st_ino == stagingInode,
+            unlinkat(destinationDescriptor, stagingName, AT_REMOVEDIR) == 0
+        else { throw TransferProtocolError.destinationEscape }
+        _ = fsync(destinationDescriptor)
+    }
+
+    func requireStagingPathIdentity() throws {
+        var current = stat()
+        guard fstatat(destinationDescriptor, stagingName, &current, AT_SYMLINK_NOFOLLOW) == 0,
+            current.st_mode & S_IFMT == S_IFDIR,
+            current.st_dev == stagingDevice,
+            current.st_ino == stagingInode
+        else { throw TransferProtocolError.destinationEscape }
+    }
+
+    func requireExactEntries(
+        _ entries: [TransferManifestEntry],
+        caseSensitive: Bool
+    ) throws {
+        var actual: [String: TransferEntryKind] = [:]
+        let root = entries[0].relativePath.components[0]
+        try collectStagedEntries(
+            parentDescriptor: rootDescriptor,
+            name: root,
+            components: [root],
+            caseSensitive: caseSensitive,
+            result: &actual
+        )
+        var expected: [String: TransferEntryKind] = [:]
+        for entry in entries {
+            let key = destinationFilesystemKey(
+                entry.relativePath.components,
+                caseSensitive: caseSensitive
+            )
+            guard expected.updateValue(entry.kind, forKey: key) == nil else {
+                throw TransferProtocolError.destinationPathCollision
+            }
+        }
+        guard actual == expected else { throw TransferProtocolError.destinationEscape }
+    }
+
     private func openDirectory(_ components: [String], create: Bool) throws -> Int32 {
         var current = dup(rootDescriptor)
         guard current >= 0 else { throw TransferProtocolError.destinationEscape }
@@ -997,7 +1116,7 @@ private final class DescriptorStagingTree: @unchecked Sendable {
     }
 }
 
-private final class StagedFile: @unchecked Sendable {
+final class StagedFile: @unchecked Sendable {
     let descriptor: Int32
     private let device: dev_t
     private let inode: ino_t
@@ -1075,7 +1194,7 @@ private final class StagedFile: @unchecked Sendable {
     }
 }
 
-private final class ResumeStateStore: @unchecked Sendable {
+final class ResumeStateStore: @unchecked Sendable {
     private static let magic = Data([0x4d, 0x43, 0x52, 0x53])  // MCRS
     private static let version: UInt8 = 2
     private static let headerBytes = 37
@@ -1098,6 +1217,36 @@ private final class ResumeStateStore: @unchecked Sendable {
         self.name = name
         self.tree = tree
         self.fingerprint = fingerprint
+    }
+
+    static func requireCompatible(
+        named name: String,
+        fingerprint: Data,
+        tree: DescriptorStagingTree
+    ) throws {
+        guard fingerprint.count == 32 else { throw TransferProtocolError.invalidResumeMap }
+        let descriptor = Darwin.openat(
+            tree.metadataDescriptor,
+            name,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+        )
+        if descriptor < 0 {
+            guard errno == ENOENT else { throw TransferProtocolError.destinationEscape }
+            return
+        }
+        defer { Darwin.close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_nlink == 1,
+            status.st_size >= headerBytes
+        else { throw TransferProtocolError.invalidResumeMap }
+        let header = try readExact(from: descriptor, offset: 0, length: headerBytes)
+        guard header.prefix(4) == magic,
+            header[4] == version,
+            header.subdata(in: 5..<headerBytes) == fingerprint
+        else { throw TransferProtocolError.invalidResumeMap }
     }
 
     deinit { Darwin.close(descriptor) }
@@ -1227,7 +1376,21 @@ private final class ResumeStateStore: @unchecked Sendable {
     }
 
     func remove() throws {
-        guard unlinkat(tree.metadataDescriptor, name, 0) == 0 else {
+        try Self.remove(named: name, tree: tree)
+    }
+
+    static func remove(named name: String, tree: DescriptorStagingTree) throws {
+        var status = stat()
+        if fstatat(tree.metadataDescriptor, name, &status, AT_SYMLINK_NOFOLLOW) != 0 {
+            guard errno == ENOENT else { throw TransferProtocolError.destinationEscape }
+            return
+        }
+        guard status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_nlink == 1,
+            unlinkat(tree.metadataDescriptor, name, 0) == 0,
+            fsync(tree.metadataDescriptor) == 0
+        else {
             throw TransferProtocolError.destinationEscape
         }
     }
@@ -1522,8 +1685,556 @@ private struct VerifiedChunks {
     }
 }
 
-private func manifestFingerprint(_ manifest: TransferManifest) throws -> Data {
+func validateReceivedManifest(_ manifest: TransferManifest) throws {
+    try manifest.validateProtocolLimits()
+    let root = manifest.entries[0].relativePath.components[0]
+    let foldedRoot = root.lowercased()
+    guard !foldedRoot.hasPrefix(".macchannel-metadata-retired-"),
+        !foldedRoot.hasPrefix(".macchannel-metadata-reaping-")
+    else { throw TransferProtocolError.invalidFrame }
+    if manifest.entries.count > 1, manifest.entries[0].kind != .directory {
+        throw TransferProtocolError.invalidFrame
+    }
+    var directories: Set<RelativePath> = []
+    var seen: Set<RelativePath> = []
+    for entry in manifest.entries {
+        guard entry.relativePath.components[0] == root,
+            seen.insert(entry.relativePath).inserted,
+            entry.digest.count == 32,
+            entry.modificationDate.timeIntervalSinceReferenceDate.isFinite
+        else { throw TransferProtocolError.invalidFrame }
+        switch entry.kind {
+        case .directory:
+            guard entry.size == 0,
+                entry.chunkCount == 0,
+                entry.digest == Data(SHA256.hash(data: Data()))
+            else { throw TransferProtocolError.invalidFrame }
+        case .file:
+            let chunkSize = UInt64(TransferProtocolLimits.maximumChunkBytes)
+            let expectedChunks =
+                entry.size == 0
+                ? 0
+                : entry.size / chunkSize + (entry.size.isMultiple(of: chunkSize) ? 0 : 1)
+            guard expectedChunks == UInt64(entry.chunkCount) else {
+                throw TransferProtocolError.invalidFrame
+            }
+        }
+        if entry.relativePath.components.count > 1 {
+            let parent = try RelativePath(
+                components: Array(entry.relativePath.components.dropLast()))
+            guard directories.contains(parent) else { throw TransferProtocolError.invalidFrame }
+        }
+        if entry.kind == .directory { directories.insert(entry.relativePath) }
+    }
+}
+
+func manifestFingerprint(_ manifest: TransferManifest) throws -> Data {
     Data(SHA256.hash(data: try TransferFrame.offer(manifest).encode()))
+}
+
+private func numberedReceiveName(
+    _ original: String,
+    number: Int,
+    maximumBytes: Int
+) -> String {
+    guard number > 1 else { return original }
+    let value = original as NSString
+    let pathExtension = value.pathExtension
+    let suffix = " \(number)"
+    let extensionSuffix = pathExtension.isEmpty ? "" : ".\(pathExtension)"
+    var stem = pathExtension.isEmpty ? original : value.deletingPathExtension
+    if suffix.utf8.count + extensionSuffix.utf8.count >= maximumBytes {
+        stem = original
+    }
+    let retainedExtension = stem == original ? "" : extensionSuffix
+    let available = max(0, maximumBytes - suffix.utf8.count - retainedExtension.utf8.count)
+    return prefixFittingUTF8(stem, maximumBytes: available) + suffix + retainedExtension
+}
+
+private func prefixFittingUTF8(_ value: String, maximumBytes: Int) -> String {
+    var result = ""
+    var bytes = 0
+    for character in value {
+        let addition = String(character)
+        guard bytes + addition.utf8.count <= maximumBytes else { break }
+        result.append(character)
+        bytes += addition.utf8.count
+    }
+    return result
+}
+
+private func directoryContainsEquivalentName(_ descriptor: Int32, candidate: String) throws -> Bool
+{
+    let independent = dup(descriptor)
+    guard independent >= 0, let directory = fdopendir(independent) else {
+        if independent >= 0 { Darwin.close(independent) }
+        throw TransferProtocolError.destinationEscape
+    }
+    defer { closedir(directory) }
+    let candidateKey = destinationFilesystemKey([candidate], caseSensitive: false)
+    errno = 0
+    while let entry = readdir(directory) {
+        let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                String(cString: $0)
+            }
+        }
+        if name != ".", name != "..",
+            destinationFilesystemKey([name], caseSensitive: false) == candidateKey
+        {
+            return true
+        }
+    }
+    guard errno == 0 else { throw TransferProtocolError.destinationEscape }
+    return false
+}
+
+private func collectStagedEntries(
+    parentDescriptor: Int32,
+    name: String,
+    components: [String],
+    caseSensitive: Bool,
+    result: inout [String: TransferEntryKind]
+) throws {
+    var status = stat()
+    guard fstatat(parentDescriptor, name, &status, AT_SYMLINK_NOFOLLOW) == 0,
+        status.st_uid == geteuid()
+    else { throw TransferProtocolError.destinationEscape }
+    let kind: TransferEntryKind
+    switch status.st_mode & S_IFMT {
+    case S_IFREG:
+        kind = .file
+    case S_IFDIR:
+        kind = .directory
+    default:
+        throw TransferProtocolError.destinationEscape
+    }
+    let key = destinationFilesystemKey(components, caseSensitive: caseSensitive)
+    guard result.updateValue(kind, forKey: key) == nil else {
+        throw TransferProtocolError.destinationPathCollision
+    }
+    guard kind == .directory else { return }
+
+    let descriptor = Darwin.openat(
+        parentDescriptor,
+        name,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard descriptor >= 0 else { throw TransferProtocolError.destinationEscape }
+    defer { Darwin.close(descriptor) }
+    let independent = dup(descriptor)
+    guard independent >= 0, let directory = fdopendir(independent) else {
+        if independent >= 0 { Darwin.close(independent) }
+        throw TransferProtocolError.destinationEscape
+    }
+    var names: [String] = []
+    errno = 0
+    while let entry = readdir(directory) {
+        let child = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                String(cString: $0)
+            }
+        }
+        if child != ".", child != ".." { names.append(child) }
+    }
+    let readError = errno
+    guard closedir(directory) == 0, readError == 0 else {
+        throw TransferProtocolError.destinationEscape
+    }
+    for child in names {
+        try collectStagedEntries(
+            parentDescriptor: descriptor,
+            name: child,
+            components: components + [child],
+            caseSensitive: caseSensitive,
+            result: &result
+        )
+    }
+}
+
+private func removeStaleMetadataRetirements(rootDescriptor: Int32) throws {
+    let independent = Darwin.openat(
+        rootDescriptor,
+        ".",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard independent >= 0, let directory = fdopendir(independent) else {
+        if independent >= 0 { Darwin.close(independent) }
+        throw TransferProtocolError.destinationEscape
+    }
+    var names: [String] = []
+    errno = 0
+    while let entry = readdir(directory) {
+        let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                String(cString: $0)
+            }
+        }
+        if isRecognizedMetadataRetirement(name) { names.append(name) }
+    }
+    let readError = errno
+    guard closedir(directory) == 0, readError == 0,
+        names.count <= TransferProtocolLimits.maximumManifestEntries
+    else { throw TransferProtocolError.destinationEscape }
+
+    for name in names {
+        var named = stat()
+        guard fstatat(rootDescriptor, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            named.st_mode & S_IFMT == S_IFDIR,
+            named.st_uid == geteuid(),
+            named.st_mode & 0o077 == 0
+        else { throw TransferProtocolError.destinationEscape }
+        let quarantine = ".macchannel-metadata-reaping-\(UUID().uuidString.lowercased())"
+        guard
+            renameatx_np(
+                rootDescriptor,
+                name,
+                rootDescriptor,
+                quarantine,
+                UInt32(RENAME_EXCL)
+            ) == 0
+        else { throw TransferProtocolError.destinationEscape }
+        let retired = Darwin.openat(
+            rootDescriptor,
+            quarantine,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard retired >= 0 else { throw TransferProtocolError.destinationEscape }
+        do {
+            var opened = stat()
+            guard fstat(retired, &opened) == 0,
+                opened.st_mode & S_IFMT == S_IFDIR,
+                opened.st_dev == named.st_dev,
+                opened.st_ino == named.st_ino,
+                opened.st_uid == geteuid(),
+                opened.st_mode & 0o077 == 0
+            else { throw TransferProtocolError.destinationEscape }
+            try requireEmptyDirectory(retired)
+            var current = stat()
+            guard fstatat(rootDescriptor, quarantine, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                current.st_mode & S_IFMT == S_IFDIR,
+                current.st_dev == named.st_dev,
+                current.st_ino == named.st_ino,
+                unlinkat(rootDescriptor, quarantine, AT_REMOVEDIR) == 0
+            else { throw TransferProtocolError.destinationEscape }
+            Darwin.close(retired)
+        } catch {
+            Darwin.close(retired)
+            throw error
+        }
+    }
+    guard fsync(rootDescriptor) == 0 else {
+        throw TransferProtocolError.destinationEscape
+    }
+}
+
+private func isRecognizedMetadataRetirement(_ name: String) -> Bool {
+    for prefix in [".macchannel-metadata-retired-", ".macchannel-metadata-reaping-"] {
+        guard name.hasPrefix(prefix) else { continue }
+        let suffix = String(name.dropFirst(prefix.count))
+        guard suffix == suffix.lowercased(), let identifier = UUID(uuidString: suffix) else {
+            return false
+        }
+        return identifier.uuidString.lowercased() == suffix
+    }
+    return false
+}
+
+private func requireEmptyDirectory(_ descriptor: Int32) throws {
+    let independent = dup(descriptor)
+    guard independent >= 0, let directory = fdopendir(independent) else {
+        if independent >= 0 { Darwin.close(independent) }
+        throw TransferProtocolError.destinationEscape
+    }
+    errno = 0
+    var foundEntry = false
+    while let entry = readdir(directory) {
+        let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                String(cString: $0)
+            }
+        }
+        if name != ".", name != ".." {
+            foundEntry = true
+            break
+        }
+    }
+    let readError = errno
+    guard closedir(directory) == 0, readError == 0, !foundEntry else {
+        throw TransferProtocolError.destinationEscape
+    }
+}
+
+func verifyPublishedManifest(
+    parentDescriptor: Int32,
+    candidate: String,
+    manifest: TransferManifest,
+    caseSensitive: Bool
+) throws {
+    let root = manifest.entries[0].relativePath.components[0]
+    var actual: [String: TransferEntryKind] = [:]
+    try collectStagedEntries(
+        parentDescriptor: parentDescriptor,
+        name: candidate,
+        components: [root],
+        caseSensitive: caseSensitive,
+        result: &actual
+    )
+    var expected: [String: TransferEntryKind] = [:]
+    for entry in manifest.entries {
+        let key = destinationFilesystemKey(
+            entry.relativePath.components,
+            caseSensitive: caseSensitive
+        )
+        guard expected.updateValue(entry.kind, forKey: key) == nil else {
+            throw TransferProtocolError.destinationPathCollision
+        }
+    }
+    guard actual == expected else { throw TransferProtocolError.destinationEscape }
+
+    for entry in manifest.entries where entry.kind == .file {
+        let descriptor = try openPublishedFile(
+            parentDescriptor: parentDescriptor,
+            candidate: candidate,
+            relativeComponents: Array(entry.relativePath.components.dropFirst())
+        )
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_nlink == 1,
+            status.st_size >= 0,
+            UInt64(status.st_size) == entry.size
+        else {
+            Darwin.close(descriptor)
+            throw TransferProtocolError.destinationEscape
+        }
+        let file: StagedFile
+        do {
+            file = try StagedFile(descriptor: descriptor)
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+        guard try file.digest(size: entry.size) == entry.digest else {
+            throw TransferProtocolError.digestMismatch
+        }
+    }
+}
+
+private func openPublishedFile(
+    parentDescriptor: Int32,
+    candidate: String,
+    relativeComponents: [String]
+) throws -> Int32 {
+    if relativeComponents.isEmpty {
+        let descriptor = Darwin.openat(
+            parentDescriptor,
+            candidate,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard descriptor >= 0 else { throw TransferProtocolError.destinationEscape }
+        return descriptor
+    }
+    var current = Darwin.openat(
+        parentDescriptor,
+        candidate,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard current >= 0 else { throw TransferProtocolError.destinationEscape }
+    for component in relativeComponents.dropLast() {
+        let next = Darwin.openat(
+            current,
+            component,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        Darwin.close(current)
+        guard next >= 0 else { throw TransferProtocolError.destinationEscape }
+        current = next
+    }
+    let descriptor = Darwin.openat(
+        current,
+        relativeComponents.last!,
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+    )
+    Darwin.close(current)
+    guard descriptor >= 0 else { throw TransferProtocolError.destinationEscape }
+    return descriptor
+}
+
+private func removeDirectoryContents(descriptor: Int32) throws {
+    let independent = dup(descriptor)
+    guard independent >= 0, let directory = fdopendir(independent) else {
+        if independent >= 0 { Darwin.close(independent) }
+        throw TransferProtocolError.destinationEscape
+    }
+    var names: [String] = []
+    errno = 0
+    while let entry = readdir(directory) {
+        let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                String(cString: $0)
+            }
+        }
+        if name != ".", name != ".." { names.append(name) }
+    }
+    let readError = errno
+    guard closedir(directory) == 0, readError == 0 else {
+        throw TransferProtocolError.destinationEscape
+    }
+    for name in names {
+        var status = stat()
+        guard fstatat(descriptor, name, &status, AT_SYMLINK_NOFOLLOW) == 0,
+            status.st_uid == geteuid()
+        else { throw TransferProtocolError.destinationEscape }
+        switch status.st_mode & S_IFMT {
+        case S_IFREG:
+            guard unlinkat(descriptor, name, 0) == 0 else {
+                throw TransferProtocolError.destinationEscape
+            }
+        case S_IFDIR:
+            let child = Darwin.openat(
+                descriptor,
+                name,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+            guard child >= 0 else { throw TransferProtocolError.destinationEscape }
+            do {
+                try removeDirectoryContents(descriptor: child)
+                Darwin.close(child)
+            } catch {
+                Darwin.close(child)
+                throw error
+            }
+            guard unlinkat(descriptor, name, AT_REMOVEDIR) == 0 else {
+                throw TransferProtocolError.destinationEscape
+            }
+        default:
+            throw TransferProtocolError.destinationEscape
+        }
+    }
+    guard fsync(descriptor) == 0 else { throw TransferProtocolError.destinationEscape }
+}
+
+func secureRemoveStagingDirectory(
+    transferID: TransferID,
+    incomingDirectory: URL
+) throws -> Bool {
+    let incoming = incomingDirectory.standardizedFileURL
+    let parent = Darwin.open(
+        incoming.path,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard parent >= 0 else { throw TransferProtocolError.destinationEscape }
+    defer { Darwin.close(parent) }
+    let name = transferID.rawValue.uuidString.lowercased()
+    var named = stat()
+    if fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) != 0 {
+        guard errno == ENOENT else { throw TransferProtocolError.destinationEscape }
+        return false
+    }
+    guard named.st_mode & S_IFMT == S_IFDIR,
+        named.st_uid == geteuid(),
+        named.st_mode & 0o077 == 0
+    else { throw TransferProtocolError.destinationEscape }
+    let quarantine = ".macchannel-expired-\(UUID().uuidString.lowercased())"
+    guard renameatx_np(parent, name, parent, quarantine, UInt32(RENAME_EXCL)) == 0 else {
+        throw TransferProtocolError.destinationEscape
+    }
+    let directory = Darwin.openat(
+        parent,
+        quarantine,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard directory >= 0 else { throw TransferProtocolError.destinationEscape }
+    defer { Darwin.close(directory) }
+    var moved = stat()
+    guard fstat(directory, &moved) == 0,
+        moved.st_mode & S_IFMT == S_IFDIR,
+        moved.st_dev == named.st_dev,
+        moved.st_ino == named.st_ino
+    else { throw TransferProtocolError.destinationEscape }
+    try removeDirectoryContents(descriptor: directory)
+    var current = stat()
+    guard fstatat(parent, quarantine, &current, AT_SYMLINK_NOFOLLOW) == 0,
+        current.st_mode & S_IFMT == S_IFDIR,
+        current.st_dev == named.st_dev,
+        current.st_ino == named.st_ino,
+        unlinkat(parent, quarantine, AT_REMOVEDIR) == 0
+    else { throw TransferProtocolError.destinationEscape }
+    _ = fsync(parent)
+    return true
+}
+
+func secureRemoveExpiredQuarantines(incomingDirectory: URL) throws {
+    let parent = Darwin.open(
+        incomingDirectory.path,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    )
+    guard parent >= 0 else { throw TransferProtocolError.destinationEscape }
+    defer { Darwin.close(parent) }
+    let independent = dup(parent)
+    guard independent >= 0, let directory = fdopendir(independent) else {
+        if independent >= 0 { Darwin.close(independent) }
+        throw TransferProtocolError.destinationEscape
+    }
+    var names: [String] = []
+    errno = 0
+    while let entry = readdir(directory) {
+        let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                String(cString: $0)
+            }
+        }
+        if isRecognizedExpiredQuarantine(name) { names.append(name) }
+    }
+    let readError = errno
+    guard closedir(directory) == 0, readError == 0 else {
+        throw TransferProtocolError.destinationEscape
+    }
+    for name in names {
+        var named = stat()
+        guard fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            named.st_mode & S_IFMT == S_IFDIR,
+            named.st_uid == geteuid(),
+            named.st_mode & 0o077 == 0
+        else { throw TransferProtocolError.destinationEscape }
+        let child = Darwin.openat(
+            parent,
+            name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard child >= 0 else { throw TransferProtocolError.destinationEscape }
+        do {
+            var opened = stat()
+            guard fstat(child, &opened) == 0,
+                opened.st_dev == named.st_dev,
+                opened.st_ino == named.st_ino
+            else { throw TransferProtocolError.destinationEscape }
+            try removeDirectoryContents(descriptor: child)
+            Darwin.close(child)
+        } catch {
+            Darwin.close(child)
+            throw error
+        }
+        var current = stat()
+        guard fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+            current.st_dev == named.st_dev,
+            current.st_ino == named.st_ino,
+            unlinkat(parent, name, AT_REMOVEDIR) == 0
+        else { throw TransferProtocolError.destinationEscape }
+    }
+    _ = fsync(parent)
+}
+
+private func isRecognizedExpiredQuarantine(_ name: String) -> Bool {
+    let prefix = ".macchannel-expired-"
+    guard name.hasPrefix(prefix) else { return false }
+    let suffix = String(name.dropFirst(prefix.count))
+    guard suffix == suffix.lowercased(),
+        let uuid = UUID(uuidString: suffix)
+    else { return false }
+    return uuid.uuidString.lowercased() == suffix
 }
 
 private func readExact(from descriptor: Int32, offset: UInt64, length: Int) throws -> Data {

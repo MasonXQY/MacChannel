@@ -1,0 +1,924 @@
+import CryptoKit
+import Darwin
+import Foundation
+import SQLite3
+import XCTest
+
+@testable import MacChannelCore
+
+final class ReceiveStoreTests: XCTestCase {
+    func testFinalizeNeverOverwritesAndPublishesOnlyAfterVerification() async throws {
+        let fixture = try StorageFixture()
+        let old = Data("old".utf8)
+        try old.write(to: fixture.downloads.appendingPathComponent("photo.jpg"))
+        let bytes = Data("new".utf8)
+        let manifest = try makeManifest(name: "photo.jpg", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.downloads.appendingPathComponent("photo 2.jpg").path
+            ))
+        try await store.write(bytes, index: 0, entry: 0)
+        let output = try await store.finalize()
+
+        XCTAssertEqual(output.lastPathComponent, "photo 2.jpg")
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.downloads.appendingPathComponent("photo.jpg")), old)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+    }
+
+    func testRestartReconcilesCrashAfterAtomicPublicationWithoutCreatingDuplicate() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("durable publication".utf8)
+        let manifest = try makeManifest(name: "durable.txt", bytes: bytes)
+        var store: ReceiveStore? = try await fixture.prepare(manifest: manifest)
+        try await store?.write(bytes, index: 0, entry: 0)
+
+        do {
+            _ = try await store?.finalize(onPublishedBeforeHistory: {
+                throw PublicationTestFault.interrupted
+            })
+            XCTFail("Expected injected publication interruption")
+        } catch {
+            XCTAssertEqual(error as? ReceiveStoreError, .atomicPlacementUnavailable)
+        }
+        let published = fixture.downloads.appendingPathComponent("durable.txt")
+        XCTAssertEqual(try Data(contentsOf: published), bytes)
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: fixture.staging(manifest.id)
+                    .appendingPathComponent(".macchannel-storage-metadata/.resume-state").path
+            )
+        )
+        let interruptedHistory = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(interruptedHistory.first?.phase, .verifying)
+        store = nil
+
+        let recovered = try await fixture.prepare(manifest: manifest)
+        let output = try await recovered.finalize()
+
+        XCTAssertEqual(output, published)
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.downloads.appendingPathComponent("durable 2.txt").path
+            )
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+        let recoveredHistory = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(recoveredHistory.first?.phase, .completed)
+    }
+
+    func testRestartFinishesEveryPostCompletionCleanupBoundary() async throws {
+        for interruptedStep in PublicationCleanupStep.allCases {
+            let fixture = try StorageFixture()
+            let bytes = Data("cleanup \(interruptedStep)".utf8)
+            let manifest = try makeManifest(name: "cleanup.txt", bytes: bytes)
+            var store: ReceiveStore? = try await fixture.prepare(manifest: manifest)
+            try await store?.write(bytes, index: 0, entry: 0)
+
+            do {
+                _ = try await store?.finalize(
+                    onPublishedBeforeHistory: {},
+                    onCleanupStep: { step in
+                        if step == interruptedStep {
+                            throw ReceiveStoreError.atomicPlacementUnavailable
+                        }
+                    }
+                )
+                XCTFail("Expected interruption after \(interruptedStep)")
+            } catch {
+                XCTAssertEqual(error as? ReceiveStoreError, .atomicPlacementUnavailable)
+            }
+            let completedHistory = try await fixture.database.history(limit: 1)
+            XCTAssertEqual(completedHistory.first?.phase, .completed)
+            store = nil
+
+            do {
+                let recovered = try await fixture.prepare(manifest: manifest)
+                _ = try await recovered.finalize()
+            } catch {
+                XCTAssertEqual(error as? ReceiveStoreError, .alreadyFinished)
+            }
+
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.lease(manifest.id).path))
+            XCTAssertEqual(
+                try Data(contentsOf: fixture.downloads.appendingPathComponent("cleanup.txt")),
+                bytes
+            )
+            XCTAssertFalse(
+                FileManager.default.fileExists(
+                    atPath: fixture.downloads.appendingPathComponent("cleanup 2.txt").path
+                )
+            )
+        }
+    }
+
+    func testSecondStoreCannotShareActiveTransferStaging() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("exclusive".utf8)
+        let manifest = try makeManifest(name: "exclusive.txt", bytes: bytes)
+        let first = try await fixture.prepare(manifest: manifest)
+
+        await assertReceiveError(.transferBusy) {
+            _ = try await fixture.prepare(manifest: manifest)
+        }
+
+        try await first.write(bytes, index: 0, entry: 0)
+        let output = try await first.finalize()
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+    }
+
+    func testFinalizeRejectsIncompleteAndDigestMismatchedContent() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data(repeating: 0x41, count: TransferProtocolLimits.maximumChunkBytes + 9)
+        let manifest = try makeManifest(name: "large.bin", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(
+            bytes.prefix(TransferProtocolLimits.maximumChunkBytes),
+            index: 0,
+            entry: 0
+        )
+
+        await assertReceiveError(.incompleteTransfer) {
+            _ = try await store.finalize()
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.downloads.appendingPathComponent("large.bin").path
+            ))
+
+        let corruptManifest = try makeManifest(
+            name: "corrupt.bin",
+            bytes: Data("expected".utf8),
+            digest: Data(SHA256.hash(data: Data("different".utf8)))
+        )
+        let corruptStore = try await fixture.prepare(manifest: corruptManifest)
+        try await corruptStore.write(Data("expected".utf8), index: 0, entry: 0)
+        await assertReceiveError(.digestMismatch) {
+            _ = try await corruptStore.finalize()
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.downloads.appendingPathComponent("corrupt.bin").path
+            ))
+    }
+
+    func testPolicyRejectsBeforeCreatingStaging() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data(repeating: 1, count: 20)
+        let untrustedManifest = try makeManifest(name: "untrusted.bin", bytes: bytes)
+        await assertReceiveError(.untrustedSource) {
+            _ = try await ReceiveStore.prepare(
+                manifest: untrustedManifest,
+                source: fixture.source,
+                policy: ReceivePolicy(trustedSources: []),
+                directories: DownloadDirectory(globalDirectory: fixture.downloads),
+                database: fixture.database,
+                incomingDirectory: fixture.incoming,
+                capacity: FixedCapacity(bytes: 1_000_000)
+            )
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.staging(untrustedManifest.id).path))
+
+        let disabledManifest = try makeManifest(name: "disabled.bin", bytes: bytes)
+        let disabled = ReceivePolicy(
+            trustedSources: [fixture.source],
+            perDevice: [fixture.source: DeviceReceivePolicy(autoAccept: false)]
+        )
+        await assertReceiveError(.automaticReceiveDisabled) {
+            _ = try await ReceiveStore.prepare(
+                manifest: disabledManifest,
+                source: fixture.source,
+                policy: disabled,
+                directories: DownloadDirectory(globalDirectory: fixture.downloads),
+                database: fixture.database,
+                incomingDirectory: fixture.incoming,
+                capacity: FixedCapacity(bytes: 1_000_000)
+            )
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.staging(disabledManifest.id).path))
+
+        let oversizedManifest = try makeManifest(name: "oversized.bin", bytes: bytes)
+        let capped = ReceivePolicy(
+            trustedSources: [fixture.source],
+            perDevice: [fixture.source: DeviceReceivePolicy(maximumBytes: 19)]
+        )
+        await assertReceiveError(.exceedsMaximumSize(limit: 19, actual: 20)) {
+            _ = try await ReceiveStore.prepare(
+                manifest: oversizedManifest,
+                source: fixture.source,
+                policy: capped,
+                directories: DownloadDirectory(globalDirectory: fixture.downloads),
+                database: fixture.database,
+                incomingDirectory: fixture.incoming,
+                capacity: FixedCapacity(bytes: 1_000_000)
+            )
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.staging(oversizedManifest.id).path))
+    }
+
+    func testPreflightAndEveryWriteMonitorRemainingCapacityWithFivePercentReserve() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data(repeating: 7, count: 100)
+        let manifest = try makeManifest(name: "space.bin", bytes: bytes)
+
+        await assertReceiveError(.insufficientCapacity(required: 105, available: 104)) {
+            _ = try await fixture.prepare(
+                manifest: manifest,
+                capacity: FixedCapacity(bytes: 104)
+            )
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.lease(manifest.id).path))
+
+        let capacity = MutableCapacity(bytes: 105)
+        let store = try await fixture.prepare(manifest: manifest, capacity: capacity)
+        capacity.bytes = 0
+        await assertReceiveError(.insufficientCapacity(required: 105, available: 0)) {
+            try await store.write(bytes, index: 0, entry: 0)
+        }
+    }
+
+    func testRestartPreflightsOnlyJournalRevalidatedRemainingBytes() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data(repeating: 4, count: TransferProtocolLimits.maximumChunkBytes + 100)
+        let manifest = try makeManifest(name: "remaining.bin", bytes: bytes)
+        var first: ReceiveStore? = try await fixture.prepare(manifest: manifest)
+        try await first?.write(
+            bytes.prefix(TransferProtocolLimits.maximumChunkBytes),
+            index: 0,
+            entry: 0
+        )
+        first = nil
+
+        let resumed = try await fixture.prepare(
+            manifest: manifest,
+            capacity: FixedCapacity(bytes: 105)
+        )
+        let map = try await resumed.resumeMap()
+        XCTAssertTrue(map.contains(ChunkCoordinate(entryIndex: 0, chunkIndex: 0)))
+    }
+
+    func testDownloadDirectoryDefaultsAndPerSourceOverride() {
+        let home = URL(fileURLWithPath: "/tmp/macchannel-home", isDirectory: true)
+        let source = DeviceID(rawValue: UUID())
+        let special = URL(fileURLWithPath: "/tmp/special", isDirectory: true)
+        let global = URL(fileURLWithPath: "/tmp/global", isDirectory: true)
+
+        XCTAssertEqual(
+            DownloadDirectory(homeDirectory: home).directory(for: source).path,
+            "/tmp/macchannel-home/Downloads/Mac 通道"
+        )
+        XCTAssertEqual(
+            DownloadDirectory(globalDirectory: global).directory(for: source),
+            global
+        )
+        XCTAssertEqual(
+            DownloadDirectory(globalDirectory: global, perSource: [source: special])
+                .directory(for: source),
+            special
+        )
+    }
+
+    func testCaseAndUnicodeEquivalentNamesReceiveCollisionNumbers() async throws {
+        let fixture = try StorageFixture()
+        let existingName = "CAFE\u{301}.txt"
+        try Data("old".utf8).write(
+            to: fixture.downloads.appendingPathComponent(existingName)
+        )
+        let bytes = Data("fresh".utf8)
+        let manifest = try makeManifest(name: "caf\u{00e9}.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+
+        let output = try await store.finalize()
+
+        XCTAssertEqual(output.lastPathComponent, "caf\u{00e9} 2.txt")
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+    }
+
+    func testMaximumLengthNameStillReceivesCollisionSuffix() async throws {
+        let fixture = try StorageFixture()
+        let name = String(repeating: "a", count: 255)
+        try Data("old".utf8).write(to: fixture.downloads.appendingPathComponent(name))
+        let bytes = Data("new".utf8)
+        let manifest = try makeManifest(name: name, bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+
+        let output = try await store.finalize()
+
+        XCTAssertLessThanOrEqual(output.lastPathComponent.utf8.count, 255)
+        XCTAssertTrue(output.lastPathComponent.hasSuffix(" 2"))
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+    }
+
+    func testMalformedDirectoryTreeAndNonNormalizedTraversalAreRejected() async throws {
+        XCTAssertThrowsError(try RelativePath("../escape"))
+        XCTAssertThrowsError(try RelativePath("folder/e\u{301}.txt"))
+
+        let fixture = try StorageFixture()
+        let bytes = Data("x".utf8)
+        let entry = TransferManifestEntry(
+            relativePath: try RelativePath("root/missing/file.txt"),
+            kind: .file,
+            size: 1,
+            modificationDate: Date(timeIntervalSince1970: 10),
+            chunkCount: 1,
+            digest: Data(SHA256.hash(data: bytes))
+        )
+        let manifest = TransferManifest(id: TransferID(rawValue: UUID()), entries: [entry])
+        await assertReceiveError(.invalidManifest) {
+            _ = try await fixture.prepare(manifest: manifest)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+
+        let reserved = try makeManifest(
+            name: ".macchannel-metadata-retired-\(UUID().uuidString.lowercased())",
+            bytes: bytes
+        )
+        await assertReceiveError(.invalidManifest) {
+            _ = try await fixture.prepare(manifest: reserved)
+        }
+    }
+
+    func testManifestRejectsChunkCountThatDoesNotMatchFileSize() async throws {
+        let fixture = try StorageFixture()
+        let entry = TransferManifestEntry(
+            relativePath: try RelativePath("bad.bin"),
+            kind: .file,
+            size: 1,
+            modificationDate: Date(),
+            chunkCount: 2,
+            digest: Data(SHA256.hash(data: Data("x".utf8)))
+        )
+        let manifest = TransferManifest(id: TransferID(rawValue: UUID()), entries: [entry])
+
+        await assertReceiveError(.invalidManifest) {
+            _ = try await fixture.prepare(manifest: manifest)
+        }
+    }
+
+    func testDestinationPermissionsAreCheckedBeforeStagingAllocation() async throws {
+        let fixture = try StorageFixture()
+        XCTAssertEqual(chmod(fixture.downloads.path, S_IRUSR | S_IXUSR), 0)
+        defer { _ = chmod(fixture.downloads.path, S_IRWXU) }
+        let manifest = try makeManifest(name: "denied.txt", bytes: Data("x".utf8))
+
+        await assertReceiveError(.destinationNotWritable) {
+            _ = try await fixture.prepare(manifest: manifest)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+    }
+
+    func testIncomingSymlinkIsRejectedWithoutChangingItsTargetPermissions() async throws {
+        let fixture = try StorageFixture()
+        let target = fixture.root.appendingPathComponent("target", isDirectory: true)
+        let linkedIncoming = fixture.root.appendingPathComponent(
+            "linked-incoming", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        XCTAssertEqual(chmod(target.path, 0o755), 0)
+        try FileManager.default.createSymbolicLink(at: linkedIncoming, withDestinationURL: target)
+        let manifest = try makeManifest(name: "safe.txt", bytes: Data("x".utf8))
+
+        await assertReceiveError(.stagingUnavailable) {
+            _ = try await ReceiveStore.prepare(
+                manifest: manifest,
+                source: fixture.source,
+                policy: ReceivePolicy(trustedSources: [fixture.source]),
+                directories: DownloadDirectory(globalDirectory: fixture.downloads),
+                database: fixture.database,
+                incomingDirectory: linkedIncoming,
+                capacity: FixedCapacity(bytes: 1_000_000)
+            )
+        }
+        var status = stat()
+        XCTAssertEqual(stat(target.path, &status), 0)
+        XCTAssertEqual(status.st_mode & 0o777, 0o755)
+    }
+
+    func testDestinationReplacementAfterPrepareFailsClosed() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("pinned".utf8)
+        let manifest = try makeManifest(name: "pinned.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        let displaced = fixture.root.appendingPathComponent(
+            "displaced-downloads", isDirectory: true)
+        try FileManager.default.moveItem(at: fixture.downloads, to: displaced)
+        try FileManager.default.createDirectory(
+            at: fixture.downloads, withIntermediateDirectories: true)
+        try await store.write(bytes, index: 0, entry: 0)
+
+        await assertReceiveError(.atomicPlacementUnavailable) {
+            _ = try await store.finalize()
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.downloads.appendingPathComponent("pinned.txt").path
+            ))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: displaced.appendingPathComponent("pinned.txt").path
+            ))
+    }
+
+    func testStagingDirectoryReplacementAfterPrepareFailsClosed() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("staged".utf8)
+        let manifest = try makeManifest(name: "staged.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        let original = fixture.staging(manifest.id)
+        let displaced = fixture.incoming.appendingPathComponent("displaced", isDirectory: true)
+        try FileManager.default.moveItem(at: original, to: displaced)
+        try FileManager.default.createDirectory(at: original, withIntermediateDirectories: false)
+        XCTAssertEqual(chmod(original.path, S_IRWXU), 0)
+        await assertReceiveError(.stagingUnavailable) {
+            try await store.write(bytes, index: 0, entry: 0)
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fixture.downloads.appendingPathComponent("staged.txt").path
+            ))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+    }
+
+    func testRestartUsesOnlyDescriptorRevalidatedJournalAndRebuildsSQLiteRanges() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data(repeating: 9, count: TransferProtocolLimits.maximumChunkBytes + 5)
+        let manifest = try makeManifest(name: "resume.bin", bytes: bytes)
+        var first: ReceiveStore? = try await fixture.prepare(manifest: manifest)
+        try await first?.write(
+            bytes.prefix(TransferProtocolLimits.maximumChunkBytes),
+            index: 0,
+            entry: 0
+        )
+        let persisted = try await fixture.database.resumeMap(for: manifest.id)
+        XCTAssertTrue(
+            persisted.contains(
+                ChunkCoordinate(entryIndex: 0, chunkIndex: 0)
+            ))
+        first = nil
+
+        try await fixture.database.replaceVerifiedRanges(
+            for: manifest.id,
+            with: try ResumeMap(ranges: [
+                ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 2)
+            ])
+        )
+        let reopenedDatabase = try TransferDatabase(url: fixture.databaseURL)
+        let resumed = try await fixture.prepare(manifest: manifest, database: reopenedDatabase)
+        let recovered = try await resumed.resumeMap()
+
+        XCTAssertTrue(recovered.contains(ChunkCoordinate(entryIndex: 0, chunkIndex: 0)))
+        XCTAssertFalse(recovered.contains(ChunkCoordinate(entryIndex: 0, chunkIndex: 1)))
+        let repairedDatabaseMap = try await reopenedDatabase.resumeMap(for: manifest.id)
+        XCTAssertEqual(repairedDatabaseMap, recovered)
+        try await resumed.write(Data(bytes.suffix(5)), index: 1, entry: 0)
+        _ = try await resumed.finalize()
+    }
+
+    func testRestartCannotReassignPartialStagingToAnotherSource() async throws {
+        let fixture = try StorageFixture()
+        let secondSource = DeviceID(rawValue: UUID())
+        let secondDownloads = fixture.root.appendingPathComponent(
+            "second-downloads",
+            isDirectory: true
+        )
+        let bytes = Data("bound source".utf8)
+        let manifest = try makeManifest(name: "identity.txt", bytes: bytes)
+        var first: ReceiveStore? = try await fixture.prepare(manifest: manifest)
+        try await first?.write(bytes, index: 0, entry: 0)
+        first = nil
+
+        await assertReceiveError(.invalidManifest) {
+            _ = try await ReceiveStore.prepare(
+                manifest: manifest,
+                source: secondSource,
+                policy: ReceivePolicy(trustedSources: [fixture.source, secondSource]),
+                directories: DownloadDirectory(
+                    globalDirectory: fixture.downloads,
+                    perSource: [secondSource: secondDownloads]
+                ),
+                database: fixture.database,
+                incomingDirectory: fixture.incoming,
+                capacity: FixedCapacity(bytes: 1_000_000)
+            )
+        }
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.peer, fixture.source)
+    }
+
+    func testRestartCannotReassignStagingWhenHistoryDatabaseIsLost() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("independent source binding".utf8)
+        let manifest = try makeManifest(name: "bound.txt", bytes: bytes)
+        var first: ReceiveStore? = try await fixture.prepare(manifest: manifest)
+        try await first?.write(bytes, index: 0, entry: 0)
+        first = nil
+        let replacementDatabase = try TransferDatabase(
+            url: fixture.root.appendingPathComponent("replacement.sqlite3")
+        )
+        let otherSource = DeviceID(rawValue: UUID())
+
+        await assertReceiveError(.invalidManifest) {
+            _ = try await ReceiveStore.prepare(
+                manifest: manifest,
+                source: otherSource,
+                policy: ReceivePolicy(trustedSources: [otherSource]),
+                directories: DownloadDirectory(globalDirectory: fixture.downloads),
+                database: replacementDatabase,
+                incomingDirectory: fixture.incoming,
+                capacity: FixedCapacity(bytes: 1_000_000)
+            )
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+    }
+
+    func testRejectedResumeManifestLeavesTransferFailedForExpiry() async throws {
+        let fixture = try StorageFixture()
+        let id = TransferID(rawValue: UUID())
+        let originalBytes = Data("first".utf8)
+        let original = try makeManifest(name: "same.txt", bytes: originalBytes, id: id)
+        var first: ReceiveStore? = try await fixture.prepare(manifest: original)
+        try await first?.write(originalBytes, index: 0, entry: 0)
+        try await first?.markFailed(at: Date(timeIntervalSince1970: 100))
+        first = nil
+        let replacement = try makeManifest(
+            name: "same.txt",
+            bytes: Data("other".utf8),
+            id: id
+        )
+
+        await assertReceiveError(.stagingUnavailable) {
+            _ = try await fixture.prepare(manifest: replacement)
+        }
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.phase, .failed)
+    }
+
+    func testRejectedAlternatePathsCannotLeakIntoLaterValidPublication() async throws {
+        let fixture = try StorageFixture()
+        let id = TransferID(rawValue: UUID())
+        let bytes = Data("x".utf8)
+        let valid = try makeDirectoryManifest(
+            id: id,
+            childName: "root/good.txt",
+            bytes: bytes
+        )
+        var first: ReceiveStore? = try await fixture.prepare(manifest: valid)
+        try await first?.markFailed(at: Date(timeIntervalSince1970: 100))
+        first = nil
+        let alternate = try makeDirectoryManifest(
+            id: id,
+            childName: "root/evil.txt",
+            bytes: bytes
+        )
+        await assertReceiveError(.stagingUnavailable) {
+            _ = try await fixture.prepare(manifest: alternate)
+        }
+
+        let resumed = try await fixture.prepare(manifest: valid)
+        try await resumed.write(bytes, index: 0, entry: 1)
+        let output = try await resumed.finalize()
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: output.appendingPathComponent("good.txt").path
+            )
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: output.appendingPathComponent("evil.txt").path
+            )
+        )
+    }
+
+    func testDatabaseHistorySchemaContainsNoPathsKeysDigestsOrContent() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("private bytes".utf8)
+        let manifest = try makeManifest(name: "history.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+        _ = try await store.finalize()
+
+        let history = try await fixture.database.history(limit: 10)
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history[0].displayFilename, "history.txt")
+        XCTAssertEqual(history[0].phase, .completed)
+
+        let columns = try sqliteColumns(at: fixture.databaseURL)
+        let forbiddenFragments = ["path", "content", "key", "digest", "hash"]
+        XCTAssertFalse(
+            columns.contains { column in
+                forbiddenFragments.contains { column.lowercased().contains($0) }
+            },
+            "privacy-limited schema contained forbidden columns: \(columns)"
+        )
+    }
+
+    func testDatabasePersistsTransferSnapshotsForHistory() async throws {
+        let fixture = try StorageFixture()
+        let id = TransferID(rawValue: UUID())
+        let snapshot = TransferSnapshot(
+            id: id,
+            peer: fixture.source,
+            phase: .paused,
+            completedBytes: 12,
+            totalBytes: 30,
+            route: .relay
+        )
+
+        try await fixture.database.record(
+            snapshot,
+            displayFilename: "report.pdf",
+            at: Date(timeIntervalSince1970: 500)
+        )
+        let history = try await fixture.database.history(limit: 1)
+
+        XCTAssertEqual(history.first?.id, id)
+        XCTAssertEqual(history.first?.phase, .paused)
+        XCTAssertEqual(history.first?.completedBytes, 12)
+        XCTAssertEqual(history.first?.route, .relay)
+    }
+
+    func testSnapshotUpdatesCannotRewriteTransferIdentity() async throws {
+        let fixture = try StorageFixture()
+        let id = TransferID(rawValue: UUID())
+        let original = TransferSnapshot(
+            id: id,
+            peer: fixture.source,
+            phase: .transferring,
+            completedBytes: 1,
+            totalBytes: 10,
+            route: .lan
+        )
+        try await fixture.database.record(original, displayFilename: "fixed.txt")
+        let replacement = TransferSnapshot(
+            id: id,
+            peer: DeviceID(rawValue: UUID()),
+            phase: .paused,
+            completedBytes: 2,
+            totalBytes: 10,
+            route: .relay
+        )
+
+        do {
+            try await fixture.database.record(replacement, displayFilename: "changed.txt")
+            XCTFail("Expected immutable identity rejection")
+        } catch {
+            XCTAssertEqual(error as? ReceiveStoreError, .invalidManifest)
+        }
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.peer, fixture.source)
+        XCTAssertEqual(history.first?.displayFilename, "fixed.txt")
+    }
+
+    func testExistingDatabasePermissionsAreTightened() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("history.sqlite3")
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil))
+        XCTAssertEqual(chmod(url.path, 0o644), 0)
+
+        _ = try TransferDatabase(url: url)
+
+        var status = stat()
+        XCTAssertEqual(stat(url.path, &status), 0)
+        XCTAssertEqual(status.st_mode & 0o777, 0o600)
+    }
+
+    func testCancelClearsStagingAndSevenDayExpiryRemovesOnlyOldFailedTransfers() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("partial".utf8)
+        let cancelledManifest = try makeManifest(name: "cancel.txt", bytes: bytes)
+        let cancelled = try await fixture.prepare(manifest: cancelledManifest)
+        try await cancelled.write(bytes, index: 0, entry: 0)
+        try await cancelled.cancel()
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.staging(cancelledManifest.id).path))
+
+        let oldManifest = try makeManifest(name: "old.txt", bytes: bytes)
+        var old: ReceiveStore? = try await fixture.prepare(manifest: oldManifest)
+        try await old?.markFailed(at: Date(timeIntervalSince1970: 100))
+        old = nil
+        let recentManifest = try makeManifest(name: "recent.txt", bytes: bytes)
+        let recent = try await fixture.prepare(manifest: recentManifest)
+        try await recent.markFailed(at: Date(timeIntervalSince1970: 100 + 6 * 86_400))
+
+        let expired = try await ReceiveStore.expireFailedStaging(
+            database: fixture.database,
+            incomingDirectory: fixture.incoming,
+            now: Date(timeIntervalSince1970: 100 + 7 * 86_400)
+        )
+
+        XCTAssertEqual(expired, [oldManifest.id])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(oldManifest.id).path))
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: fixture.staging(recentManifest.id).path))
+    }
+
+    func testExpiryFinishesRecognizedCrashLeftQuarantine() async throws {
+        let fixture = try StorageFixture()
+        try FileManager.default.createDirectory(
+            at: fixture.incoming,
+            withIntermediateDirectories: true
+        )
+        XCTAssertEqual(chmod(fixture.incoming.path, S_IRWXU), 0)
+        let quarantine = fixture.incoming.appendingPathComponent(
+            ".macchannel-expired-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: quarantine, withIntermediateDirectories: false)
+        XCTAssertEqual(chmod(quarantine.path, S_IRWXU), 0)
+        try Data("orphan".utf8).write(to: quarantine.appendingPathComponent("part"))
+
+        _ = try await ReceiveStore.expireFailedStaging(
+            database: fixture.database,
+            incomingDirectory: fixture.incoming,
+            now: Date()
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: quarantine.path))
+    }
+}
+
+private enum PublicationTestFault: Error {
+    case interrupted
+}
+
+private struct StorageFixture {
+    let root: URL
+    let downloads: URL
+    let incoming: URL
+    let databaseURL: URL
+    let database: TransferDatabase
+    let source = DeviceID(rawValue: UUID())
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        downloads = root.appendingPathComponent("downloads", isDirectory: true)
+        incoming = root.appendingPathComponent("Incoming", isDirectory: true)
+        databaseURL = root.appendingPathComponent("history.sqlite3")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        database = try TransferDatabase(url: databaseURL)
+    }
+
+    func staging(_ id: TransferID) -> URL {
+        incoming.appendingPathComponent(id.rawValue.uuidString.lowercased(), isDirectory: true)
+    }
+
+    func lease(_ id: TransferID) -> URL {
+        incoming.appendingPathComponent(
+            ".macchannel-lease-\(id.rawValue.uuidString.lowercased())"
+        )
+    }
+
+    func prepare(
+        manifest: TransferManifest,
+        capacity: any ReceiveCapacityProviding = FixedCapacity(bytes: 1_000_000_000),
+        database: TransferDatabase? = nil
+    ) async throws -> ReceiveStore {
+        try await ReceiveStore.prepare(
+            manifest: manifest,
+            source: source,
+            policy: ReceivePolicy(trustedSources: [source]),
+            directories: DownloadDirectory(globalDirectory: downloads),
+            database: database ?? self.database,
+            incomingDirectory: incoming,
+            capacity: capacity
+        )
+    }
+}
+
+private final class FixedCapacity: ReceiveCapacityProviding, @unchecked Sendable {
+    private let value: UInt64
+
+    init(bytes: UInt64) { value = bytes }
+
+    func availableBytes(at directory: URL) throws -> UInt64 {
+        _ = directory
+        return value
+    }
+}
+
+private final class MutableCapacity: ReceiveCapacityProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64
+
+    var bytes: UInt64 {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
+    }
+
+    init(bytes: UInt64) { value = bytes }
+
+    func availableBytes(at directory: URL) throws -> UInt64 {
+        _ = directory
+        return bytes
+    }
+}
+
+private func makeManifest(
+    name: String,
+    bytes: Data,
+    digest: Data? = nil,
+    id: TransferID = TransferID(rawValue: UUID())
+) throws -> TransferManifest {
+    let count: UInt32
+    if bytes.isEmpty {
+        count = 0
+    } else {
+        let chunkSize = TransferProtocolLimits.maximumChunkBytes
+        count = UInt32((bytes.count + chunkSize - 1) / chunkSize)
+    }
+    return TransferManifest(
+        id: id,
+        entries: [
+            TransferManifestEntry(
+                relativePath: try RelativePath(name),
+                kind: .file,
+                size: UInt64(bytes.count),
+                modificationDate: Date(timeIntervalSince1970: 1_700_000_000),
+                chunkCount: count,
+                digest: digest ?? Data(SHA256.hash(data: bytes))
+            )
+        ]
+    )
+}
+
+private func makeDirectoryManifest(
+    id: TransferID,
+    childName: String,
+    bytes: Data
+) throws -> TransferManifest {
+    TransferManifest(
+        id: id,
+        entries: [
+            TransferManifestEntry(
+                relativePath: try RelativePath("root"),
+                kind: .directory,
+                size: 0,
+                modificationDate: Date(timeIntervalSince1970: 1_700_000_000),
+                chunkCount: 0,
+                digest: Data(SHA256.hash(data: Data()))
+            ),
+            TransferManifestEntry(
+                relativePath: try RelativePath(childName),
+                kind: .file,
+                size: UInt64(bytes.count),
+                modificationDate: Date(timeIntervalSince1970: 1_700_000_000),
+                chunkCount: bytes.isEmpty ? 0 : 1,
+                digest: Data(SHA256.hash(data: bytes))
+            ),
+        ]
+    )
+}
+
+private func assertReceiveError(
+    _ expected: ReceiveStoreError,
+    operation: () async throws -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await operation()
+        XCTFail("Expected \(expected)", file: file, line: line)
+    } catch {
+        XCTAssertEqual(error as? ReceiveStoreError, expected, file: file, line: line)
+    }
+}
+
+private func sqliteColumns(at url: URL) throws -> [String] {
+    var database: OpaquePointer?
+    guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+        let database
+    else { throw NSError(domain: "ReceiveStoreTests", code: 1) }
+    defer { sqlite3_close(database) }
+    var result: [String] = []
+    for table in ["transfers", "entries", "verified_ranges"] {
+        var statement: OpaquePointer?
+        guard
+            sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil)
+                == SQLITE_OK,
+            let statement
+        else { throw NSError(domain: "ReceiveStoreTests", code: 2) }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let name = sqlite3_column_text(statement, 1) {
+                result.append(String(cString: name))
+            }
+        }
+    }
+    return result
+}
