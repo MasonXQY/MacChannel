@@ -955,6 +955,109 @@ final class ReceiveStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: output), bytes)
     }
 
+    func testRestartRecoversEveryInterruptedInitialPreparationBoundary() async throws {
+        for interruptedStep in ReceivePreparationStep.allCases {
+            let fixture = try StorageFixture()
+            let bytes = Data("initial preparation \(interruptedStep)".utf8)
+            let manifest = try makeManifest(name: "creation.txt", bytes: bytes)
+
+            do {
+                _ = try await fixture.prepare(
+                    manifest: manifest,
+                    onPreparationStep: { step in
+                        if step == interruptedStep { throw PublicationTestFault.interrupted }
+                    }
+                )
+                XCTFail("Expected preparation interruption after \(interruptedStep)")
+            } catch {
+                XCTAssertEqual(error as? PublicationTestFault, .interrupted)
+            }
+
+            let interruptedHistory = try await fixture.database.history(limit: 10)
+            XCTAssertEqual(interruptedHistory.count, 1)
+            XCTAssertEqual(interruptedHistory.first?.id, manifest.id)
+            XCTAssertEqual(interruptedHistory.first?.peer, fixture.source)
+            XCTAssertEqual(interruptedHistory.first?.phase, .preparing)
+            let hasInterruptedIntent =
+                try await fixture.database.creationIntentExists(for: manifest.id)
+            XCTAssertTrue(hasInterruptedIntent)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+
+            let wrongSource = DeviceID(rawValue: UUID())
+            await assertReceiveError(.invalidManifest) {
+                _ = try await ReceiveStore.prepare(
+                    manifest: manifest,
+                    source: wrongSource,
+                    policy: ReceivePolicy(trustedSources: [wrongSource]),
+                    directories: DownloadDirectory(globalDirectory: fixture.downloads),
+                    database: fixture.database,
+                    incomingDirectory: fixture.incoming,
+                    capacity: FixedCapacity(bytes: 1_000_000)
+                )
+            }
+            let incompatible = try makeManifest(
+                name: "creation.txt",
+                bytes: Data("incompatible".utf8),
+                id: manifest.id
+            )
+            await assertReceiveError(.invalidManifest) {
+                _ = try await fixture.prepare(manifest: incompatible)
+            }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+
+            let recovered = try await fixture.prepare(manifest: manifest)
+            let hasReadyIntent = try await fixture.database.creationIntentExists(for: manifest.id)
+            XCTAssertFalse(hasReadyIntent)
+            try await recovered.write(bytes, index: 0, entry: 0)
+            let output = try await recovered.finalize()
+            XCTAssertEqual(try Data(contentsOf: output), bytes)
+        }
+    }
+
+    func testInterruptedPreparationRejectsUnknownContentAndRemainsExpiryEligible()
+        async throws
+    {
+        let fixture = try StorageFixture()
+        let bytes = Data("unknown creation content".utf8)
+        let manifest = try makeManifest(name: "creation-unknown.txt", bytes: bytes)
+
+        do {
+            _ = try await fixture.prepare(
+                manifest: manifest,
+                onPreparationStep: { step in
+                    if step == .sourceBindingWritten {
+                        throw PublicationTestFault.interrupted
+                    }
+                }
+            )
+            XCTFail("Expected preparation interruption")
+        } catch {
+            XCTAssertEqual(error as? PublicationTestFault, .interrupted)
+        }
+        let unknown = fixture.staging(manifest.id).appendingPathComponent("unknown-private-state")
+        try Data("do not delete until expiry".utf8).write(to: unknown)
+
+        await assertReceiveError(.stagingUnavailable) {
+            _ = try await fixture.prepare(manifest: manifest)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unknown.path))
+        let failedHistory = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(failedHistory.first?.phase, .failed)
+        try await fixture.database.markPhase(
+            .failed,
+            for: manifest.id,
+            at: Date(timeIntervalSince1970: 100)
+        )
+
+        let removed = try await ReceiveStore.expireFailedStaging(
+            database: fixture.database,
+            incomingDirectory: fixture.incoming,
+            now: Date(timeIntervalSince1970: 100 + 7 * 86_400)
+        )
+        XCTAssertEqual(removed, [manifest.id])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+    }
+
     func testReplacementDatabaseRemainsUntouchedWhenStagedJournalRejectsManifest() async throws {
         let fixture = try StorageFixture()
         let id = TransferID(rawValue: UUID())
@@ -1094,6 +1197,51 @@ final class ReceiveStoreTests: XCTestCase {
             XCTAssertEqual(error as? ReceiveStoreError, .databaseFailure)
         }
         XCTAssertEqual(try sqliteUserVersion(at: url), 0)
+    }
+
+    func testMigrationUpgradesValidatedVersionOneSchemaAtomically() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("version-one.sqlite3")
+        try executeSQLite(
+            at: url,
+            sql: """
+                CREATE TABLE transfers (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    peer_id TEXT NOT NULL,
+                    display_filename TEXT NOT NULL,
+                    aggregate_size INTEGER NOT NULL CHECK (aggregate_size >= 0),
+                    completed_bytes INTEGER NOT NULL CHECK (completed_bytes >= 0),
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    route TEXT NOT NULL,
+                    phase TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE entries (
+                    transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+                    entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+                    size INTEGER NOT NULL CHECK (size >= 0),
+                    chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
+                    PRIMARY KEY (transfer_id, entry_index)
+                ) STRICT;
+                CREATE TABLE verified_ranges (
+                    transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
+                    entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+                    lower_bound INTEGER NOT NULL CHECK (lower_bound >= 0),
+                    upper_bound INTEGER NOT NULL CHECK (upper_bound > lower_bound),
+                    PRIMARY KEY (transfer_id, entry_index, lower_bound)
+                ) STRICT;
+                CREATE INDEX transfers_phase_updated ON transfers(phase, updated_at);
+                PRAGMA user_version = 1;
+                """
+        )
+
+        let database = try TransferDatabase(url: url)
+        withExtendedLifetime(database) {}
+        XCTAssertEqual(try sqliteUserVersion(at: url), 2)
+        XCTAssertTrue(try sqliteColumns(at: url).contains("preparation_fingerprint"))
     }
 
     func testMigrationRejectsWrongLegacyTypesAndConstraintsWithoutAdvancingVersion() throws {
@@ -1389,6 +1537,85 @@ final class ReceiveStoreTests: XCTestCase {
         XCTAssertEqual(recoveredHistory.first?.phase, .cancelled)
     }
 
+    func testSameStoreRetriesCancellationAfterPostDiscardCallbackFailure() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("retry callback cancellation".utf8)
+        let manifest = try makeManifest(name: "retry-callback.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+
+        do {
+            try await store.cancel(onCleanupStep: { step in
+                if step == .stagingDiscarded { throw PublicationTestFault.interrupted }
+            })
+            XCTFail("Expected cancellation interruption")
+        } catch {
+            XCTAssertEqual(error as? PublicationTestFault, .interrupted)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+
+        try await store.cancel()
+
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.phase, .cancelled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.lease(manifest.id).path))
+    }
+
+    func testSameStoreRetriesCancellationAfterDatabaseFailureFollowingDiscard() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("retry database cancellation".utf8)
+        let manifest = try makeManifest(name: "retry-database.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+        let lock = try SQLiteWriteLock(url: fixture.databaseURL)
+
+        do {
+            try await store.cancel(onCleanupStep: { step in
+                if step == .stagingDiscarded { try lock.acquire() }
+            })
+            XCTFail("Expected database failure")
+        } catch {
+            XCTAssertEqual(error as? ReceiveStoreError, .databaseFailure)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+        lock.release()
+
+        try await store.cancel()
+
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.phase, .cancelled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.lease(manifest.id).path))
+    }
+
+    func testRestartCompletesCancellationAfterDatabaseFailureFollowingDiscard() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("restart database cancellation".utf8)
+        let manifest = try makeManifest(name: "restart-database.txt", bytes: bytes)
+        var store: ReceiveStore? = try await fixture.prepare(manifest: manifest)
+        try await store?.write(bytes, index: 0, entry: 0)
+        let lock = try SQLiteWriteLock(url: fixture.databaseURL)
+
+        do {
+            try await store?.cancel(onCleanupStep: { step in
+                if step == .stagingDiscarded { try lock.acquire() }
+            })
+            XCTFail("Expected database failure")
+        } catch {
+            XCTAssertEqual(error as? ReceiveStoreError, .databaseFailure)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.staging(manifest.id).path))
+        lock.release()
+        store = nil
+
+        await assertReceiveError(.alreadyFinished) {
+            _ = try await fixture.prepare(manifest: manifest)
+        }
+
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(history.first?.phase, .cancelled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.lease(manifest.id).path))
+    }
+
     func testRestartCompletesCancellationFromPartiallyDiscardedStaging() async throws {
         let fixture = try StorageFixture()
         let bytes = Data("partial cancellation cleanup".utf8)
@@ -1550,7 +1777,8 @@ private struct StorageFixture {
     func prepare(
         manifest: TransferManifest,
         capacity: any ReceiveCapacityProviding = FixedCapacity(bytes: 1_000_000_000),
-        database: TransferDatabase? = nil
+        database: TransferDatabase? = nil,
+        onPreparationStep: @escaping @Sendable (ReceivePreparationStep) throws -> Void = { _ in }
     ) async throws -> ReceiveStore {
         try await ReceiveStore.prepare(
             manifest: manifest,
@@ -1559,8 +1787,38 @@ private struct StorageFixture {
             directories: DownloadDirectory(globalDirectory: downloads),
             database: database ?? self.database,
             incomingDirectory: incoming,
-            capacity: capacity
+            capacity: capacity,
+            onPreparationStep: onPreparationStep
         )
+    }
+}
+
+private final class SQLiteWriteLock: @unchecked Sendable {
+    private var connection: OpaquePointer?
+
+    init(url: URL) throws {
+        guard sqlite3_open_v2(url.path, &connection, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            if let connection { sqlite3_close(connection) }
+            throw NSError(domain: "ReceiveStoreTests", code: 8)
+        }
+        guard sqlite3_busy_timeout(connection, 0) == SQLITE_OK else {
+            throw NSError(domain: "ReceiveStoreTests", code: 9)
+        }
+    }
+
+    deinit {
+        release()
+        if let connection { sqlite3_close(connection) }
+    }
+
+    func acquire() throws {
+        guard let connection,
+            sqlite3_exec(connection, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK
+        else { throw NSError(domain: "ReceiveStoreTests", code: 10) }
+    }
+
+    func release() {
+        if let connection { _ = sqlite3_exec(connection, "ROLLBACK", nil, nil, nil) }
     }
 }
 

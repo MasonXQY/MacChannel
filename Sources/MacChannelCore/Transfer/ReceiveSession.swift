@@ -753,9 +753,12 @@ final class DescriptorStagingTree: @unchecked Sendable {
         )
     }
 
-    init(destinationDescriptor sourceDescriptor: Int32, stagingName: String, metadataName: String)
-        throws
-    {
+    init(
+        destinationDescriptor sourceDescriptor: Int32,
+        stagingName: String,
+        metadataName: String,
+        onStagingDirectoryCreated: () throws -> Void = {}
+    ) throws {
         let destinationDescriptor = Darwin.openat(
             sourceDescriptor,
             ".",
@@ -792,6 +795,13 @@ final class DescriptorStagingTree: @unchecked Sendable {
         }
         stagingDevice = status.st_dev
         stagingInode = status.st_ino
+        do {
+            try onStagingDirectoryCreated()
+        } catch {
+            Darwin.close(rootDescriptor)
+            Darwin.close(destinationDescriptor)
+            throw error
+        }
         do {
             try removeStaleMetadataRetirements(rootDescriptor: rootDescriptor)
         } catch {
@@ -1114,6 +1124,62 @@ final class DescriptorStagingTree: @unchecked Sendable {
             }
         }
         guard actual == expected else { throw TransferProtocolError.destinationEscape }
+    }
+
+    func requireSafeCreationSubset(
+        manifestRootName: String,
+        entries: [TransferManifestEntry],
+        allowedMetadataEntries: Set<String>,
+        caseSensitive: Bool
+    ) throws {
+        try requireStagingPathIdentity()
+        let rootNames = try exactDirectoryNames(rootDescriptor)
+        guard rootNames.contains(metadataName),
+            rootNames.isSubset(of: [manifestRootName, metadataName])
+        else { throw TransferProtocolError.destinationEscape }
+
+        var metadata = stat()
+        guard fstatat(rootDescriptor, metadataName, &metadata, AT_SYMLINK_NOFOLLOW) == 0,
+            metadata.st_mode & S_IFMT == S_IFDIR,
+            metadata.st_uid == geteuid(),
+            metadata.st_dev == metadataDevice,
+            metadata.st_ino == metadataInode
+        else { throw TransferProtocolError.destinationEscape }
+        let metadataNames = try exactDirectoryNames(metadataDescriptor)
+        guard metadataNames.isSubset(of: allowedMetadataEntries) else {
+            throw TransferProtocolError.destinationEscape
+        }
+        for name in metadataNames {
+            var item = stat()
+            guard fstatat(metadataDescriptor, name, &item, AT_SYMLINK_NOFOLLOW) == 0,
+                item.st_mode & S_IFMT == S_IFREG,
+                item.st_uid == geteuid(),
+                item.st_nlink == 1
+            else { throw TransferProtocolError.destinationEscape }
+        }
+
+        guard rootNames.contains(manifestRootName) else { return }
+        var actual: [String: TransferEntryKind] = [:]
+        try collectStagedEntries(
+            parentDescriptor: rootDescriptor,
+            name: manifestRootName,
+            components: [manifestRootName],
+            caseSensitive: caseSensitive,
+            result: &actual
+        )
+        var expected: [String: TransferEntryKind] = [:]
+        for entry in entries {
+            let key = destinationFilesystemKey(
+                entry.relativePath.components,
+                caseSensitive: caseSensitive
+            )
+            guard expected.updateValue(entry.kind, forKey: key) == nil else {
+                throw TransferProtocolError.destinationPathCollision
+            }
+        }
+        for (key, kind) in actual where expected[key] != kind {
+            throw TransferProtocolError.destinationEscape
+        }
     }
 
     func requireExactStagingRoot(

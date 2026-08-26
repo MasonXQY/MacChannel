@@ -205,14 +205,19 @@ final class ReceiveTransferLease: @unchecked Sendable {
         return true
     }
 
-    func makeStagingTree(stagingName: String, metadataName: String) throws
+    func makeStagingTree(
+        stagingName: String,
+        metadataName: String,
+        onStagingDirectoryCreated: () throws -> Void = {}
+    ) throws
         -> DescriptorStagingTree
     {
         try requireHeld()
         let tree = try DescriptorStagingTree(
             destinationDescriptor: parentDescriptor,
             stagingName: stagingName,
-            metadataName: metadataName
+            metadataName: metadataName,
+            onStagingDirectoryCreated: onStagingDirectoryCreated
         )
         try requireHeld()
         return tree
@@ -412,6 +417,26 @@ private enum SourceBindingStore {
             try record(source: source, tree: tree)
             return
         }
+        try validate(descriptor: descriptor, source: source)
+    }
+
+    static func validateIfPresent(
+        source: DeviceID,
+        tree: DescriptorStagingTree
+    ) throws {
+        let descriptor = Darwin.openat(
+            tree.metadataDescriptor,
+            name,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+        )
+        if descriptor < 0 {
+            guard errno == ENOENT else { throw ReceiveStoreError.stagingUnavailable }
+            return
+        }
+        try validate(descriptor: descriptor, source: source)
+    }
+
+    private static func validate(descriptor: Int32, source: DeviceID) throws {
         defer { Darwin.close(descriptor) }
         var status = stat()
         guard fstat(descriptor, &status) == 0,
@@ -640,10 +665,19 @@ enum CancellationCleanupStep: Sendable {
     case stagingDiscarded
 }
 
+enum ReceivePreparationStep: CaseIterable, Sendable {
+    case treeCreated
+    case sourceBindingWritten
+    case manifestRootCreated
+    case journalReady
+    case beforeDatabaseReady
+}
+
 public actor ReceiveStore {
     private enum State {
         case receiving
         case cancelling
+        case discardedPendingCommit
         case published(URL)
         case reconciled(URL)
         case finished
@@ -706,6 +740,54 @@ public actor ReceiveStore {
         incomingDirectory suppliedIncoming: URL? = nil,
         capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider()
     ) async throws -> ReceiveStore {
+        try await prepareImpl(
+            manifest: manifest,
+            source: source,
+            policy: policy,
+            directories: directories,
+            database: suppliedDatabase,
+            route: route,
+            incomingDirectory: suppliedIncoming,
+            capacity: capacity,
+            onPreparationStep: { _ in }
+        )
+    }
+
+    static func prepare(
+        manifest: TransferManifest,
+        source: DeviceID,
+        policy: ReceivePolicy,
+        directories: DownloadDirectory = DownloadDirectory(),
+        database suppliedDatabase: TransferDatabase? = nil,
+        route: ConnectionRoute = .lan,
+        incomingDirectory suppliedIncoming: URL? = nil,
+        capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
+        onPreparationStep: @escaping @Sendable (ReceivePreparationStep) throws -> Void
+    ) async throws -> ReceiveStore {
+        try await prepareImpl(
+            manifest: manifest,
+            source: source,
+            policy: policy,
+            directories: directories,
+            database: suppliedDatabase,
+            route: route,
+            incomingDirectory: suppliedIncoming,
+            capacity: capacity,
+            onPreparationStep: onPreparationStep
+        )
+    }
+
+    private static func prepareImpl(
+        manifest: TransferManifest,
+        source: DeviceID,
+        policy: ReceivePolicy,
+        directories: DownloadDirectory = DownloadDirectory(),
+        database suppliedDatabase: TransferDatabase? = nil,
+        route: ConnectionRoute = .lan,
+        incomingDirectory suppliedIncoming: URL? = nil,
+        capacity: any ReceiveCapacityProviding,
+        onPreparationStep: @escaping @Sendable (ReceivePreparationStep) throws -> Void
+    ) async throws -> ReceiveStore {
         do {
             try validateReceivedManifest(manifest)
         } catch {
@@ -733,7 +815,7 @@ public actor ReceiveStore {
             transferID: manifest.id,
             incomingDirectory: incoming
         )
-        let resuming = try lease.stagingDirectoryExists(transferID: manifest.id)
+        var resuming = try lease.stagingDirectoryExists(transferID: manifest.id)
         if knownPhase == .cancelling || knownPhase == .cancelled || knownPhase == .completed {
             do {
                 try lease.removeExpiredQuarantines()
@@ -784,21 +866,85 @@ public actor ReceiveStore {
                     [preferredMetadata],
                     caseSensitive: caseSensitive
                 ) ? preferredMetadata + ".private" : preferredMetadata
+        let fingerprint = try manifestFingerprint(manifest)
+        let initialPreparation = try await database.preparationRecord(
+            manifest: manifest,
+            source: source
+        )
+        var recordedPhase = initialPreparation?.phase ?? .preparing
+        var creationIntentDurable = initialPreparation?.isCreating == true
+
+        if resuming, creationIntentDurable {
+            do {
+                let interruptedTree = try lease.makeStagingTree(
+                    stagingName: suffix,
+                    metadataName: metadataName
+                )
+                try interruptedTree.requireSafeCreationSubset(
+                    manifestRootName: rootName,
+                    entries: manifest.entries,
+                    allowedMetadataEntries: [
+                        ".source-binding", ".source-binding.tmp", ".resume-state",
+                    ],
+                    caseSensitive: caseSensitive
+                )
+                try SourceBindingStore.validateIfPresent(source: source, tree: interruptedTree)
+                try interruptedTree.discard()
+                resuming = false
+            } catch let error as ReceiveStoreError {
+                _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
+                lease.preserveForTransfer()
+                throw error
+            } catch {
+                _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
+                lease.preserveForTransfer()
+                throw ReceiveStoreError.stagingUnavailable
+            }
+        }
+
+        if !resuming, !creationIntentDurable {
+            recordedPhase = try await database.recordPreparationIntent(
+                manifest: manifest,
+                source: source,
+                route: route,
+                at: Date()
+            )
+            creationIntentDurable = true
+        }
+
+        var preparationInterrupted = false
+        func checkpoint(_ step: ReceivePreparationStep) throws {
+            do {
+                try onPreparationStep(step)
+            } catch {
+                preparationInterrupted = true
+                throw error
+            }
+        }
         let tree: DescriptorStagingTree
         do {
             tree = try lease.makeStagingTree(
                 stagingName: suffix,
-                metadataName: metadataName
+                metadataName: metadataName,
+                onStagingDirectoryCreated: {
+                    try checkpoint(.treeCreated)
+                }
             )
         } catch {
+            if preparationInterrupted {
+                lease.preserveForTransfer()
+                throw error
+            }
+            if creationIntentDurable {
+                _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
+            }
             throw ReceiveStoreError.stagingUnavailable
         }
         var files: [UInt32: StagedFile] = [:]
         var publicationCommitted = knownPhase == .completed
         var cancellationRecovery = false
-        var databasePrepared = false
+        var databasePrepared = initialPreparation != nil || creationIntentDurable
         do {
-            let fingerprint = try manifestFingerprint(manifest)
             try ResumeStateStore.requireCompatible(
                 named: ".resume-state",
                 fingerprint: fingerprint,
@@ -809,6 +955,7 @@ public actor ReceiveStore {
             if knownPhase != .completed {
                 try SourceBindingStore.ensure(source: source, resuming: resuming, tree: tree)
             }
+            if !resuming { try checkpoint(.sourceBindingWritten) }
             let hasCancellationIntent = try CancellationIntentStore.exists(
                 fingerprint: fingerprint,
                 tree: tree
@@ -836,7 +983,18 @@ public actor ReceiveStore {
                     }
                 }
             } else if !resuming {
-                for (index, entry) in manifest.entries.enumerated() {
+                let rootEntry = manifest.entries[0]
+                switch rootEntry.kind {
+                case .directory:
+                    try tree.ensureDirectory(rootEntry.relativePath.components)
+                case .file:
+                    files[0] = try tree.openFile(
+                        rootEntry.relativePath.components,
+                        create: true
+                    )
+                }
+                try checkpoint(.manifestRootCreated)
+                for (index, entry) in manifest.entries.enumerated().dropFirst() {
                     switch entry.kind {
                     case .directory:
                         try tree.ensureDirectory(entry.relativePath.components)
@@ -861,6 +1019,7 @@ public actor ReceiveStore {
             } else {
                 loaded = nil
             }
+            if !resuming { try checkpoint(.journalReady) }
             if loaded != nil {
                 var metadataEntries: Set<String> = [".resume-state", ".source-binding"]
                 if intent != nil { metadataEntries.insert(".publication-intent") }
@@ -871,13 +1030,26 @@ public actor ReceiveStore {
                 )
             }
 
-            let recordedPhase = try await database.recordPrepared(
-                manifest: manifest,
-                source: source,
-                route: route,
-                at: Date()
-            )
-            databasePrepared = true
+            if resuming, initialPreparation == nil {
+                recordedPhase = try await database.recordPreparationIntent(
+                    manifest: manifest,
+                    source: source,
+                    route: route,
+                    at: Date()
+                )
+                creationIntentDurable = true
+                databasePrepared = true
+            }
+            if creationIntentDurable {
+                try checkpoint(.beforeDatabaseReady)
+                recordedPhase = try await database.finishPreparation(
+                    manifest: manifest,
+                    source: source,
+                    route: route,
+                    at: Date()
+                )
+                creationIntentDurable = false
+            }
             if recordedPhase == .cancelling {
                 cancellationRecovery = true
                 try tree.discard()
@@ -973,6 +1145,10 @@ public actor ReceiveStore {
             lease.preserveForTransfer()
             return store
         } catch let error as ReceiveStoreError {
+            if preparationInterrupted {
+                lease.preserveForTransfer()
+                throw error
+            }
             if databasePrepared, !publicationCommitted, !cancellationRecovery {
                 _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
             } else if !resuming, !databasePrepared {
@@ -980,6 +1156,10 @@ public actor ReceiveStore {
             }
             throw error
         } catch {
+            if preparationInterrupted {
+                lease.preserveForTransfer()
+                throw error
+            }
             if databasePrepared, !publicationCommitted, !cancellationRecovery {
                 _ = try? await database.markPhase(.failed, for: manifest.id, at: Date())
             } else if !resuming, !databasePrepared {
@@ -1105,6 +1285,8 @@ public actor ReceiveStore {
         case .finished:
             throw ReceiveStoreError.alreadyFinished
         case .cancelling:
+            throw ReceiveStoreError.alreadyFinished
+        case .discardedPendingCommit:
             throw ReceiveStoreError.alreadyFinished
         case .receiving:
             break
@@ -1233,16 +1415,37 @@ public actor ReceiveStore {
             try onCleanupStep(.intentRecorded)
         case .cancelling:
             break
+        case .discardedPendingCommit:
+            break
         case .published, .reconciled, .finished:
             return
         }
+        if case .cancelling = state {
+            try lease.requireHeld()
+            try await database.markPhase(.cancelling, for: manifest.id, at: Date())
+            do {
+                try tree.discard()
+            } catch {
+                do {
+                    guard try !lease.stagingDirectoryExists(transferID: manifest.id) else {
+                        throw ReceiveStoreError.stagingUnavailable
+                    }
+                } catch let storage as ReceiveStoreError {
+                    throw storage
+                } catch {
+                    throw ReceiveStoreError.stagingUnavailable
+                }
+            }
+            state = .discardedPendingCommit
+            try onCleanupStep(.stagingDiscarded)
+        }
         try lease.requireHeld()
-        try await database.markPhase(.cancelling, for: manifest.id, at: Date())
-        do { try tree.discard() } catch { throw ReceiveStoreError.stagingUnavailable }
-        state = .finished
-        try onCleanupStep(.stagingDiscarded)
+        guard try !lease.stagingDirectoryExists(transferID: manifest.id) else {
+            throw ReceiveStoreError.stagingUnavailable
+        }
         try await database.markPhase(.cancelled, for: manifest.id, at: Date())
         try lease.removeAfterTerminalState()
+        state = .finished
     }
 
     public func markFailed(at date: Date = Date()) async throws {

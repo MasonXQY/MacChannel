@@ -14,8 +14,13 @@ public struct TransferHistoryRecord: Equatable, Sendable {
     public let phase: TransferPhase
 }
 
+struct TransferPreparationRecord: Equatable, Sendable {
+    let phase: TransferPhase
+    let isCreating: Bool
+}
+
 public actor TransferDatabase {
-    private static let schemaVersion: Int32 = 1
+    private static let schemaVersion: Int32 = 2
     nonisolated(unsafe) private var connection: OpaquePointer?
 
     public init(url: URL) throws {
@@ -86,7 +91,33 @@ public actor TransferDatabase {
         if let connection { sqlite3_close(connection) }
     }
 
-    func recordPrepared(
+    func preparationRecord(
+        manifest: TransferManifest,
+        source: DeviceID
+    ) throws -> TransferPreparationRecord? {
+        let aggregate = try manifestAggregateBytes(manifest)
+        guard aggregate <= UInt64(Int64.max) else { throw ReceiveStoreError.invalidManifest }
+        let fingerprint = try manifestFingerprint(manifest)
+        guard
+            let existing = try validateExistingTransfer(
+                manifest: manifest,
+                source: source,
+                displayName: manifest.entries[0].relativePath.components[0],
+                aggregate: aggregate
+            )
+        else { return nil }
+        if let storedFingerprint = existing.preparationFingerprint,
+            storedFingerprint != fingerprint
+        {
+            throw ReceiveStoreError.invalidManifest
+        }
+        return TransferPreparationRecord(
+            phase: existing.phase,
+            isCreating: existing.preparationFingerprint != nil
+        )
+    }
+
+    func recordPreparationIntent(
         manifest: TransferManifest,
         source: DeviceID,
         route: ConnectionRoute,
@@ -95,21 +126,43 @@ public actor TransferDatabase {
         let aggregate = try manifestAggregateBytes(manifest)
         guard aggregate <= UInt64(Int64.max) else { throw ReceiveStoreError.invalidManifest }
         let displayName = manifest.entries[0].relativePath.components[0]
+        let fingerprint = try manifestFingerprint(manifest)
         return try transaction {
-            if let existingPhase = try validateExistingTransfer(
+            if let existing = try validateExistingTransfer(
                 manifest: manifest,
                 source: source,
                 displayName: displayName,
                 aggregate: aggregate
             ) {
-                return existingPhase
+                if let storedFingerprint = existing.preparationFingerprint,
+                    storedFingerprint != fingerprint
+                {
+                    throw ReceiveStoreError.invalidManifest
+                }
+                let update = try statement(
+                    """
+                    UPDATE transfers
+                    SET preparation_fingerprint = ?, updated_at = ?, route = ?
+                    WHERE id = ?
+                    """
+                )
+                defer { sqlite3_finalize(update) }
+                try bind(fingerprint, to: update, at: 1)
+                try bind(date.timeIntervalSince1970, to: update, at: 2)
+                try bind(route.rawValue, to: update, at: 3)
+                try bind(manifest.id.rawValue.uuidString.lowercased(), to: update, at: 4)
+                try stepDone(update)
+                guard sqlite3_changes(try requiredConnection) == 1 else {
+                    throw ReceiveStoreError.databaseFailure
+                }
+                return existing.phase
             } else {
                 let insert = try statement(
                     """
                     INSERT INTO transfers (
                         id, peer_id, display_filename, aggregate_size, completed_bytes,
-                        created_at, updated_at, route, phase
-                    ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)
+                        created_at, updated_at, route, phase, preparation_fingerprint
+                    ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                     """
                 )
                 defer { sqlite3_finalize(insert) }
@@ -121,6 +174,7 @@ public actor TransferDatabase {
                 try bind(date.timeIntervalSince1970, to: insert, at: 6)
                 try bind(route.rawValue, to: insert, at: 7)
                 try bind(TransferPhase.preparing.rawValue, to: insert, at: 8)
+                try bind(fingerprint, to: insert, at: 9)
                 try stepDone(insert)
 
                 for (index, entry) in manifest.entries.enumerated() {
@@ -142,6 +196,45 @@ public actor TransferDatabase {
                 }
                 return .preparing
             }
+        }
+    }
+
+    func finishPreparation(
+        manifest: TransferManifest,
+        source: DeviceID,
+        route: ConnectionRoute,
+        at date: Date
+    ) throws -> TransferPhase {
+        let aggregate = try manifestAggregateBytes(manifest)
+        guard aggregate <= UInt64(Int64.max) else { throw ReceiveStoreError.invalidManifest }
+        let fingerprint = try manifestFingerprint(manifest)
+        return try transaction {
+            guard
+                let existing = try validateExistingTransfer(
+                    manifest: manifest,
+                    source: source,
+                    displayName: manifest.entries[0].relativePath.components[0],
+                    aggregate: aggregate
+                ),
+                existing.preparationFingerprint == fingerprint
+            else { throw ReceiveStoreError.invalidManifest }
+            let update = try statement(
+                """
+                UPDATE transfers
+                SET preparation_fingerprint = NULL, updated_at = ?, route = ?
+                WHERE id = ? AND preparation_fingerprint = ?
+                """
+            )
+            defer { sqlite3_finalize(update) }
+            try bind(date.timeIntervalSince1970, to: update, at: 1)
+            try bind(route.rawValue, to: update, at: 2)
+            try bind(manifest.id.rawValue.uuidString.lowercased(), to: update, at: 3)
+            try bind(fingerprint, to: update, at: 4)
+            try stepDone(update)
+            guard sqlite3_changes(try requiredConnection) == 1 else {
+                throw ReceiveStoreError.databaseFailure
+            }
+            return existing.phase
         }
     }
 
@@ -277,6 +370,22 @@ public actor TransferDatabase {
             sqlite3_step(query) == SQLITE_DONE
         else { throw ReceiveStoreError.databaseFailure }
         return phase
+    }
+
+    func creationIntentExists(for transfer: TransferID) throws -> Bool {
+        let query = try statement(
+            "SELECT preparation_fingerprint FROM transfers WHERE id = ?"
+        )
+        defer { sqlite3_finalize(query) }
+        try bind(transfer.rawValue.uuidString.lowercased(), to: query, at: 1)
+        let first = sqlite3_step(query)
+        if first == SQLITE_DONE { return false }
+        guard first == SQLITE_ROW else { throw ReceiveStoreError.databaseFailure }
+        let hasIntent = sqlite3_column_type(query, 0) != SQLITE_NULL
+        guard sqlite3_step(query) == SQLITE_DONE else {
+            throw ReceiveStoreError.databaseFailure
+        }
+        return hasIntent
     }
 
     public func replaceVerifiedRanges(for transfer: TransferID, with map: ResumeMap) throws {
@@ -481,10 +590,22 @@ public actor TransferDatabase {
         do {
             if version == 0 {
                 try execute(database, sql: createSchemaSQL)
+            } else if version == 1 {
+                try validateSchema(database, includesPreparationFingerprint: false)
+                try execute(
+                    database,
+                    sql: """
+                        ALTER TABLE transfers ADD COLUMN preparation_fingerprint BLOB
+                        CHECK (
+                            preparation_fingerprint IS NULL
+                            OR length(preparation_fingerprint) = 32
+                        )
+                        """
+                )
             }
-            try validateSchema(database)
-            if version == 0 {
-                try execute(database, sql: "PRAGMA user_version = 1")
+            try validateSchema(database, includesPreparationFingerprint: true)
+            if version < schemaVersion {
+                try execute(database, sql: "PRAGMA user_version = 2")
             }
             try execute(database, sql: "COMMIT")
         } catch {
@@ -503,7 +624,11 @@ public actor TransferDatabase {
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL,
             route TEXT NOT NULL,
-            phase TEXT NOT NULL
+            phase TEXT NOT NULL,
+            preparation_fingerprint BLOB CHECK (
+                preparation_fingerprint IS NULL
+                OR length(preparation_fingerprint) = 32
+            )
         ) STRICT;
         CREATE TABLE IF NOT EXISTS entries (
             transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
@@ -546,21 +671,46 @@ public actor TransferDatabase {
         let match: String
     }
 
-    private static func validateSchema(_ database: OpaquePointer) throws {
+    private static func validateSchema(
+        _ database: OpaquePointer,
+        includesPreparationFingerprint: Bool
+    ) throws {
+        let transfersSQL: String
+        if includesPreparationFingerprint {
+            transfersSQL = """
+                CREATE TABLE transfers (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    peer_id TEXT NOT NULL,
+                    display_filename TEXT NOT NULL,
+                    aggregate_size INTEGER NOT NULL CHECK (aggregate_size >= 0),
+                    completed_bytes INTEGER NOT NULL CHECK (completed_bytes >= 0),
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    route TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    preparation_fingerprint BLOB CHECK (
+                        preparation_fingerprint IS NULL
+                        OR length(preparation_fingerprint) = 32
+                    )
+                ) STRICT
+                """
+        } else {
+            transfersSQL = """
+                CREATE TABLE transfers (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    peer_id TEXT NOT NULL,
+                    display_filename TEXT NOT NULL,
+                    aggregate_size INTEGER NOT NULL CHECK (aggregate_size >= 0),
+                    completed_bytes INTEGER NOT NULL CHECK (completed_bytes >= 0),
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    route TEXT NOT NULL,
+                    phase TEXT NOT NULL
+                ) STRICT
+                """
+        }
         let expectedSQL = [
-            "transfers": """
-            CREATE TABLE transfers (
-                id TEXT PRIMARY KEY NOT NULL,
-                peer_id TEXT NOT NULL,
-                display_filename TEXT NOT NULL,
-                aggregate_size INTEGER NOT NULL CHECK (aggregate_size >= 0),
-                completed_bytes INTEGER NOT NULL CHECK (completed_bytes >= 0),
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                route TEXT NOT NULL,
-                phase TEXT NOT NULL
-            ) STRICT
-            """,
+            "transfers": transfersSQL,
             "entries": """
             CREATE TABLE entries (
                 transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
@@ -593,29 +743,36 @@ public actor TransferDatabase {
             else { throw ReceiveStoreError.databaseFailure }
         }
 
-        try requireColumns(
-            database,
-            table: "transfers",
-            expected: [
-                SchemaColumn(name: "id", type: "TEXT", notNull: true, primaryKeyPosition: 1),
-                SchemaColumn(name: "peer_id", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+        var transferColumns = [
+            SchemaColumn(name: "id", type: "TEXT", notNull: true, primaryKeyPosition: 1),
+            SchemaColumn(name: "peer_id", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+            SchemaColumn(
+                name: "display_filename", type: "TEXT", notNull: true,
+                primaryKeyPosition: 0),
+            SchemaColumn(
+                name: "aggregate_size", type: "INTEGER", notNull: true,
+                primaryKeyPosition: 0),
+            SchemaColumn(
+                name: "completed_bytes", type: "INTEGER", notNull: true,
+                primaryKeyPosition: 0),
+            SchemaColumn(
+                name: "created_at", type: "REAL", notNull: true, primaryKeyPosition: 0),
+            SchemaColumn(
+                name: "updated_at", type: "REAL", notNull: true, primaryKeyPosition: 0),
+            SchemaColumn(name: "route", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+            SchemaColumn(name: "phase", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+        ]
+        if includesPreparationFingerprint {
+            transferColumns.append(
                 SchemaColumn(
-                    name: "display_filename", type: "TEXT", notNull: true,
-                    primaryKeyPosition: 0),
-                SchemaColumn(
-                    name: "aggregate_size", type: "INTEGER", notNull: true,
-                    primaryKeyPosition: 0),
-                SchemaColumn(
-                    name: "completed_bytes", type: "INTEGER", notNull: true,
-                    primaryKeyPosition: 0),
-                SchemaColumn(
-                    name: "created_at", type: "REAL", notNull: true, primaryKeyPosition: 0),
-                SchemaColumn(
-                    name: "updated_at", type: "REAL", notNull: true, primaryKeyPosition: 0),
-                SchemaColumn(name: "route", type: "TEXT", notNull: true, primaryKeyPosition: 0),
-                SchemaColumn(name: "phase", type: "TEXT", notNull: true, primaryKeyPosition: 0),
-            ]
-        )
+                    name: "preparation_fingerprint",
+                    type: "BLOB",
+                    notNull: false,
+                    primaryKeyPosition: 0
+                )
+            )
+        }
+        try requireColumns(database, table: "transfers", expected: transferColumns)
         try requireColumns(
             database,
             table: "entries",
@@ -898,16 +1055,22 @@ public actor TransferDatabase {
         try stepDone(insert)
     }
 
+    private struct ExistingTransfer {
+        let phase: TransferPhase
+        let preparationFingerprint: Data?
+    }
+
     private func validateExistingTransfer(
         manifest: TransferManifest,
         source: DeviceID,
         displayName: String,
         aggregate: UInt64
-    ) throws -> TransferPhase? {
+    ) throws -> ExistingTransfer? {
         let id = manifest.id.rawValue.uuidString.lowercased()
         let transfer = try statement(
             """
-            SELECT peer_id, display_filename, aggregate_size, phase
+            SELECT peer_id, display_filename, aggregate_size, phase,
+                   preparation_fingerprint
             FROM transfers WHERE id = ?
             """
         )
@@ -921,9 +1084,21 @@ public actor TransferDatabase {
             sqlite3_column_int64(transfer, 2) == Int64(aggregate),
             let phaseValue = textColumn(transfer, 3),
             let phase = TransferPhase(rawValue: phaseValue),
-            phase != .cancelled,
-            sqlite3_step(transfer) == SQLITE_DONE
+            phase != .cancelled
         else { throw ReceiveStoreError.invalidManifest }
+
+        let preparationFingerprint: Data?
+        if sqlite3_column_type(transfer, 4) == SQLITE_NULL {
+            preparationFingerprint = nil
+        } else {
+            guard let value = dataColumn(transfer, 4), value.count == 32 else {
+                throw ReceiveStoreError.databaseFailure
+            }
+            preparationFingerprint = value
+        }
+        guard sqlite3_step(transfer) == SQLITE_DONE else {
+            throw ReceiveStoreError.invalidManifest
+        }
 
         let entries = try statement(
             """
@@ -943,7 +1118,10 @@ public actor TransferDatabase {
         guard sqlite3_step(entries) == SQLITE_DONE else {
             throw ReceiveStoreError.invalidManifest
         }
-        return phase
+        return ExistingTransfer(
+            phase: phase,
+            preparationFingerprint: preparationFingerprint
+        )
     }
 
     private func validateExistingSnapshot(
@@ -1024,9 +1202,25 @@ public actor TransferDatabase {
         }
     }
 
+    private func bind(_ value: Data, to statement: OpaquePointer, at index: Int32) throws {
+        let result = value.withUnsafeBytes { bytes in
+            sqlite3_bind_blob(
+                statement, index, bytes.baseAddress, Int32(bytes.count), sqliteTransient)
+        }
+        guard result == SQLITE_OK else { throw ReceiveStoreError.databaseFailure }
+    }
+
     private func textColumn(_ statement: OpaquePointer, _ index: Int32) -> String? {
         guard let text = sqlite3_column_text(statement, index) else { return nil }
         return String(cString: text)
+    }
+
+    private func dataColumn(_ statement: OpaquePointer, _ index: Int32) -> Data? {
+        let count = Int(sqlite3_column_bytes(statement, index))
+        guard count >= 0, let bytes = sqlite3_column_blob(statement, index) else {
+            return count == 0 ? Data() : nil
+        }
+        return Data(bytes: bytes, count: count)
     }
 
     private func uuidColumn(_ statement: OpaquePointer, _ index: Int32) -> UUID? {

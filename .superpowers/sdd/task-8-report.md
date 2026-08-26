@@ -31,6 +31,12 @@ existing destination, and can resume safely after process or database loss.
   late Incoming/destination swaps at the publication commit boundary,
   cancellation phase regression, malicious legacy schemas, unexpected private
   staging state, repeated case/Unicode collision scans, and extreme timestamps.
+- The final preparation/cancellation pass faulted every initial construction
+  boundary (immediately after staging-directory creation, source binding,
+  manifest-root creation, journal setup, and immediately before the ready
+  transaction). It also forced callback and SQLite failures after cancellation
+  discard, both in-process and across restart, before the implementation was
+  changed.
 
 ## Implemented contract
 
@@ -42,6 +48,15 @@ existing destination, and can resume safely after process or database loss.
 - New transfers preflight remaining bytes plus a five-percent reserve before
   staging is created. Resumed transfers first revalidate the Task 7 journal and
   preflight only the still-missing bytes. Every write repeats the capacity check.
+- Before allocating a transfer UUID staging directory, SQLite durably records a
+  privacy-limited `preparing` creation intent bound to transfer ID, source ID,
+  aggregate size, entry shape, and a 32-byte manifest fingerprint. A crash at
+  any later construction boundary therefore cannot leave untracked staging.
+  Restart validates that binding before changing history or staging, accepts
+  only the expected descriptor-validated subset of construction state, and
+  safely discards/rebuilds it for the rightful source. A different source or
+  manifest is rejected without mutation; unknown or identity-changed content
+  is retained fail-closed and made eligible for failed-staging expiry.
 - Staging lives at private mode `0700` under
   `~/Library/Application Support/MacChannel/Incoming/<TransferID>` by default.
   The incoming directory, transfer staging, destination, and pinned entries are
@@ -84,14 +99,21 @@ existing destination, and can resume safely after process or database loss.
   is zero, and only then commits `cancelled`. Completed history similarly treats
   residual private staging as disposable cleanup rather than requiring an intact
   receive tree.
+- After cancellation discard, the actor remains in a recoverable
+  `discardedPendingCommit` state. Callback or SQLite failure can be retried by
+  the same store; a new store also treats absent staging as a completed discard,
+  commits `cancelled`, removes the pinned lease, and only then becomes finished.
 - SQLite uses WAL mode, full synchronization, foreign keys, strict transactional
   schema migration, and mode `0600` even for an existing database. The
   `transfers`, `entries`, and `verified_ranges` tables store only transfer/peer
   identity, display name, aggregate size, timestamps, route, phase, entry shape,
-  and verified ranges. They contain no content, keys, file paths, hashes, or
-  digests. Version-zero databases are accepted only when `sqlite_master`, table
-  columns, indexes, and foreign keys exactly match the canonical privacy-safe
-  schema; `user_version` advances only inside the validated transaction.
+  verified ranges, and the temporary preparation fingerprint required above.
+  They contain no content, keys, file paths, or per-file digests. Existing
+  version-zero objects and version-one migration inputs are accepted only when
+  `sqlite_master`, table columns, indexes, and foreign keys exactly match the
+  canonical privacy-safe schema; `user_version` advances only inside the
+  validated transaction. The preparation fingerprint is cleared atomically
+  when construction becomes ready and is not exposed by local history APIs.
   Immutable transfer identity and durable terminal/cancelling phases cannot be
   rewritten by later snapshots or general phase updates.
 - Completion and cancellation clear private staging. Failed staging expires at
@@ -102,9 +124,9 @@ existing destination, and can resume safely after process or database loss.
 
 ## Verification
 
-- `swift test --filter ReceiveStoreTests`: 53 tests, 0 failures.
+- `swift test --filter ReceiveStoreTests`: 59 tests, 0 failures.
 - `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
-- `swift test`: 212 tests, 0 failures.
+- `swift test`: 218 tests, 0 failures.
 - `bash Scripts/build-app.sh`: successful packaged-app build.
 - `swift-format lint --strict` with the repository's four-space configuration
   over the Task 8 source and test files: clean.
@@ -113,9 +135,10 @@ existing destination, and can resume safely after process or database loss.
 ## Independent review and constraints
 
 - Independent review drove the cancellation, schema, staging-root, timestamp,
-  directory-scan, and lease-binding hardening above. The final follow-up review
-  found no remaining P1/P2 issue and assessed the formatted implementation as
-  ready to merge after all focused and complete verification gates passed.
+  directory-scan, lease-binding, initial-preparation, and post-discard state
+  hardening above. Each reported P1/P2 condition now has a focused regression,
+  and all focused and complete verification gates pass on the final formatted
+  snapshot.
 - Safe publication requires the staging and destination directories to reside on
   the same filesystem. A configuration that cannot provide this invariant fails
   before receiving content rather than falling back to a non-atomic copy.
@@ -129,5 +152,6 @@ existing destination, and can resume safely after process or database loss.
 ## Commit
 
 - `feat: safely persist received files`
-- `fix: harden receive storage recovery` (follow-up review corrections and this
-  report)
+- `fix: harden receive storage recovery`
+- `fix: make receive preparation crash-safe` (final preparation and
+  cancellation recovery corrections and this report)
