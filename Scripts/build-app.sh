@@ -5,6 +5,7 @@ swift build -c debug
 
 app_path=".build/MacChannel.app"
 contents_path="$app_path/Contents"
+rm -rf "$app_path"
 mkdir -p "$contents_path/MacOS" "$contents_path/Resources"
 cp ".build/debug/MacChannelApp" "$contents_path/MacOS/MacChannelApp"
 
