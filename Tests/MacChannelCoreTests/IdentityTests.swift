@@ -51,7 +51,11 @@ final class IdentityTests: XCTestCase {
             TrustStoreSnapshot.self,
             from: JSONEncoder().encode(try store.snapshot(signedBy: owner))
         )
-        var restored = try TrustStore(snapshot: snapshot, minimumGeneration: 0)
+        var restored = try TrustStore(
+            snapshot: snapshot,
+            expectedOwner: owner,
+            minimumGeneration: 0
+        )
 
         XCTAssertThrowsError(
             try restored.ingest(
@@ -71,7 +75,11 @@ final class IdentityTests: XCTestCase {
             TrustStoreSnapshot.self,
             from: JSONEncoder().encode(try store.snapshot(signedBy: owner))
         )
-        let restored = try TrustStore(snapshot: snapshot, minimumGeneration: 0)
+        let restored = try TrustStore(
+            snapshot: snapshot,
+            expectedOwner: owner,
+            minimumGeneration: 0
+        )
 
         XCTAssertFalse(restored.isTrusted(peer.id))
         XCTAssertTrue(snapshot.revokedDevices.contains(peer.id))
@@ -228,7 +236,9 @@ final class IdentityTests: XCTestCase {
             "rawValue": owner.id.rawValue.uuidString,
         ]])
 
-        XCTAssertThrowsError(try TrustStore(snapshot: revokedOwner, minimumGeneration: 0)) { error in
+        XCTAssertThrowsError(
+            try TrustStore(snapshot: revokedOwner, expectedOwner: owner, minimumGeneration: 0)
+        ) { error in
             XCTAssertEqual(error as? TrustStoreError, .snapshotRevokesOwner)
         }
     }
@@ -239,7 +249,9 @@ final class IdentityTests: XCTestCase {
         let snapshot = try store.snapshot(signedBy: owner)
         let tampered = try snapshotByReplacing(snapshot, key: "generation", with: 99)
 
-        XCTAssertThrowsError(try TrustStore(snapshot: tampered, minimumGeneration: 0)) { error in
+        XCTAssertThrowsError(
+            try TrustStore(snapshot: tampered, expectedOwner: owner, minimumGeneration: 0)
+        ) { error in
             XCTAssertEqual(error as? TrustStoreError, .invalidSnapshotSignature)
         }
     }
@@ -250,7 +262,11 @@ final class IdentityTests: XCTestCase {
         let snapshot = try store.snapshot(signedBy: owner)
 
         XCTAssertThrowsError(
-            try TrustStore(snapshot: snapshot, minimumGeneration: snapshot.generation + 1)
+            try TrustStore(
+                snapshot: snapshot,
+                expectedOwner: owner,
+                minimumGeneration: snapshot.generation + 1
+            )
         ) { error in
             XCTAssertEqual(error as? TrustStoreError, .snapshotGenerationTooLow)
         }
@@ -287,6 +303,23 @@ final class IdentityTests: XCTestCase {
         XCTAssertEqual(record.epochMilliseconds, 1_726_000_000_123)
         XCTAssertEqual(roundTripped.epochMilliseconds, record.epochMilliseconds)
         try roundTripped.validated()
+    }
+
+    func testRestoreRejectsValidSnapshotSignedByDifferentOwner() throws {
+        let expectedOwner = try DeviceIdentity.ephemeral()
+        let attacker = try DeviceIdentity.ephemeral()
+        var attackerStore = TrustStore(owner: attacker.id)
+        let foreignSnapshot = try attackerStore.snapshot(signedBy: attacker)
+
+        XCTAssertThrowsError(
+            try TrustStore(
+                snapshot: foreignSnapshot,
+                expectedOwner: expectedOwner,
+                minimumGeneration: foreignSnapshot.generation
+            )
+        ) { error in
+            XCTAssertEqual(error as? TrustStoreError, .snapshotAnchorMismatch)
+        }
     }
 }
 

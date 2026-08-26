@@ -11,6 +11,7 @@ public enum TrustStoreError: Error, Equatable {
     case cannotRevokeOwner
     case invalidSnapshot
     case invalidSnapshotOwner
+    case snapshotAnchorMismatch
     case invalidSnapshotSignature
     case snapshotRevokesOwner
     case snapshotGenerationTooLow
@@ -127,7 +128,16 @@ public struct TrustStore {
         self.owner = owner
     }
 
-    public init(snapshot: TrustStoreSnapshot, minimumGeneration: UInt64) throws {
+    public init(
+        snapshot: TrustStoreSnapshot,
+        expectedOwner: DeviceIdentity,
+        minimumGeneration: UInt64
+    ) throws {
+        guard snapshot.owner == expectedOwner.id,
+              snapshot.ownerPublicKey == expectedOwner.publicKey.rawRepresentation
+        else {
+            throw TrustStoreError.snapshotAnchorMismatch
+        }
         try snapshot.validated(minimumGeneration: minimumGeneration)
         owner = snapshot.owner
         trustedPublicKeys = snapshot.trustedPublicKeys
