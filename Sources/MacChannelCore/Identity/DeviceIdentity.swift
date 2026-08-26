@@ -5,7 +5,7 @@ public enum DeviceIdentityError: Error, Equatable {
     case invalidStoredPrivateKey
 }
 
-public struct DeviceIdentity {
+public struct DeviceIdentity: Sendable {
     private static let privateKeyAccount = "p256-signing-private-key"
 
     public let id: DeviceID

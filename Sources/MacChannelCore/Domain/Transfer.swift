@@ -37,6 +37,14 @@ public struct TransferSnapshot: Codable, Equatable, Sendable {
 public enum MacChannelError: Error, Equatable, Sendable {
     case invalidConfiguration(String)
     case untrustedDevice(DeviceID)
+    case pairingInvalidCode
+    case pairingCodeExpired
+    case pairingCodeAlreadyUsed
+    case pairingRateLimited
+    case pairingFingerprintMismatch
+    case pairingAuthorizationPending
+    case pairingHandshakeFailed
+    case pairingTrustFailed
     case connectionFailed
     case transferFailed
     case cancelled

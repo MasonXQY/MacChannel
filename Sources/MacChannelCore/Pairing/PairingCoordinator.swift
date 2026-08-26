@@ -9,10 +9,21 @@ public actor PairingCoordinator: PairingHostEndpoint {
         var used: Bool
     }
 
+    private enum PendingRole {
+        case host
+        case joiner
+    }
+
     private struct PendingConfirmation {
+        let role: PendingRole
+        let sessionID: PairingSessionID
         let fingerprint: String
         let peer: DeviceSummary
-        let authorization: SignedTrustRecord
+        let peerIdentityPublicKey: Data
+        let transcript: Data
+        let channelKey: SymmetricKey
+        var localConfirmed: Bool
+        var issuedAuthorization: SignedTrustRecord?
     }
 
     private let identity: DeviceIdentity
@@ -22,7 +33,6 @@ public actor PairingCoordinator: PairingHostEndpoint {
     private var trustStore: TrustStore
     private var hostedSession: HostedSession?
     private var pendingConfirmation: PendingConfirmation?
-    private var authorizationSequence: UInt64 = 0
     private var state: PairingState = .idle
     private let stateContinuation: AsyncStream<PairingState>.Continuation
 
@@ -31,14 +41,18 @@ public actor PairingCoordinator: PairingHostEndpoint {
     public init(
         identity: DeviceIdentity,
         displayName: String = "Mac",
+        trustStore: TrustStore,
         transport: any PairingTransport,
         clock: any PairingClock = SystemPairingClock()
-    ) {
+    ) throws {
+        guard trustStore.isOwned(by: identity) else {
+            throw PairingError.invalidTrustStore
+        }
         self.identity = identity
         self.displayName = displayName
+        self.trustStore = trustStore
         self.transport = transport
         self.clock = clock
-        trustStore = TrustStore(owner: identity.id)
         let stream = AsyncStream<PairingState>.makeStream()
         states = stream.stream
         stateContinuation = stream.continuation
@@ -76,7 +90,7 @@ public actor PairingCoordinator: PairingHostEndpoint {
             transition(to: .displayingCode(expiresAt: expiresAt))
             return code
         } catch {
-            transition(to: .failed(.connectionFailed))
+            transitionToFailure(error)
             throw error
         }
     }
@@ -89,26 +103,24 @@ public actor PairingCoordinator: PairingHostEndpoint {
             hostedSession = session
             return PairingCodeAcceptance(expiresAt: session.expiresAt)
         } catch {
-            transition(to: .failed(.connectionFailed))
+            transitionToFailure(error)
             throw error
         }
     }
 
-    public func join(
-        code: String,
-        source: String? = nil
-    ) async throws -> PairingJoinResult {
+    public func join(code: String) async throws -> PairingJoinResult {
         transition(to: .joining)
-        let resolvedSource = source ?? identity.id.rawValue.uuidString.lowercased()
         do {
-            let offer = try await transport.lookup(code: code, source: resolvedSource)
+            let offer = try await transport.lookup(code: code)
             let hostIdentityKey = try validatedIdentityKey(
                 id: offer.hostID,
                 rawRepresentation: offer.hostIdentityPublicKey
             )
-            let hostEphemeralKey = try P256.KeyAgreement.PublicKey(
+            guard let hostEphemeralKey = try? P256.KeyAgreement.PublicKey(
                 rawRepresentation: offer.hostEphemeralPublicKey
-            )
+            ) else {
+                throw PairingError.invalidHandshake
+            }
             let joiningEphemeralKey = P256.KeyAgreement.PrivateKey()
             let transcript = try PairingCryptography.transcript(
                 offer: offer,
@@ -131,45 +143,29 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 identitySignature: try identity.sign(transcript).derRepresentation,
                 channelTag: PairingCryptography.channelTag(
                     label: "join-confirmation",
-                    transcript: transcript,
+                    message: transcript,
                     key: channelKey
                 )
             )
-            let response = try await transport.submit(
-                code: code,
-                source: resolvedSource,
-                request: request
+            let response = try await transport.submit(code: code, request: request)
+            let responseTranscript = PairingCryptography.sessionBoundTranscript(
+                transcript,
+                sessionID: response.sessionID
             )
             try PairingCryptography.verifySignature(
                 response.hostIdentitySignature,
-                message: transcript,
+                message: responseTranscript,
                 publicKey: hostIdentityKey
             )
-            guard PairingCryptography.channelTag(
+            guard PairingCryptography.isValidChannelTag(
+                response.channelTag,
                 label: "host-confirmation",
-                transcript: transcript,
+                message: responseTranscript,
                 key: channelKey
-            ) == response.channelTag else {
-                throw PairingError.invalidHandshake
-            }
-            try response.authorization.validated()
-            guard response.authorization.issuer == offer.hostID,
-                  response.authorization.issuerPublicKey == offer.hostIdentityPublicKey,
-                  response.authorization.subject == identity.id,
-                  response.authorization.subjectPublicKey == identity.publicKey.rawRepresentation,
-                  response.authorization.action == .authorize
-            else {
+            ) else {
                 throw PairingError.invalidHandshake
             }
 
-            let sequence = try reserveAuthorizationSequence()
-            let localAuthorization = try SignedTrustRecord.authorizing(
-                subject: offer.hostID,
-                subjectPublicKey: offer.hostIdentityPublicKey,
-                signedBy: identity,
-                sequence: sequence,
-                timestamp: clock.now
-            )
             let fingerprint = PairingCryptography.fingerprint(
                 hostPublicKey: offer.hostEphemeralPublicKey,
                 joiningPublicKey: joiningEphemeralKey.publicKey.rawRepresentation
@@ -180,21 +176,27 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 availability: .internet
             )
             pendingConfirmation = PendingConfirmation(
+                role: .joiner,
+                sessionID: response.sessionID,
                 fingerprint: fingerprint,
                 peer: peer,
-                authorization: localAuthorization
+                peerIdentityPublicKey: offer.hostIdentityPublicKey,
+                transcript: transcript,
+                channelKey: channelKey,
+                localConfirmed: false,
+                issuedAuthorization: nil
             )
             transition(to: .awaitingFingerprint(local: fingerprint, remote: fingerprint))
             return PairingJoinResult(
+                sessionID: response.sessionID,
                 peer: peer,
                 fingerprint: fingerprint,
                 hostEphemeralPublicKey: offer.hostEphemeralPublicKey,
-                joiningEphemeralPublicKey: joiningEphemeralKey.publicKey.rawRepresentation,
-                authorization: response.authorization
+                joiningEphemeralPublicKey: joiningEphemeralKey.publicKey.rawRepresentation
             )
         } catch {
-            transition(to: .failed(.connectionFailed))
-            throw error
+            transitionToFailure(error)
+            throw normalizedHandshakeError(error)
         }
     }
 
@@ -205,12 +207,9 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 id: request.joiningID,
                 rawRepresentation: request.joiningIdentityPublicKey
             )
-            let joiningEphemeralKey: P256.KeyAgreement.PublicKey
-            do {
-                joiningEphemeralKey = try P256.KeyAgreement.PublicKey(
-                    rawRepresentation: request.joiningEphemeralPublicKey
-                )
-            } catch {
+            guard let joiningEphemeralKey = try? P256.KeyAgreement.PublicKey(
+                rawRepresentation: request.joiningEphemeralPublicKey
+            ) else {
                 throw PairingError.invalidHandshake
             }
             let offer = PairingOffer(
@@ -238,23 +237,21 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 remotePublicKey: joiningEphemeralKey,
                 transcript: transcript
             )
-            guard PairingCryptography.channelTag(
+            guard PairingCryptography.isValidChannelTag(
+                request.channelTag,
                 label: "join-confirmation",
-                transcript: transcript,
+                message: transcript,
                 key: channelKey
-            ) == request.channelTag else {
+            ) else {
                 throw PairingError.invalidHandshake
             }
 
             session.used = true
             hostedSession = session
-            let sequence = try reserveAuthorizationSequence()
-            let authorization = try SignedTrustRecord.authorizing(
-                subject: request.joiningID,
-                subjectPublicKey: request.joiningIdentityPublicKey,
-                signedBy: identity,
-                sequence: sequence,
-                timestamp: clock.now
+            let sessionID = PairingSessionID()
+            let responseTranscript = PairingCryptography.sessionBoundTranscript(
+                transcript,
+                sessionID: sessionID
             )
             let fingerprint = PairingCryptography.fingerprint(
                 hostPublicKey: session.ephemeralKey.publicKey.rawRepresentation,
@@ -266,42 +263,57 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 availability: .internet
             )
             pendingConfirmation = PendingConfirmation(
+                role: .host,
+                sessionID: sessionID,
                 fingerprint: fingerprint,
                 peer: peer,
-                authorization: authorization
+                peerIdentityPublicKey: request.joiningIdentityPublicKey,
+                transcript: transcript,
+                channelKey: channelKey,
+                localConfirmed: false,
+                issuedAuthorization: nil
             )
             transition(to: .awaitingFingerprint(local: fingerprint, remote: fingerprint))
             return PairingJoinResponse(
-                hostIdentitySignature: try identity.sign(transcript).derRepresentation,
+                sessionID: sessionID,
+                hostIdentitySignature: try identity.sign(responseTranscript).derRepresentation,
                 channelTag: PairingCryptography.channelTag(
                     label: "host-confirmation",
-                    transcript: transcript,
+                    message: responseTranscript,
                     key: channelKey
-                ),
-                authorization: authorization
+                )
             )
         } catch {
-            transition(to: .failed(.connectionFailed))
-            throw error
+            transitionToFailure(error)
+            throw normalizedHandshakeError(error)
         }
     }
 
-    public func confirmFingerprint(_ fingerprint: String) throws {
-        guard let pendingConfirmation else {
-            throw PairingError.noPendingConfirmation
+    @discardableResult
+    public func confirmFingerprint(_ fingerprint: String) async throws -> SignedTrustRecord {
+        guard var pending = pendingConfirmation else {
+            let error = PairingError.noPendingConfirmation
+            transitionToFailure(error)
+            throw error
         }
-        guard pendingConfirmation.fingerprint == fingerprint else {
-            self.pendingConfirmation = nil
-            transition(to: .failed(.connectionFailed))
-            throw PairingError.fingerprintMismatch
+        guard pending.fingerprint == fingerprint else {
+            pendingConfirmation = nil
+            let error = PairingError.fingerprintMismatch
+            transitionToFailure(error)
+            throw error
         }
+
+        pending.localConfirmed = true
+        pendingConfirmation = pending
         do {
-            try trustStore.authorize(pendingConfirmation.authorization)
-            self.pendingConfirmation = nil
-            transition(to: .confirmed(pendingConfirmation.peer))
+            switch pending.role {
+            case .host:
+                return try await confirmAsHost(pending)
+            case .joiner:
+                return try await confirmAsJoiner(pending)
+            }
         } catch {
-            self.pendingConfirmation = nil
-            transition(to: .failed(.connectionFailed))
+            transitionToFailure(error)
             throw error
         }
     }
@@ -312,6 +324,85 @@ public actor PairingCoordinator: PairingHostEndpoint {
 
     public func isTrusted(_ device: DeviceID) -> Bool {
         trustStore.isTrusted(device)
+    }
+
+    private func confirmAsHost(
+        _ suppliedPending: PendingConfirmation
+    ) async throws -> SignedTrustRecord {
+        var pending = suppliedPending
+        let authorization: SignedTrustRecord
+        if let existing = pending.issuedAuthorization {
+            authorization = existing
+        } else {
+            let sequence = try trustStore.nextIssuerSequence(for: identity)
+            authorization = try SignedTrustRecord.authorizing(
+                subject: pending.peer.id,
+                subjectPublicKey: pending.peerIdentityPublicKey,
+                signedBy: identity,
+                sequence: sequence,
+                timestamp: clock.now
+            )
+            try trustStore.authorize(authorization)
+            pending.issuedAuthorization = authorization
+            pendingConfirmation = pending
+        }
+
+        let message = try PairingCryptography.authorizationMessage(
+            transcript: pending.transcript,
+            sessionID: pending.sessionID,
+            authorization: authorization
+        )
+        let envelope = PairingAuthorizationEnvelope(
+            sessionID: pending.sessionID,
+            authorization: authorization,
+            channelTag: PairingCryptography.channelTag(
+                label: "authorization",
+                message: message,
+                key: pending.channelKey
+            )
+        )
+        try await transport.deliverAuthorization(envelope)
+        pendingConfirmation = nil
+        transition(to: .confirmed(pending.peer))
+        return authorization
+    }
+
+    private func confirmAsJoiner(
+        _ pending: PendingConfirmation
+    ) async throws -> SignedTrustRecord {
+        let envelope = try await transport.authorization(for: pending.sessionID)
+        guard envelope.sessionID == pending.sessionID else {
+            throw PairingError.invalidHandshake
+        }
+        let message = try PairingCryptography.authorizationMessage(
+            transcript: pending.transcript,
+            sessionID: pending.sessionID,
+            authorization: envelope.authorization
+        )
+        guard PairingCryptography.isValidChannelTag(
+            envelope.channelTag,
+            label: "authorization",
+            message: message,
+            key: pending.channelKey
+        ) else {
+            throw PairingError.invalidHandshake
+        }
+        try envelope.authorization.validated()
+        guard envelope.authorization.action == .authorize,
+              envelope.authorization.issuer == pending.peer.id,
+              envelope.authorization.issuerPublicKey == pending.peerIdentityPublicKey,
+              envelope.authorization.subject == identity.id,
+              envelope.authorization.subjectPublicKey == identity.publicKey.rawRepresentation
+        else {
+            throw PairingError.invalidHandshake
+        }
+        try trustStore.bootstrapFromConfirmedPairing(
+            envelope.authorization,
+            localIdentity: identity
+        )
+        pendingConfirmation = nil
+        transition(to: .confirmed(pending.peer))
+        return envelope.authorization
     }
 
     private func validatedSession(for code: String) throws -> HostedSession {
@@ -343,18 +434,26 @@ public actor PairingCoordinator: PairingHostEndpoint {
         return key
     }
 
-    private func reserveAuthorizationSequence() throws -> UInt64 {
-        let next = authorizationSequence.addingReportingOverflow(1)
-        guard !next.overflow else {
-            throw PairingError.authorizationSequenceExhausted
-        }
-        authorizationSequence = next.partialValue
-        return next.partialValue
-    }
-
     private func transition(to newState: PairingState) {
         state = newState
         stateContinuation.yield(newState)
+    }
+
+    private func transitionToFailure(_ error: Error) {
+        if let pairingError = error as? PairingError {
+            transition(to: .failed(pairingError.stateError))
+        } else if error is TrustStoreError || error is TrustRecordValidationError {
+            transition(to: .failed(.pairingTrustFailed))
+        } else {
+            transition(to: .failed(.pairingHandshakeFailed))
+        }
+    }
+
+    private func normalizedHandshakeError(_ error: Error) -> Error {
+        if error is PairingError || error is TrustStoreError || error is TrustRecordValidationError {
+            return error
+        }
+        return PairingError.invalidHandshake
     }
 }
 
@@ -402,6 +501,24 @@ private enum PairingCryptography {
         return try encoder.encode(value)
     }
 
+    static func sessionBoundTranscript(
+        _ transcript: Data,
+        sessionID: PairingSessionID
+    ) -> Data {
+        transcript + Data(sessionID.rawValue.uuidString.lowercased().utf8)
+    }
+
+    static func authorizationMessage(
+        transcript: Data,
+        sessionID: PairingSessionID,
+        authorization: SignedTrustRecord
+    ) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return sessionBoundTranscript(transcript, sessionID: sessionID)
+            + (try encoder.encode(authorization))
+    }
+
     static func channelKey(
         privateKey: P256.KeyAgreement.PrivateKey,
         remotePublicKey: P256.KeyAgreement.PublicKey,
@@ -416,11 +533,24 @@ private enum PairingCryptography {
         )
     }
 
-    static func channelTag(label: String, transcript: Data, key: SymmetricKey) -> Data {
+    static func channelTag(label: String, message: Data, key: SymmetricKey) -> Data {
         Data(HMAC<SHA256>.authenticationCode(
-            for: Data(label.utf8) + transcript,
+            for: Data(label.utf8) + message,
             using: key
         ))
+    }
+
+    static func isValidChannelTag(
+        _ tag: Data,
+        label: String,
+        message: Data,
+        key: SymmetricKey
+    ) -> Bool {
+        HMAC<SHA256>.isValidAuthenticationCode(
+            tag,
+            authenticating: Data(label.utf8) + message,
+            using: key
+        )
     }
 
     static func verifySignature(
@@ -441,5 +571,4 @@ private enum PairingCryptography {
             .map { String(format: "%02x", $0) }
             .joined()
     }
-
 }

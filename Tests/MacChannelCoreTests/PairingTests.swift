@@ -6,34 +6,24 @@ import XCTest
 final class PairingTests: XCTestCase {
     func testCreateCodePublishesSixDigitsForFiveMinutes() async throws {
         let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
-        let transport = MemoryPairingTransport(clock: clock)
-        let host = PairingCoordinator(
-            identity: try .ephemeral(),
-            displayName: "Host Mac",
-            transport: transport,
-            clock: clock
-        )
+        let server = MemoryPairingServer(clock: clock)
+        let identity = try DeviceIdentity.ephemeral()
+        let host = try makeCoordinator(identity: identity, displayName: "Host Mac", server: server, source: "host", clock: clock)
 
         let code = try await host.createCode()
 
         XCTAssertEqual(code.count, 6)
         XCTAssertTrue(code.allSatisfy(\.isNumber))
         let hostState = await host.currentState()
-        XCTAssertEqual(
-            hostState,
-            .displayingCode(expiresAt: Date(timeIntervalSince1970: 1_300))
-        )
+        XCTAssertEqual(hostState, .displayingCode(expiresAt: Date(timeIntervalSince1970: 1_300)))
         let _: AsyncStream<PairingState> = host.states
     }
 
     func testCodeExpiresAndCannotBeReplayed() async throws {
         let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
-        let transport = MemoryPairingTransport(clock: clock)
-        let host = PairingCoordinator(
-            identity: try .ephemeral(),
-            transport: transport,
-            clock: clock
-        )
+        let server = MemoryPairingServer(clock: clock)
+        let identity = try DeviceIdentity.ephemeral()
+        let host = try makeCoordinator(identity: identity, server: server, source: "host", clock: clock)
         let code = try await host.createCode()
 
         clock.advance(seconds: 300)
@@ -48,159 +38,462 @@ final class PairingTests: XCTestCase {
         }
     }
 
-    func testWrongCodeIsRejected() async throws {
+    func testWrongCodeUsesTransportObservedSourceAndTypedFailureState() async throws {
         let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
-        let transport = MemoryPairingTransport(clock: clock)
-        let host = PairingCoordinator(
-            identity: try .ephemeral(),
-            transport: transport,
-            clock: clock
-        )
-        let joiner = PairingCoordinator(
-            identity: try .ephemeral(),
-            transport: transport,
-            clock: clock
-        )
+        let server = MemoryPairingServer(clock: clock)
+        let hostIdentity = try DeviceIdentity.ephemeral()
+        let joinerIdentity = try DeviceIdentity.ephemeral()
+        let host = try makeCoordinator(identity: hostIdentity, server: server, source: "host", clock: clock)
+        let joiner = try makeCoordinator(identity: joinerIdentity, server: server, source: "server-observed-192.0.2.10", clock: clock)
         let code = try await host.createCode()
         let wrongCode = code == "000000" ? "000001" : "000000"
 
-        await XCTAssertThrowsErrorAsync(
-            try await joiner.join(code: wrongCode, source: "192.0.2.10")
-        ) { error in
+        await XCTAssertThrowsErrorAsync(try await joiner.join(code: wrongCode)) { error in
             XCTAssertEqual(error as? PairingError, .invalidCode)
         }
         let joinerState = await joiner.currentState()
-        XCTAssertEqual(joinerState, .failed(.connectionFailed))
+        XCTAssertEqual(joinerState, .failed(.pairingInvalidCode))
     }
 
-    func testSixthFailedJoinFromSameSourceIsRateLimitedForTenMinutes() async throws {
+    func testSixthFailedJoinFromSameObservedSourceIsRateLimitedForTenMinutes() async throws {
         let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
-        let transport = MemoryPairingTransport(clock: clock)
-        let joiner = PairingCoordinator(
-            identity: try .ephemeral(),
-            transport: transport,
-            clock: clock
-        )
+        let server = MemoryPairingServer(clock: clock)
+        let joinerIdentity = try DeviceIdentity.ephemeral()
+        let joiner = try makeCoordinator(identity: joinerIdentity, server: server, source: "server-observed-192.0.2.20", clock: clock)
 
         for _ in 0..<5 {
-            await XCTAssertThrowsErrorAsync(
-                try await joiner.join(code: "111111", source: "192.0.2.20")
-            ) { error in
+            await XCTAssertThrowsErrorAsync(try await joiner.join(code: "111111")) { error in
                 XCTAssertEqual(error as? PairingError, .invalidCode)
             }
         }
-        await XCTAssertThrowsErrorAsync(
-            try await joiner.join(code: "111111", source: "192.0.2.20")
-        ) { error in
+        await XCTAssertThrowsErrorAsync(try await joiner.join(code: "111111")) { error in
             XCTAssertEqual(error as? PairingError, .rateLimited)
         }
 
         clock.advance(seconds: 601)
-        await XCTAssertThrowsErrorAsync(
-            try await joiner.join(code: "111111", source: "192.0.2.20")
-        ) { error in
+        await XCTAssertThrowsErrorAsync(try await joiner.join(code: "111111")) { error in
             XCTAssertEqual(error as? PairingError, .invalidCode)
         }
     }
 
-    func testAuthenticatedECDHHandshakeShowsMatchingFingerprintAndConfirmationEstablishesTrust() async throws {
+    func testRotatingSourcesHitPerCodeAndGlobalBackstopsWithBoundedStorage() async throws {
         let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
-        let transport = MemoryPairingTransport(clock: clock)
+        let server = MemoryPairingServer(clock: clock)
+
+        for index in 0..<20 {
+            let connection = MemoryPairingTransport(server: server, observedSource: "rotating-code-source-\(index)")
+            await XCTAssertThrowsErrorAsync(try await connection.lookup(code: "111111")) { error in
+                XCTAssertEqual(error as? PairingError, .invalidCode)
+            }
+        }
+        let codeBlocked = MemoryPairingTransport(server: server, observedSource: "rotating-code-source-20")
+        await XCTAssertThrowsErrorAsync(try await codeBlocked.lookup(code: "111111")) { error in
+            XCTAssertEqual(error as? PairingError, .rateLimited)
+        }
+
+        clock.advance(seconds: 601)
+        for index in 0..<100 {
+            let connection = MemoryPairingTransport(server: server, observedSource: "rotating-global-source-\(index)")
+            let code = String(format: "%06d", index + 200_000)
+            await XCTAssertThrowsErrorAsync(try await connection.lookup(code: code)) { error in
+                XCTAssertEqual(error as? PairingError, .invalidCode)
+            }
+        }
+        let globallyBlocked = MemoryPairingTransport(server: server, observedSource: "rotating-global-source-100")
+        await XCTAssertThrowsErrorAsync(try await globallyBlocked.lookup(code: "999999")) { error in
+            XCTAssertEqual(error as? PairingError, .rateLimited)
+        }
+
+        let counts = await server.limiterStorageCounts()
+        XCTAssertLessThanOrEqual(counts.sources, 100)
+        XCTAssertLessThanOrEqual(counts.codes, 100)
+        XCTAssertLessThanOrEqual(counts.globalEvents, 100)
+    }
+
+    func testConcurrentBurstReservesBeforeAwaitAndOnlyFiveReachHandler() async throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        let server = MemoryPairingServer(clock: clock)
+        let endpoint = BlockingRejectingEndpoint()
+        let transport = MemoryPairingTransport(server: server, observedSource: "burst-source")
+        let offer = PairingOffer.testValue(code: "123456", expiresAt: Date(timeIntervalSince1970: 1_300))
+        try await transport.publish(offer, endpoint: endpoint)
+        let request = PairingJoinRequest.testValue(code: offer.code)
+
+        let burst = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<10 {
+                    group.addTask {
+                        _ = try? await transport.submit(code: offer.code, request: request)
+                    }
+                }
+            }
+        }
+
+        for _ in 0..<1_000 where await endpoint.attemptCount < 5 {
+            await Task.yield()
+        }
+        let attemptsBeforeRelease = await endpoint.attemptCount
+        XCTAssertEqual(attemptsBeforeRelease, 5)
+        await endpoint.releaseAll()
+        await burst.value
+        let attemptsAfterRelease = await endpoint.attemptCount
+        XCTAssertEqual(attemptsAfterRelease, 5)
+    }
+
+    func testAuthorizationDoesNotExistOrEscapeUntilHostConfirmation() async throws {
+        let context = try PairingTestContext()
+        let code = try await context.host.createCode()
+        let result = try await context.joiner.join(code: code)
+        let expectedFingerprint = fingerprint(for: result)
+
+        XCTAssertEqual(result.fingerprint, expectedFingerprint)
+        let deliveriesBefore = await context.server.deliveredAuthorizationCount
+        let hostTrustedBefore = await context.host.isTrusted(context.joinerID)
+        let joinerTrustedBefore = await context.joiner.isTrusted(context.hostID)
+        XCTAssertEqual(deliveriesBefore, 0)
+        XCTAssertFalse(hostTrustedBefore)
+        XCTAssertFalse(joinerTrustedBefore)
+
+        await XCTAssertThrowsErrorAsync(try await context.joiner.confirmFingerprint(expectedFingerprint)) { error in
+            XCTAssertEqual(error as? PairingError, .authorizationPending)
+        }
+        let trustedWhilePending = await context.joiner.isTrusted(context.hostID)
+        XCTAssertFalse(trustedWhilePending)
+
+        let issued = try await context.host.confirmFingerprint(expectedFingerprint)
+        try issued.validated()
+        XCTAssertEqual(issued.issuer, context.hostID)
+        XCTAssertEqual(issued.subject, context.joinerID)
+        let deliveriesAfter = await context.server.deliveredAuthorizationCount
+        let hostTrustedAfterIssue = await context.host.isTrusted(context.joinerID)
+        let joinerTrustedBeforeReceipt = await context.joiner.isTrusted(context.hostID)
+        XCTAssertEqual(deliveriesAfter, 1)
+        XCTAssertTrue(hostTrustedAfterIssue)
+        XCTAssertFalse(joinerTrustedBeforeReceipt)
+
+        let received = try await context.joiner.confirmFingerprint(expectedFingerprint)
+        let joinerTrustedAfterReceipt = await context.joiner.isTrusted(context.hostID)
+        XCTAssertEqual(received.signature, issued.signature)
+        XCTAssertTrue(joinerTrustedAfterReceipt)
+        await XCTAssertThrowsErrorAsync(
+            try await context.joinerTransport.authorization(for: result.sessionID)
+        ) { error in
+            XCTAssertEqual(error as? PairingError, .invalidHandshake)
+        }
+    }
+
+    func testAuthenticatedECDHHandshakeShowsMatchingFingerprintAndConfirmationEstablishesTrust() async throws {
+        let context = try PairingTestContext()
+        let result = try await context.joiner.join(code: try await context.host.createCode())
+        let expectedFingerprint = fingerprint(for: result)
+        let hostAwaitingState = await context.host.currentState()
+        let joinerAwaitingState = await context.joiner.currentState()
+
+        XCTAssertEqual(result.fingerprint, expectedFingerprint)
+        XCTAssertEqual(hostAwaitingState, .awaitingFingerprint(local: expectedFingerprint, remote: expectedFingerprint))
+        XCTAssertEqual(joinerAwaitingState, .awaitingFingerprint(local: expectedFingerprint, remote: expectedFingerprint))
+
+        _ = try await context.host.confirmFingerprint(expectedFingerprint)
+        _ = try await context.joiner.confirmFingerprint(expectedFingerprint)
+
+        let hostTrustsJoiner = await context.host.isTrusted(context.joinerID)
+        let joinerTrustsHost = await context.joiner.isTrusted(context.hostID)
+        XCTAssertTrue(hostTrustsJoiner)
+        XCTAssertTrue(joinerTrustsHost)
+        let hostState = await context.host.currentState()
+        let joinerState = await context.joiner.currentState()
+        XCTAssertEqual(hostState, .confirmed(DeviceSummary(id: context.joinerID, displayName: "Joining Mac", availability: .internet)))
+        XCTAssertEqual(joinerState, .confirmed(DeviceSummary(id: context.hostID, displayName: "Host Mac", availability: .internet)))
+    }
+
+    func testAlteredSignatureTagAndTranscriptAreRejectedWithTypedState() async throws {
+        for mutation in [HandshakeMutation.signature, .responseTag, .transcript] {
+            let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+            let server = MemoryPairingServer(clock: clock)
+            let hostIdentity = try DeviceIdentity.ephemeral()
+            let joinerIdentity = try DeviceIdentity.ephemeral()
+            let host = try makeCoordinator(identity: hostIdentity, server: server, source: "host-\(mutation)", clock: clock)
+            let baseTransport = MemoryPairingTransport(server: server, observedSource: "joiner-\(mutation)")
+            let joiner = try PairingCoordinator(
+                identity: joinerIdentity,
+                trustStore: TrustStore(owner: joinerIdentity.id),
+                transport: MutatingPairingTransport(base: baseTransport, mutation: mutation),
+                clock: clock
+            )
+
+            await XCTAssertThrowsErrorAsync(try await joiner.join(code: try await host.createCode())) { error in
+                XCTAssertEqual(error as? PairingError, .invalidHandshake)
+            }
+            let state = await joiner.currentState()
+            XCTAssertEqual(state, .failed(.pairingHandshakeFailed))
+        }
+    }
+
+    func testAlteredAuthorizationTagIsRejectedWithoutTrustMutation() async throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        let server = MemoryPairingServer(clock: clock)
         let hostIdentity = try DeviceIdentity.ephemeral()
         let joinerIdentity = try DeviceIdentity.ephemeral()
         let hostID = hostIdentity.id
-        let joinerID = joinerIdentity.id
-        let host = PairingCoordinator(
-            identity: hostIdentity,
-            displayName: "Host Mac",
-            transport: transport,
-            clock: clock
-        )
-        let joiner = PairingCoordinator(
+        let host = try makeCoordinator(identity: hostIdentity, server: server, source: "host", clock: clock)
+        let baseTransport = MemoryPairingTransport(server: server, observedSource: "joiner")
+        let joiner = try PairingCoordinator(
             identity: joinerIdentity,
-            displayName: "Joining Mac",
-            transport: transport,
-            clock: clock
-        )
-        let code = try await host.createCode()
-
-        let result = try await joiner.join(code: code, source: "192.0.2.30")
-        let expectedFingerprint = SHA256.hash(
-            data: result.hostEphemeralPublicKey + result.joiningEphemeralPublicKey
-        ).prefix(6).map { String(format: "%02x", $0) }.joined()
-        try result.authorization.validated()
-        let hostAwaitingState = await host.currentState()
-        let joinerAwaitingState = await joiner.currentState()
-        let hostTrustedBeforeConfirmation = await host.isTrusted(joinerID)
-        let joinerTrustedBeforeConfirmation = await joiner.isTrusted(hostID)
-
-        XCTAssertEqual(result.fingerprint, expectedFingerprint)
-        XCTAssertEqual(result.authorization.issuer, hostID)
-        XCTAssertEqual(result.authorization.subject, joinerID)
-        XCTAssertEqual(result.authorization.action, .authorize)
-        XCTAssertEqual(
-            hostAwaitingState,
-            .awaitingFingerprint(local: expectedFingerprint, remote: expectedFingerprint)
-        )
-        XCTAssertEqual(
-            joinerAwaitingState,
-            .awaitingFingerprint(local: expectedFingerprint, remote: expectedFingerprint)
-        )
-        XCTAssertFalse(hostTrustedBeforeConfirmation)
-        XCTAssertFalse(joinerTrustedBeforeConfirmation)
-
-        try await host.confirmFingerprint(expectedFingerprint)
-        try await joiner.confirmFingerprint(expectedFingerprint)
-        let hostTrustedAfterConfirmation = await host.isTrusted(joinerID)
-        let joinerTrustedAfterConfirmation = await joiner.isTrusted(hostID)
-        let hostConfirmedState = await host.currentState()
-        let joinerConfirmedState = await joiner.currentState()
-
-        XCTAssertTrue(hostTrustedAfterConfirmation)
-        XCTAssertTrue(joinerTrustedAfterConfirmation)
-        XCTAssertEqual(
-            hostConfirmedState,
-            .confirmed(DeviceSummary(
-                id: joinerID,
-                displayName: "Joining Mac",
-                availability: .internet
-            ))
-        )
-        XCTAssertEqual(
-            joinerConfirmedState,
-            .confirmed(DeviceSummary(
-                id: hostID,
-                displayName: "Host Mac",
-                availability: .internet
-            ))
-        )
-    }
-
-    func testConfirmationRejectsAChangedFingerprintWithoutChangingTrust() async throws {
-        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
-        let transport = MemoryPairingTransport(clock: clock)
-        let hostIdentity = try DeviceIdentity.ephemeral()
-        let joinerIdentity = try DeviceIdentity.ephemeral()
-        let joinerID = joinerIdentity.id
-        let host = PairingCoordinator(
-            identity: hostIdentity,
-            transport: transport,
-            clock: clock
-        )
-        let joiner = PairingCoordinator(
-            identity: joinerIdentity,
-            transport: transport,
+            trustStore: TrustStore(owner: joinerIdentity.id),
+            transport: MutatingPairingTransport(base: baseTransport, mutation: .authorizationTag),
             clock: clock
         )
         let result = try await joiner.join(code: try await host.createCode())
 
-        await XCTAssertThrowsErrorAsync(
-            try await host.confirmFingerprint(result.fingerprint + "0")
-        ) { error in
-            XCTAssertEqual(error as? PairingError, .fingerprintMismatch)
+        _ = try await host.confirmFingerprint(result.fingerprint)
+        await XCTAssertThrowsErrorAsync(try await joiner.confirmFingerprint(result.fingerprint)) { error in
+            XCTAssertEqual(error as? PairingError, .invalidHandshake)
         }
-        let hostTrustsJoiner = await host.isTrusted(joinerID)
-        XCTAssertFalse(hostTrustsJoiner)
+        let joinerTrustsHost = await joiner.isTrusted(hostID)
+        XCTAssertFalse(joinerTrustsHost)
+        let state = await joiner.currentState()
+        XCTAssertEqual(state, .failed(.pairingHandshakeFailed))
+    }
+
+    func testRestoredTrustStoreUsesPersistedIssuerSequenceAndRetainsPeers() async throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        let server = MemoryPairingServer(clock: clock)
+        let hostIdentity = try DeviceIdentity.ephemeral()
+        let existingPeer = try DeviceIdentity.ephemeral()
+        let joinerIdentity = try DeviceIdentity.ephemeral()
+        var originalStore = TrustStore(owner: hostIdentity.id)
+        try originalStore.authorize(SignedTrustRecord.authorizing(existingPeer, signedBy: hostIdentity, sequence: 1))
+        let snapshot = try originalStore.snapshot(signedBy: hostIdentity)
+        let restoredStore = try TrustStore(snapshot: snapshot, expectedOwner: hostIdentity, minimumGeneration: snapshot.generation)
+        let existingPeerID = existingPeer.id
+        let joinerID = joinerIdentity.id
+        let host = try PairingCoordinator(
+            identity: hostIdentity,
+            displayName: "Restarted Host",
+            trustStore: restoredStore,
+            transport: MemoryPairingTransport(server: server, observedSource: "host"),
+            clock: clock
+        )
+        let joiner = try makeCoordinator(identity: joinerIdentity, server: server, source: "joiner", clock: clock)
+        let result = try await joiner.join(code: try await host.createCode())
+
+        let authorization = try await host.confirmFingerprint(result.fingerprint)
+        _ = try await joiner.confirmFingerprint(result.fingerprint)
+
+        let retainedExistingPeer = await host.isTrusted(existingPeerID)
+        let trustsNewJoiner = await host.isTrusted(joinerID)
+        XCTAssertEqual(authorization.issuerSequence, 2)
+        XCTAssertTrue(retainedExistingPeer)
+        XCTAssertTrue(trustsNewJoiner)
+    }
+
+    func testCoordinatorRejectsTrustStoreOwnedByAnotherIdentity() throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        let server = MemoryPairingServer(clock: clock)
+        let identity = try DeviceIdentity.ephemeral()
+        let otherOwner = try DeviceIdentity.ephemeral()
+        let mismatchedStore = TrustStore(owner: otherOwner.id)
+
+        XCTAssertThrowsError(
+            try PairingCoordinator(
+                identity: identity,
+                trustStore: mismatchedStore,
+                transport: MemoryPairingTransport(server: server, observedSource: "local"),
+                clock: clock
+            )
+        ) { error in
+            XCTAssertEqual(error as? PairingError, .invalidTrustStore)
+        }
+    }
+
+    func testCodeRotationInvalidatesOldCodeAndKeepsNewSessionUsable() async throws {
+        let context = try PairingTestContext()
+        let oldCode = try await context.host.createCode()
+        let newCode = try await context.host.createCode()
+
+        await XCTAssertThrowsErrorAsync(try await context.joiner.join(code: oldCode)) { error in
+            XCTAssertEqual(error as? PairingError, .invalidCode)
+        }
+        let result = try await context.joiner.join(code: newCode)
+        XCTAssertEqual(result.fingerprint.count, 12)
+    }
+}
+
+private struct PairingTestContext {
+    let server: MemoryPairingServer
+    let joinerTransport: MemoryPairingTransport
+    let host: PairingCoordinator
+    let joiner: PairingCoordinator
+    let hostID: DeviceID
+    let joinerID: DeviceID
+
+    init() throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        server = MemoryPairingServer(clock: clock)
+        let hostIdentity = try DeviceIdentity.ephemeral()
+        let joinerIdentity = try DeviceIdentity.ephemeral()
+        hostID = hostIdentity.id
+        joinerID = joinerIdentity.id
+        host = try makeCoordinator(identity: hostIdentity, displayName: "Host Mac", server: server, source: "host", clock: clock)
+        joinerTransport = MemoryPairingTransport(server: server, observedSource: "joiner")
+        let joinerStore = TrustStore(owner: joinerIdentity.id)
+        joiner = try PairingCoordinator(
+            identity: joinerIdentity,
+            displayName: "Joining Mac",
+            trustStore: joinerStore,
+            transport: joinerTransport,
+            clock: clock
+        )
+    }
+}
+
+private func makeCoordinator(
+    identity: DeviceIdentity,
+    displayName: String = "Mac",
+    server: MemoryPairingServer,
+    source: String,
+    clock: any PairingClock
+) throws -> PairingCoordinator {
+    let trustStore = TrustStore(owner: identity.id)
+    return try PairingCoordinator(
+        identity: identity,
+        displayName: displayName,
+        trustStore: trustStore,
+        transport: MemoryPairingTransport(server: server, observedSource: source),
+        clock: clock
+    )
+}
+
+private func fingerprint(for result: PairingJoinResult) -> String {
+    SHA256.hash(data: result.hostEphemeralPublicKey + result.joiningEphemeralPublicKey)
+        .prefix(6)
+        .map { String(format: "%02x", $0) }
+        .joined()
+}
+
+private enum HandshakeMutation: CustomStringConvertible {
+    case signature
+    case responseTag
+    case transcript
+    case authorizationTag
+
+    var description: String {
+        switch self {
+        case .signature: "signature"
+        case .responseTag: "response-tag"
+        case .transcript: "transcript"
+        case .authorizationTag: "authorization-tag"
+        }
+    }
+}
+
+private struct MutatingPairingTransport: PairingTransport {
+    let base: MemoryPairingTransport
+    let mutation: HandshakeMutation
+
+    func publish(_ offer: PairingOffer, endpoint: any PairingHostEndpoint) async throws {
+        try await base.publish(offer, endpoint: endpoint)
+    }
+
+    func lookup(code: String) async throws -> PairingOffer {
+        let offer = try await base.lookup(code: code)
+        guard mutation == .transcript else { return offer }
+        return PairingOffer(
+            code: offer.code,
+            expiresAt: offer.expiresAt,
+            hostID: offer.hostID,
+            hostIdentityPublicKey: offer.hostIdentityPublicKey,
+            hostEphemeralPublicKey: offer.hostEphemeralPublicKey,
+            hostDisplayName: offer.hostDisplayName + " altered"
+        )
+    }
+
+    func submit(code: String, request: PairingJoinRequest) async throws -> PairingJoinResponse {
+        let response = try await base.submit(code: code, request: request)
+        switch mutation {
+        case .signature:
+            return PairingJoinResponse(
+                sessionID: response.sessionID,
+                hostIdentitySignature: Data(repeating: 0, count: response.hostIdentitySignature.count),
+                channelTag: response.channelTag
+            )
+        case .responseTag:
+            return PairingJoinResponse(
+                sessionID: response.sessionID,
+                hostIdentitySignature: response.hostIdentitySignature,
+                channelTag: Data(repeating: 0, count: response.channelTag.count)
+            )
+        case .transcript, .authorizationTag:
+            return response
+        }
+    }
+
+    func remove(code: String) async {
+        await base.remove(code: code)
+    }
+
+    func deliverAuthorization(_ envelope: PairingAuthorizationEnvelope) async throws {
+        try await base.deliverAuthorization(envelope)
+    }
+
+    func authorization(for sessionID: PairingSessionID) async throws -> PairingAuthorizationEnvelope {
+        let envelope = try await base.authorization(for: sessionID)
+        guard mutation == .authorizationTag else { return envelope }
+        return PairingAuthorizationEnvelope(
+            sessionID: envelope.sessionID,
+            authorization: envelope.authorization,
+            channelTag: Data(repeating: 0, count: envelope.channelTag.count)
+        )
+    }
+}
+
+private actor BlockingRejectingEndpoint: PairingHostEndpoint {
+    private(set) var attemptCount = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func accept(_ request: PairingJoinRequest) async throws -> PairingJoinResponse {
+        attemptCount += 1
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+        throw PairingError.invalidHandshake
+    }
+
+    func releaseAll() {
+        let current = waiters
+        waiters.removeAll()
+        current.forEach { $0.resume() }
+    }
+}
+
+private extension PairingOffer {
+    static func testValue(code: String, expiresAt: Date) -> PairingOffer {
+        let identityKey = P256.Signing.PrivateKey()
+        let ephemeralKey = P256.KeyAgreement.PrivateKey()
+        return PairingOffer(
+            code: code,
+            expiresAt: expiresAt,
+            hostID: DeviceIdentity.deviceID(for: identityKey.publicKey.rawRepresentation),
+            hostIdentityPublicKey: identityKey.publicKey.rawRepresentation,
+            hostEphemeralPublicKey: ephemeralKey.publicKey.rawRepresentation,
+            hostDisplayName: "Host"
+        )
+    }
+}
+
+private extension PairingJoinRequest {
+    static func testValue(code: String) -> PairingJoinRequest {
+        let identityKey = P256.Signing.PrivateKey()
+        let ephemeralKey = P256.KeyAgreement.PrivateKey()
+        return PairingJoinRequest(
+            code: code,
+            joiningID: DeviceIdentity.deviceID(for: identityKey.publicKey.rawRepresentation),
+            joiningIdentityPublicKey: identityKey.publicKey.rawRepresentation,
+            joiningEphemeralPublicKey: ephemeralKey.publicKey.rawRepresentation,
+            joiningDisplayName: "Joiner",
+            identitySignature: Data(),
+            channelTag: Data()
+        )
     }
 }
 
@@ -208,21 +501,15 @@ private final class TestClock: PairingClock, @unchecked Sendable {
     private let lock = NSLock()
     private var storedNow: Date
 
-    init(now: Date) {
-        storedNow = now
-    }
+    init(now: Date) { storedNow = now }
 
-    var now: Date {
-        lock.withLock { storedNow }
-    }
+    var now: Date { lock.withLock { storedNow } }
 
     func advance(seconds: TimeInterval) {
         lock.withLock { storedNow = storedNow.addingTimeInterval(seconds) }
     }
 
-    func rewind(seconds: TimeInterval) {
-        advance(seconds: -seconds)
-    }
+    func rewind(seconds: TimeInterval) { advance(seconds: -seconds) }
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

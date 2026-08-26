@@ -16,6 +16,7 @@ public enum TrustStoreError: Error, Equatable {
     case snapshotRevokesOwner
     case snapshotGenerationTooLow
     case snapshotGenerationExhausted
+    case invalidPairingBootstrap
 }
 
 public struct TrustStoreSnapshot: Codable, Sendable {
@@ -117,7 +118,7 @@ public struct TrustStoreSnapshot: Codable, Sendable {
     }
 }
 
-public struct TrustStore {
+public struct TrustStore: Sendable {
     private let owner: DeviceID
     private var trustedPublicKeys: [DeviceID: Data] = [:]
     private var issuerSequences: [DeviceID: UInt64] = [:]
@@ -148,6 +149,50 @@ public struct TrustStore {
 
     public func isTrusted(_ device: DeviceID) -> Bool {
         !revokedDevices.contains(device) && (device == owner || trustedPublicKeys[device] != nil)
+    }
+
+    public func isOwned(by identity: DeviceIdentity) -> Bool {
+        owner == identity.id
+    }
+
+    public func nextIssuerSequence(for issuer: DeviceIdentity) throws -> UInt64 {
+        guard isTrusted(issuer.id) else {
+            throw TrustStoreError.untrustedIssuer(issuer.id)
+        }
+        if let pinnedKey = trustedPublicKeys[issuer.id],
+           pinnedKey != issuer.publicKey.rawRepresentation {
+            throw TrustStoreError.invalidSignature
+        }
+        let next = (issuerSequences[issuer.id] ?? 0).addingReportingOverflow(1)
+        guard !next.overflow else {
+            throw TrustStoreError.sequenceExhausted(issuer.id)
+        }
+        return next.partialValue
+    }
+
+    mutating func bootstrapFromConfirmedPairing(
+        _ record: SignedTrustRecord,
+        localIdentity: DeviceIdentity
+    ) throws {
+        guard owner == localIdentity.id,
+              record.action == .authorize,
+              record.subject == owner,
+              record.subjectPublicKey == localIdentity.publicKey.rawRepresentation,
+              record.issuer != owner
+        else {
+            throw TrustStoreError.invalidPairingBootstrap
+        }
+        try record.validated()
+        guard record.issuerSequence > (issuerSequences[record.issuer] ?? 0) else {
+            throw TrustStoreError.nonIncreasingSequence(record.issuer)
+        }
+        if let pinnedKey = trustedPublicKeys[record.issuer],
+           pinnedKey != record.issuerPublicKey {
+            throw TrustStoreError.invalidSignature
+        }
+        issuerSequences[record.issuer] = record.issuerSequence
+        trustedPublicKeys[record.issuer] = record.issuerPublicKey
+        revokedDevices.remove(record.issuer)
     }
 
     public mutating func authorize(_ record: SignedTrustRecord) throws {

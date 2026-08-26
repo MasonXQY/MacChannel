@@ -6,10 +6,34 @@ public enum PairingError: Error, Equatable, Sendable {
     case codeAlreadyUsed
     case rateLimited
     case fingerprintMismatch
+    case authorizationPending
     case noPendingConfirmation
     case invalidPeerIdentity
     case invalidHandshake
-    case authorizationSequenceExhausted
+    case invalidTrustStore
+}
+
+extension PairingError {
+    var stateError: MacChannelError {
+        switch self {
+        case .invalidCode:
+            .pairingInvalidCode
+        case .codeExpired:
+            .pairingCodeExpired
+        case .codeAlreadyUsed:
+            .pairingCodeAlreadyUsed
+        case .rateLimited:
+            .pairingRateLimited
+        case .fingerprintMismatch:
+            .pairingFingerprintMismatch
+        case .authorizationPending:
+            .pairingAuthorizationPending
+        case .invalidPeerIdentity, .invalidHandshake:
+            .pairingHandshakeFailed
+        case .noPendingConfirmation, .invalidTrustStore:
+            .pairingTrustFailed
+        }
+    }
 }
 
 public enum PairingState: Equatable, Sendable {
@@ -29,25 +53,33 @@ public struct PairingCodeAcceptance: Equatable, Sendable {
     }
 }
 
+public struct PairingSessionID: Hashable, Codable, Sendable {
+    public let rawValue: UUID
+
+    public init(rawValue: UUID = UUID()) {
+        self.rawValue = rawValue
+    }
+}
+
 public struct PairingJoinResult: Sendable {
+    public let sessionID: PairingSessionID
     public let peer: DeviceSummary
     public let fingerprint: String
     public let hostEphemeralPublicKey: Data
     public let joiningEphemeralPublicKey: Data
-    public let authorization: SignedTrustRecord
 
     public init(
+        sessionID: PairingSessionID,
         peer: DeviceSummary,
         fingerprint: String,
         hostEphemeralPublicKey: Data,
-        joiningEphemeralPublicKey: Data,
-        authorization: SignedTrustRecord
+        joiningEphemeralPublicKey: Data
     ) {
+        self.sessionID = sessionID
         self.peer = peer
         self.fingerprint = fingerprint
         self.hostEphemeralPublicKey = hostEphemeralPublicKey
         self.joiningEphemeralPublicKey = joiningEphemeralPublicKey
-        self.authorization = authorization
     }
 }
 
@@ -57,7 +89,6 @@ public protocol PairingClock: Sendable {
 
 public struct SystemPairingClock: PairingClock {
     public init() {}
-
     public var now: Date { Date() }
 }
 
@@ -115,17 +146,45 @@ public struct PairingJoinRequest: Sendable {
 }
 
 public struct PairingJoinResponse: Sendable {
+    public let sessionID: PairingSessionID
     public let hostIdentitySignature: Data
     public let channelTag: Data
-    public let authorization: SignedTrustRecord
 
     public init(
+        sessionID: PairingSessionID,
         hostIdentitySignature: Data,
-        channelTag: Data,
-        authorization: SignedTrustRecord
+        channelTag: Data
     ) {
+        self.sessionID = sessionID
         self.hostIdentitySignature = hostIdentitySignature
         self.channelTag = channelTag
+    }
+}
+
+public struct PairingAuthorizationEnvelope: Sendable {
+    public let sessionID: PairingSessionID
+    public let authorization: SignedTrustRecord
+    public let channelTag: Data
+
+    public init(
+        sessionID: PairingSessionID,
+        authorization: SignedTrustRecord,
+        channelTag: Data
+    ) {
+        self.sessionID = sessionID
         self.authorization = authorization
+        self.channelTag = channelTag
+    }
+}
+
+public struct PairingLimiterStorageCounts: Equatable, Sendable {
+    public let sources: Int
+    public let codes: Int
+    public let globalEvents: Int
+
+    public init(sources: Int, codes: Int, globalEvents: Int) {
+        self.sources = sources
+        self.codes = codes
+        self.globalEvents = globalEvents
     }
 }

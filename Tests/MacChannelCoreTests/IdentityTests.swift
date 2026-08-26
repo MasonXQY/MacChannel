@@ -321,6 +321,29 @@ final class IdentityTests: XCTestCase {
             XCTAssertEqual(error as? TrustStoreError, .snapshotAnchorMismatch)
         }
     }
+
+    func testConfirmedPairingBootstrapKeepsLocalOwnerImmutable() throws {
+        let localOwner = try DeviceIdentity.ephemeral()
+        let confirmedHost = try DeviceIdentity.ephemeral()
+        let authorization = try SignedTrustRecord.authorizing(
+            subject: localOwner.id,
+            subjectPublicKey: localOwner.publicKey.rawRepresentation,
+            signedBy: confirmedHost,
+            sequence: 1
+        )
+        var store = TrustStore(owner: localOwner.id)
+
+        try store.bootstrapFromConfirmedPairing(
+            authorization,
+            localIdentity: localOwner
+        )
+
+        XCTAssertTrue(store.isTrusted(localOwner.id))
+        XCTAssertTrue(store.isTrusted(confirmedHost.id))
+        XCTAssertThrowsError(try store.revoke(localOwner.id, signedBy: localOwner)) { error in
+            XCTAssertEqual(error as? TrustStoreError, .cannotRevokeOwner)
+        }
+    }
 }
 
 private func snapshotByReplacing(
