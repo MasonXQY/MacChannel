@@ -430,6 +430,14 @@ func TestPreTrustPairingAuthorizationMailboxLifecycle(t *testing.T) {
 	if hostRequest.SessionID != joined.SessionID || string(hostRequest.EncryptedJoinPayload) != "opaque-join-request" {
 		t.Fatalf("host request = %#v", hostRequest)
 	}
+	responseCommit := api.doEnvelope(t, http.MethodPost, "/v1/pairing/sessions/"+joined.SessionID+"/response",
+		api.signedRequestAs(t, host, map[string]any{
+			"sessionID": joined.SessionID, "joinResponse": []byte("opaque-host-response"),
+		}), nil)
+	responseCommit.Body.Close()
+	if responseCommit.StatusCode != http.StatusNoContent {
+		t.Fatalf("host response status=%d, want 204", responseCommit.StatusCode)
+	}
 
 	reservePath := "/v1/pairing/sessions/" + joined.SessionID + "/authorization/reserve"
 	reserve := func() string {
@@ -545,13 +553,13 @@ func TestSwiftPairingTransportStateSequence(t *testing.T) {
 		"code": code, "joinRequest": []byte("swift-pairing-join-request"),
 	}, http.StatusAccepted)
 	var joined struct {
-		SessionID        string `json:"sessionID"`
-		SessionExpiresAt int64  `json:"sessionExpiresAt"`
+		SessionID          string `json:"sessionID"`
+		HandshakeExpiresAt int64  `json:"handshakeExpiresAt"`
 	}
 	if err := json.Unmarshal(joinBody, &joined); err != nil {
 		t.Fatal(err)
 	}
-	if joined.SessionID == "" || joined.SessionExpiresAt != api.clock.Now().Add(5*time.Minute).UnixMilli() {
+	if joined.SessionID == "" || joined.HandshakeExpiresAt != api.clock.Now().Add(5*time.Minute).UnixMilli() {
 		t.Fatalf("join route=%+v", joined)
 	}
 
@@ -703,12 +711,56 @@ func TestPairingSessionGetsFreshFiveMinutesAtJoinNearCodeExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := joinedAt.Add(5 * time.Minute); !session.ExpiresAt.Equal(want) {
-		t.Fatalf("session expiry=%v want=%v", session.ExpiresAt, want)
+	if want := joinedAt.Add(5 * time.Minute); !session.HandshakeExpiresAt.Equal(want) {
+		t.Fatalf("handshake expiry=%v want=%v", session.HandshakeExpiresAt, want)
 	}
 	clock.Advance(2 * time.Second)
 	if _, err := store.HostJoin(context.Background(), "123456", host.id, clock.Now()); err != nil {
 		t.Fatalf("session died at original code expiry: %v", err)
+	}
+}
+
+func TestCanonicalSessionStartsOnlyWhenHostResponseCommits(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
+	store := pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now})
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	if err := store.CreateSession(context.Background(), "123456", host.id, "203.0.113.1", []byte("offer"), clock.Now().Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.Join(context.Background(), "123456", joiner.id, "203.0.113.2", []byte("join"), clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveAuthorization(context.Background(), session.ID, host.id, clock.Now()); !errors.Is(err, pairing.ErrPending) {
+		t.Fatalf("reservation before host response error=%v, want pending", err)
+	}
+	clock.Advance(5*time.Minute - time.Second)
+	committedAt := clock.Now()
+	if err := store.CommitJoinResponse(context.Background(), session.ID, host.id, []byte("response"), committedAt); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(5*time.Minute - time.Second)
+	if response, err := store.JoinResponse(context.Background(), session.ID, joiner.id, clock.Now()); err != nil || string(response) != "response" {
+		t.Fatalf("response before commit-derived boundary=%q err=%v", response, err)
+	}
+	clock.Advance(time.Second)
+	if _, err := store.JoinResponse(context.Background(), session.ID, joiner.id, clock.Now()); !errors.Is(err, pairing.ErrGone) {
+		t.Fatalf("response at commit-derived boundary error=%v, want gone", err)
+	}
+
+	clock = &testClock{now: time.Unix(1_800_100_000, 0)}
+	store = pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now})
+	if err := store.CreateSession(context.Background(), "654321", host.id, "203.0.113.1", []byte("offer"), clock.Now().Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Join(context.Background(), "654321", joiner.id, "203.0.113.2", []byte("join"), clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(5 * time.Minute)
+	if err := store.CommitJoinResponse(context.Background(), pending.ID, host.id, []byte("late"), clock.Now()); !errors.Is(err, pairing.ErrGone) {
+		t.Fatalf("commit at pending-handshake boundary error=%v, want gone", err)
 	}
 }
 
@@ -722,6 +774,9 @@ func TestAuthorizationReservationSurvivesPairingExpiryUntilMailboxExpiry(t *test
 	}
 	session, err := store.Join(context.Background(), "123456", joiner.id, "203.0.113.2", []byte("join"), clock.Now())
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitJoinResponse(context.Background(), session.ID, host.id, []byte("response"), clock.Now()); err != nil {
 		t.Fatal(err)
 	}
 	reservation, err := store.ReserveAuthorization(context.Background(), session.ID, host.id, clock.Now())
@@ -738,9 +793,52 @@ func TestAuthorizationReservationSurvivesPairingExpiryUntilMailboxExpiry(t *test
 	if payload, err := store.Authorization(context.Background(), session.ID, joiner.id, clock.Now()); err != nil || string(payload) != "authorization" {
 		t.Fatalf("mailbox retrieval payload=%q err=%v", payload, err)
 	}
-	clock.Advance(13 * time.Minute)
+	clock.Advance(15 * time.Minute)
 	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), clock.Now()); !errors.Is(err, pairing.ErrGone) {
 		t.Fatalf("commit at mailbox expiry error=%v, want gone", err)
+	}
+}
+
+func TestCommittedMailboxRetriesIgnoreExpiredReservationUntilMailboxExpiry(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
+	store := pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now})
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	if err := store.CreateSession(context.Background(), "123456", host.id, "203.0.113.1", []byte("offer"), clock.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.Join(context.Background(), "123456", joiner.id, "203.0.113.2", []byte("join"), clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitJoinResponse(context.Background(), session.ID, host.id, []byte("response"), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveAuthorization(context.Background(), session.ID, host.id, clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(14 * time.Minute)
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Minute)
+	retried, err := store.ReserveAuthorization(context.Background(), session.ID, host.id, clock.Now())
+	if err != nil || retried.ID != reservation.ID {
+		t.Fatalf("reserve retry after reservation expiry=%+v err=%v", retried, err)
+	}
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), clock.Now()); err != nil {
+		t.Fatalf("identical redelivery after reservation expiry: %v", err)
+	}
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("different"), clock.Now()); !errors.Is(err, pairing.ErrConflict) {
+		t.Fatalf("conflicting redelivery error=%v, want conflict", err)
+	}
+	clock.Advance(13 * time.Minute)
+	if _, err := store.ReserveAuthorization(context.Background(), session.ID, host.id, clock.Now()); !errors.Is(err, pairing.ErrGone) {
+		t.Fatalf("reserve at mailbox expiry error=%v, want gone", err)
+	}
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), clock.Now()); !errors.Is(err, pairing.ErrGone) {
+		t.Fatalf("redelivery at mailbox expiry error=%v, want gone", err)
 	}
 }
 
@@ -778,8 +876,8 @@ func TestPostgresPairingProtocolSurvivesRestartAtEveryPhase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := now.Add(5 * time.Minute); !session.ExpiresAt.Equal(want) {
-		t.Fatalf("session expiry=%v want=%v", session.ExpiresAt, want)
+	if want := now.Add(5 * time.Minute); !session.HandshakeExpiresAt.Equal(want) {
+		t.Fatalf("handshake expiry=%v want=%v", session.HandshakeExpiresAt, want)
 	}
 	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
 	hostView, err := store.HostJoin(context.Background(), "123456", host.id, now.Add(11*time.Second))
@@ -792,6 +890,13 @@ func TestPostgresPairingProtocolSurvivesRestartAtEveryPhase(t *testing.T) {
 	}
 	if err := store.CommitJoinResponse(context.Background(), session.ID, host.id, []byte("host-signature-channel-tag"), now); err != nil {
 		t.Fatal(err)
+	}
+	var durableSessionExpiry time.Time
+	if err := database.QueryRow(`SELECT session_expires_at FROM pairing_sessions WHERE session_id = $1`, session.ID).Scan(&durableSessionExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if want := now.Add(5 * time.Minute); !durableSessionExpiry.Equal(want) {
+		t.Fatalf("committed session expiry=%v want=%v", durableSessionExpiry, want)
 	}
 	store = pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: clock})
 	if response, err := store.JoinResponse(context.Background(), session.ID, joiner.id, now); err != nil || string(response) != "host-signature-channel-tag" {
@@ -856,6 +961,107 @@ func TestPostgresPairingProtocolSurvivesRestartAtEveryPhase(t *testing.T) {
 	}
 	if _, err := store.Lookup(context.Background(), "654321", joiner.id, "203.0.113.2", now); !errors.Is(err, pairing.ErrGone) {
 		t.Fatalf("removed code lookup error=%v, want gone", err)
+	}
+}
+
+func TestPostgresCanonicalSessionStartsAtDelayedHostResponseAcrossRestart(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE pairing_sessions, pairing_creation_events,
+		pairing_attempt_failures, pairing_attempt_reservations`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	store := pairing.NewPostgresStore(database, pairing.StoreConfig{})
+	if err := store.CreateSession(context.Background(), "123456", host.id, "203.0.113.1", []byte("offer"), now.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.Join(context.Background(), "123456", joiner.id, "203.0.113.2", []byte("join"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayedCommit := now.Add(5*time.Minute - time.Second)
+	restarted := pairing.NewPostgresStore(database, pairing.StoreConfig{})
+	if _, err := restarted.HostJoin(context.Background(), "123456", host.id, delayedCommit); err != nil {
+		t.Fatalf("delayed host poll: %v", err)
+	}
+	if err := restarted.CommitJoinResponse(context.Background(), session.ID, host.id, []byte("response"), delayedCommit); err != nil {
+		t.Fatalf("delayed host response: %v", err)
+	}
+	wantExpiry := delayedCommit.Add(5 * time.Minute)
+	var storedExpiry time.Time
+	if err := database.QueryRow(`SELECT session_expires_at FROM pairing_sessions WHERE session_id = $1`, session.ID).Scan(&storedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if !storedExpiry.Equal(wantExpiry) {
+		t.Fatalf("durable delayed-response expiry=%v want=%v", storedExpiry, wantExpiry)
+	}
+	restarted = pairing.NewPostgresStore(database, pairing.StoreConfig{})
+	if response, err := restarted.JoinResponse(context.Background(), session.ID, joiner.id, wantExpiry.Add(-time.Nanosecond)); err != nil || string(response) != "response" {
+		t.Fatalf("response before delayed boundary=%q err=%v", response, err)
+	}
+	if _, err := restarted.JoinResponse(context.Background(), session.ID, joiner.id, wantExpiry); !errors.Is(err, pairing.ErrGone) {
+		t.Fatalf("response at delayed boundary error=%v, want gone", err)
+	}
+}
+
+func TestPostgresCommittedMailboxRetrySurvivesReservationExpiryAndRestart(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE pairing_sessions, pairing_creation_events,
+		pairing_attempt_failures, pairing_attempt_reservations`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	store := pairing.NewPostgresStore(database, pairing.StoreConfig{Clock: func() time.Time { return now }})
+	if err := store.CreateSession(context.Background(), "123456", host.id, "203.0.113.1", []byte("offer"), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.Join(context.Background(), "123456", joiner.id, "203.0.113.2", []byte("join"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitJoinResponse(context.Background(), session.ID, host.id, []byte("response"), now); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := store.ReserveAuthorization(context.Background(), session.ID, host.id, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedAt := now.Add(14 * time.Minute)
+	if err := store.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), committedAt); err != nil {
+		t.Fatal(err)
+	}
+	restarted := pairing.NewPostgresStore(database, pairing.StoreConfig{})
+	retryAt := now.Add(16 * time.Minute)
+	retried, err := restarted.ReserveAuthorization(context.Background(), session.ID, host.id, retryAt)
+	if err != nil || retried.ID != reservation.ID {
+		t.Fatalf("reserve retry after restart=%+v err=%v", retried, err)
+	}
+	if err := restarted.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), retryAt); err != nil {
+		t.Fatalf("redelivery after restart: %v", err)
+	}
+	mailboxBoundary := committedAt.Add(15 * time.Minute)
+	if err := restarted.CommitAuthorization(context.Background(), session.ID, host.id, reservation.ID, []byte("authorization"), mailboxBoundary); !errors.Is(err, pairing.ErrGone) {
+		t.Fatalf("redelivery at mailbox boundary error=%v, want gone", err)
 	}
 }
 
@@ -1192,7 +1398,14 @@ func TestTrustQuotasArePerIssuerAndCompactRepeatedPairUpdates(t *testing.T) {
 	compact := auth.NewTrustRegistryWithConfig(auth.TrustRegistryConfig{
 		Clock: clock.Now, PerIssuerSubjects: 1, PerIssuerUpdates: 64,
 	})
-	for sequence := uint64(1); sequence <= 32; sequence++ {
+	firstAuthorization := attacker.trustRecord(t, first, 1)
+	if err := compact.AuthenticateDevice(attacker.id, attacker.publicKey, []auth.SignedTrustRecord{firstAuthorization}); err != nil {
+		t.Fatal(err)
+	}
+	if err := compact.AuthenticateDevice(first.id, first.publicKey, []auth.SignedTrustRecord{firstAuthorization}); err != nil {
+		t.Fatal(err)
+	}
+	for sequence := uint64(2); sequence <= 32; sequence++ {
 		action := auth.TrustAuthorize
 		if sequence%2 == 0 {
 			action = auth.TrustRevoke
@@ -1223,6 +1436,106 @@ func TestTrustQuotasArePerIssuerAndCompactRepeatedPairUpdates(t *testing.T) {
 		attacker.trustRecordAction(t, first, 3, auth.TrustAuthorize),
 	}); err != nil {
 		t.Fatalf("issuer did not recover after rate window: %v", err)
+	}
+}
+
+func TestTrustGlobalCapExpiresUnconfirmedSybilStateAndAllowsEstablishedUpdates(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
+	registry := auth.NewTrustRegistryWithConfig(auth.TrustRegistryConfig{
+		Clock: clock.Now, GlobalPairs: 2, UnconfirmedTTL: time.Minute,
+	})
+	establishedHost := newIdentity(t)
+	establishedPeer := newIdentity(t)
+	established := establishedHost.trustRecord(t, establishedPeer, 1)
+	if err := registry.AuthenticateDevice(establishedHost.id, establishedHost.publicKey, []auth.SignedTrustRecord{established}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(establishedPeer.id, establishedPeer.publicKey, []auth.SignedTrustRecord{established}); err != nil {
+		t.Fatal(err)
+	}
+	sybil := newIdentity(t)
+	sybilSubject := newIdentity(t)
+	if err := registry.AuthenticateDevice(sybil.id, sybil.publicKey, []auth.SignedTrustRecord{sybil.trustRecord(t, sybilSubject, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	third := newIdentity(t)
+	thirdSubject := newIdentity(t)
+	thirdRecord := third.trustRecord(t, thirdSubject, 1)
+	if err := registry.AuthenticateDevice(third.id, third.publicKey, []auth.SignedTrustRecord{thirdRecord}); !errors.Is(err, auth.ErrTrustCapacity) {
+		t.Fatalf("new pair above global cap error=%v, want capacity", err)
+	}
+	revocation := establishedHost.trustRecordAction(t, establishedPeer, 2, auth.TrustRevoke)
+	if err := registry.AuthenticateDevice(establishedHost.id, establishedHost.publicKey, []auth.SignedTrustRecord{revocation}); err != nil {
+		t.Fatalf("established pair update blocked by global cap: %v", err)
+	}
+	clock.Advance(time.Minute)
+	if err := registry.Cleanup(context.Background(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(third.id, third.publicKey, []auth.SignedTrustRecord{thirdRecord}); err != nil {
+		t.Fatalf("expired unconfirmed Sybil state did not release capacity: %v", err)
+	}
+}
+
+func TestUnilateralRevocationsCannotConsumeTrustCapacity(t *testing.T) {
+	registry := auth.NewTrustRegistryWithConfig(auth.TrustRegistryConfig{GlobalPairs: 2})
+	for range 3 {
+		issuer := newIdentity(t)
+		subject := newIdentity(t)
+		revocation := issuer.trustRecordAction(t, subject, 1, auth.TrustRevoke)
+		if err := registry.AuthenticateDevice(issuer.id, issuer.publicKey, []auth.SignedTrustRecord{revocation}); !errors.Is(err, auth.ErrInvalidTrust) {
+			t.Fatalf("unilateral revocation admission error=%v, want invalid trust", err)
+		}
+	}
+	legitimateHost := newIdentity(t)
+	legitimatePeer := newIdentity(t)
+	if err := registry.AuthenticateDevice(legitimateHost.id, legitimateHost.publicKey, []auth.SignedTrustRecord{
+		legitimateHost.trustRecord(t, legitimatePeer, 1),
+	}); err != nil {
+		t.Fatalf("rejected legitimate authorization after revocation flood: %v", err)
+	}
+}
+
+func TestExpiredReauthorizationCannotCrossRetainedRevocationBarrier(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
+	registry := auth.NewTrustRegistryWithConfig(auth.TrustRegistryConfig{Clock: clock.Now, UnconfirmedTTL: time.Minute})
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	initial := host.trustRecord(t, joiner, 1)
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{initial}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{initial}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{
+		joiner.trustRecordAction(t, host, 1, auth.TrustRevoke),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending := host.trustRecord(t, joiner, 2)
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{pending}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	if err := registry.Cleanup(context.Background(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{pending}); !errors.Is(err, auth.ErrInvalidTrust) {
+		t.Fatalf("expired second presentation error=%v, want invalid trust", err)
+	}
+	if registry.ShareGraph(host.id, joiner.id) {
+		t.Fatal("expired reauthorization crossed retained revocation")
+	}
+	replacement := host.trustRecord(t, joiner, 3)
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{replacement}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{replacement}); err != nil {
+		t.Fatal(err)
+	}
+	if !registry.ShareGraph(host.id, joiner.id) {
+		t.Fatal("fresh two-party authorization did not cross revocation")
 	}
 }
 
@@ -1592,6 +1905,561 @@ func TestPostgresTrustStateCompactsAndRefreshesAcrossReplicas(t *testing.T) {
 	}
 	if pairRows != 1 {
 		t.Fatalf("compacted pair rows=%d, want 1", pairRows)
+	}
+}
+
+func TestPostgresRevocationRefreshesPresenceOnAnotherRouter(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE trust_pair_states, trust_issuer_states, trust_state_version,
+		device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+
+	clock := &testClock{now: time.Now().UTC()}
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	authorization := host.trustRecord(t, joiner, 1)
+	firstRegistry, err := auth.NewPostgresTrustRegistry(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRegistry, err := auth.NewPostgresTrustRegistry(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstRegistry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{authorization}); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstRegistry.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{authorization}); err != nil {
+		t.Fatal(err)
+	}
+
+	newReplicaAPI := func(registry *auth.TrustRegistry) *testAPI {
+		verifier := auth.NewVerifier(auth.VerifierConfig{
+			Clock: clock.Now, FreshnessWindow: time.Minute, ChallengeCapacity: 64, ReplayCapacity: 256,
+		})
+		handler := NewRouter(Config{
+			Clock: clock.Now, Verifier: verifier, Registry: registry,
+			Pairings: pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now}),
+			Presence: presence.NewHub(registry), Signals: signal.NewHub(registry),
+		})
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		return &testAPI{t: t, clock: clock, server: server}
+	}
+	firstRouter := newReplicaAPI(firstRegistry)
+	secondRouter := newReplicaAPI(secondRegistry)
+
+	hostOnSecond := secondRouter.authenticatedWebSocket(t, host, []auth.SignedTrustRecord{authorization})
+	defer hostOnSecond.Close()
+	joinerOnSecond := secondRouter.authenticatedWebSocket(t, joiner, []auth.SignedTrustRecord{authorization})
+	defer joinerOnSecond.Close()
+	if event := readUntilType(t, hostOnSecond, "presence"); event["deviceID"] != joiner.id || event["availability"] != "internet" {
+		t.Fatalf("initial cross-router presence=%#v", event)
+	}
+
+	joinerOnFirst := firstRouter.authenticatedWebSocket(t, joiner, nil)
+	defer joinerOnFirst.Close()
+	revocation := joiner.trustRecordAction(t, host, 1, auth.TrustRevoke)
+	if err := joinerOnFirst.WriteJSON(map[string]any{
+		"type": "trust-update", "trustRecords": []auth.SignedTrustRecord{revocation},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	readUntilType(t, joinerOnFirst, "trust-ok")
+	if event := readUntilType(t, hostOnSecond, "presence"); event["deviceID"] != joiner.id || event["availability"] != "offline" {
+		t.Fatalf("cross-router revocation presence=%#v", event)
+	}
+}
+
+func TestPostgresPresenceFailsClosedWhenDurableTrustUnavailable(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`TRUNCATE trust_pair_states, trust_issuer_states, trust_state_version,
+		device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	clock := &testClock{now: time.Now().UTC()}
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	authorization := host.trustRecord(t, joiner, 1)
+	registry, err := auth.NewPostgresTrustRegistry(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{authorization}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{authorization}); err != nil {
+		t.Fatal(err)
+	}
+	verifier := auth.NewVerifier(auth.VerifierConfig{Clock: clock.Now, FreshnessWindow: time.Minute})
+	handler := NewRouter(Config{
+		Clock: clock.Now, Verifier: verifier, Registry: registry,
+		Pairings: pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now}),
+		Presence: presence.NewHub(registry), Signals: signal.NewHub(registry),
+	})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	api := &testAPI{t: t, clock: clock, server: server}
+	hostWS := api.authenticatedWebSocket(t, host, []auth.SignedTrustRecord{authorization})
+	defer hostWS.Close()
+	joinerWS := api.authenticatedWebSocket(t, joiner, []auth.SignedTrustRecord{authorization})
+	defer joinerWS.Close()
+	if event := readUntilType(t, hostWS, "presence"); event["availability"] != "internet" {
+		t.Fatalf("initial presence=%#v", event)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if event := readUntilType(t, hostWS, "presence"); event["deviceID"] != joiner.id || event["availability"] != "offline" {
+		t.Fatalf("database-outage presence=%#v", event)
+	}
+}
+
+func TestPostgresTrustMutationCommitOrderIsLinearizableAcrossReplicas(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if _, err := database.Exec(`DROP TRIGGER IF EXISTS test_delay_trust_authorize_trigger ON trust_pair_states;
+		DROP FUNCTION IF EXISTS test_delay_trust_authorize()`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`TRUNCATE trust_pair_states, trust_issuer_states, trust_state_version,
+		device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	mutator, err := auth.NewPostgresTrustRegistry(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoker, err := auth.NewPostgresTrustRegistry(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleReplica, err := auth.NewPostgresTrustRegistry(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := host.trustRecord(t, joiner, 100)
+	if err := mutator.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{initial}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mutator.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{initial}); err != nil {
+		t.Fatal(err)
+	}
+	if !staleReplica.ShareGraph(host.id, joiner.id) {
+		t.Fatal("initial authorization did not refresh to replica")
+	}
+	if _, err := database.Exec(`
+		CREATE OR REPLACE FUNCTION test_delay_trust_authorize() RETURNS trigger AS $$
+		BEGIN
+			IF NEW.action = 'authorize' AND NEW.issuer_sequence = 101 THEN
+				PERFORM pg_sleep(0.35);
+			END IF;
+			RETURN NEW;
+		END
+		$$ LANGUAGE plpgsql;
+		CREATE TRIGGER test_delay_trust_authorize_trigger
+		BEFORE INSERT OR UPDATE ON trust_pair_states
+		FOR EACH ROW EXECUTE FUNCTION test_delay_trust_authorize()`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = database.Exec(`DROP TRIGGER IF EXISTS test_delay_trust_authorize_trigger ON trust_pair_states;
+			DROP FUNCTION IF EXISTS test_delay_trust_authorize()`)
+	})
+
+	completion := make(chan string, 2)
+	errorsFound := make(chan error, 2)
+	reauthorization := host.trustRecord(t, joiner, 101)
+	go func() {
+		errorsFound <- mutator.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{reauthorization})
+		completion <- "authorization"
+	}()
+	time.Sleep(50 * time.Millisecond)
+	revocation := joiner.trustRecordAction(t, host, 1, auth.TrustRevoke)
+	go func() {
+		errorsFound <- revoker.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{revocation})
+		completion <- "revocation"
+	}()
+
+	if first := <-completion; first != "authorization" {
+		t.Fatalf("first commit=%s, want serialized authorization before later revocation", first)
+	}
+	<-completion
+	for range 2 {
+		if err := <-errorsFound; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var version, maximumOrder uint64
+	if err := database.QueryRow(`SELECT version FROM trust_state_version WHERE singleton = TRUE`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COALESCE(MAX(accepted_order), 0) FROM trust_pair_states`).Scan(&maximumOrder); err != nil {
+		t.Fatal(err)
+	}
+	if version < maximumOrder {
+		t.Fatalf("durable version=%d fell below accepted order=%d", version, maximumOrder)
+	}
+	if staleReplica.ShareGraph(host.id, joiner.id) {
+		t.Fatal("replica did not observe the serially later revocation")
+	}
+}
+
+func TestPostgresTrustGlobalCapExpiresUnconfirmedSybilRows(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE trust_pair_states, trust_issuer_states, trust_state_version,
+		device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	clock := &testClock{now: time.Now().UTC()}
+	config := auth.TrustRegistryConfig{Clock: clock.Now, GlobalPairs: 2, UnconfirmedTTL: time.Minute}
+	registry, err := auth.NewPostgresTrustRegistryWithConfig(context.Background(), database, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := newIdentity(t)
+	peer := newIdentity(t)
+	established := host.trustRecord(t, peer, 1)
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{established}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(peer.id, peer.publicKey, []auth.SignedTrustRecord{established}); err != nil {
+		t.Fatal(err)
+	}
+	sybil := newIdentity(t)
+	sybilSubject := newIdentity(t)
+	if err := registry.AuthenticateDevice(sybil.id, sybil.publicKey, []auth.SignedTrustRecord{sybil.trustRecord(t, sybilSubject, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	third := newIdentity(t)
+	thirdSubject := newIdentity(t)
+	thirdRecord := third.trustRecord(t, thirdSubject, 1)
+	if err := registry.AuthenticateDevice(third.id, third.publicKey, []auth.SignedTrustRecord{thirdRecord}); !errors.Is(err, auth.ErrTrustCapacity) {
+		t.Fatalf("durable global-cap error=%v, want capacity", err)
+	}
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{
+		host.trustRecordAction(t, peer, 2, auth.TrustRevoke),
+	}); err != nil {
+		t.Fatalf("established durable update blocked by cap: %v", err)
+	}
+	clock.Advance(time.Minute)
+	if err := registry.Cleanup(context.Background(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var afterCleanup int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM trust_pair_states`).Scan(&afterCleanup); err != nil {
+		t.Fatal(err)
+	}
+	if afterCleanup != 1 {
+		t.Fatalf("durable expired cleanup pairs=%d, want established pair only", afterCleanup)
+	}
+	if err := registry.AuthenticateDevice(third.id, third.publicKey, []auth.SignedTrustRecord{thirdRecord}); err != nil {
+		t.Fatalf("expired durable Sybil row did not release capacity: %v", err)
+	}
+	var pairs, orphanSybilIssuers int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM trust_pair_states`).Scan(&pairs); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM trust_issuer_states WHERE issuer_device_id = $1`, sybil.id).Scan(&orphanSybilIssuers); err != nil {
+		t.Fatal(err)
+	}
+	if pairs != 2 || orphanSybilIssuers != 0 {
+		t.Fatalf("durable compact counts pairs=%d orphanSybilIssuers=%d", pairs, orphanSybilIssuers)
+	}
+}
+
+func TestPostgresUnilateralRevocationsCannotConsumeGlobalTrustCapacity(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE trust_pair_states, trust_issuer_states, trust_state_version,
+		device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := auth.NewPostgresTrustRegistryWithConfig(context.Background(), database,
+		auth.TrustRegistryConfig{GlobalPairs: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		issuer := newIdentity(t)
+		subject := newIdentity(t)
+		if err := registry.AuthenticateDevice(issuer.id, issuer.publicKey, []auth.SignedTrustRecord{
+			issuer.trustRecordAction(t, subject, 1, auth.TrustRevoke),
+		}); !errors.Is(err, auth.ErrInvalidTrust) {
+			t.Fatalf("durable unilateral revocation admission error=%v, want invalid trust", err)
+		}
+	}
+	var rows int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM trust_pair_states`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("unilateral revocations persisted rows=%d", rows)
+	}
+	host := newIdentity(t)
+	peer := newIdentity(t)
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{host.trustRecord(t, peer, 1)}); err != nil {
+		t.Fatalf("durable legitimate admission after revocation flood: %v", err)
+	}
+}
+
+func TestPostgresExpiredReauthorizationRetainsRevocationAcrossRestart(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE trust_pair_states, trust_issuer_states, trust_state_version,
+		device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	clock := &testClock{now: time.Now().UTC()}
+	config := auth.TrustRegistryConfig{Clock: clock.Now, UnconfirmedTTL: time.Minute}
+	registry, err := auth.NewPostgresTrustRegistryWithConfig(context.Background(), database, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	initial := host.trustRecord(t, joiner, 1)
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{initial}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{initial}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{
+		joiner.trustRecordAction(t, host, 1, auth.TrustRevoke),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending := host.trustRecord(t, joiner, 2)
+	if err := registry.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{pending}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	if err := registry.Cleanup(context.Background(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := auth.NewPostgresTrustRegistryWithConfig(context.Background(), database, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{pending}); !errors.Is(err, auth.ErrInvalidTrust) {
+		t.Fatalf("durable expired second presentation error=%v, want invalid trust", err)
+	}
+	if restarted.ShareGraph(host.id, joiner.id) {
+		t.Fatal("durable expired reauthorization crossed revocation after restart")
+	}
+	replacement := host.trustRecord(t, joiner, 3)
+	if err := restarted.AuthenticateDevice(host.id, host.publicKey, []auth.SignedTrustRecord{replacement}); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.AuthenticateDevice(joiner.id, joiner.publicKey, []auth.SignedTrustRecord{replacement}); err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.ShareGraph(host.id, joiner.id) {
+		t.Fatal("durable fresh authorization did not cross revocation")
+	}
+}
+
+func TestMigration005UpgradesInFlightSessionAndExpiresOneSidedTrust(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE pairing_sessions, trust_pair_states, trust_issuer_states,
+		trust_state_version, device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	sessionID := "11111111-1111-4111-8111-111111111111"
+	codeHash := sha256.Sum256([]byte("123456"))
+	if _, err := database.Exec(`INSERT INTO pairing_sessions
+		(code_hash, session_id, host_device_id, joiner_device_id, encrypted_session_payload,
+		 encrypted_join_payload, expires_at, consumed_at, session_expires_at, handshake_expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL)`, codeHash[:], sessionID, host.id, joiner.id,
+		[]byte("offer"), []byte("join"), now.Add(time.Minute), now, now.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	oneSided := host.trustRecord(t, joiner, 1)
+	encoded, err := json.Marshal(oneSided)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashInput := append(append([]byte{}, oneSided.CanonicalPayload()...), oneSided.Signature...)
+	recordHash := sha256.Sum256(hashInput)
+	if _, err := database.Exec(`INSERT INTO trust_pair_states
+		(issuer_device_id, subject_device_id, record_hash, issuer_sequence, action, signed_record,
+		 issuer_confirmed, subject_confirmed, accepted_order, unconfirmed_expires_at)
+		VALUES ($1,$2,$3,1,'authorize',$4,TRUE,FALSE,1,NULL)`, host.id, joiner.id, recordHash[:], encoded); err != nil {
+		t.Fatal(err)
+	}
+	migration, err := os.ReadFile("../../../migrations/005_trust_and_handshake_upgrade.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(string(migration)); err != nil {
+		t.Fatal(err)
+	}
+	var handshakeExpiry, unconfirmedExpiry time.Time
+	if err := database.QueryRow(`SELECT handshake_expires_at FROM pairing_sessions WHERE session_id = $1`, sessionID).Scan(&handshakeExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if !handshakeExpiry.Equal(now.Add(5 * time.Minute)) {
+		t.Fatalf("backfilled handshake expiry=%v", handshakeExpiry)
+	}
+	if err := database.QueryRow(`SELECT unconfirmed_expires_at FROM trust_pair_states WHERE record_hash = $1`, recordHash[:]).Scan(&unconfirmedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if !unconfirmedExpiry.After(now) {
+		t.Fatalf("backfilled trust expiry=%v", unconfirmedExpiry)
+	}
+	store := pairing.NewPostgresStore(database, pairing.StoreConfig{})
+	if _, err := store.HostJoin(context.Background(), "123456", host.id, now.Add(time.Minute)); err != nil {
+		t.Fatalf("upgraded host join: %v", err)
+	}
+	if err := store.CommitJoinResponse(context.Background(), sessionID, host.id, []byte("response"), now.Add(time.Minute)); err != nil {
+		t.Fatalf("upgraded response commit: %v", err)
+	}
+}
+
+func TestMigrationPreservesOnlyReciprocalLegacyTrustUntilNextMutation(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	database, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`TRUNCATE trust_pair_states, trust_issuer_states, trust_state_version,
+		device_authorizations, device_revocations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO trust_state_version (singleton, version) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	left := newIdentity(t)
+	right := newIdentity(t)
+	oneWayIssuer := newIdentity(t)
+	oneWaySubject := newIdentity(t)
+	legacyRecords := []auth.SignedTrustRecord{
+		left.trustRecord(t, right, 1),
+		right.trustRecord(t, left, 1),
+		oneWayIssuer.trustRecord(t, oneWaySubject, 1),
+	}
+	for _, record := range legacyRecords {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hashInput := append(append([]byte{}, record.CanonicalPayload()...), record.Signature...)
+		recordHash := sha256.Sum256(hashInput)
+		if _, err := database.Exec(`INSERT INTO device_authorizations
+			(record_hash, issuer_device_id, subject_device_id, issuer_sequence, signed_record, issuer_confirmed_at)
+			VALUES ($1,$2,$3,$4,$5,NOW())`, recordHash[:], record.Issuer, record.Subject,
+			record.IssuerSequence, encoded); err != nil {
+			t.Fatal(err)
+		}
+	}
+	migration, err := os.ReadFile("../../../migrations/004_compact_trust_state.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(string(migration)); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := auth.NewPostgresTrustRegistry(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registry.ShareGraph(left.id, right.id) {
+		t.Fatal("reciprocal routable legacy trust was lost during compaction")
+	}
+	if registry.ShareGraph(oneWayIssuer.id, oneWaySubject.id) {
+		t.Fatal("one-way legacy authorization became routable")
+	}
+	if err := registry.AuthenticateDevice(left.id, left.publicKey, []auth.SignedTrustRecord{
+		left.trustRecordAction(t, right, 2, auth.TrustRevoke),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if registry.ShareGraph(left.id, right.id) {
+		t.Fatal("new revocation did not replace legacy compatibility state")
 	}
 }
 

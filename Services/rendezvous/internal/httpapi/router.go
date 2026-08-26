@@ -29,6 +29,7 @@ const (
 	webSocketPongWait        = 90 * time.Second
 	webSocketPingEvery       = 30 * time.Second
 	webSocketMaximumLifetime = 24 * time.Hour
+	trustStatePollInterval   = 250 * time.Millisecond
 )
 
 var webSocketAuthPayload = []byte(`{"type":"websocket-auth-v1"}`)
@@ -105,15 +106,18 @@ type Config struct {
 }
 
 type Router struct {
-	clock       func() time.Time
-	verifier    *auth.Verifier
-	registry    *auth.TrustRegistry
-	pairings    pairing.Store
-	presence    *presence.Hub
-	signals     *signal.Hub
-	pairingTTL  time.Duration
-	connections *connectionLimiter
-	upgrader    websocket.Upgrader
+	clock        func() time.Time
+	verifier     *auth.Verifier
+	registry     *auth.TrustRegistry
+	pairings     pairing.Store
+	presence     *presence.Hub
+	signals      *signal.Hub
+	pairingTTL   time.Duration
+	connections  *connectionLimiter
+	upgrader     websocket.Upgrader
+	trustWatchMu sync.Mutex
+	trustWatches int
+	trustStop    chan struct{}
 }
 
 func NewRouter(config Config) http.Handler {
@@ -334,7 +338,7 @@ func (r *Router) joinPairing(writer http.ResponseWriter, request *http.Request) 
 		writeJSON(writer, status, map[string]any{
 			"sessionID":               session.ID,
 			"encryptedSessionPayload": session.EncryptedSessionPayload,
-			"sessionExpiresAt":        session.ExpiresAt.UnixMilli(),
+			"handshakeExpiresAt":      session.HandshakeExpiresAt.UnixMilli(),
 		})
 	}
 }
@@ -358,7 +362,7 @@ func (r *Router) hostPairing(writer http.ResponseWriter, request *http.Request) 
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"sessionID": session.ID, "encryptedJoinPayload": session.EncryptedJoinPayload,
-		"joinRequest": session.EncryptedJoinPayload, "sessionExpiresAt": session.ExpiresAt.UnixMilli(),
+		"joinRequest": session.EncryptedJoinPayload, "handshakeExpiresAt": session.HandshakeExpiresAt.UnixMilli(),
 	})
 }
 
@@ -630,6 +634,8 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer disconnectPresence()
+	releaseTrustWatch := r.retainTrustWatch()
+	defer releaseTrustWatch()
 
 	for {
 		var frame struct {
@@ -663,6 +669,49 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 		default:
 			_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
 		}
+	}
+}
+
+func (r *Router) retainTrustWatch() func() {
+	r.trustWatchMu.Lock()
+	r.trustWatches++
+	if r.trustWatches == 1 {
+		r.trustStop = make(chan struct{})
+		stop := r.trustStop
+		go func() {
+			ticker := time.NewTicker(trustStatePollInterval)
+			defer ticker.Stop()
+			invalid := false
+			for {
+				select {
+				case <-ticker.C:
+					changed, err := r.registry.RefreshPersistent()
+					if err != nil {
+						r.presence.FailClosed()
+						invalid = true
+					} else if changed || invalid {
+						r.presence.Refresh()
+						invalid = false
+					}
+				case <-stop:
+					return
+				}
+			}
+		}()
+	}
+	r.trustWatchMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.trustWatchMu.Lock()
+			r.trustWatches--
+			if r.trustWatches == 0 {
+				close(r.trustStop)
+				r.trustStop = nil
+			}
+			r.trustWatchMu.Unlock()
+		})
 	}
 }
 

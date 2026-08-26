@@ -616,11 +616,19 @@ type directionalTrustState struct {
 	revocationOrder  uint64
 	issuerConfirmed  bool
 	subjectConfirmed bool
+	unconfirmedUntil time.Time
+	legacyActive     bool
+	established      bool
+	pendingExpired   bool
 }
 
 type TrustRecordStore interface {
 	Load(ctx context.Context) ([]PersistedTrustRecord, error)
 	Confirm(ctx context.Context, presentedBy string, records []SignedTrustRecord) error
+}
+
+type trustRecordCleaner interface {
+	Cleanup(ctx context.Context, now time.Time) error
 }
 
 type versionedTrustRecordStore interface {
@@ -634,6 +642,10 @@ type PersistedTrustRecord struct {
 	SubjectConfirmed bool
 	Order            uint64
 	RevocationOrder  uint64
+	UnconfirmedUntil time.Time
+	LegacyActive     bool
+	Established      bool
+	PendingExpired   bool
 }
 
 type pendingRecord struct {
@@ -645,6 +657,10 @@ type pendingRecord struct {
 	subjectConfirmed bool
 	order            uint64
 	revocationOrder  uint64
+	unconfirmedUntil time.Time
+	legacyActive     bool
+	established      bool
+	pendingExpired   bool
 }
 
 type TrustRegistry struct {
@@ -659,6 +675,7 @@ type TrustRegistry struct {
 	clock              func() time.Time
 	perIssuerSubjects  int
 	perIssuerUpdates   int
+	unconfirmedTTL     time.Duration
 	issuerUpdateEvents map[string][]time.Time
 	nextTrustOrder     uint64
 	storeVersion       uint64
@@ -668,6 +685,8 @@ type TrustRegistryConfig struct {
 	Clock             func() time.Time
 	PerIssuerSubjects int
 	PerIssuerUpdates  int
+	GlobalPairs       int
+	UnconfirmedTTL    time.Duration
 }
 
 func NewTrustRegistry() *TrustRegistry {
@@ -684,22 +703,33 @@ func NewTrustRegistryWithConfig(config TrustRegistryConfig) *TrustRegistry {
 	if config.PerIssuerUpdates <= 0 {
 		config.PerIssuerUpdates = 256
 	}
+	if config.GlobalPairs <= 0 {
+		config.GlobalPairs = 16_384
+	}
+	if config.UnconfirmedTTL <= 0 {
+		config.UnconfirmedTTL = 10 * time.Minute
+	}
 	return &TrustRegistry{
 		publicKeys:         make(map[string][]byte),
 		directional:        make(map[directedTrustEdge]directionalTrustState),
 		adjacency:          make(map[string]map[string]bool),
 		issuerSequence:     make(map[string]uint64),
 		records:            make(map[[32]byte]directedTrustEdge),
-		maxRecords:         16_384,
+		maxRecords:         config.GlobalPairs,
 		clock:              config.Clock,
 		perIssuerSubjects:  config.PerIssuerSubjects,
 		perIssuerUpdates:   config.PerIssuerUpdates,
+		unconfirmedTTL:     config.UnconfirmedTTL,
 		issuerUpdateEvents: make(map[string][]time.Time),
 	}
 }
 
 func NewPersistentTrustRegistry(ctx context.Context, store TrustRecordStore) (*TrustRegistry, error) {
-	registry := NewTrustRegistry()
+	return NewPersistentTrustRegistryWithConfig(ctx, store, TrustRegistryConfig{})
+}
+
+func NewPersistentTrustRegistryWithConfig(ctx context.Context, store TrustRecordStore, config TrustRegistryConfig) (*TrustRegistry, error) {
+	registry := NewTrustRegistryWithConfig(config)
 	persisted, version, err := loadConsistentTrustSnapshot(ctx, store)
 	if err != nil {
 		return nil, err
@@ -759,7 +789,7 @@ func (r *TrustRegistry) AuthenticateDevice(deviceID string, publicKey []byte, re
 			return err
 		}
 	}
-	if r.recordStore != nil && !r.refreshPersistent() {
+	if r.recordStore != nil && r.refreshPersistent() != nil {
 		return ErrInvalidTrust
 	}
 
@@ -790,6 +820,8 @@ func (r *TrustRegistry) AuthenticateDevice(deviceID string, publicKey []byte, re
 }
 
 func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []SignedTrustRecord) ([]pendingRecord, error) {
+	now := r.clock()
+	r.purgeUnconfirmedLocked(now)
 	pending := make([]pendingRecord, 0, len(records))
 	batchHashes := make(map[[32]byte]struct{}, len(records))
 	for _, record := range records {
@@ -806,7 +838,15 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 		}
 		edge := directedTrustEdge{issuer: issuer, subject: subject}
 		current, exists := r.directional[edge]
+		reverse := r.directional[directedTrustEdge{issuer: subject, subject: issuer}]
 		sameRecord := exists && current.hash == recordHash
+		if sameRecord && current.pendingExpired {
+			return nil, ErrInvalidTrust
+		}
+		established := current.established || reverse.established
+		if record.Action == TrustRevoke && !established {
+			return nil, ErrInvalidTrust
+		}
 		issuerConfirmed := presentedBy == issuer
 		subjectConfirmed := record.Action == TrustAuthorize && presentedBy == subject
 		if sameRecord {
@@ -815,7 +855,7 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 		}
 		pending = append(pending, pendingRecord{
 			record: record, hash: recordHash, isNew: !sameRecord, presentedBy: presentedBy,
-			issuerConfirmed: issuerConfirmed, subjectConfirmed: subjectConfirmed,
+			issuerConfirmed: issuerConfirmed, subjectConfirmed: subjectConfirmed, established: established,
 		})
 	}
 	sort.Slice(pending, func(left, right int) bool {
@@ -829,7 +869,7 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 	highWater := make(map[string]uint64)
 	newSubjects := make(map[string]map[string]bool)
 	newUpdates := make(map[string]int)
-	now := r.clock()
+	newEdges := make(map[directedTrustEdge]bool)
 	for issuer, events := range r.issuerUpdateEvents {
 		r.issuerUpdateEvents[issuer] = recentTrustEvents(events, now.Add(-10*time.Minute))
 	}
@@ -854,6 +894,7 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 		}
 		edge := directedTrustEdge{issuer: issuer, subject: subject}
 		if _, exists := r.directional[edge]; !exists {
+			newEdges[edge] = true
 			if newSubjects[issuer] == nil {
 				newSubjects[issuer] = make(map[string]bool)
 			}
@@ -863,7 +904,53 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 			return nil, ErrTrustCapacity
 		}
 	}
+	if len(r.directional)+len(newEdges) > r.maxRecords {
+		return nil, ErrTrustCapacity
+	}
 	return pending, nil
+}
+
+func (r *TrustRegistry) purgeUnconfirmedLocked(now time.Time) {
+	for edge, state := range r.directional {
+		if state.unconfirmedUntil.IsZero() || now.Before(state.unconfirmedUntil) {
+			continue
+		}
+		if state.established {
+			state.issuerConfirmed = false
+			state.subjectConfirmed = false
+			state.unconfirmedUntil = time.Time{}
+			state.pendingExpired = true
+			r.directional[edge] = state
+			r.refreshPairLocked(edge.issuer, edge.subject)
+			continue
+		}
+		if state.action != TrustAuthorize {
+			continue
+		}
+		delete(r.records, state.hash)
+		delete(r.directional, edge)
+		r.refreshPairLocked(edge.issuer, edge.subject)
+	}
+	for issuer := range r.issuerSequence {
+		if r.issuerSubjectCountLocked(issuer) == 0 {
+			delete(r.issuerSequence, issuer)
+			delete(r.issuerUpdateEvents, issuer)
+		}
+	}
+	for deviceID := range r.publicKeys {
+		if !r.deviceHasTrustStateLocked(deviceID) {
+			delete(r.publicKeys, deviceID)
+		}
+	}
+}
+
+func (r *TrustRegistry) deviceHasTrustStateLocked(deviceID string) bool {
+	for edge := range r.directional {
+		if edge.issuer == deviceID || edge.subject == deviceID {
+			return true
+		}
+	}
+	return false
 }
 
 func recentTrustEvents(events []time.Time, cutoff time.Time) []time.Time {
@@ -888,7 +975,7 @@ func (r *TrustRegistry) prepareRestoreLocked(persisted []PersistedTrustRecord) (
 	latest := make(map[directedTrustEdge]pendingRecord)
 	latestRevocation := make(map[directedTrustEdge]uint64)
 	for index, item := range persisted {
-		if !item.IssuerConfirmed && !(item.Record.Action == TrustAuthorize && item.SubjectConfirmed) {
+		if !item.PendingExpired && !item.IssuerConfirmed && !(item.Record.Action == TrustAuthorize && item.SubjectConfirmed) {
 			continue
 		}
 		hashInput := append(append([]byte{}, item.Record.CanonicalPayload()...), item.Record.Signature...)
@@ -906,7 +993,9 @@ func (r *TrustRegistry) prepareRestoreLocked(persisted []PersistedTrustRecord) (
 			latestRevocation[edge] = revocationOrder
 		}
 		candidate := pendingRecord{record: item.Record, hash: hash, isNew: true,
-			issuerConfirmed: item.IssuerConfirmed, subjectConfirmed: item.SubjectConfirmed, order: order}
+			issuerConfirmed: item.IssuerConfirmed, subjectConfirmed: item.SubjectConfirmed, order: order,
+			unconfirmedUntil: item.UnconfirmedUntil, legacyActive: item.LegacyActive,
+			established: item.Established || item.LegacyActive, pendingExpired: item.PendingExpired}
 		current, exists := latest[edge]
 		if !exists || candidate.record.IssuerSequence > current.record.IssuerSequence {
 			latest[edge] = candidate
@@ -966,13 +1055,26 @@ func (r *TrustRegistry) applyPendingLocked(pending []pendingRecord) {
 				revocationOrder = order
 			}
 			current = directionalTrustState{record: record, hash: recordHash, action: record.Action,
-				sequence: record.IssuerSequence, order: order, revocationOrder: revocationOrder}
+				sequence: record.IssuerSequence, order: order, revocationOrder: revocationOrder,
+				unconfirmedUntil: item.unconfirmedUntil, legacyActive: item.legacyActive,
+				established: item.established, pendingExpired: item.pendingExpired}
+			if current.unconfirmedUntil.IsZero() && record.Action == TrustAuthorize &&
+				!(item.issuerConfirmed && item.subjectConfirmed) {
+				current.unconfirmedUntil = r.clock().Add(r.unconfirmedTTL)
+			}
 			if item.order == 0 {
 				r.issuerUpdateEvents[issuer] = append(r.issuerUpdateEvents[issuer], r.clock())
 			}
 		}
 		current.issuerConfirmed = item.issuerConfirmed
 		current.subjectConfirmed = item.subjectConfirmed
+		if current.action == TrustAuthorize && current.issuerConfirmed && current.subjectConfirmed {
+			current.established = true
+			current.pendingExpired = false
+		}
+		if current.action != TrustAuthorize || (current.issuerConfirmed && current.subjectConfirmed) {
+			current.unconfirmedUntil = time.Time{}
+		}
 		r.records[recordHash] = edge
 		r.directional[edge] = current
 		r.refreshPairLocked(issuer, subject)
@@ -984,6 +1086,7 @@ func (r *TrustRegistry) refreshPairLocked(left, right string) {
 	rightToLeft := r.directional[directedTrustEdge{issuer: right, subject: left}]
 	latestRevocation := uint64(0)
 	latestAuthorization := uint64(0)
+	legacyAuthorization := leftToRight.legacyActive && rightToLeft.legacyActive
 	for _, state := range []directionalTrustState{leftToRight, rightToLeft} {
 		if state.revocationOrder > latestRevocation {
 			latestRevocation = state.revocationOrder
@@ -992,7 +1095,7 @@ func (r *TrustRegistry) refreshPairLocked(left, right string) {
 			latestAuthorization = state.order
 		}
 	}
-	if latestAuthorization > latestRevocation {
+	if legacyAuthorization || latestAuthorization > latestRevocation {
 		if r.adjacency[left] == nil {
 			r.adjacency[left] = make(map[string]bool)
 		}
@@ -1013,7 +1116,7 @@ func (r *TrustRegistry) ShareGraph(left, right string) bool {
 	if left == right {
 		return true
 	}
-	if !r.refreshPersistent() {
+	if r.refreshPersistent() != nil {
 		return false
 	}
 	r.mu.RLock()
@@ -1044,7 +1147,7 @@ func (r *TrustRegistry) ShareGraph(left, right string) bool {
 
 func (r *TrustRegistry) DevicesInGraph(deviceID string) []string {
 	deviceID = strings.ToLower(deviceID)
-	if !r.refreshPersistent() {
+	if r.refreshPersistent() != nil {
 		return []string{deviceID}
 	}
 	r.mu.RLock()
@@ -1069,34 +1172,73 @@ func (r *TrustRegistry) DevicesInGraph(deviceID string) []string {
 	return result
 }
 
-func (r *TrustRegistry) refreshPersistent() bool {
+// RefreshPersistent polls durable trust state once and reports whether this
+// registry installed a newer committed version. Memory-only registries return
+// false so callers do not perform periodic work without a durable source.
+func (r *TrustRegistry) RefreshPersistent() (bool, error) {
+	r.mu.RLock()
+	store := r.recordStore
+	before := r.storeVersion
+	r.mu.RUnlock()
+	if store == nil {
+		return false, nil
+	}
+	if err := r.refreshPersistent(); err != nil {
+		return false, err
+	}
+	r.mu.RLock()
+	after := r.storeVersion
+	r.mu.RUnlock()
+	return after > before, nil
+}
+
+func (r *TrustRegistry) Cleanup(ctx context.Context, now time.Time) error {
+	r.mu.RLock()
+	store := r.recordStore
+	r.mu.RUnlock()
+	if cleaner, ok := store.(trustRecordCleaner); ok {
+		if err := cleaner.Cleanup(ctx, now); err != nil {
+			return err
+		}
+		if r.refreshPersistent() != nil {
+			return errors.New("refresh durable trust state after cleanup")
+		}
+	}
+	r.mu.Lock()
+	r.purgeUnconfirmedLocked(now)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *TrustRegistry) refreshPersistent() error {
 	r.mu.RLock()
 	store := r.recordStore
 	currentVersion := r.storeVersion
 	r.mu.RUnlock()
 	versioned, ok := store.(versionedTrustRecordStore)
 	if !ok {
-		return true
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	version, err := versioned.Version(ctx)
 	if err != nil {
-		return false
+		return err
 	}
 	if version <= currentVersion {
-		return true
+		return nil
 	}
 	persisted, err := versioned.Load(ctx)
 	if err != nil {
-		return false
+		return err
 	}
 	fresh := NewTrustRegistryWithConfig(TrustRegistryConfig{
 		Clock: r.clock, PerIssuerSubjects: r.perIssuerSubjects, PerIssuerUpdates: r.perIssuerUpdates,
+		GlobalPairs: r.maxRecords, UnconfirmedTTL: r.unconfirmedTTL,
 	})
 	for _, item := range persisted {
 		if err := item.Record.Validate(); err != nil {
-			return false
+			return err
 		}
 	}
 	fresh.mu.Lock()
@@ -1106,12 +1248,12 @@ func (r *TrustRegistry) refreshPersistent() bool {
 	}
 	fresh.mu.Unlock()
 	if err != nil {
-		return false
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if version <= r.storeVersion {
-		return true
+		return nil
 	}
 	r.publicKeys = fresh.publicKeys
 	r.directional = fresh.directional
@@ -1120,7 +1262,7 @@ func (r *TrustRegistry) refreshPersistent() bool {
 	r.records = fresh.records
 	r.nextTrustOrder = fresh.nextTrustOrder
 	r.storeVersion = version
-	return true
+	return nil
 }
 
 func equalBytes(left, right []byte) bool {
@@ -1135,16 +1277,44 @@ func equalBytes(left, right []byte) bool {
 }
 
 type PostgresTrustRecordStore struct {
-	database *sql.DB
+	database          *sql.DB
+	clock             func() time.Time
+	globalPairs       int
+	perIssuerSubjects int
+	perIssuerUpdates  int
+	unconfirmedTTL    time.Duration
 }
 
 func NewPostgresTrustRegistry(ctx context.Context, database *sql.DB) (*TrustRegistry, error) {
-	return NewPersistentTrustRegistry(ctx, &PostgresTrustRecordStore{database: database})
+	return NewPostgresTrustRegistryWithConfig(ctx, database, TrustRegistryConfig{})
+}
+
+func NewPostgresTrustRegistryWithConfig(ctx context.Context, database *sql.DB, config TrustRegistryConfig) (*TrustRegistry, error) {
+	if config.Clock == nil {
+		config.Clock = time.Now
+	}
+	if config.GlobalPairs <= 0 {
+		config.GlobalPairs = 16_384
+	}
+	if config.PerIssuerSubjects <= 0 {
+		config.PerIssuerSubjects = 128
+	}
+	if config.PerIssuerUpdates <= 0 {
+		config.PerIssuerUpdates = 256
+	}
+	if config.UnconfirmedTTL <= 0 {
+		config.UnconfirmedTTL = 10 * time.Minute
+	}
+	store := &PostgresTrustRecordStore{database: database, clock: config.Clock, globalPairs: config.GlobalPairs,
+		perIssuerSubjects: config.PerIssuerSubjects, perIssuerUpdates: config.PerIssuerUpdates,
+		unconfirmedTTL: config.UnconfirmedTTL}
+	return NewPersistentTrustRegistryWithConfig(ctx, store, config)
 }
 
 func (s *PostgresTrustRecordStore) Load(ctx context.Context) ([]PersistedTrustRecord, error) {
 	rows, err := s.database.QueryContext(ctx, `
-		SELECT signed_record, issuer_confirmed, subject_confirmed, accepted_order, revocation_order
+		SELECT signed_record, issuer_confirmed, subject_confirmed, accepted_order, revocation_order,
+		       unconfirmed_expires_at, legacy_active, established_pair, pending_expired
 		FROM trust_pair_states ORDER BY accepted_order, issuer_device_id, subject_device_id`)
 	if err != nil {
 		return nil, err
@@ -1154,8 +1324,11 @@ func (s *PostgresTrustRecordStore) Load(ctx context.Context) ([]PersistedTrustRe
 	for rows.Next() {
 		var encoded []byte
 		var issuerConfirmed, subjectConfirmed bool
+		var legacyActive, established, pendingExpired bool
 		var order, revocationOrder uint64
-		if err := rows.Scan(&encoded, &issuerConfirmed, &subjectConfirmed, &order, &revocationOrder); err != nil {
+		var unconfirmedUntil sql.NullTime
+		if err := rows.Scan(&encoded, &issuerConfirmed, &subjectConfirmed, &order, &revocationOrder,
+			&unconfirmedUntil, &legacyActive, &established, &pendingExpired); err != nil {
 			return nil, err
 		}
 		var record SignedTrustRecord
@@ -1164,7 +1337,8 @@ func (s *PostgresTrustRecordStore) Load(ctx context.Context) ([]PersistedTrustRe
 		}
 		records = append(records, PersistedTrustRecord{
 			Record: record, IssuerConfirmed: issuerConfirmed, SubjectConfirmed: subjectConfirmed,
-			Order: order, RevocationOrder: revocationOrder,
+			Order: order, RevocationOrder: revocationOrder, UnconfirmedUntil: unconfirmedUntil.Time,
+			LegacyActive: legacyActive, Established: established, PendingExpired: pendingExpired,
 		})
 	}
 	return records, rows.Err()
@@ -1176,6 +1350,15 @@ func (s *PostgresTrustRecordStore) Confirm(ctx context.Context, presentedBy stri
 		return err
 	}
 	defer tx.Rollback()
+	var lockedVersion uint64
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM trust_state_version
+		WHERE singleton = TRUE FOR UPDATE`).Scan(&lockedVersion); err != nil {
+		return err
+	}
+	now := s.clock().UTC()
+	if err := cleanupUnconfirmedTrust(ctx, tx, now); err != nil {
+		return err
+	}
 	for _, record := range records {
 		encoded, err := json.Marshal(record)
 		if err != nil {
@@ -1189,23 +1372,30 @@ func (s *PostgresTrustRecordStore) Confirm(ctx context.Context, presentedBy stri
 		issuerConfirmed := presentedBy == strings.ToLower(record.Issuer)
 		subjectConfirmed := presentedBy == strings.ToLower(record.Subject) && record.Action == TrustAuthorize
 		var storedHash []byte
-		var storedIssuerConfirmed, storedSubjectConfirmed bool
-		err = tx.QueryRowContext(ctx, `SELECT record_hash, issuer_confirmed, subject_confirmed
+		var storedIssuerConfirmed, storedSubjectConfirmed, storedEstablished, storedPendingExpired bool
+		err = tx.QueryRowContext(ctx, `SELECT record_hash, issuer_confirmed, subject_confirmed, established_pair, pending_expired
 			FROM trust_pair_states WHERE issuer_device_id = $1 AND subject_device_id = $2 FOR UPDATE`,
-			record.Issuer, record.Subject).Scan(&storedHash, &storedIssuerConfirmed, &storedSubjectConfirmed)
+			record.Issuer, record.Subject).Scan(&storedHash, &storedIssuerConfirmed, &storedSubjectConfirmed,
+			&storedEstablished, &storedPendingExpired)
 		existingPair := err == nil
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		sameRecord := existingPair && equalBytes(storedHash, recordHash[:])
 		if sameRecord {
+			if storedPendingExpired {
+				return ErrInvalidTrust
+			}
 			updatedIssuer := storedIssuerConfirmed || issuerConfirmed
 			updatedSubject := storedSubjectConfirmed || subjectConfirmed
 			if updatedIssuer == storedIssuerConfirmed && updatedSubject == storedSubjectConfirmed {
 				continue
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE trust_pair_states SET issuer_confirmed = $3,
-				subject_confirmed = $4 WHERE issuer_device_id = $1 AND subject_device_id = $2`,
+				subject_confirmed = $4,
+				established_pair = established_pair OR (action = 'authorize' AND $3 AND $4),
+				unconfirmed_expires_at = CASE WHEN $3 AND $4 THEN NULL ELSE unconfirmed_expires_at END
+				WHERE issuer_device_id = $1 AND subject_device_id = $2`,
 				record.Issuer, record.Subject, updatedIssuer, updatedSubject); err != nil {
 				return err
 			}
@@ -1213,6 +1403,18 @@ func (s *PostgresTrustRecordStore) Confirm(ctx context.Context, presentedBy stri
 				return err
 			}
 			continue
+		}
+		pairEstablished := storedEstablished
+		if record.Action == TrustRevoke && !pairEstablished {
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(BOOL_OR(established_pair), FALSE)
+				FROM trust_pair_states WHERE (issuer_device_id = $1 AND subject_device_id = $2)
+				   OR (issuer_device_id = $2 AND subject_device_id = $1)`,
+				record.Issuer, record.Subject).Scan(&pairEstablished); err != nil {
+				return err
+			}
+			if !pairEstablished {
+				return ErrInvalidTrust
+			}
 		}
 
 		var highWater sql.NullString
@@ -1230,12 +1432,11 @@ func (s *PostgresTrustRecordStore) Confirm(ctx context.Context, presentedBy stri
 				return ErrInvalidTrust
 			}
 		}
-		now := time.Now().UTC()
 		if !windowStart.Valid || !now.Before(windowStart.Time.Add(10*time.Minute)) {
 			windowStart = sql.NullTime{Time: now, Valid: true}
 			windowUpdates = 0
 		}
-		if windowUpdates >= 256 {
+		if windowUpdates >= s.perIssuerUpdates {
 			return ErrTrustRateLimit
 		}
 		if !existingPair {
@@ -1243,27 +1444,42 @@ func (s *PostgresTrustRecordStore) Confirm(ctx context.Context, presentedBy stri
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM trust_pair_states WHERE issuer_device_id = $1`, record.Issuer).Scan(&subjects); err != nil {
 				return err
 			}
-			if subjects >= 128 {
+			if subjects >= s.perIssuerSubjects {
+				return ErrTrustCapacity
+			}
+			var globalPairs int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM trust_pair_states`).Scan(&globalPairs); err != nil {
+				return err
+			}
+			if globalPairs >= s.globalPairs {
 				return ErrTrustCapacity
 			}
 		}
-		var acceptedOrder uint64
-		if err := tx.QueryRowContext(ctx, `SELECT nextval('trust_event_order_seq')`).Scan(&acceptedOrder); err != nil {
+		acceptedOrder, err := nextTrustVersion(ctx, tx)
+		if err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO trust_pair_states
 			(issuer_device_id, subject_device_id, record_hash, issuer_sequence, action, signed_record,
-			 issuer_confirmed, subject_confirmed, accepted_order, revocation_order)
+			 issuer_confirmed, subject_confirmed, accepted_order, revocation_order,
+			 unconfirmed_expires_at, legacy_active, established_pair, pending_expired)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
-			        CASE WHEN $5::text = 'revoke' THEN $9::bigint ELSE 0::bigint END)
+			        CASE WHEN $5::text = 'revoke' THEN $9::bigint ELSE 0::bigint END,
+			        CASE WHEN $5::text = 'authorize' AND NOT ($7::boolean AND $8::boolean)
+			             THEN $10::timestamptz ELSE NULL END, FALSE, $11, FALSE)
 			ON CONFLICT (issuer_device_id, subject_device_id) DO UPDATE SET
 			 record_hash = EXCLUDED.record_hash, issuer_sequence = EXCLUDED.issuer_sequence,
 			 action = EXCLUDED.action, signed_record = EXCLUDED.signed_record,
 			 issuer_confirmed = EXCLUDED.issuer_confirmed, subject_confirmed = EXCLUDED.subject_confirmed,
 			 accepted_order = EXCLUDED.accepted_order,
 			 revocation_order = CASE WHEN EXCLUDED.action = 'revoke' THEN EXCLUDED.accepted_order
-			                          ELSE trust_pair_states.revocation_order END`, record.Issuer, record.Subject, recordHash[:],
-			record.IssuerSequence, record.Action, encoded, issuerConfirmed, subjectConfirmed, acceptedOrder); err != nil {
+			                          ELSE trust_pair_states.revocation_order END,
+			 unconfirmed_expires_at = EXCLUDED.unconfirmed_expires_at,
+			 legacy_active = FALSE,
+			 established_pair = trust_pair_states.established_pair OR EXCLUDED.established_pair,
+			 pending_expired = FALSE`, record.Issuer, record.Subject, recordHash[:],
+			record.IssuerSequence, record.Action, encoded, issuerConfirmed, subjectConfirmed, acceptedOrder,
+			now.Add(s.unconfirmedTTL), pairEstablished); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO trust_issuer_states
@@ -1274,16 +1490,69 @@ func (s *PostgresTrustRecordStore) Confirm(ctx context.Context, presentedBy stri
 			windowStart.Time, windowUpdates+1); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE trust_state_version SET version = $1 WHERE singleton = TRUE`, acceptedOrder); err != nil {
-			return err
-		}
 	}
 	return tx.Commit()
 }
 
 func bumpTrustVersion(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `UPDATE trust_state_version SET version = nextval('trust_event_order_seq') WHERE singleton = TRUE`)
+	_, err := nextTrustVersion(ctx, tx)
 	return err
+}
+
+func cleanupUnconfirmedTrust(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	expiredPending, err := tx.ExecContext(ctx, `UPDATE trust_pair_states SET
+		issuer_confirmed = FALSE, subject_confirmed = FALSE, unconfirmed_expires_at = NULL, pending_expired = TRUE
+		WHERE established_pair AND action = 'authorize' AND unconfirmed_expires_at IS NOT NULL
+		  AND unconfirmed_expires_at <= $1`, now.UTC())
+	if err != nil {
+		return err
+	}
+	expiredPendingRows, err := expiredPending.RowsAffected()
+	if err != nil {
+		return err
+	}
+	deleted, err := tx.ExecContext(ctx, `DELETE FROM trust_pair_states
+		WHERE action = 'authorize' AND NOT established_pair
+		  AND unconfirmed_expires_at IS NOT NULL AND unconfirmed_expires_at <= $1`, now.UTC())
+	if err != nil {
+		return err
+	}
+	deletedRows, err := deleted.RowsAffected()
+	if err != nil || (deletedRows == 0 && expiredPendingRows == 0) {
+		return err
+	}
+	if deletedRows > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM trust_issuer_states issuer
+			WHERE NOT EXISTS (SELECT 1 FROM trust_pair_states pair_state
+				WHERE pair_state.issuer_device_id = issuer.issuer_device_id)`); err != nil {
+			return err
+		}
+	}
+	return bumpTrustVersion(ctx, tx)
+}
+
+func (s *PostgresTrustRecordStore) Cleanup(ctx context.Context, now time.Time) error {
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var lockedVersion uint64
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM trust_state_version
+		WHERE singleton = TRUE FOR UPDATE`).Scan(&lockedVersion); err != nil {
+		return err
+	}
+	if err := cleanupUnconfirmedTrust(ctx, tx, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func nextTrustVersion(ctx context.Context, tx *sql.Tx) (uint64, error) {
+	var version uint64
+	err := tx.QueryRowContext(ctx, `UPDATE trust_state_version SET version = version + 1
+		WHERE singleton = TRUE RETURNING version`).Scan(&version)
+	return version, err
 }
 
 func (s *PostgresTrustRecordStore) Version(ctx context.Context) (uint64, error) {

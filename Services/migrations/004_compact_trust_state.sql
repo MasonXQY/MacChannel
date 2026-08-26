@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS trust_pair_states (
     subject_confirmed BOOLEAN NOT NULL,
     accepted_order BIGINT NOT NULL CHECK (accepted_order > 0),
     revocation_order BIGINT NOT NULL DEFAULT 0 CHECK (revocation_order >= 0),
+    unconfirmed_expires_at TIMESTAMPTZ,
+    legacy_active BOOLEAN NOT NULL DEFAULT FALSE,
+    established_pair BOOLEAN NOT NULL DEFAULT FALSE,
+    pending_expired BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (issuer_device_id, subject_device_id),
     UNIQUE (record_hash)
 );
@@ -28,6 +32,13 @@ CREATE INDEX IF NOT EXISTS trust_pair_states_subject_idx ON trust_pair_states (s
 
 ALTER TABLE trust_pair_states
     ADD COLUMN IF NOT EXISTS revocation_order BIGINT NOT NULL DEFAULT 0 CHECK (revocation_order >= 0);
+ALTER TABLE trust_pair_states ADD COLUMN IF NOT EXISTS unconfirmed_expires_at TIMESTAMPTZ;
+ALTER TABLE trust_pair_states ADD COLUMN IF NOT EXISTS legacy_active BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE trust_pair_states ADD COLUMN IF NOT EXISTS established_pair BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE trust_pair_states ADD COLUMN IF NOT EXISTS pending_expired BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS trust_pair_states_unconfirmed_expiry_idx ON trust_pair_states (unconfirmed_expires_at)
+    WHERE unconfirmed_expires_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS trust_state_version (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
@@ -66,6 +77,25 @@ SELECT issuer_device_id, subject_device_id, record_hash, issuer_sequence,
        CASE WHEN action = 'revoke' THEN event_order ELSE 0 END
 FROM ordered
 ON CONFLICT (issuer_device_id, subject_device_id) DO NOTHING;
+
+-- Pre-compact registries considered reciprocal issuer-confirmed authorization
+-- records routable. Preserve that state only while both compact rows still
+-- match those exact legacy records; any subsequent signed mutation replaces a
+-- row and therefore clears compatibility without fabricating a signature.
+UPDATE trust_pair_states current_state
+SET legacy_active = TRUE, established_pair = TRUE
+FROM device_authorizations current_legacy
+WHERE current_state.record_hash = current_legacy.record_hash
+  AND current_legacy.issuer_confirmed_at IS NOT NULL
+  AND EXISTS (
+      SELECT 1
+      FROM trust_pair_states reverse_state
+      JOIN device_authorizations reverse_legacy
+        ON reverse_legacy.record_hash = reverse_state.record_hash
+      WHERE reverse_state.issuer_device_id = current_state.subject_device_id
+        AND reverse_state.subject_device_id = current_state.issuer_device_id
+        AND reverse_legacy.issuer_confirmed_at IS NOT NULL
+  );
 
 INSERT INTO trust_issuer_states (issuer_device_id, high_water, rate_window_started_at, rate_window_updates)
 SELECT issuer_device_id, MAX(issuer_sequence), NOW(), 0

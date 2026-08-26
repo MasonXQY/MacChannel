@@ -58,6 +58,7 @@ type Session struct {
 	EncryptedSessionPayload []byte
 	EncryptedJoinPayload    []byte
 	ExpiresAt               time.Time
+	HandshakeExpiresAt      time.Time
 }
 
 type AuthorizationReservation struct {
@@ -79,6 +80,7 @@ type storedSession struct {
 	encryptedSessionPayload  []byte
 	encryptedJoinPayload     []byte
 	expiresAt                time.Time
+	handshakeExpiresAt       *time.Time
 	sessionExpiresAt         *time.Time
 	consumedAt               *time.Time
 	removedAt                *time.Time
@@ -314,9 +316,10 @@ func (s *MemoryStore) Join(_ context.Context, code, joinerDeviceID, observedSour
 		return Session{}, ErrGone
 	}
 	consumedAt := now
-	sessionExpiresAt := now.Add(5 * time.Minute)
+	handshakeExpiresAt := now.Add(5 * time.Minute)
 	session.consumedAt = &consumedAt
-	session.sessionExpiresAt = &sessionExpiresAt
+	session.handshakeExpiresAt = &handshakeExpiresAt
+	session.sessionExpiresAt = nil
 	session.sessionID = newUUID()
 	session.joinerDeviceID = joinerDeviceID
 	session.encryptedJoinPayload = append([]byte(nil), encryptedJoinPayload...)
@@ -324,7 +327,7 @@ func (s *MemoryStore) Join(_ context.Context, code, joinerDeviceID, observedSour
 		ID:                      session.sessionID,
 		EncryptedSessionPayload: append([]byte(nil), session.encryptedSessionPayload...),
 		EncryptedJoinPayload:    append([]byte(nil), session.encryptedJoinPayload...),
-		ExpiresAt:               sessionExpiresAt,
+		HandshakeExpiresAt:      handshakeExpiresAt,
 	}, nil
 }
 
@@ -349,14 +352,14 @@ func (s *MemoryStore) HostJoin(_ context.Context, code, hostDeviceID string, now
 	if session.consumedAt == nil {
 		return Session{}, ErrPending
 	}
-	if session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
+	if session.handshakeExpiresAt == nil || !now.Before(*session.handshakeExpiresAt) {
 		return Session{}, ErrGone
 	}
 	return Session{
 		ID:                      session.sessionID,
 		EncryptedSessionPayload: append([]byte(nil), session.encryptedSessionPayload...),
 		EncryptedJoinPayload:    append([]byte(nil), session.encryptedJoinPayload...),
-		ExpiresAt:               *session.sessionExpiresAt,
+		HandshakeExpiresAt:      *session.handshakeExpiresAt,
 	}, nil
 }
 
@@ -376,17 +379,22 @@ func (s *MemoryStore) CommitJoinResponse(_ context.Context, sessionID, hostDevic
 	if session.removedAt != nil {
 		return ErrGone
 	}
-	if session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
-		return ErrGone
-	}
 	if session.joinResponseCommittedAt != nil {
+		if session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
+			return ErrGone
+		}
 		if !equalBytes(session.encryptedJoinResponse, response) {
 			return ErrConflict
 		}
 		return nil
 	}
+	if session.handshakeExpiresAt == nil || !now.Before(*session.handshakeExpiresAt) {
+		return ErrGone
+	}
 	session.encryptedJoinResponse = append([]byte(nil), response...)
 	session.joinResponseCommittedAt = timePointer(now)
+	sessionExpiresAt := now.Add(5 * time.Minute)
+	session.sessionExpiresAt = &sessionExpiresAt
 	return nil
 }
 
@@ -403,11 +411,14 @@ func (s *MemoryStore) JoinResponse(_ context.Context, sessionID, joinerDeviceID 
 	if session.removedAt != nil {
 		return nil, ErrGone
 	}
+	if session.joinResponseCommittedAt == nil {
+		if session.handshakeExpiresAt == nil || !now.Before(*session.handshakeExpiresAt) {
+			return nil, ErrGone
+		}
+		return nil, ErrPending
+	}
 	if session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
 		return nil, ErrGone
-	}
-	if session.joinResponseCommittedAt == nil {
-		return nil, ErrPending
 	}
 	return append([]byte(nil), session.encryptedJoinResponse...), nil
 }
@@ -424,6 +435,19 @@ func (s *MemoryStore) ReserveAuthorization(_ context.Context, sessionID, hostDev
 	}
 	if session.removedAt != nil {
 		return AuthorizationReservation{}, ErrGone
+	}
+	if session.joinResponseCommittedAt == nil {
+		if session.handshakeExpiresAt != nil && now.Before(*session.handshakeExpiresAt) {
+			return AuthorizationReservation{}, ErrPending
+		}
+		return AuthorizationReservation{}, ErrGone
+	}
+	if session.authorizationCommittedAt != nil {
+		if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+			return AuthorizationReservation{}, ErrGone
+		}
+		return AuthorizationReservation{ID: session.reservationID, SessionID: sessionID,
+			ExpiresAt: *session.authorizationExpiresAt}, nil
 	}
 	if session.reservationID != "" {
 		if session.reservationExpiresAt == nil || !now.Before(*session.reservationExpiresAt) {
@@ -457,14 +481,17 @@ func (s *MemoryStore) CommitAuthorization(_ context.Context, sessionID, hostDevi
 	if session.removedAt != nil {
 		return ErrGone
 	}
-	if session.reservationExpiresAt == nil || !now.Before(*session.reservationExpiresAt) {
-		return ErrGone
-	}
 	if session.authorizationCommittedAt != nil {
+		if session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+			return ErrGone
+		}
 		if !equalBytes(session.encryptedAuthorization, encryptedAuthorization) {
 			return ErrConflict
 		}
 		return nil
+	}
+	if session.reservationExpiresAt == nil || !now.Before(*session.reservationExpiresAt) {
+		return ErrGone
 	}
 	session.encryptedAuthorization = append([]byte(nil), encryptedAuthorization...)
 	session.authorizationCommittedAt = timePointer(now)
@@ -536,6 +563,9 @@ func (s *MemoryStore) Authorization(_ context.Context, sessionID, joinerDeviceID
 	}
 	if session.authorizationCommittedAt == nil {
 		if session.reservationExpiresAt != nil && now.Before(*session.reservationExpiresAt) {
+			return nil, ErrPending
+		}
+		if session.joinResponseCommittedAt == nil && session.handshakeExpiresAt != nil && now.Before(*session.handshakeExpiresAt) {
 			return nil, ErrPending
 		}
 		if session.sessionExpiresAt != nil && now.Before(*session.sessionExpiresAt) {
@@ -615,7 +645,7 @@ func (s *MemoryStore) purgeLocked(now time.Time) {
 
 func sessionRetentionExpiry(session *storedSession) time.Time {
 	expiresAt := session.expiresAt
-	for _, candidate := range []*time.Time{session.sessionExpiresAt, session.reservationExpiresAt, session.authorizationExpiresAt} {
+	for _, candidate := range []*time.Time{session.handshakeExpiresAt, session.sessionExpiresAt, session.reservationExpiresAt, session.authorizationExpiresAt} {
 		if candidate != nil && candidate.After(expiresAt) {
 			expiresAt = *candidate
 		}
@@ -708,7 +738,8 @@ func (s *PostgresStore) CreateSession(ctx context.Context, code, hostDeviceID, o
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE GREATEST(expires_at,
-		COALESCE(session_expires_at, '-infinity'), COALESCE(authorization_reservation_expires_at, '-infinity'),
+		COALESCE(handshake_expires_at, '-infinity'), COALESCE(session_expires_at, '-infinity'),
+		COALESCE(authorization_reservation_expires_at, '-infinity'),
 		COALESCE(authorization_expires_at, '-infinity')) <= $1`, now); err != nil {
 		return err
 	}
@@ -962,12 +993,13 @@ func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observed
 		return Session{}, ErrGone
 	}
 	sessionID := newUUID()
-	sessionExpiresAt := now.Add(5 * time.Minute)
+	handshakeExpiresAt := now.Add(5 * time.Minute)
 	result, err := tx.ExecContext(ctx, `
 		UPDATE pairing_sessions SET consumed_at = $2, session_id = $3,
-			joiner_device_id = $4, encrypted_join_payload = $5, session_expires_at = $6
+			joiner_device_id = $4, encrypted_join_payload = $5,
+			handshake_expires_at = $6, session_expires_at = NULL
 		WHERE code_hash = $1 AND consumed_at IS NULL`, codeHash[:], now.UTC(), sessionID,
-		joinerDeviceID, encryptedJoinPayload, sessionExpiresAt.UTC())
+		joinerDeviceID, encryptedJoinPayload, handshakeExpiresAt.UTC())
 	if err != nil {
 		return Session{}, err
 	}
@@ -984,7 +1016,8 @@ func (s *PostgresStore) Join(ctx context.Context, code, joinerDeviceID, observed
 	if err := tx.Commit(); err != nil {
 		return Session{}, err
 	}
-	return Session{ID: sessionID, EncryptedSessionPayload: payload, EncryptedJoinPayload: append([]byte(nil), encryptedJoinPayload...), ExpiresAt: sessionExpiresAt}, nil
+	return Session{ID: sessionID, EncryptedSessionPayload: payload,
+		EncryptedJoinPayload: append([]byte(nil), encryptedJoinPayload...), HandshakeExpiresAt: handshakeExpiresAt}, nil
 }
 
 func (s *PostgresStore) HostJoin(ctx context.Context, code, hostDeviceID string, now time.Time) (Session, error) {
@@ -993,14 +1026,14 @@ func (s *PostgresStore) HostJoin(ctx context.Context, code, hostDeviceID string,
 	var sessionID sql.NullString
 	var storedHost string
 	var expiresAt time.Time
-	var sessionExpiresAt sql.NullTime
+	var handshakeExpiresAt sql.NullTime
 	var consumedAt, removedAt sql.NullTime
 	err := s.db.QueryRowContext(ctx, `
 		SELECT session_id, host_device_id, encrypted_session_payload, encrypted_join_payload, expires_at, consumed_at,
-		       session_expires_at, removed_at
+		       handshake_expires_at, removed_at
 		FROM pairing_sessions WHERE code_hash = $1`, hash[:]).Scan(
 		&sessionID, &storedHost, &session.EncryptedSessionPayload, &session.EncryptedJoinPayload, &expiresAt, &consumedAt,
-		&sessionExpiresAt, &removedAt)
+		&handshakeExpiresAt, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -1019,11 +1052,11 @@ func (s *PostgresStore) HostJoin(ctx context.Context, code, hostDeviceID string,
 		}
 		return Session{}, ErrPending
 	}
-	if !sessionExpiresAt.Valid || !now.Before(sessionExpiresAt.Time) {
+	if !handshakeExpiresAt.Valid || !now.Before(handshakeExpiresAt.Time) {
 		return Session{}, ErrGone
 	}
 	session.ID = sessionID.String
-	session.ExpiresAt = sessionExpiresAt.Time
+	session.HandshakeExpiresAt = handshakeExpiresAt.Time
 	return session, nil
 }
 
@@ -1037,12 +1070,14 @@ func (s *PostgresStore) CommitJoinResponse(ctx context.Context, sessionID, hostD
 	}
 	defer tx.Rollback()
 	var storedHost string
-	var expiresAt time.Time
+	var handshakeExpiresAt time.Time
+	var sessionExpiresAt sql.NullTime
 	var committedAt, removedAt sql.NullTime
 	var stored []byte
-	err = tx.QueryRowContext(ctx, `SELECT host_device_id, session_expires_at,
+	err = tx.QueryRowContext(ctx, `SELECT host_device_id, handshake_expires_at, session_expires_at,
 		join_response_committed_at, encrypted_join_response, removed_at FROM pairing_sessions
-		WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(&storedHost, &expiresAt, &committedAt, &stored, &removedAt)
+		WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
+		&storedHost, &handshakeExpiresAt, &sessionExpiresAt, &committedAt, &stored, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -1055,17 +1090,22 @@ func (s *PostgresStore) CommitJoinResponse(ctx context.Context, sessionID, hostD
 	if removedAt.Valid {
 		return ErrGone
 	}
-	if !now.Before(expiresAt) {
-		return ErrGone
-	}
 	if committedAt.Valid {
+		if !sessionExpiresAt.Valid || !now.Before(sessionExpiresAt.Time) {
+			return ErrGone
+		}
 		if !equalBytes(stored, response) {
 			return ErrConflict
 		}
 		return tx.Commit()
 	}
+	if !now.Before(handshakeExpiresAt) {
+		return ErrGone
+	}
+	sessionExpiresAtValue := now.Add(5 * time.Minute)
 	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET encrypted_join_response = $2,
-		join_response_committed_at = $3 WHERE session_id = $1`, sessionID, response, now.UTC()); err != nil {
+		join_response_committed_at = $3, session_expires_at = $4 WHERE session_id = $1`,
+		sessionID, response, now.UTC(), sessionExpiresAtValue.UTC()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1073,12 +1113,14 @@ func (s *PostgresStore) CommitJoinResponse(ctx context.Context, sessionID, hostD
 
 func (s *PostgresStore) JoinResponse(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error) {
 	var storedJoiner string
-	var expiresAt time.Time
+	var handshakeExpiresAt time.Time
+	var sessionExpiresAt sql.NullTime
 	var committedAt, removedAt sql.NullTime
 	var response []byte
-	err := s.db.QueryRowContext(ctx, `SELECT joiner_device_id, session_expires_at,
+	err := s.db.QueryRowContext(ctx, `SELECT joiner_device_id, handshake_expires_at, session_expires_at,
 		join_response_committed_at, encrypted_join_response, removed_at FROM pairing_sessions
-		WHERE session_id = $1`, sessionID).Scan(&storedJoiner, &expiresAt, &committedAt, &response, &removedAt)
+		WHERE session_id = $1`, sessionID).Scan(
+		&storedJoiner, &handshakeExpiresAt, &sessionExpiresAt, &committedAt, &response, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1091,11 +1133,14 @@ func (s *PostgresStore) JoinResponse(ctx context.Context, sessionID, joinerDevic
 	if removedAt.Valid {
 		return nil, ErrGone
 	}
-	if !now.Before(expiresAt) {
-		return nil, ErrGone
-	}
 	if !committedAt.Valid {
+		if !now.Before(handshakeExpiresAt) {
+			return nil, ErrGone
+		}
 		return nil, ErrPending
+	}
+	if !sessionExpiresAt.Valid || !now.Before(sessionExpiresAt.Time) {
+		return nil, ErrGone
 	}
 	return response, nil
 }
@@ -1107,14 +1152,17 @@ func (s *PostgresStore) ReserveAuthorization(ctx context.Context, sessionID, hos
 	}
 	defer tx.Rollback()
 	var storedHost string
-	var sessionExpires time.Time
+	var handshakeExpires time.Time
+	var sessionExpires sql.NullTime
 	var reservationID sql.NullString
-	var reservationExpires, removedAt sql.NullTime
+	var reservationExpires, responseCommittedAt, authorizationCommittedAt, authorizationExpiresAt, removedAt sql.NullTime
 	err = tx.QueryRowContext(ctx, `
-		SELECT host_device_id, session_expires_at, authorization_reservation_id,
-		       authorization_reservation_expires_at, removed_at
+		SELECT host_device_id, handshake_expires_at, session_expires_at, join_response_committed_at,
+		       authorization_reservation_id, authorization_reservation_expires_at,
+		       authorization_committed_at, authorization_expires_at, removed_at
 		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
-		&storedHost, &sessionExpires, &reservationID, &reservationExpires, &removedAt)
+		&storedHost, &handshakeExpires, &sessionExpires, &responseCommittedAt, &reservationID, &reservationExpires,
+		&authorizationCommittedAt, &authorizationExpiresAt, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthorizationReservation{}, ErrNotFound
 	}
@@ -1127,13 +1175,26 @@ func (s *PostgresStore) ReserveAuthorization(ctx context.Context, sessionID, hos
 	if removedAt.Valid {
 		return AuthorizationReservation{}, ErrGone
 	}
+	if !responseCommittedAt.Valid {
+		if now.Before(handshakeExpires) {
+			return AuthorizationReservation{}, ErrPending
+		}
+		return AuthorizationReservation{}, ErrGone
+	}
+	if authorizationCommittedAt.Valid {
+		if !reservationID.Valid || !authorizationExpiresAt.Valid || !now.Before(authorizationExpiresAt.Time) {
+			return AuthorizationReservation{}, ErrGone
+		}
+		return AuthorizationReservation{ID: reservationID.String, SessionID: sessionID,
+			ExpiresAt: authorizationExpiresAt.Time}, tx.Commit()
+	}
 	if reservationID.Valid {
 		if !reservationExpires.Valid || !now.Before(reservationExpires.Time) {
 			return AuthorizationReservation{}, ErrGone
 		}
 		return AuthorizationReservation{ID: reservationID.String, SessionID: sessionID, ExpiresAt: reservationExpires.Time}, tx.Commit()
 	}
-	if !now.Before(sessionExpires) {
+	if !sessionExpires.Valid || !now.Before(sessionExpires.Time) {
 		return AuthorizationReservation{}, ErrGone
 	}
 	id := newUUID()
@@ -1160,12 +1221,13 @@ func (s *PostgresStore) CommitAuthorization(ctx context.Context, sessionID, host
 	defer tx.Rollback()
 	var storedHost, storedReservation string
 	var reservationExpiresAt time.Time
-	var committedAt, removedAt sql.NullTime
+	var committedAt, storedMailboxExpiresAt, removedAt sql.NullTime
 	var storedPayload []byte
 	err = tx.QueryRowContext(ctx, `SELECT host_device_id, authorization_reservation_id,
-		authorization_reservation_expires_at, authorization_committed_at, encrypted_authorization, removed_at
+		authorization_reservation_expires_at, authorization_committed_at, authorization_expires_at,
+		encrypted_authorization, removed_at
 		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
-		&storedHost, &storedReservation, &reservationExpiresAt, &committedAt, &storedPayload, &removedAt)
+		&storedHost, &storedReservation, &reservationExpiresAt, &committedAt, &storedMailboxExpiresAt, &storedPayload, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -1178,14 +1240,17 @@ func (s *PostgresStore) CommitAuthorization(ctx context.Context, sessionID, host
 	if removedAt.Valid {
 		return ErrGone
 	}
-	if !now.Before(reservationExpiresAt) {
-		return ErrGone
-	}
 	if committedAt.Valid {
+		if !storedMailboxExpiresAt.Valid || !now.Before(storedMailboxExpiresAt.Time) {
+			return ErrGone
+		}
 		if !equalBytes(storedPayload, encryptedAuthorization) {
 			return ErrConflict
 		}
 		return tx.Commit()
+	}
+	if !now.Before(reservationExpiresAt) {
+		return ErrGone
 	}
 	mailboxExpiresAt := now.Add(authorizationMailboxTTL)
 	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET encrypted_authorization = $2,
@@ -1321,7 +1386,8 @@ func (s *PostgresStore) Cleanup(ctx context.Context, now time.Time) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE GREATEST(expires_at,
-		COALESCE(session_expires_at, '-infinity'), COALESCE(authorization_reservation_expires_at, '-infinity'),
+		COALESCE(handshake_expires_at, '-infinity'), COALESCE(session_expires_at, '-infinity'),
+		COALESCE(authorization_reservation_expires_at, '-infinity'),
 		COALESCE(authorization_expires_at, '-infinity')) <= $1`, now.UTC()); err != nil {
 		return err
 	}

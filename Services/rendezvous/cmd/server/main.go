@@ -55,7 +55,7 @@ func main() {
 
 	shutdownContext, stop := ossignal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go cleanupExpired(shutdownContext, pairingStore, verifier, clock, time.Minute)
+	go cleanupExpired(shutdownContext, pairingStore, registry, verifier, clock, time.Minute)
 	go func() {
 		<-shutdownContext.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -71,7 +71,7 @@ func main() {
 	}
 }
 
-func cleanupExpired(ctx context.Context, pairings pairing.Store, verifier *auth.Verifier, clock func() time.Time, interval time.Duration) {
+func cleanupExpired(ctx context.Context, pairings pairing.Store, registry *auth.TrustRegistry, verifier *auth.Verifier, clock func() time.Time, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -81,6 +81,9 @@ func cleanupExpired(ctx context.Context, pairings pairing.Store, verifier *auth.
 			now := clock()
 			if err := pairings.Cleanup(cleanupContext, now); err != nil {
 				log.Printf("rendezvous pairing cleanup: %v", err)
+			}
+			if err := registry.Cleanup(cleanupContext, now); err != nil {
+				log.Printf("rendezvous trust cleanup: %v", err)
 			}
 			if err := verifier.Cleanup(cleanupContext, now); err != nil {
 				log.Printf("rendezvous authentication cleanup: %v", err)

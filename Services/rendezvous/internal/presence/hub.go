@@ -114,6 +114,33 @@ func (h *Hub) Refresh() {
 	}
 }
 
+func (h *Hub) FailClosed() {
+	h.mu.Lock()
+	seen := make(map[string]bool)
+	var deliveries []delivery
+	for deviceID, peers := range h.visible {
+		for peerID := range peers {
+			key := deviceID + "\x00" + peerID
+			reverseKey := peerID + "\x00" + deviceID
+			if seen[key] || seen[reverseKey] {
+				continue
+			}
+			seen[key] = true
+			if client, online := h.clients[deviceID]; online {
+				deliveries = append(deliveries, delivery{sink: client.sink,
+					event: Event{Type: "presence", DeviceID: peerID, Availability: "offline"}})
+			}
+			if peer, online := h.clients[peerID]; online {
+				deliveries = append(deliveries, delivery{sink: peer.sink,
+					event: Event{Type: "presence", DeviceID: deviceID, Availability: "offline"}})
+			}
+		}
+	}
+	h.visible = make(map[string]map[string]bool)
+	h.mu.Unlock()
+	sendAll(deliveries)
+}
+
 func (h *Hub) RefreshDevice(deviceID string) {
 	graphPeers := h.graph.DevicesInGraph(deviceID)
 	allowed := make(map[string]bool, len(graphPeers))

@@ -8,6 +8,7 @@ CREATE TABLE pairing_sessions (
     encrypted_session_payload BYTEA NOT NULL CHECK (octet_length(encrypted_session_payload) BETWEEN 1 AND 65536),
     encrypted_join_payload BYTEA CHECK (encrypted_join_payload IS NULL OR octet_length(encrypted_join_payload) BETWEEN 1 AND 65536),
     expires_at TIMESTAMPTZ NOT NULL,
+    handshake_expires_at TIMESTAMPTZ,
     session_expires_at TIMESTAMPTZ,
     consumed_at TIMESTAMPTZ,
     removed_at TIMESTAMPTZ,
@@ -27,6 +28,8 @@ CREATE TABLE pairing_sessions (
 CREATE INDEX pairing_sessions_expiry_idx ON pairing_sessions (expires_at);
 CREATE INDEX pairing_sessions_session_expiry_idx ON pairing_sessions (session_expires_at)
     WHERE session_expires_at IS NOT NULL;
+CREATE INDEX pairing_sessions_handshake_expiry_idx ON pairing_sessions (handshake_expires_at)
+    WHERE handshake_expires_at IS NOT NULL;
 CREATE UNIQUE INDEX pairing_sessions_session_id_idx ON pairing_sessions (session_id)
     WHERE session_id IS NOT NULL;
 CREATE INDEX pairing_sessions_authorization_expiry_idx ON pairing_sessions (authorization_expires_at)
@@ -131,11 +134,17 @@ CREATE TABLE trust_pair_states (
     subject_confirmed BOOLEAN NOT NULL,
     accepted_order BIGINT NOT NULL CHECK (accepted_order > 0),
     revocation_order BIGINT NOT NULL DEFAULT 0 CHECK (revocation_order >= 0),
+    unconfirmed_expires_at TIMESTAMPTZ,
+    legacy_active BOOLEAN NOT NULL DEFAULT FALSE,
+    established_pair BOOLEAN NOT NULL DEFAULT FALSE,
+    pending_expired BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (issuer_device_id, subject_device_id),
     UNIQUE (record_hash)
 );
 
 CREATE INDEX trust_pair_states_subject_idx ON trust_pair_states (subject_device_id);
+CREATE INDEX trust_pair_states_unconfirmed_expiry_idx ON trust_pair_states (unconfirmed_expires_at)
+    WHERE unconfirmed_expires_at IS NOT NULL;
 
 CREATE TABLE trust_state_version (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
