@@ -45,6 +45,23 @@ public struct SignedTrustRecord: Codable, Sendable {
         )
     }
 
+    static func authorizing(
+        subject: DeviceID,
+        subjectPublicKey: Data,
+        signedBy issuer: DeviceIdentity,
+        sequence: UInt64 = 1,
+        timestamp: Date = Date()
+    ) throws -> SignedTrustRecord {
+        try signed(
+            issuer: issuer,
+            subject: subject,
+            subjectPublicKey: subjectPublicKey,
+            action: .authorize,
+            sequence: sequence,
+            epochMilliseconds: epochMilliseconds(for: timestamp)
+        )
+    }
+
     static func revoking(
         _ subject: DeviceID,
         subjectPublicKey: Data,
