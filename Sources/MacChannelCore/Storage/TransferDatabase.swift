@@ -14,6 +14,29 @@ public struct TransferHistoryRecord: Equatable, Sendable {
     public let phase: TransferPhase
 }
 
+/// The orchestration persistence seam. Production uses `TransferDatabase`;
+/// tests can deterministically delay or fail individual conditional writes.
+public protocol TransferSnapshotPersistence: Sendable {
+    func persist(
+        _ snapshot: TransferSnapshot,
+        displayFilename: String,
+        expectedPhase: TransferPhase?
+    ) async throws
+
+    func persistedHistory(limit: Int) async throws -> [TransferHistoryRecord]
+    func persistedTransfer(id: TransferID) async throws -> TransferHistoryRecord?
+}
+
+public extension TransferSnapshotPersistence {
+    func persistedTransfer(id: TransferID) async throws -> TransferHistoryRecord? {
+        try await persistedHistory(limit: 10_000).first { $0.id == id }
+    }
+}
+
+public enum TransferPersistenceError: Error, Equatable, Sendable {
+    case conditionalConflict
+}
+
 struct TransferPreparationRecord: Equatable, Sendable {
     let phase: TransferPhase
     let isCreating: Bool
@@ -288,11 +311,11 @@ public actor TransferDatabase {
             !displayFilename.isEmpty
         else { throw ReceiveStoreError.databaseFailure }
         try transaction {
-            if let oldPhase = try validateExistingSnapshot(
+            if let existing = try validateExistingSnapshot(
                 snapshot,
                 displayFilename: displayFilename
             ) {
-                guard isAllowedPhaseTransition(from: oldPhase, to: snapshot.phase) else {
+                guard isAllowedPhaseTransition(from: existing.phase, to: snapshot.phase) else {
                     throw ReceiveStoreError.databaseFailure
                 }
                 let update = try statement(
@@ -303,7 +326,7 @@ public actor TransferDatabase {
                     """
                 )
                 defer { sqlite3_finalize(update) }
-                try bind(snapshot.completedBytes, to: update, at: 1)
+                try bind(max(snapshot.completedBytes, existing.completedBytes), to: update, at: 1)
                 try bind(date.timeIntervalSince1970, to: update, at: 2)
                 try bind(snapshot.route.rawValue, to: update, at: 3)
                 try bind(snapshot.phase.rawValue, to: update, at: 4)
@@ -337,6 +360,106 @@ public actor TransferDatabase {
                 try stepDone(delete)
             }
         }
+    }
+
+    /// Conditionally advances an orchestration snapshot. The expected phase is
+    /// checked in the same SQLite transaction and in the UPDATE predicate, so a
+    /// stale actor continuation cannot overwrite a newer durable phase.
+    public func persist(
+        _ snapshot: TransferSnapshot,
+        displayFilename: String,
+        expectedPhase: TransferPhase?
+    ) throws {
+        guard snapshot.completedBytes >= 0,
+            snapshot.totalBytes >= 0,
+            snapshot.completedBytes <= snapshot.totalBytes,
+            !displayFilename.isEmpty
+        else { throw ReceiveStoreError.databaseFailure }
+        try transaction {
+            let existing = try validateExistingSnapshot(
+                snapshot,
+                displayFilename: displayFilename
+            )
+            if expectedPhase == nil {
+                guard existing == nil else {
+                    throw TransferPersistenceError.conditionalConflict
+                }
+                let insert = try statement(
+                    """
+                    INSERT INTO transfers (
+                        id, peer_id, display_filename, aggregate_size, completed_bytes,
+                        created_at, updated_at, route, phase
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+                )
+                defer { sqlite3_finalize(insert) }
+                let now = Date().timeIntervalSince1970
+                try bind(snapshot.id.rawValue.uuidString.lowercased(), to: insert, at: 1)
+                try bind(snapshot.peer.rawValue.uuidString.lowercased(), to: insert, at: 2)
+                try bind(displayFilename, to: insert, at: 3)
+                try bind(snapshot.totalBytes, to: insert, at: 4)
+                try bind(snapshot.completedBytes, to: insert, at: 5)
+                try bind(now, to: insert, at: 6)
+                try bind(now, to: insert, at: 7)
+                try bind(snapshot.route.rawValue, to: insert, at: 8)
+                try bind(snapshot.phase.rawValue, to: insert, at: 9)
+                try stepDone(insert)
+            } else {
+                guard let existing, existing.phase == expectedPhase,
+                    isAllowedPhaseTransition(from: existing.phase, to: snapshot.phase)
+                else { throw TransferPersistenceError.conditionalConflict }
+                let update = try statement(
+                    """
+                    UPDATE transfers
+                    SET completed_bytes = MAX(completed_bytes, ?), updated_at = ?,
+                        route = ?, phase = ?
+                    WHERE id = ? AND phase = ?
+                    """
+                )
+                defer { sqlite3_finalize(update) }
+                try bind(snapshot.completedBytes, to: update, at: 1)
+                try bind(Date().timeIntervalSince1970, to: update, at: 2)
+                try bind(snapshot.route.rawValue, to: update, at: 3)
+                try bind(snapshot.phase.rawValue, to: update, at: 4)
+                try bind(snapshot.id.rawValue.uuidString.lowercased(), to: update, at: 5)
+                try bind(expectedPhase!.rawValue, to: update, at: 6)
+                try stepDone(update)
+                guard sqlite3_changes(try requiredConnection) == 1 else {
+                    throw TransferPersistenceError.conditionalConflict
+                }
+            }
+            if snapshot.phase == .completed || snapshot.phase == .cancelled {
+                let delete = try statement("DELETE FROM verified_ranges WHERE transfer_id = ?")
+                defer { sqlite3_finalize(delete) }
+                try bind(snapshot.id.rawValue.uuidString.lowercased(), to: delete, at: 1)
+                try stepDone(delete)
+            }
+        }
+    }
+
+    public func persistedHistory(limit: Int) throws -> [TransferHistoryRecord] {
+        try history(limit: limit)
+    }
+
+    public func persistedTransfer(id: TransferID) throws -> TransferHistoryRecord? {
+        let query = try statement(
+            """
+            SELECT id, peer_id, display_filename, aggregate_size, completed_bytes,
+                   created_at, updated_at, route, phase
+            FROM transfers
+            WHERE id = ?
+            """
+        )
+        defer { sqlite3_finalize(query) }
+        try bind(id.rawValue.uuidString.lowercased(), to: query, at: 1)
+        let first = sqlite3_step(query)
+        if first == SQLITE_DONE { return nil }
+        guard first == SQLITE_ROW else { throw ReceiveStoreError.databaseFailure }
+        let record = try transferHistoryRecord(from: query)
+        guard sqlite3_step(query) == SQLITE_DONE else {
+            throw ReceiveStoreError.databaseFailure
+        }
+        return record
     }
 
     public func resumeMap(for transfer: TransferID) throws -> ResumeMap {
@@ -530,36 +653,38 @@ public actor TransferDatabase {
         var records: [TransferHistoryRecord] = []
         var result = sqlite3_step(query)
         while result == SQLITE_ROW {
-            guard let id = uuidColumn(query, 0),
-                let peer = uuidColumn(query, 1),
-                let display = textColumn(query, 2),
-                let routeText = textColumn(query, 7),
-                let route = ConnectionRoute(rawValue: routeText),
-                let phaseText = textColumn(query, 8),
-                let phase = TransferPhase(rawValue: phaseText)
-            else { throw ReceiveStoreError.databaseFailure }
-            let aggregate = sqlite3_column_int64(query, 3)
-            let completed = sqlite3_column_int64(query, 4)
-            guard aggregate >= 0, completed >= 0 else {
-                throw ReceiveStoreError.databaseFailure
-            }
-            records.append(
-                TransferHistoryRecord(
-                    id: TransferID(rawValue: id),
-                    peer: DeviceID(rawValue: peer),
-                    displayFilename: display,
-                    aggregateSize: UInt64(aggregate),
-                    completedBytes: UInt64(completed),
-                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 5)),
-                    updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 6)),
-                    route: route,
-                    phase: phase
-                )
-            )
+            records.append(try transferHistoryRecord(from: query))
             result = sqlite3_step(query)
         }
         guard result == SQLITE_DONE else { throw ReceiveStoreError.databaseFailure }
         return records
+    }
+
+    private func transferHistoryRecord(from query: OpaquePointer) throws -> TransferHistoryRecord {
+        guard let id = uuidColumn(query, 0),
+            let peer = uuidColumn(query, 1),
+            let display = textColumn(query, 2),
+            let routeText = textColumn(query, 7),
+            let route = ConnectionRoute(rawValue: routeText),
+            let phaseText = textColumn(query, 8),
+            let phase = TransferPhase(rawValue: phaseText)
+        else { throw ReceiveStoreError.databaseFailure }
+        let aggregate = sqlite3_column_int64(query, 3)
+        let completed = sqlite3_column_int64(query, 4)
+        guard aggregate >= 0, completed >= 0 else {
+            throw ReceiveStoreError.databaseFailure
+        }
+        return TransferHistoryRecord(
+            id: TransferID(rawValue: id),
+            peer: DeviceID(rawValue: peer),
+            displayFilename: display,
+            aggregateSize: UInt64(aggregate),
+            completedBytes: UInt64(completed),
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 5)),
+            updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 6)),
+            route: route,
+            phase: phase
+        )
     }
 
     func failedTransfers(updatedBefore date: Date) throws -> [TransferID] {
@@ -1138,13 +1263,18 @@ public actor TransferDatabase {
         )
     }
 
+    private struct ExistingSnapshot {
+        let phase: TransferPhase
+        let completedBytes: Int64
+    }
+
     private func validateExistingSnapshot(
         _ snapshot: TransferSnapshot,
         displayFilename: String
-    ) throws -> TransferPhase? {
+    ) throws -> ExistingSnapshot? {
         let query = try statement(
             """
-            SELECT peer_id, display_filename, aggregate_size, phase
+            SELECT peer_id, display_filename, aggregate_size, phase, completed_bytes
             FROM transfers WHERE id = ?
             """
         )
@@ -1152,15 +1282,20 @@ public actor TransferDatabase {
         try bind(snapshot.id.rawValue.uuidString.lowercased(), to: query, at: 1)
         let first = sqlite3_step(query)
         if first == SQLITE_DONE { return nil }
+        let completedBytes = sqlite3_column_int64(query, 4)
         guard first == SQLITE_ROW,
             textColumn(query, 0) == snapshot.peer.rawValue.uuidString.lowercased(),
             textColumn(query, 1) == displayFilename,
             sqlite3_column_int64(query, 2) == snapshot.totalBytes,
             let phaseText = textColumn(query, 3),
             let phase = TransferPhase(rawValue: phaseText),
+            completedBytes >= 0,
             sqlite3_step(query) == SQLITE_DONE
         else { throw ReceiveStoreError.invalidManifest }
-        return phase
+        return ExistingSnapshot(
+            phase: phase,
+            completedBytes: completedBytes
+        )
     }
 
     private func requireWritablePhase(_ transfer: TransferID) throws {
@@ -1250,5 +1385,7 @@ public actor TransferDatabase {
         textColumn(statement, index).flatMap(UUID.init(uuidString:))
     }
 }
+
+extension TransferDatabase: TransferSnapshotPersistence {}
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

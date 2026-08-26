@@ -540,7 +540,8 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         let task: Task<Void, Never>
     }
 
-    private static let maximumConcurrentAcceptances = 8
+    private static let maximumConcurrentAcceptances =
+        IncomingTransferCapacity.maximumUpstreamAcceptances
     private static let maximumConcurrentAcceptancesPerDevice = 2
 
     private let directory: DeviceDirectory
@@ -580,7 +581,10 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         channelContinuation = continuation
         var transferContinuation:
             AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation!
-        transferStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(32)) {
+        // Transfer orchestration owns the sole established-channel backlog.
+        // A zero-element handoff prevents this source from silently adding a
+        // second 32-channel queue; dropped handoffs are closed in `accept`.
+        transferStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(0)) {
             transferContinuation = $0
         }
         self.transferContinuation = transferContinuation

@@ -22,6 +22,8 @@ public struct ReceiveSession: Sendable {
     private let destinationDirectory: URL
     private let control: TransferSessionControl?
     private let durableStorage: DurableStorage?
+    private let initialOfferTimeout: Duration?
+    private let inactivityTimeout: Duration?
     private let onStagingPrepared: (@Sendable (URL) -> Void)?
     private let onCheckpointValidated: (@Sendable (String) -> Void)?
     private let onMetadataValidated: (@Sendable (String) -> Void)?
@@ -29,12 +31,16 @@ public struct ReceiveSession: Sendable {
     public init(
         transferID: TransferID,
         destinationDirectory: URL,
-        control: TransferSessionControl? = nil
+        control: TransferSessionControl? = nil,
+        initialOfferTimeout: Duration? = nil,
+        inactivityTimeout: Duration? = nil
     ) {
         self.transferID = transferID
         self.destinationDirectory = destinationDirectory
         self.control = control
         durableStorage = nil
+        self.initialOfferTimeout = initialOfferTimeout
+        self.inactivityTimeout = inactivityTimeout
         onStagingPrepared = nil
         onCheckpointValidated = nil
         onMetadataValidated = nil
@@ -52,6 +58,8 @@ public struct ReceiveSession: Sendable {
         self.destinationDirectory = destinationDirectory
         self.control = control
         durableStorage = nil
+        initialOfferTimeout = nil
+        inactivityTimeout = nil
         self.onStagingPrepared = onStagingPrepared
         self.onCheckpointValidated = onCheckpointValidated
         self.onMetadataValidated = onMetadataValidated
@@ -67,7 +75,9 @@ public struct ReceiveSession: Sendable {
         database: TransferDatabase,
         incomingDirectory: URL? = nil,
         capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
-        control: TransferSessionControl? = nil
+        control: TransferSessionControl? = nil,
+        initialOfferTimeout: Duration? = nil,
+        inactivityTimeout: Duration? = nil
     ) {
         self.transferID = transferID
         destinationDirectory = directories.directory(for: source)
@@ -80,6 +90,8 @@ public struct ReceiveSession: Sendable {
             incomingDirectory: incomingDirectory,
             capacity: capacity
         )
+        self.initialOfferTimeout = initialOfferTimeout
+        self.inactivityTimeout = inactivityTimeout
         onStagingPrepared = nil
         onCheckpointValidated = nil
         onMetadataValidated = nil
@@ -89,17 +101,14 @@ public struct ReceiveSession: Sendable {
         var outboundSequence: UInt64 = 0
         var terminationCrypto: TransferCryptographicContext?
         var receiveStorage: ReceiveSessionStorage?
+        let initialClock = ContinuousClock()
+        let initialOfferDeadline = initialOfferTimeout.map { initialClock.now + $0 }
         do {
-            let challenge = TransferReceiverChallenge.fresh(for: transferID)
-            try await sendWireRespectingCancellation(
-                challenge.encode(),
+            let crypto = try await prepareReceiverHandshake(
+                transferID: transferID,
                 on: channel,
-                control: control
-            )
-            let crypto = try await TransferCryptographicContext.make(
-                on: channel,
-                transfer: transferID,
-                receiverChallenge: challenge.bytes
+                control: control,
+                timeout: initialOfferTimeout
             )
             terminationCrypto = crypto
             let frameReader = TransferFrameReader(
@@ -114,10 +123,16 @@ public struct ReceiveSession: Sendable {
             }
             let first: TransferFrame
             initialOffer: while true {
+                let remainingInitialOfferTime = initialOfferDeadline.map { deadline in
+                    initialClock.now >= deadline
+                        ? Duration.zero
+                        : initialClock.now.duration(to: deadline)
+                }
                 let event = try await waitForTransferSessionEvent(
                     reader: frameReader,
                     control: control,
-                    after: controlSnapshot
+                    after: controlSnapshot,
+                    timeout: remainingInitialOfferTime
                 )
                 switch event {
                 case .frame(let frame):
@@ -129,7 +144,7 @@ public struct ReceiveSession: Sendable {
                         throw TransferProtocolError.cancelled
                     }
                 case .timeout:
-                    continue
+                    throw TransferProtocolError.channelEnded
                 }
             }
             guard case .offer(let manifest) = first, manifest.id == transferID else {
@@ -176,6 +191,7 @@ public struct ReceiveSession: Sendable {
             var chunksSinceAcknowledgement = 0
             let clock = ContinuousClock()
             var lastAcknowledgement = clock.now
+            var lastInboundActivity = clock.now
             var announcedLocalPause = false
             var peerPaused = false
             while true {
@@ -186,15 +202,18 @@ public struct ReceiveSession: Sendable {
                     announcedPause: &announcedLocalPause,
                     snapshot: &controlSnapshot
                 )
-                var timeout: Duration?
+                var timeout = inactivityTimeout.map { inactivity in
+                    let elapsed = lastInboundActivity.duration(to: clock.now)
+                    return elapsed >= inactivity ? Duration.zero : inactivity - elapsed
+                }
                 if chunksSinceAcknowledgement > 0 {
                     let elapsed = lastAcknowledgement.duration(to: clock.now)
-                    timeout =
+                    let acknowledgementTimeout =
                         elapsed >= .milliseconds(250)
                         ? .zero
                         : .milliseconds(250) - elapsed
-                } else {
-                    timeout = nil
+                    timeout = timeout.map { min($0, acknowledgementTimeout) }
+                        ?? acknowledgementTimeout
                 }
                 let event = try await waitForTransferSessionEvent(
                     reader: frameReader,
@@ -207,6 +226,11 @@ public struct ReceiveSession: Sendable {
                     continue
                 }
                 if case .timeout = event {
+                    if let inactivityTimeout,
+                        lastInboundActivity.duration(to: clock.now) >= inactivityTimeout
+                    {
+                        throw TransferProtocolError.channelEnded
+                    }
                     if chunksSinceAcknowledgement > 0,
                         lastAcknowledgement.duration(to: clock.now) >= .milliseconds(250)
                     {
@@ -241,6 +265,7 @@ public struct ReceiveSession: Sendable {
                 guard case .frame(let frame) = event else {
                     throw TransferProtocolError.channelEnded
                 }
+                lastInboundActivity = clock.now
                 switch frame {
                 case .chunk(let chunk):
                     guard !peerPaused else { throw TransferProtocolError.unexpectedFrame }
@@ -659,6 +684,123 @@ private actor TransferFrameInbox {
         self.waiter = nil
         waiter.timer?.cancel()
         waiter.continuation.resume(throwing: CancellationError())
+    }
+}
+
+private enum ReceiverHandshakeOutcome: @unchecked Sendable {
+    case ready(TransferCryptographicContext)
+    case failed(Error)
+    case timedOut
+    case cancelled
+}
+
+private actor ReceiverHandshakeCompletion {
+    private var outcome: ReceiverHandshakeOutcome?
+    private var waiter: CheckedContinuation<ReceiverHandshakeOutcome, Never>?
+
+    func wait() async -> ReceiverHandshakeOutcome {
+        if let outcome { return outcome }
+        return await withCheckedContinuation { continuation in
+            if let outcome {
+                continuation.resume(returning: outcome)
+            } else {
+                waiter = continuation
+            }
+        }
+    }
+
+    func finish(_ outcome: ReceiverHandshakeOutcome) {
+        guard self.outcome == nil else { return }
+        self.outcome = outcome
+        waiter?.resume(returning: outcome)
+        waiter = nil
+    }
+}
+
+/// Retains cancellation-insensitive pre-offer work until it actually exits and
+/// refuses to create more once the explicit detached-operation bound is full.
+/// Well-behaved channels are reaped immediately after close/cancellation.
+actor ReceiverHandshakeOperationRegistry {
+    static let shared = ReceiverHandshakeOperationRegistry()
+
+    private var operations: [UUID: Task<Void, Never>] = [:]
+
+    func start(_ operation: @escaping @Sendable () async -> Void) -> UUID? {
+        guard operations.count < IncomingTransferCapacity.maximumDetachedHandshakeOperations else {
+            return nil
+        }
+        let token = UUID()
+        operations[token] = Task { [weak self] in
+            await operation()
+            await self?.finished(token)
+        }
+        return token
+    }
+
+    func cancel(_ token: UUID) {
+        operations[token]?.cancel()
+    }
+
+    func activeCount() -> Int { operations.count }
+
+    private func finished(_ token: UUID) {
+        operations.removeValue(forKey: token)
+    }
+}
+
+/// Bounds the entire pre-offer exchange, including a transport that ignores
+/// cancellation while sending the receiver challenge or exporting keying
+/// material. The listener can close the owned channel and release its slot
+/// without awaiting that non-cooperative operation.
+private func prepareReceiverHandshake(
+    transferID: TransferID,
+    on channel: any SecureChannel,
+    control: TransferSessionControl?,
+    timeout: Duration?
+) async throws -> TransferCryptographicContext {
+    let completion = ReceiverHandshakeCompletion()
+    guard let operationToken = await ReceiverHandshakeOperationRegistry.shared.start({
+        do {
+            let challenge = TransferReceiverChallenge.fresh(for: transferID)
+            try await sendWireRespectingCancellation(
+                challenge.encode(),
+                on: channel,
+                control: control
+            )
+            let crypto = try await TransferCryptographicContext.make(
+                on: channel,
+                transfer: transferID,
+                receiverChallenge: challenge.bytes
+            )
+            await completion.finish(.ready(crypto))
+        } catch {
+            await completion.finish(.failed(error))
+        }
+    }) else { throw TransferProtocolError.channelEnded }
+    let watchdog = timeout.map { timeout in
+        Task {
+            do {
+                try await Task.sleep(for: timeout)
+                await completion.finish(.timedOut)
+            } catch {}
+        }
+    }
+    let outcome = await withTaskCancellationHandler {
+        await completion.wait()
+    } onCancel: {
+        Task { await completion.finish(.cancelled) }
+    }
+    await ReceiverHandshakeOperationRegistry.shared.cancel(operationToken)
+    watchdog?.cancel()
+    switch outcome {
+    case .ready(let crypto):
+        return crypto
+    case .failed(let error):
+        throw error
+    case .timedOut:
+        throw TransferProtocolError.channelEnded
+    case .cancelled:
+        throw TransferProtocolError.cancelled
     }
 }
 

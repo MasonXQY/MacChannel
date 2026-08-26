@@ -173,6 +173,66 @@ final class PinnedSource: @unchecked Sendable {
         return PinnedSource(descriptor: cloneDescriptor, size: UInt64(cloneStatus.st_size))
     }
 
+    /// Opens an immutable file in a private outgoing package. Unlike arbitrary
+    /// user-selected input, this file is already an APFS clone protected by an
+    /// owner-only package and has no write bits, so pinning its descriptor does
+    /// not require another temporary clone.
+    static func openImmutablePackageFile(from url: URL) throws -> PinnedSource {
+        var before = stat()
+        guard lstat(url.path, &before) == 0,
+            before.st_mode & S_IFMT == S_IFREG,
+            before.st_uid == geteuid(),
+            before.st_nlink == 1,
+            before.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH) == 0,
+            before.st_size >= 0
+        else { throw TransferProtocolError.sourceChanged }
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw TransferProtocolError.sourceChanged }
+        var after = stat()
+        guard fstat(descriptor, &after) == 0,
+            after.st_mode & S_IFMT == S_IFREG,
+            after.st_dev == before.st_dev,
+            after.st_ino == before.st_ino,
+            after.st_uid == before.st_uid,
+            after.st_nlink == 1,
+            after.st_size == before.st_size,
+            after.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH) == 0
+        else {
+            Darwin.close(descriptor)
+            throw TransferProtocolError.sourceChanged
+        }
+        return PinnedSource(descriptor: descriptor, size: UInt64(after.st_size))
+    }
+
+    func clonePersistently(to destination: URL) throws {
+        let parent = destination.deletingLastPathComponent()
+        let parentDescriptor = Darwin.open(
+            parent.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard parentDescriptor >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(parentDescriptor) }
+        let name = destination.lastPathComponent
+        guard !name.isEmpty, !name.contains("/") else {
+            throw TransferProtocolError.invalidRelativePath
+        }
+        guard fclonefileat(descriptor, parentDescriptor, name, 0) == 0 else {
+            throw TransferProtocolError.unsupportedSource
+        }
+        var status = stat()
+        guard fstatat(parentDescriptor, name, &status, AT_SYMLINK_NOFOLLOW) == 0,
+            status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_nlink == 1,
+            status.st_size >= 0,
+            UInt64(status.st_size) == size,
+            fchmodat(parentDescriptor, name, S_IRUSR, 0) == 0
+        else {
+            _ = unlinkat(parentDescriptor, name, 0)
+            throw TransferProtocolError.sourceChanged
+        }
+    }
+
     func read(offset: UInt64, length: Int) throws -> Data {
         guard length >= 0, offset <= size, UInt64(length) <= size - offset else {
             throw TransferProtocolError.sourceChanged
@@ -251,6 +311,18 @@ public struct TransferManifest: Sendable {
     }
 
     public static func build(from sourceURL: URL) throws -> TransferManifest {
+        try build(
+            from: sourceURL,
+            transferID: TransferID(rawValue: UUID()),
+            immutablePackageSource: false
+        )
+    }
+
+    static func build(
+        from sourceURL: URL,
+        transferID: TransferID,
+        immutablePackageSource: Bool
+    ) throws -> TransferManifest {
         let source = sourceURL.standardizedFileURL
         let keys: Set<URLResourceKey> = [
             .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
@@ -349,7 +421,9 @@ public struct TransferManifest: Sendable {
             let size: UInt64
             let pinnedSource: PinnedSource?
             if kind == .file {
-                let pinned = try PinnedSource.clone(from: url)
+                let pinned = try immutablePackageSource
+                    ? PinnedSource.openImmutablePackageFile(from: url)
+                    : PinnedSource.clone(from: url)
                 size = pinned.size
                 pinnedSource = pinned
             } else {
@@ -378,7 +452,7 @@ public struct TransferManifest: Sendable {
             }
             return lhs.relativePath.string < rhs.relativePath.string
         }
-        let manifest = TransferManifest(id: TransferID(rawValue: UUID()), entries: entries)
+        let manifest = TransferManifest(id: transferID, entries: entries)
         try manifest.validateProtocolLimits()
         return manifest
     }

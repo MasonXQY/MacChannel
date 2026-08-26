@@ -17,7 +17,26 @@ public struct IncomingTransferConnection: Sendable {
 }
 
 public protocol IncomingTransferConnectionSource: Sendable {
+    /// Implementations must use a bounded source stream and close every channel
+    /// rejected by that stream. Production uses a zero-element handoff buffer;
+    /// the listener itself owns the 34 established-channel capacity below.
     func connections() async -> AsyncThrowingStream<IncomingTransferConnection, Error>
+}
+
+public enum IncomingTransferCapacity {
+    public static let maximumActiveTransfers = 2
+    public static let maximumQueuedConnections = 32
+    public static let maximumEstablishedConnections =
+        maximumActiveTransfers + maximumQueuedConnections
+
+    // WebRTC can additionally have eight authenticated acceptances in flight,
+    // but retains no second established-channel queue before this listener.
+    public static let maximumUpstreamAcceptances = 8
+    public static let maximumDetachedHandshakeOperations = 8
+    public static let maximumEndToEndConnections =
+        maximumEstablishedConnections + maximumUpstreamAcceptances
+    public static let maximumRetainedConnectionsAndOperations =
+        maximumEndToEndConnections + maximumDetachedHandshakeOperations
 }
 
 /// Runs trusted inbound transfers through `ReceiveSession` and its hardened
@@ -29,15 +48,13 @@ public actor IncomingTransferListener {
         let task: Task<Void, Never>
     }
 
-    private static let maximumConcurrentTransfers = 2
-    private static let maximumQueuedConnections = 32
-
     private let source: any IncomingTransferConnectionSource
     private let policy: ReceivePolicy
     private let directories: DownloadDirectory
     private let database: TransferDatabase
     private let incomingDirectory: URL?
     private let capacity: any ReceiveCapacityProviding
+    private let inactivityTimeout: Duration
 
     private var readerTask: Task<Void, Never>?
     private var pending: [IncomingTransferConnection] = []
@@ -51,7 +68,8 @@ public actor IncomingTransferListener {
         directories: DownloadDirectory = DownloadDirectory(),
         database: TransferDatabase,
         incomingDirectory: URL? = nil,
-        capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider()
+        capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
+        inactivityTimeout: Duration = .seconds(30)
     ) {
         self.source = source
         self.policy = policy
@@ -59,6 +77,7 @@ public actor IncomingTransferListener {
         self.database = database
         self.incomingDirectory = incomingDirectory
         self.capacity = capacity
+        self.inactivityTimeout = max(.milliseconds(1), inactivityTimeout)
     }
 
     deinit {
@@ -72,8 +91,11 @@ public actor IncomingTransferListener {
             do {
                 let connections = await source.connections()
                 for try await connection in connections {
-                    guard !Task.isCancelled else { return }
-                    await self?.enqueue(connection)
+                    guard !Task.isCancelled, let self else {
+                        await connection.channel.close()
+                        return
+                    }
+                    await self.enqueue(connection)
                 }
             } catch {
                 await self?.sourceEnded()
@@ -105,7 +127,7 @@ public actor IncomingTransferListener {
             await connection.channel.close()
             return
         }
-        guard pending.count < Self.maximumQueuedConnections else {
+        guard pending.count < IncomingTransferCapacity.maximumQueuedConnections else {
             await connection.channel.close()
             return
         }
@@ -114,7 +136,7 @@ public actor IncomingTransferListener {
     }
 
     private func schedule() {
-        while active.count < Self.maximumConcurrentTransfers, !pending.isEmpty {
+        while active.count < IncomingTransferCapacity.maximumActiveTransfers, !pending.isEmpty {
             let connection = pending.removeFirst()
             let token = UUID()
             activeTransferIDs.insert(connection.transferID)
@@ -139,11 +161,14 @@ public actor IncomingTransferListener {
                 directories: directories,
                 database: database,
                 incomingDirectory: incomingDirectory,
-                capacity: capacity
+                capacity: capacity,
+                initialOfferTimeout: inactivityTimeout,
+                inactivityTimeout: inactivityTimeout
             ).run(on: connection.channel)
-        } catch {
-            await connection.channel.close()
-        }
+        } catch {}
+        // The listener owns accepted channels and closes them on every exit,
+        // including successful publication, timeout, failure, and cancellation.
+        await connection.channel.close()
         receiveFinished(token)
     }
 
