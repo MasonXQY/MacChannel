@@ -22,8 +22,12 @@ public struct SignedTrustRecord: Codable, Sendable {
     public let subjectPublicKey: Data
     public let action: TrustAction
     public let issuerSequence: UInt64
-    public let timestamp: Date
+    public let epochMilliseconds: Int64
     public let signature: Data
+
+    public var timestamp: Date {
+        Date(timeIntervalSince1970: TimeInterval(epochMilliseconds) / 1_000)
+    }
 
     public static func authorizing(
         _ subject: DeviceIdentity,
@@ -37,7 +41,7 @@ public struct SignedTrustRecord: Codable, Sendable {
             subjectPublicKey: subject.publicKey.rawRepresentation,
             action: .authorize,
             sequence: sequence,
-            timestamp: timestamp
+            epochMilliseconds: epochMilliseconds(for: timestamp)
         )
     }
 
@@ -54,7 +58,7 @@ public struct SignedTrustRecord: Codable, Sendable {
             subjectPublicKey: subjectPublicKey,
             action: .revoke,
             sequence: sequence,
-            timestamp: timestamp
+            epochMilliseconds: epochMilliseconds(for: timestamp)
         )
     }
 
@@ -85,7 +89,7 @@ public struct SignedTrustRecord: Codable, Sendable {
         subjectPublicKey: Data,
         action: TrustAction,
         sequence: UInt64,
-        timestamp: Date
+        epochMilliseconds: Int64
     ) throws -> SignedTrustRecord {
         let unsigned = SignedTrustRecord(
             issuer: issuer.id,
@@ -94,7 +98,7 @@ public struct SignedTrustRecord: Codable, Sendable {
             subjectPublicKey: subjectPublicKey,
             action: action,
             issuerSequence: sequence,
-            timestamp: timestamp,
+            epochMilliseconds: epochMilliseconds,
             signature: Data()
         )
         let signature = try issuer.sign(unsigned.canonicalPayload()).derRepresentation
@@ -105,7 +109,7 @@ public struct SignedTrustRecord: Codable, Sendable {
             subjectPublicKey: unsigned.subjectPublicKey,
             action: unsigned.action,
             issuerSequence: unsigned.issuerSequence,
-            timestamp: unsigned.timestamp,
+            epochMilliseconds: unsigned.epochMilliseconds,
             signature: signature
         )
     }
@@ -113,29 +117,29 @@ public struct SignedTrustRecord: Codable, Sendable {
     private func canonicalPayload() throws -> Data {
         struct Payload: Encodable {
             let action: String
+            let epochMilliseconds: Int64
             let issuer: String
             let issuerPublicKey: String
             let issuerSequence: UInt64
             let subject: String
             let subjectPublicKey: String
-            let timestampMilliseconds: Int64
         }
 
         let payload = Payload(
             action: action.rawValue,
+            epochMilliseconds: epochMilliseconds,
             issuer: issuer.rawValue.uuidString.lowercased(),
             issuerPublicKey: issuerPublicKey.base64EncodedString(),
             issuerSequence: issuerSequence,
             subject: subject.rawValue.uuidString.lowercased(),
-            subjectPublicKey: subjectPublicKey.base64EncodedString(),
-            timestampMilliseconds: try timestampMilliseconds()
+            subjectPublicKey: subjectPublicKey.base64EncodedString()
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return try encoder.encode(payload)
     }
 
-    private func timestampMilliseconds() throws -> Int64 {
+    private static func epochMilliseconds(for timestamp: Date) throws -> Int64 {
         let milliseconds = timestamp.timeIntervalSince1970 * 1_000
         guard milliseconds.isFinite,
               milliseconds > Double(Int64.min),

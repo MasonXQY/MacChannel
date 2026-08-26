@@ -49,9 +49,9 @@ final class IdentityTests: XCTestCase {
         try store.ingest(SignedTrustRecord.authorizing(firstPeer, signedBy: owner, sequence: 2))
         let snapshot = try JSONDecoder().decode(
             TrustStoreSnapshot.self,
-            from: JSONEncoder().encode(store.snapshot())
+            from: JSONEncoder().encode(try store.snapshot(signedBy: owner))
         )
-        var restored = try TrustStore(snapshot: snapshot)
+        var restored = try TrustStore(snapshot: snapshot, minimumGeneration: 0)
 
         XCTAssertThrowsError(
             try restored.ingest(
@@ -69,9 +69,9 @@ final class IdentityTests: XCTestCase {
         _ = try store.revoke(peer.id, signedBy: owner)
         let snapshot = try JSONDecoder().decode(
             TrustStoreSnapshot.self,
-            from: JSONEncoder().encode(store.snapshot())
+            from: JSONEncoder().encode(try store.snapshot(signedBy: owner))
         )
-        let restored = try TrustStore(snapshot: snapshot)
+        let restored = try TrustStore(snapshot: snapshot, minimumGeneration: 0)
 
         XCTAssertFalse(restored.isTrusted(peer.id))
         XCTAssertTrue(snapshot.revokedDevices.contains(peer.id))
@@ -80,19 +80,13 @@ final class IdentityTests: XCTestCase {
     func testExtremeTimestampIsRejectedWithTypedValidationError() throws {
         let owner = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()
-        let validRecord = try SignedTrustRecord.authorizing(peer, signedBy: owner)
-        let extremeRecord = SignedTrustRecord(
-            issuer: validRecord.issuer,
-            issuerPublicKey: validRecord.issuerPublicKey,
-            subject: validRecord.subject,
-            subjectPublicKey: validRecord.subjectPublicKey,
-            action: validRecord.action,
-            issuerSequence: validRecord.issuerSequence,
-            timestamp: Date(timeIntervalSince1970: .infinity),
-            signature: validRecord.signature
-        )
-
-        XCTAssertThrowsError(try extremeRecord.validated()) { error in
+        XCTAssertThrowsError(
+            try SignedTrustRecord.authorizing(
+                peer,
+                signedBy: owner,
+                timestamp: Date(timeIntervalSince1970: .infinity)
+            )
+        ) { error in
             XCTAssertEqual(error as? TrustRecordValidationError, .invalidTimestamp)
         }
     }
@@ -108,7 +102,7 @@ final class IdentityTests: XCTestCase {
             subjectPublicKey: Data("not-a-p256-key".utf8),
             action: validRecord.action,
             issuerSequence: validRecord.issuerSequence,
-            timestamp: validRecord.timestamp,
+            epochMilliseconds: validRecord.epochMilliseconds,
             signature: validRecord.signature
         )
         var store = TrustStore(owner: owner.id)
@@ -129,7 +123,7 @@ final class IdentityTests: XCTestCase {
             subjectPublicKey: validRecord.subjectPublicKey,
             action: validRecord.action,
             issuerSequence: validRecord.issuerSequence,
-            timestamp: validRecord.timestamp,
+            epochMilliseconds: validRecord.epochMilliseconds,
             signature: validRecord.signature
         )
         var store = TrustStore(owner: owner.id)
@@ -158,7 +152,7 @@ final class IdentityTests: XCTestCase {
             subjectPublicKey: record.subjectPublicKey,
             action: record.action,
             issuerSequence: record.issuerSequence,
-            timestamp: record.timestamp,
+            epochMilliseconds: record.epochMilliseconds,
             signature: Data()
         )
         var store = TrustStore(owner: owner.id)
@@ -196,6 +190,119 @@ final class IdentityTests: XCTestCase {
         )
         XCTAssertFalse(store.isTrusted(peer.id))
     }
+
+    func testPeerCannotRevokeOwner() throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        var store = TrustStore(owner: owner.id)
+
+        try store.ingest(SignedTrustRecord.authorizing(peer, signedBy: owner))
+        let ownerRevocation = try SignedTrustRecord.revoking(
+            owner.id,
+            subjectPublicKey: owner.publicKey.rawRepresentation,
+            signedBy: peer,
+            sequence: 1
+        )
+
+        XCTAssertThrowsError(try store.ingest(ownerRevocation)) { error in
+            XCTAssertEqual(error as? TrustStoreError, .cannotRevokeOwner)
+        }
+        XCTAssertTrue(store.isTrusted(owner.id))
+    }
+
+    func testLocalRevokeRejectsOwnerBeforeMutation() throws {
+        let owner = try DeviceIdentity.ephemeral()
+        var store = TrustStore(owner: owner.id)
+
+        XCTAssertThrowsError(try store.revoke(owner.id, signedBy: owner)) { error in
+            XCTAssertEqual(error as? TrustStoreError, .cannotRevokeOwner)
+        }
+        XCTAssertTrue(store.isTrusted(owner.id))
+    }
+
+    func testSnapshotRejectsOwnerRevocation() throws {
+        let owner = try DeviceIdentity.ephemeral()
+        var store = TrustStore(owner: owner.id)
+        let snapshot = try store.snapshot(signedBy: owner)
+        let revokedOwner = try snapshotByReplacing(snapshot, key: "revokedDevices", with: [[
+            "rawValue": owner.id.rawValue.uuidString,
+        ]])
+
+        XCTAssertThrowsError(try TrustStore(snapshot: revokedOwner, minimumGeneration: 0)) { error in
+            XCTAssertEqual(error as? TrustStoreError, .snapshotRevokesOwner)
+        }
+    }
+
+    func testSnapshotRejectsTampering() throws {
+        let owner = try DeviceIdentity.ephemeral()
+        var store = TrustStore(owner: owner.id)
+        let snapshot = try store.snapshot(signedBy: owner)
+        let tampered = try snapshotByReplacing(snapshot, key: "generation", with: 99)
+
+        XCTAssertThrowsError(try TrustStore(snapshot: tampered, minimumGeneration: 0)) { error in
+            XCTAssertEqual(error as? TrustStoreError, .invalidSnapshotSignature)
+        }
+    }
+
+    func testSnapshotRejectsRollbackBelowMinimumGeneration() throws {
+        let owner = try DeviceIdentity.ephemeral()
+        var store = TrustStore(owner: owner.id)
+        let snapshot = try store.snapshot(signedBy: owner)
+
+        XCTAssertThrowsError(
+            try TrustStore(snapshot: snapshot, minimumGeneration: snapshot.generation + 1)
+        ) { error in
+            XCTAssertEqual(error as? TrustStoreError, .snapshotGenerationTooLow)
+        }
+    }
+
+    func testRevokeRejectsSequenceExhaustion() throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        var store = TrustStore(owner: owner.id)
+
+        try store.ingest(
+            SignedTrustRecord.authorizing(peer, signedBy: owner, sequence: UInt64.max)
+        )
+
+        XCTAssertThrowsError(try store.revoke(peer.id, signedBy: owner)) { error in
+            XCTAssertEqual(error as? TrustStoreError, .sequenceExhausted(owner.id))
+        }
+    }
+
+    func testRecordTimestampIsNormalizedToMillisecondPrecision() throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+
+        let record = try SignedTrustRecord.authorizing(
+            peer,
+            signedBy: owner,
+            timestamp: Date(timeIntervalSince1970: 1_726_000_000.123_987)
+        )
+        let roundTripped = try JSONDecoder().decode(
+            SignedTrustRecord.self,
+            from: JSONEncoder().encode(record)
+        )
+
+        XCTAssertEqual(record.epochMilliseconds, 1_726_000_000_123)
+        XCTAssertEqual(roundTripped.epochMilliseconds, record.epochMilliseconds)
+        try roundTripped.validated()
+    }
+}
+
+private func snapshotByReplacing(
+    _ snapshot: TrustStoreSnapshot,
+    key: String,
+    with value: Any
+) throws -> TrustStoreSnapshot {
+    var object = try XCTUnwrap(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as? [String: Any]
+    )
+    object[key] = value
+    return try JSONDecoder().decode(
+        TrustStoreSnapshot.self,
+        from: JSONSerialization.data(withJSONObject: object)
+    )
 }
 
 private final class MemorySecretStore: SecretStore {
