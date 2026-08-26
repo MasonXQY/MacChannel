@@ -519,6 +519,174 @@ final class PairingTests: XCTestCase {
         )
     }
 
+    func testFailBeforeDeliveryCommitRetriesStableReservationWithoutNewSequence() async throws {
+        let setup = try DeliveryFaultPairingSetup(mode: .failBeforeCommit)
+        let result = try await setup.joiner.join(code: try await setup.host.createCode())
+
+        var firstAuthorization: SignedTrustRecord?
+        await XCTAssertThrowsErrorAsync(
+            try await setup.host.confirmFingerprint(result.fingerprint)
+        ) { error in
+            XCTAssertEqual(error as? DeliveryFaultError, .transient)
+        }
+        firstAuthorization = await setup.fault.lastAttemptedAuthorization
+        let beforeRetryCount = await setup.server.deliveredAuthorizationCount
+        XCTAssertEqual(beforeRetryCount, 0)
+
+        let retried = try await setup.host.confirmFingerprint(result.fingerprint)
+        let received = try await setup.joiner.confirmFingerprint(result.fingerprint)
+
+        XCTAssertEqual(retried.issuerSequence, 1)
+        XCTAssertEqual(retried.signature, firstAuthorization?.signature)
+        XCTAssertEqual(received.signature, retried.signature)
+        let reservationCount = await setup.fault.uniqueReservationCount
+        XCTAssertEqual(reservationCount, 1)
+    }
+
+    func testResponseLossAfterCommitRetriesIdempotentlyWithoutDuplicateMailbox() async throws {
+        let setup = try DeliveryFaultPairingSetup(mode: .loseResponseAfterCommit)
+        let result = try await setup.joiner.join(code: try await setup.host.createCode())
+
+        await XCTAssertThrowsErrorAsync(
+            try await setup.host.confirmFingerprint(result.fingerprint)
+        ) { error in
+            XCTAssertEqual(error as? DeliveryFaultError, .transient)
+        }
+        let committedBeforeRetry = await setup.server.deliveredAuthorizationCount
+        XCTAssertEqual(committedBeforeRetry, 1)
+        let attemptedReservation = await setup.fault.lastReservation
+        let reservation = try XCTUnwrap(attemptedReservation)
+        let committedStatus = try await setup.hostTransport.deliveryStatus(for: reservation)
+        XCTAssertEqual(committedStatus, .committed)
+
+        let received = try await setup.joiner.confirmFingerprint(result.fingerprint)
+        let retried = try await setup.host.confirmFingerprint(result.fingerprint)
+        let committedAfterRetry = await setup.server.deliveredAuthorizationCount
+        let hostState = await setup.host.currentState()
+
+        XCTAssertEqual(committedAfterRetry, 1)
+        XCTAssertEqual(retried.signature, received.signature)
+        XCTAssertEqual(
+            hostState,
+            .confirmed(DeviceSummary(id: received.subject, displayName: "Fault Joiner", availability: .internet))
+        )
+        let reservationCount = await setup.fault.uniqueReservationCount
+        let authorizationCount = await setup.fault.uniqueAuthorizationCount
+        XCTAssertEqual(reservationCount, 1)
+        XCTAssertEqual(authorizationCount, 1)
+    }
+
+    func testExplicitCancellationReleasesUncommittedReservationButCannotAbandonIssuedTrust() async throws {
+        let setup = try DeliveryFaultPairingSetup(mode: .failBeforeCommit)
+        let result = try await setup.joiner.join(code: try await setup.host.createCode())
+
+        await XCTAssertThrowsErrorAsync(
+            try await setup.host.confirmFingerprint(result.fingerprint)
+        ) { error in
+            XCTAssertEqual(error as? DeliveryFaultError, .transient)
+        }
+        await XCTAssertThrowsErrorAsync(
+            try await setup.host.cancelPendingPairing()
+        ) { error in
+            XCTAssertEqual(error as? PairingError, .operationInProgress)
+        }
+
+        _ = try await setup.host.confirmFingerprint(result.fingerprint)
+        _ = try await setup.joiner.confirmFingerprint(result.fingerprint)
+
+        let clock = TestClock(now: Date(timeIntervalSince1970: 2_000))
+        let server = MemoryPairingServer(clock: clock)
+        let host = MemoryPairingTransport(server: server, observedSource: "cancel-host")
+        let joiner = MemoryPairingTransport(server: server, observedSource: "cancel-joiner")
+        let sessionID = try await establishTestRoute(
+            code: "430000",
+            host: host,
+            joiner: joiner,
+            endpoint: ImmediateEndpoint(),
+            expiresAt: Date(timeIntervalSince1970: 2_300)
+        )
+        let reservation = try await host.reserveAuthorizationDelivery(for: sessionID)
+        await host.cancelAuthorizationDelivery(reservation)
+
+        await XCTAssertThrowsErrorAsync(try await host.deliveryStatus(for: reservation)) { error in
+            XCTAssertEqual(error as? PairingError, .invalidHandshake)
+        }
+        let counts = await server.sessionStorageCounts()
+        XCTAssertEqual(counts.reservations, 0)
+    }
+
+    func testActiveReservationCanCommitAcrossPairingExpiryAndMailboxRemainsRetrievable() async throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        XCTAssertEqual(MemoryPairingServer.authorizationMailboxTTL, 900)
+        let setup = try DeliveryFaultPairingSetup(mode: .failBeforeCommit, clock: clock)
+        let result = try await setup.joiner.join(code: try await setup.host.createCode())
+
+        await XCTAssertThrowsErrorAsync(
+            try await setup.host.confirmFingerprint(result.fingerprint)
+        ) { error in
+            XCTAssertEqual(error as? DeliveryFaultError, .transient)
+        }
+        clock.advance(seconds: 300)
+
+        let committed = try await setup.host.confirmFingerprint(result.fingerprint)
+        clock.advance(seconds: 899)
+        let received = try await setup.joiner.confirmFingerprint(result.fingerprint)
+
+        XCTAssertEqual(received.signature, committed.signature)
+        XCTAssertEqual(received.issuerSequence, 1)
+    }
+
+    func testDeliveredMailboxHasIndependentTTLAndBoundedPerRecipientCapacity() async throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+        let server = MemoryPairingServer(clock: clock)
+        let hostTransport = MemoryPairingTransport(server: server, observedSource: "mailbox-host")
+        let joinTransport = MemoryPairingTransport(server: server, observedSource: "mailbox-joiner")
+        let endpoint = ImmediateEndpoint()
+        let issuer = try DeviceIdentity.ephemeral()
+        let subject = try DeviceIdentity.ephemeral()
+
+        for index in 0..<8 {
+            let code = String(format: "%06d", 420_000 + index)
+            let sessionID = try await establishTestRoute(
+                code: code,
+                host: hostTransport,
+                joiner: joinTransport,
+                endpoint: endpoint,
+                expiresAt: Date(timeIntervalSince1970: 1_300)
+            )
+            let reservation = try await hostTransport.reserveAuthorizationDelivery(for: sessionID)
+            let record = try SignedTrustRecord.authorizing(subject, signedBy: issuer, sequence: UInt64(index + 1))
+            try await hostTransport.deliverAuthorization(
+                PairingAuthorizationEnvelope(sessionID: sessionID, authorization: record, channelTag: Data([UInt8(index)])),
+                reservation: reservation
+            )
+        }
+
+        clock.advance(seconds: 300)
+        let retained = await server.sessionStorageCounts()
+        XCTAssertEqual(retained.routes, 0)
+        XCTAssertEqual(retained.deliveries, 8)
+
+        let blockedSession = try await establishTestRoute(
+            code: "420008",
+            host: hostTransport,
+            joiner: joinTransport,
+            endpoint: endpoint,
+            expiresAt: Date(timeIntervalSince1970: 1_600)
+        )
+        await XCTAssertThrowsErrorAsync(
+            try await hostTransport.reserveAuthorizationDelivery(for: blockedSession)
+        ) { error in
+            XCTAssertEqual(error as? PairingError, .resourceExhausted)
+        }
+
+        clock.advance(seconds: 600)
+        let purged = await server.sessionStorageCounts()
+        XCTAssertEqual(purged.deliveries, 0)
+        XCTAssertLessThanOrEqual(purged.routes, 1)
+        XCTAssertEqual(purged.reservations, 0)
+    }
+
     func testConcurrentJoinIsRejectedWhileFirstJoinIsBlocked() async throws {
         let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
         let server = MemoryPairingServer(clock: clock)
@@ -618,6 +786,136 @@ private struct PairingTestContext {
     }
 }
 
+private enum DeliveryFaultMode: Sendable {
+    case failBeforeCommit
+    case loseResponseAfterCommit
+}
+
+private enum DeliveryFaultError: Error, Equatable {
+    case transient
+}
+
+private struct DeliveryFaultPairingSetup {
+    let server: MemoryPairingServer
+    let hostTransport: MemoryPairingTransport
+    let host: PairingCoordinator
+    let joiner: PairingCoordinator
+    let fault: DeliveryFaultController
+
+    init(
+        mode: DeliveryFaultMode,
+        clock: TestClock = TestClock(now: Date(timeIntervalSince1970: 1_000))
+    ) throws {
+        server = MemoryPairingServer(clock: clock)
+        let hostIdentity = try DeviceIdentity.ephemeral()
+        let joinerIdentity = try DeviceIdentity.ephemeral()
+        hostTransport = MemoryPairingTransport(server: server, observedSource: "fault-host")
+        fault = DeliveryFaultController(mode: mode, base: hostTransport)
+        let hostRepository = try TrustRepository(
+            ownerIdentity: hostIdentity,
+            trustStore: TrustStore(owner: hostIdentity.id),
+            persistedGeneration: 0
+        )
+        host = try PairingCoordinator(
+            identity: hostIdentity,
+            displayName: "Fault Host",
+            trustRepository: hostRepository,
+            transport: DeliveryFaultTransport(base: hostTransport, controller: fault),
+            clock: clock
+        )
+        joiner = try makeCoordinator(
+            identity: joinerIdentity,
+            displayName: "Fault Joiner",
+            server: server,
+            source: "fault-joiner",
+            clock: clock
+        )
+    }
+}
+
+private struct DeliveryFaultTransport: PairingTransport {
+    let base: MemoryPairingTransport
+    let controller: DeliveryFaultController
+
+    func publish(_ offer: PairingOffer, endpoint: any PairingHostEndpoint) async throws {
+        try await base.publish(offer, endpoint: endpoint)
+    }
+
+    func lookup(code: String) async throws -> PairingOffer {
+        try await base.lookup(code: code)
+    }
+
+    func submit(code: String, request: PairingJoinRequest) async throws -> PairingJoinResponse {
+        try await base.submit(code: code, request: request)
+    }
+
+    func remove(code: String) async {
+        await base.remove(code: code)
+    }
+
+    func reserveAuthorizationDelivery(for sessionID: PairingSessionID) async throws -> PairingDeliveryReservation {
+        try await base.reserveAuthorizationDelivery(for: sessionID)
+    }
+
+    func deliveryStatus(for reservation: PairingDeliveryReservation) async throws -> PairingDeliveryStatus {
+        try await base.deliveryStatus(for: reservation)
+    }
+
+    func deliverAuthorization(
+        _ envelope: PairingAuthorizationEnvelope,
+        reservation: PairingDeliveryReservation
+    ) async throws {
+        try await controller.deliver(envelope, reservation: reservation)
+    }
+
+    func cancelAuthorizationDelivery(_ reservation: PairingDeliveryReservation) async {
+        await base.cancelAuthorizationDelivery(reservation)
+    }
+
+    func authorization(for sessionID: PairingSessionID) async throws -> PairingAuthorizationEnvelope {
+        try await base.authorization(for: sessionID)
+    }
+}
+
+private actor DeliveryFaultController {
+    let mode: DeliveryFaultMode
+    let base: MemoryPairingTransport
+    private var injectedFailure = false
+    private var reservations: Set<PairingDeliveryReservation> = []
+    private var authorizationSignatures: Set<Data> = []
+    private(set) var lastAttemptedAuthorization: SignedTrustRecord?
+    private(set) var lastReservation: PairingDeliveryReservation?
+
+    init(mode: DeliveryFaultMode, base: MemoryPairingTransport) {
+        self.mode = mode
+        self.base = base
+    }
+
+    var uniqueReservationCount: Int { reservations.count }
+    var uniqueAuthorizationCount: Int { authorizationSignatures.count }
+
+    func deliver(
+        _ envelope: PairingAuthorizationEnvelope,
+        reservation: PairingDeliveryReservation
+    ) async throws {
+        reservations.insert(reservation)
+        lastReservation = reservation
+        authorizationSignatures.insert(envelope.authorization.signature)
+        lastAttemptedAuthorization = envelope.authorization
+        guard !injectedFailure else {
+            return try await base.deliverAuthorization(envelope, reservation: reservation)
+        }
+        injectedFailure = true
+        switch mode {
+        case .failBeforeCommit:
+            throw DeliveryFaultError.transient
+        case .loseResponseAfterCommit:
+            try await base.deliverAuthorization(envelope, reservation: reservation)
+            throw DeliveryFaultError.transient
+        }
+    }
+}
+
 private func makeCoordinator(
     identity: DeviceIdentity,
     displayName: String = "Mac",
@@ -663,6 +961,18 @@ private func pairHost(
     let authorization = try await host.confirmFingerprint(result.fingerprint)
     _ = try await joiner.confirmFingerprint(result.fingerprint)
     return authorization
+}
+
+private func establishTestRoute(
+    code: String,
+    host: MemoryPairingTransport,
+    joiner: MemoryPairingTransport,
+    endpoint: ImmediateEndpoint,
+    expiresAt: Date
+) async throws -> PairingSessionID {
+    try await host.publish(.testValue(code: code, expiresAt: expiresAt), endpoint: endpoint)
+    let response = try await joiner.submit(code: code, request: .testValue(code: code))
+    return response.sessionID
 }
 
 private func fingerprint(for result: PairingJoinResult) -> String {
@@ -739,6 +1049,10 @@ private struct MutatingPairingTransport: PairingTransport {
         try await base.reserveAuthorizationDelivery(for: sessionID)
     }
 
+    func deliveryStatus(for reservation: PairingDeliveryReservation) async throws -> PairingDeliveryStatus {
+        try await base.deliveryStatus(for: reservation)
+    }
+
     func deliverAuthorization(
         _ envelope: PairingAuthorizationEnvelope,
         reservation: PairingDeliveryReservation
@@ -801,6 +1115,10 @@ private struct BlockingReserveTransport: PairingTransport {
         return try await base.reserveAuthorizationDelivery(for: sessionID)
     }
 
+    func deliveryStatus(for reservation: PairingDeliveryReservation) async throws -> PairingDeliveryStatus {
+        try await base.deliveryStatus(for: reservation)
+    }
+
     func deliverAuthorization(
         _ envelope: PairingAuthorizationEnvelope,
         reservation: PairingDeliveryReservation
@@ -843,6 +1161,10 @@ private struct BlockingLookupTransport: PairingTransport {
         for sessionID: PairingSessionID
     ) async throws -> PairingDeliveryReservation {
         try await base.reserveAuthorizationDelivery(for: sessionID)
+    }
+
+    func deliveryStatus(for reservation: PairingDeliveryReservation) async throws -> PairingDeliveryStatus {
+        try await base.deliveryStatus(for: reservation)
     }
 
     func deliverAuthorization(

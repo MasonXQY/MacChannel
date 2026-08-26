@@ -199,6 +199,11 @@ public struct PairingDeliveryReservation: Hashable, Sendable {
     }
 }
 
+public enum PairingDeliveryStatus: Equatable, Sendable {
+    case reserved
+    case committed
+}
+
 public struct PairingSessionStorageCounts: Equatable, Sendable {
     public let routes: Int
     public let deliveries: Int

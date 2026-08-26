@@ -10,6 +10,7 @@ public protocol PairingTransport: Sendable {
     func submit(code: String, request: PairingJoinRequest) async throws -> PairingJoinResponse
     func remove(code: String) async
     func reserveAuthorizationDelivery(for sessionID: PairingSessionID) async throws -> PairingDeliveryReservation
+    func deliveryStatus(for reservation: PairingDeliveryReservation) async throws -> PairingDeliveryStatus
     func deliverAuthorization(_ envelope: PairingAuthorizationEnvelope, reservation: PairingDeliveryReservation) async throws
     func cancelAuthorizationDelivery(_ reservation: PairingDeliveryReservation) async
     func authorization(for sessionID: PairingSessionID) async throws -> PairingAuthorizationEnvelope
@@ -48,6 +49,10 @@ public struct MemoryPairingTransport: PairingTransport {
         try await server.reserveAuthorizationDelivery(for: sessionID, source: source)
     }
 
+    public func deliveryStatus(for reservation: PairingDeliveryReservation) async throws -> PairingDeliveryStatus {
+        try await server.deliveryStatus(for: reservation, source: source)
+    }
+
     public func deliverAuthorization(_ envelope: PairingAuthorizationEnvelope, reservation: PairingDeliveryReservation) async throws {
         try await server.deliverAuthorization(envelope, reservation: reservation, source: source)
     }
@@ -79,6 +84,15 @@ public actor MemoryPairingServer {
         let route: SessionRoute
     }
 
+    private struct DeliveredMailbox {
+        let reservation: PairingDeliveryReservation
+        let envelope: PairingAuthorizationEnvelope
+        let host: PairingSourceContext
+        let joiner: PairingSourceContext
+        let expiresAt: Date
+        var retrieved: Bool
+    }
+
     private static let sourceFailureLimit = 5
     private static let codeFailureLimit = 20
     private static let globalFailureLimit = 100
@@ -88,11 +102,14 @@ public actor MemoryPairingServer {
     private static let offerLimit = 1_024
     private static let sourceSessionLimit = 8
     private static let globalSessionLimit = 64
+    /// A committed authorization remains retrievable for fifteen minutes,
+    /// independently of the five-minute code/session route lifetime.
+    public static let authorizationMailboxTTL: TimeInterval = 900
 
     private let clock: any PairingClock
     private var offers: [String: StoredOffer] = [:]
     private var sessionRoutes: [PairingSessionID: SessionRoute] = [:]
-    private var deliveredAuthorizations: [PairingSessionID: PairingAuthorizationEnvelope] = [:]
+    private var deliveredMailboxes: [PairingSessionID: DeliveredMailbox] = [:]
     private var reservations: [UUID: ReservationEntry] = [:]
     private var pendingRoutesBySource: [PairingSourceContext: Int] = [:]
     private var pendingRoutesGlobal = 0
@@ -168,21 +185,51 @@ public actor MemoryPairingServer {
     }
 
     func reserveAuthorizationDelivery(for sessionID: PairingSessionID, source: PairingSourceContext) throws -> PairingDeliveryReservation {
-        try requireLiveRoute(sessionID, source: source, role: .host)
+        if let route = sessionRoutes[sessionID],
+           route.host == source,
+           clock.now >= route.expiresAt,
+           !reservations.values.contains(where: { $0.reservation.sessionID == sessionID }) {
+            sessionRoutes.removeValue(forKey: sessionID)
+            purgeExpiredState()
+            throw PairingError.sessionExpired
+        }
         purgeExpiredState()
+        if let mailbox = deliveredMailboxes[sessionID] {
+            guard mailbox.host == source else { throw PairingError.invalidHandshake }
+            return mailbox.reservation
+        }
+        if let existing = reservations.values.first(where: { $0.reservation.sessionID == sessionID }) {
+            guard existing.route.host == source else { throw PairingError.invalidHandshake }
+            return existing.reservation
+        }
+        try requireLiveRoute(sessionID, source: source, role: .host)
         guard let route = sessionRoutes[sessionID], route.host == source else { throw PairingError.invalidHandshake }
-        guard deliveredAuthorizations[sessionID] == nil,
-              !reservations.values.contains(where: { $0.reservation.sessionID == sessionID })
-        else { throw PairingError.operationInProgress }
-        let recipientUsage = deliveredAuthorizations.keys.reduce(into: 0) { count, id in
-            if sessionRoutes[id]?.joiner == route.joiner { count += 1 }
-        } + reservations.values.filter { $0.route.joiner == route.joiner }.count
+        let recipientUsage = deliveredMailboxes.values.filter { $0.joiner == route.joiner }.count
+            + reservations.values.filter { $0.route.joiner == route.joiner }.count
         guard recipientUsage < Self.sourceSessionLimit,
-              deliveredAuthorizations.count + reservations.count < Self.globalSessionLimit
+              deliveredMailboxes.count + reservations.count < Self.globalSessionLimit
         else { throw PairingError.resourceExhausted }
         let reservation = PairingDeliveryReservation(sessionID: sessionID)
         reservations[reservation.id] = ReservationEntry(reservation: reservation, route: route)
         return reservation
+    }
+
+    func deliveryStatus(
+        for reservation: PairingDeliveryReservation,
+        source: PairingSourceContext
+    ) throws -> PairingDeliveryStatus {
+        purgeExpiredState()
+        if let mailbox = deliveredMailboxes[reservation.sessionID] {
+            guard mailbox.host == source, mailbox.reservation == reservation else {
+                throw PairingError.invalidHandshake
+            }
+            return .committed
+        }
+        guard let entry = reservations[reservation.id],
+              entry.reservation == reservation,
+              entry.route.host == source
+        else { throw PairingError.invalidHandshake }
+        return .reserved
     }
 
     func deliverAuthorization(
@@ -191,13 +238,27 @@ public actor MemoryPairingServer {
         source: PairingSourceContext
     ) throws {
         purgeExpiredState()
+        if let mailbox = deliveredMailboxes[reservation.sessionID] {
+            guard mailbox.host == source,
+                  mailbox.reservation == reservation,
+                  envelopesMatch(mailbox.envelope, envelope)
+            else { throw PairingError.invalidHandshake }
+            return
+        }
         guard envelope.sessionID == reservation.sessionID,
               let entry = reservations.removeValue(forKey: reservation.id),
               entry.reservation == reservation,
-              entry.route.host == source,
-              sessionRoutes[reservation.sessionID]?.host == source
+              entry.route.host == source
         else { throw PairingError.invalidHandshake }
-        deliveredAuthorizations[envelope.sessionID] = envelope
+        deliveredMailboxes[envelope.sessionID] = DeliveredMailbox(
+            reservation: reservation,
+            envelope: envelope,
+            host: entry.route.host,
+            joiner: entry.route.joiner,
+            expiresAt: clock.now.addingTimeInterval(Self.authorizationMailboxTTL),
+            retrieved: false
+        )
+        sessionRoutes.removeValue(forKey: envelope.sessionID)
     }
 
     func cancelAuthorizationDelivery(_ reservation: PairingDeliveryReservation, source: PairingSourceContext) {
@@ -206,26 +267,41 @@ public actor MemoryPairingServer {
     }
 
     func authorization(for sessionID: PairingSessionID, source: PairingSourceContext) throws -> PairingAuthorizationEnvelope {
-        try requireLiveRoute(sessionID, source: source, role: .joiner)
-        purgeExpiredState()
-        guard sessionRoutes[sessionID]?.joiner == source else { throw PairingError.invalidHandshake }
-        guard let envelope = deliveredAuthorizations.removeValue(forKey: sessionID) else {
-            throw PairingError.authorizationPending
+        if let mailbox = deliveredMailboxes[sessionID], mailbox.joiner == source, clock.now >= mailbox.expiresAt {
+            deliveredMailboxes.removeValue(forKey: sessionID)
+            purgeExpiredState()
+            throw PairingError.sessionExpired
         }
-        removeSession(sessionID)
-        return envelope
+        if let route = sessionRoutes[sessionID],
+           route.joiner == source,
+           clock.now >= route.expiresAt,
+           !reservations.values.contains(where: { $0.reservation.sessionID == sessionID }) {
+            sessionRoutes.removeValue(forKey: sessionID)
+            purgeExpiredState()
+            throw PairingError.sessionExpired
+        }
+        purgeExpiredState()
+        if var mailbox = deliveredMailboxes[sessionID] {
+            guard mailbox.joiner == source else { throw PairingError.invalidHandshake }
+            guard !mailbox.retrieved else { throw PairingError.invalidHandshake }
+            mailbox.retrieved = true
+            deliveredMailboxes[sessionID] = mailbox
+            return mailbox.envelope
+        }
+        try requireLiveRoute(sessionID, source: source, role: .joiner)
+        throw PairingError.authorizationPending
     }
 
     public var deliveredAuthorizationCount: Int {
         purgeExpiredState()
-        return deliveredAuthorizations.count
+        return deliveredMailboxes.count
     }
 
     public func sessionStorageCounts() -> PairingSessionStorageCounts {
         purgeExpiredState()
         return PairingSessionStorageCounts(
             routes: sessionRoutes.count,
-            deliveries: deliveredAuthorizations.count,
+            deliveries: deliveredMailboxes.count,
             reservations: reservations.count
         )
     }
@@ -255,7 +331,7 @@ public actor MemoryPairingServer {
             $0.reservation.sessionID == sessionID
         }
         guard clock.now < route.expiresAt || hasCommittedReservation else {
-            removeSession(sessionID)
+            sessionRoutes.removeValue(forKey: sessionID)
             purgeExpiredState()
             throw PairingError.sessionExpired
         }
@@ -329,17 +405,28 @@ public actor MemoryPairingServer {
         }
         globalFailures = globalFailures.filter { $0 > cutoff }
         offers = offers.filter { $0.value.offer.expiresAt > now }
+        deliveredMailboxes = deliveredMailboxes.filter { $0.value.expiresAt > now }
         let reservedSessions = Set(reservations.values.map(\.reservation.sessionID))
         let expired = sessionRoutes.compactMap { id, route in
             route.expiresAt <= now && !reservedSessions.contains(id) ? id : nil
         }
-        for id in expired { removeSession(id) }
+        for id in expired { sessionRoutes.removeValue(forKey: id) }
     }
 
-    private func removeSession(_ sessionID: PairingSessionID) {
-        sessionRoutes.removeValue(forKey: sessionID)
-        deliveredAuthorizations.removeValue(forKey: sessionID)
-        reservations = reservations.filter { $0.value.reservation.sessionID != sessionID }
+    private func envelopesMatch(
+        _ lhs: PairingAuthorizationEnvelope,
+        _ rhs: PairingAuthorizationEnvelope
+    ) -> Bool {
+        lhs.sessionID == rhs.sessionID
+            && lhs.channelTag == rhs.channelTag
+            && lhs.authorization.issuer == rhs.authorization.issuer
+            && lhs.authorization.issuerPublicKey == rhs.authorization.issuerPublicKey
+            && lhs.authorization.subject == rhs.authorization.subject
+            && lhs.authorization.subjectPublicKey == rhs.authorization.subjectPublicKey
+            && lhs.authorization.action == rhs.authorization.action
+            && lhs.authorization.issuerSequence == rhs.authorization.issuerSequence
+            && lhs.authorization.epochMilliseconds == rhs.authorization.epochMilliseconds
+            && lhs.authorization.signature == rhs.authorization.signature
     }
 
     private func decrement<Key: Hashable>(_ values: inout [Key: Int], key: Key) {

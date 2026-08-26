@@ -26,6 +26,7 @@ public actor PairingCoordinator: PairingHostEndpoint {
         let generation: UInt64
         var localConfirmed: Bool
         var issuedAuthorization: SignedTrustRecord?
+        var deliveryReservation: PairingDeliveryReservation?
     }
 
     private let identity: DeviceIdentity
@@ -74,8 +75,15 @@ public actor PairingCoordinator: PairingHostEndpoint {
         guard !codeCreationInProgress, !joinInProgress, !commitInProgress else {
             throw PairingError.operationInProgress
         }
+        guard pendingConfirmation?.issuedAuthorization == nil else {
+            throw PairingError.operationInProgress
+        }
         codeCreationInProgress = true
         defer { codeCreationInProgress = false }
+        if let reservation = pendingConfirmation?.deliveryReservation {
+            await transport.cancelAuthorizationDelivery(reservation)
+            pendingConfirmation = nil
+        }
         if let previous = hostedSession {
             await transport.remove(code: previous.code)
         }
@@ -206,7 +214,8 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 expiresAt: offer.expiresAt,
                 generation: lifecycleGeneration,
                 localConfirmed: false,
-                issuedAuthorization: nil
+                issuedAuthorization: nil,
+                deliveryReservation: nil
             )
             transition(to: .awaitingFingerprint(local: fingerprint, remote: fingerprint))
             return PairingJoinResult(
@@ -301,7 +310,8 @@ public actor PairingCoordinator: PairingHostEndpoint {
                 expiresAt: session.expiresAt,
                 generation: lifecycleGeneration,
                 localConfirmed: false,
-                issuedAuthorization: nil
+                issuedAuthorization: nil,
+                deliveryReservation: nil
             )
             transition(to: .awaitingFingerprint(local: fingerprint, remote: fingerprint))
             return PairingJoinResponse(
@@ -334,6 +344,14 @@ public actor PairingCoordinator: PairingHostEndpoint {
             throw error
         }
         guard pending.fingerprint == fingerprint else {
+            if pending.issuedAuthorization != nil {
+                let error = PairingError.fingerprintMismatch
+                transitionToFailure(error)
+                throw error
+            }
+            if let reservation = pending.deliveryReservation {
+                await transport.cancelAuthorizationDelivery(reservation)
+            }
             clearPendingIfMatching(pending)
             let error = PairingError.fingerprintMismatch
             transitionToFailure(error)
@@ -365,21 +383,45 @@ public actor PairingCoordinator: PairingHostEndpoint {
         await trustRepository.isTrusted(device)
     }
 
+    public func cancelPendingPairing() async throws {
+        guard !commitInProgress,
+              !confirmationInProgress,
+              !joinInProgress,
+              !codeCreationInProgress
+        else { throw PairingError.operationInProgress }
+        guard let pending = pendingConfirmation else { return }
+        guard pending.issuedAuthorization == nil else {
+            throw PairingError.operationInProgress
+        }
+        commitInProgress = true
+        defer { commitInProgress = false }
+        clearPendingIfMatching(pending)
+        transition(to: .idle)
+        if let reservation = pending.deliveryReservation {
+            await transport.cancelAuthorizationDelivery(reservation)
+        }
+    }
+
     private func confirmAsHost(
         _ suppliedPending: PendingConfirmation
     ) async throws -> SignedTrustRecord {
-        try validatePendingIsCurrentAndLive(suppliedPending)
         var pending = suppliedPending
-        let reservation = try await transport.reserveAuthorizationDelivery(for: pending.sessionID)
-        guard pendingMatches(pending), !codeCreationInProgress else {
-            await transport.cancelAuthorizationDelivery(reservation)
-            throw PairingError.staleOperation
-        }
-        do {
+        let reservation: PairingDeliveryReservation
+        if let existing = pending.deliveryReservation {
+            reservation = existing
+            guard pendingMatches(pending), !codeCreationInProgress else {
+                throw PairingError.staleOperation
+            }
+        } else {
             try validatePendingIsCurrentAndLive(pending)
-        } catch {
-            await transport.cancelAuthorizationDelivery(reservation)
-            throw error
+            let created = try await transport.reserveAuthorizationDelivery(for: pending.sessionID)
+            guard pendingMatches(pending), !codeCreationInProgress else {
+                await transport.cancelAuthorizationDelivery(created)
+                throw PairingError.staleOperation
+            }
+            pending.deliveryReservation = created
+            pendingConfirmation = pending
+            reservation = created
         }
         commitInProgress = true
         defer { commitInProgress = false }
@@ -402,6 +444,10 @@ public actor PairingCoordinator: PairingHostEndpoint {
             }
         } catch {
             await transport.cancelAuthorizationDelivery(reservation)
+            if pendingMatches(pending) {
+                pending.deliveryReservation = nil
+                pendingConfirmation = pending
+            }
             throw error
         }
 
@@ -429,7 +475,7 @@ public actor PairingCoordinator: PairingHostEndpoint {
     private func confirmAsJoiner(
         _ pending: PendingConfirmation
     ) async throws -> SignedTrustRecord {
-        try validatePendingIsCurrentAndLive(pending)
+        guard pendingMatches(pending) else { throw PairingError.staleOperation }
         guard !codeCreationInProgress else { throw PairingError.staleOperation }
         let envelope = try await transport.authorization(for: pending.sessionID)
         guard pendingMatches(pending), !codeCreationInProgress else {
@@ -460,7 +506,7 @@ public actor PairingCoordinator: PairingHostEndpoint {
         else {
             throw PairingError.invalidHandshake
         }
-        try validatePendingIsCurrentAndLive(pending)
+        guard pendingMatches(pending) else { throw PairingError.staleOperation }
         commitInProgress = true
         defer { commitInProgress = false }
         try await trustRepository.bootstrapFromConfirmedPairing(envelope.authorization)
