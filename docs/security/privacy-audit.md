@@ -105,3 +105,6 @@ container ID、inspect/mount JSON、查询时间窗和过期行计数交叉核�
 
 消除运行时自证、加入签名 manifest/raw evidence 交叉校验、二进制/跨行/大文件与敏感
 类别 mutant 的不可变内容提交为 `5158d40`。本行同样由后续仅追加提交记录。
+
+补充可信 producer schema、明确 producer 尚不存在，并将 canary pattern 移出 argv 的
+不可变内容提交为 `0ba4bb2`。本行由后续仅追加提交记录。

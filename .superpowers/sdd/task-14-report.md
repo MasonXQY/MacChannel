@@ -82,3 +82,5 @@ The immutable Task 14 privacy-finding revision is commit `764e280`; its audit
 document records the exact script content hashes and UTC evidence timestamp.
 The runtime-evidence hardening content revision is commit `5158d40`; this exact
 identifier is recorded by the subsequent append-only provenance commit.
+The producer-contract and pattern-channel hardening revision is `0ba4bb2`; it is
+also pinned by a subsequent append-only provenance commit.
