@@ -69,3 +69,6 @@ Task 14 can be completed only after the default `Scripts/verify-e2e.sh` passes,
 privacy checks PA-01 through PA-06 have zero unresolved findings, a signed and
 notarized identical commit passes RM-01 through RM-12, and the evidence is tied
 to its service image digests and Git commit.
+
+The immutable Task 14 privacy-finding revision is commit `764e280`; its audit
+document records the exact script content hashes and UTC evidence timestamp.
