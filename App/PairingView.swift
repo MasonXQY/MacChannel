@@ -35,18 +35,29 @@ struct PairingFingerprintPresentation: Equatable {
     }
 }
 
+struct MeshPairingPeerChoice: Identifiable, Equatable, Sendable {
+    let id: String
+    let displayName: String
+}
+
 @MainActor
 protocol PairingSurfaceServicing: AnyObject {
     var isAvailable: Bool { get }
+    var codeLifetime: TimeInterval { get }
     func createCode() async throws -> String
     func join(code: String) async throws -> PairingJoinResult
     func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult
     func cancel() async throws
     func pendingPeer() async -> DeviceSummary?
+    func availableMeshPeers() async -> [MeshPairingPeerChoice]
+    func selectMeshPeer(_ id: String) async throws
 }
 
 extension PairingSurfaceServicing {
+    var codeLifetime: TimeInterval { 300 }
     func pendingPeer() async -> DeviceSummary? { nil }
+    func availableMeshPeers() async -> [MeshPairingPeerChoice] { [] }
+    func selectMeshPeer(_ id: String) async throws {}
 }
 
 @MainActor
@@ -56,6 +67,9 @@ final class PairingSurfaceModel: ObservableObject {
     @Published var entryCode: String
     @Published var pendingPeer: DeviceSummary?
     @Published var actionError: String?
+    @Published var meshPeers: [MeshPairingPeerChoice]
+    @Published var selectedMeshPeerID: String?
+    @Published var hostedCodeLifetimeMinutes: Int = 5
     private let announcer: any AccessibilityAnnouncing
 
     init(
@@ -64,6 +78,8 @@ final class PairingSurfaceModel: ObservableObject {
         entryCode: String = "",
         pendingPeer: DeviceSummary? = nil,
         actionError: String? = nil,
+        meshPeers: [MeshPairingPeerChoice] = [],
+        selectedMeshPeerID: String? = nil,
         announcer: (any AccessibilityAnnouncing)? = nil
     ) {
         self.state = state
@@ -71,7 +87,30 @@ final class PairingSurfaceModel: ObservableObject {
         self.entryCode = PairingCodeInput.sanitize(entryCode)
         self.pendingPeer = pendingPeer
         self.actionError = actionError
+        self.meshPeers = meshPeers
+        self.selectedMeshPeerID = selectedMeshPeerID
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
+    }
+
+    func refreshMeshPeers(using service: any PairingSurfaceServicing) async {
+        let peers = await service.availableMeshPeers()
+        meshPeers = peers
+        if peers.count == 1, selectedMeshPeerID == nil {
+            selectedMeshPeerID = peers[0].id
+            try? await service.selectMeshPeer(peers[0].id)
+        } else if let selectedMeshPeerID, !peers.contains(where: { $0.id == selectedMeshPeerID }) {
+            self.selectedMeshPeerID = nil
+        }
+    }
+
+    func selectMeshPeer(_ id: String, using service: any PairingSurfaceServicing) async {
+        do {
+            try await service.selectMeshPeer(id)
+            selectedMeshPeerID = id
+            actionError = nil
+        } catch {
+            publishError("无法选择这台 Mac，请刷新后重试。")
+        }
     }
 
     func createCode(using service: any PairingSurfaceServicing) async {
@@ -79,7 +118,8 @@ final class PairingSurfaceModel: ObservableObject {
         do {
             let code = try await service.createCode()
             hostedCode = PairingCodeInput.sanitize(code)
-            state = .displayingCode(expiresAt: Date().addingTimeInterval(300))
+            hostedCodeLifetimeMinutes = max(1, Int(service.codeLifetime / 60))
+            state = .displayingCode(expiresAt: Date().addingTimeInterval(service.codeLifetime))
         } catch {
             publishError("无法生成配对码，请检查网络后重试。")
         }
@@ -165,6 +205,7 @@ struct PairingView: View {
             if case .idle = model.state {
                 codeFieldFocused = true
             }
+            Task { await model.refreshMeshPeers(using: service) }
         }
         .onExitCommand(perform: dismiss)
     }
@@ -206,6 +247,27 @@ struct PairingView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if !model.meshPeers.isEmpty {
+                Text("选择显示配对码的 Mac")
+                    .font(.headline)
+                ForEach(model.meshPeers) { peer in
+                    Button {
+                        Task { await model.selectMeshPeer(peer.id, using: service) }
+                    } label: {
+                        HStack {
+                            Label(peer.displayName, systemImage: "desktopcomputer")
+                            Spacer()
+                            if model.selectedMeshPeerID == peer.id {
+                                Image(systemName: "checkmark.circle.fill")
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("选择 \(peer.displayName)")
+                    .accessibilityValue(model.selectedMeshPeerID == peer.id ? "已选择" : "未选择")
+                }
+            }
+
             TextField("六位配对码", text: codeBinding)
                 .font(.system(size: 26, weight: .semibold, design: .monospaced))
                 .multilineTextAlignment(.center)
@@ -219,7 +281,10 @@ struct PairingView: View {
             HStack(spacing: 10) {
                 Button("输入配对码", systemImage: "arrow.right.circle", action: join)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!PairingCodeInput.isComplete(model.entryCode))
+                    .disabled(
+                        !PairingCodeInput.isComplete(model.entryCode)
+                            || (!model.meshPeers.isEmpty && model.selectedMeshPeerID == nil)
+                    )
                     .frame(minHeight: 40)
                 Button("在本机生成配对码", systemImage: "number") {
                     Task { await model.createCode(using: service) }
@@ -238,7 +303,7 @@ struct PairingView: View {
                 .textSelection(.enabled)
                 .accessibilityLabel("本机配对码")
                 .accessibilityValue(PairingCodeInput.spaced(model.hostedCode ?? ""))
-            Label("配对码将在五分钟内过期，且只能使用一次", systemImage: "clock")
+            Label("配对码将在\(model.hostedCodeLifetimeMinutes)分钟内过期，且只能使用一次", systemImage: "clock")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -341,7 +406,9 @@ struct PairingView: View {
 final class UnavailablePairingSurfaceService: PairingSurfaceServicing {
     let isAvailable = false
     func createCode() async throws -> String { throw PairingSurfaceError.unavailable }
-    func join(code: String) async throws -> PairingJoinResult { throw PairingSurfaceError.unavailable }
+    func join(code: String) async throws -> PairingJoinResult {
+        throw PairingSurfaceError.unavailable
+    }
     func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
         throw PairingSurfaceError.unavailable
     }

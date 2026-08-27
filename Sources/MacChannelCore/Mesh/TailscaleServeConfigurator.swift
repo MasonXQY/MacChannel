@@ -22,6 +22,12 @@ public protocol TailscaleServeCommanding: Sendable {
     func disableTCP(externalPort: UInt16) async throws
 }
 
+public protocol TailscaleServeManaging: Sendable {
+    func inspect() async throws -> TailscaleServeState
+    func enable() async throws
+    func disable() async throws
+}
+
 public struct TailscaleServeCLI: TailscaleServeCommanding {
     private let client: TailscaleCommandClient
 
@@ -291,3 +297,5 @@ public actor TailscaleServeConfigurator {
         }
     }
 }
+
+extension TailscaleServeConfigurator: TailscaleServeManaging {}

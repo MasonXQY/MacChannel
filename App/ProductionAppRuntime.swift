@@ -14,6 +14,7 @@ struct ProductionRuntimeConfiguration {
     let bonjourPort: UInt16
     let identityPolicy: KeychainPolicy
     let isIsolatedLaunchTest: Bool
+    let isolatedConnectivityMode: ConnectivityMode?
 
     static func current(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -71,7 +72,11 @@ struct ProductionRuntimeConfiguration {
             ice: ICEConfiguration(stunURLs: stunURLs, turnServers: []),
             bonjourPort: port,
             identityPolicy: identityPolicy,
-            isIsolatedLaunchTest: launchTestMarker != nil
+            isIsolatedLaunchTest: launchTestMarker != nil,
+            isolatedConnectivityMode: launchTestMarker.flatMap { _ in
+                environment["MACCHANNEL_LAUNCH_TEST_CONNECTIVITY_MODE"]
+                    .flatMap(ConnectivityMode.init(rawValue:))
+            }
         )
     }
 
@@ -87,6 +92,65 @@ enum ProductionRuntimeError: Error {
     case insecureRendezvousURL
     case missingRuntimeConfiguration
     case invalidTrustGeneration
+}
+
+actor PersonalMeshSetupCoordinator {
+    private let status: any TailscaleStatusProviding
+    private let serve: any TailscaleServeManaging
+
+    init(status: any TailscaleStatusProviding, serve: any TailscaleServeManaging) {
+        self.status = status
+        self.serve = serve
+    }
+
+    func inspect() async -> PersonalMeshStatus {
+        do {
+            _ = try await status.status()
+            switch try await serve.inspect() {
+            case .disabled: return .readyToEnable
+            case .enabled: return .enabled
+            case .conflict: return .portConflict
+            }
+        } catch TailscaleCommandError.notInstalled {
+            return .tailscaleNotInstalled
+        } catch TailscaleCommandError.notConnected {
+            return .tailscaleDisconnected
+        } catch TailscaleServeError.portConflict {
+            return .portConflict
+        } catch {
+            return .unavailable
+        }
+    }
+
+    func enable() async throws -> PersonalMeshStatus {
+        _ = try await status.status()
+        guard try await serve.inspect() != .conflict else {
+            throw TailscaleServeError.portConflict
+        }
+        try await serve.enable()
+        guard try await serve.inspect() == .enabled else {
+            throw TailscaleServeError.verificationFailed
+        }
+        return .enabled
+    }
+
+    func disable() async throws { try await serve.disable() }
+
+    func reconcileCommittedEnable() async -> PersonalMeshStatus {
+        do {
+            return try await enable()
+        } catch TailscaleCommandError.notInstalled {
+            return .tailscaleNotInstalled
+        } catch TailscaleCommandError.notConnected {
+            return .tailscaleDisconnected
+        } catch TailscaleServeError.portConflict { return .portConflict } catch {
+            return .unavailable
+        }
+    }
+}
+
+enum PersonalMeshInstallGuide {
+    static let officialURL = URL(string: "https://tailscale.com/download/mac")!
 }
 
 struct RendezvousEndpointConfiguration: Equatable {
@@ -152,8 +216,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     let container: AppContainer
     let initialStatus: AppRuntimeStatus
 
-    private let browser: BonjourPeerBrowser
-    private let advertiser: BonjourPeerAdvertiser
+    private let browser: BonjourPeerBrowser?
+    private let advertiser: BonjourPeerAdvertiser?
     private let trustPersistenceTask: Task<Void, Never>
     private let historySource: RuntimeHistorySource
     private let statusSource: RuntimeStatusSource
@@ -165,6 +229,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let transferCoordinator: TransferCoordinator?
     private let trustRepository: TrustRepository
     private let trustStore: any TrustSnapshotPersisting
+    private let additionalShutdown: (@Sendable () async -> Void)?
     private let launchTestKeychain: KeychainStore?
     private let launchTestDataDirectory: URL?
     private var stopped = false
@@ -172,8 +237,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private init(
         container: AppContainer,
         initialStatus: AppRuntimeStatus,
-        browser: BonjourPeerBrowser,
-        advertiser: BonjourPeerAdvertiser,
+        browser: BonjourPeerBrowser?,
+        advertiser: BonjourPeerAdvertiser?,
         trustPersistenceTask: Task<Void, Never>,
         historySource: RuntimeHistorySource,
         statusSource: RuntimeStatusSource,
@@ -186,7 +251,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         trustRepository: TrustRepository,
         trustStore: any TrustSnapshotPersisting,
         launchTestKeychain: KeychainStore?,
-        launchTestDataDirectory: URL?
+        launchTestDataDirectory: URL?,
+        additionalShutdown: (@Sendable () async -> Void)? = nil
     ) {
         self.container = container
         self.initialStatus = initialStatus
@@ -205,6 +271,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         self.trustStore = trustStore
         self.launchTestKeychain = launchTestKeychain
         self.launchTestDataDirectory = launchTestDataDirectory
+        self.additionalShutdown = additionalShutdown
     }
 
     static func bootstrap(
@@ -256,9 +323,10 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id]),
             defaultRendezvousURL: configuration.packagedRendezvousURL
         )
-        let configuredEndpoints = try configuration.endpoints(
-            persistedURL: await settingsStore.current().rendezvousURL
-        )
+        if let isolatedMode = configuration.isolatedConnectivityMode {
+            try await settingsStore.updateConnectivityMode(isolatedMode)
+        }
+        let settingsSnapshot = await settingsStore.current()
         let database = try TransferDatabase(
             url: configuration.dataDirectory.appendingPathComponent("transfers.sqlite3")
         )
@@ -270,30 +338,56 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             settings: settingsStore,
             outputLocator: outputLocator
         )
+        let personalMeshSetup: PersonalMeshSetupCoordinator?
+        if settingsSnapshot.connectivityMode == .personalMesh {
+            let client = TailscaleCommandClient()
+            let serve = TailscaleServeConfigurator(
+                commands: TailscaleServeCLI(client: client),
+                stateURL: configuration.dataDirectory.appendingPathComponent("tailscale-serve.json")
+            )
+            personalMeshSetup = PersonalMeshSetupCoordinator(status: client, serve: serve)
+            var setupStatus = await personalMeshSetup!.inspect()
+            if setupStatus == .enabled, !settingsSnapshot.personalMeshEnabled {
+                setupStatus = .readyToEnable
+            }
+            await settingsStore.updatePersonalMeshStatus(setupStatus)
+        } else {
+            personalMeshSetup = nil
+        }
         let settingsService = ProductionDeviceSettingsService(
             store: settingsStore,
             trustRepository: trustRepository,
-            trustStore: trustStore
+            trustStore: trustStore,
+            personalMeshSetup: personalMeshSetup
         )
         let statusSource = RuntimeStatusSource()
 
-        let browser = BonjourPeerBrowser(
-            directory: directory,
-            trust: DeviceTrust(trustedIDs: currentTrust.trustedDeviceIDs)
-        )
-        browser.observeTrust(trustRepository)
-        browser.start()
-        cleanup.push { await browser.stop() }
-        let advertiser = try BonjourPeerAdvertiser(
-            device: identity.id,
-            port: configuration.bonjourPort
-        ) { connection in
-            // The authenticated WebRTC listener owns transfer channels. This
-            // advertised TCP endpoint is discovery evidence only.
-            connection.cancel()
+        let browser: BonjourPeerBrowser?
+        let advertiser: BonjourPeerAdvertiser?
+        if settingsSnapshot.connectivityMode == .publicService {
+            let publicBrowser = BonjourPeerBrowser(
+                directory: directory,
+                trust: DeviceTrust(trustedIDs: currentTrust.trustedDeviceIDs)
+            )
+            publicBrowser.observeTrust(trustRepository)
+            publicBrowser.start()
+            cleanup.push { await publicBrowser.stop() }
+            let publicAdvertiser = try BonjourPeerAdvertiser(
+                device: identity.id,
+                port: configuration.bonjourPort
+            ) { connection in
+                // The authenticated WebRTC listener owns transfer channels. This
+                // advertised TCP endpoint is discovery evidence only.
+                connection.cancel()
+            }
+            publicAdvertiser.start()
+            cleanup.push { await publicAdvertiser.stopAndWait() }
+            browser = publicBrowser
+            advertiser = publicAdvertiser
+        } else {
+            browser = nil
+            advertiser = nil
         }
-        advertiser.start()
-        cleanup.push { await advertiser.stopAndWait() }
 
         let trustPersistenceTask = Task {
             let updates = await trustRepository.updates()
@@ -310,6 +404,30 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             trustPersistenceTask.cancel()
             await trustPersistenceTask.value
         }
+
+        if settingsSnapshot.connectivityMode == .personalMesh {
+            return try await buildPersonalMesh(
+                configuration: configuration,
+                cleanup: cleanup,
+                identity: identity,
+                trustStore: trustStore,
+                trustRepository: trustRepository,
+                directory: directory,
+                settingsStore: settingsStore,
+                settingsService: settingsService,
+                database: database,
+                history: history,
+                statusSource: statusSource,
+                browser: browser,
+                advertiser: advertiser,
+                trustPersistenceTask: trustPersistenceTask,
+                setup: personalMeshSetup!
+            )
+        }
+
+        let configuredEndpoints = try configuration.endpoints(
+            persistedURL: settingsSnapshot.rendezvousURL
+        )
 
         let webSocketURL = configuredEndpoints.webSocketURL
         let httpOrigin = configuredEndpoints.httpOrigin
@@ -356,7 +474,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                 pairingStates: pairingCoordinator.states,
                 settingsSnapshots: { await settingsStore.snapshots() },
                 transferHistory: { await history.stream() },
-                runtimeIdentityID: identity.id
+                runtimeIdentityID: identity.id,
+                runtimeConnectivityMode: .publicService
             )
             return ProductionAppRuntime(
                 container: container,
@@ -451,7 +570,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             pairingStates: pairingCoordinator.states,
             settingsSnapshots: { await settingsStore.snapshots() },
             transferHistory: { await history.stream() },
-            runtimeIdentityID: identity.id
+            runtimeIdentityID: identity.id,
+            runtimeConnectivityMode: .publicService
         )
         return ProductionAppRuntime(
             container: container,
@@ -476,6 +596,224 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         )
     }
 
+    private static func buildPersonalMesh(
+        configuration: ProductionRuntimeConfiguration,
+        cleanup: RuntimeBootstrapCleanup,
+        identity: DeviceIdentity,
+        trustStore: any TrustSnapshotPersisting,
+        trustRepository: TrustRepository,
+        directory: DeviceDirectory,
+        settingsStore: RuntimeSettingsStore,
+        settingsService: ProductionDeviceSettingsService,
+        database: TransferDatabase,
+        history: RuntimeHistorySource,
+        statusSource: RuntimeStatusSource,
+        browser: BonjourPeerBrowser?,
+        advertiser: BonjourPeerAdvertiser?,
+        trustPersistenceTask: Task<Void, Never>,
+        setup: PersonalMeshSetupCoordinator
+    ) async throws -> ProductionAppRuntime {
+        let settings = await settingsStore.current()
+        let setupStatus =
+            settings.personalMeshEnabled
+            ? await setup.reconcileCommittedEnable()
+            : await setup.inspect()
+        let effectiveStatus: PersonalMeshStatus =
+            setupStatus == .enabled && !settings.personalMeshEnabled ? .readyToEnable : setupStatus
+        await settingsStore.updatePersonalMeshStatus(effectiveStatus)
+
+        guard effectiveStatus == .enabled, settings.personalMeshEnabled else {
+            let container = AppContainer(
+                deviceDirectory: directory,
+                transferCoordinator: UnavailableTransferCoordinator(),
+                settingsSurfaceService: settingsService,
+                settingsSnapshots: { await settingsStore.snapshots() },
+                transferHistory: { await history.stream() },
+                runtimeIdentityID: identity.id,
+                runtimeConnectivityMode: .personalMesh
+            )
+            return ProductionAppRuntime(
+                container: container,
+                initialStatus: .offline(effectiveStatus.localizedText),
+                browser: browser,
+                advertiser: advertiser,
+                trustPersistenceTask: trustPersistenceTask,
+                historySource: history,
+                statusSource: statusSource,
+                presenceSession: nil,
+                presenceTask: nil,
+                pairingTransport: nil,
+                connectionListener: nil,
+                incomingController: nil,
+                transferCoordinator: nil,
+                trustRepository: trustRepository,
+                trustStore: trustStore,
+                launchTestKeychain: configuration.isIsolatedLaunchTest
+                    ? KeychainStore(policy: configuration.identityPolicy) : nil,
+                launchTestDataDirectory: configuration.isIsolatedLaunchTest
+                    ? configuration.dataDirectory : nil
+            )
+        }
+
+        let meshCleanup = RuntimeBootstrapCleanup()
+        do {
+            let commandClient = TailscaleCommandClient()
+            let peerDirectory = MeshPeerDirectory(status: commandClient)
+            let listener = MeshConnectionListener()
+            let registry = MeshConnectionRegistry(trustRepository: trustRepository)
+            let pairingTransport = MeshPairingTransport(opener: NWMeshPairingConnectionOpener())
+            let pairingHost = MeshPairingHost(listener: listener, transport: pairingTransport)
+            let probeHost = MeshProbeHost(
+                listener: listener,
+                device: identity.id,
+                displayName: Host.current().localizedName ?? "Mac"
+            )
+            try await probeHost.start()
+            cleanup.push { await probeHost.stop() }
+            meshCleanup.push { await probeHost.stop() }
+            try await pairingHost.start()
+            cleanup.push { await pairingHost.stop() }
+            meshCleanup.push { await pairingHost.stop() }
+            await peerDirectory.start()
+            cleanup.push { await peerDirectory.stop() }
+            meshCleanup.push { await peerDirectory.stop() }
+            let bridge = MeshDirectoryBridge(
+                mesh: peerDirectory,
+                directory: directory,
+                trustRepository: trustRepository
+            )
+            await bridge.start()
+            cleanup.push { await bridge.stop() }
+            meshCleanup.push { await bridge.stop() }
+
+            let pairingCoordinator = try PairingCoordinator(
+                identity: identity,
+                displayName: Host.current().localizedName ?? "Mac",
+                trustRepository: trustRepository,
+                transport: pairingTransport
+            )
+            let pairingService = PersistingPairingSurfaceService(
+                coordinator: pairingCoordinator,
+                settings: settingsStore,
+                trustStore: trustStore,
+                trustRepository: trustRepository,
+                meshDirectory: peerDirectory,
+                meshTransport: pairingTransport
+            )
+            let connector = MeshTransferConnector(
+                identity: identity,
+                trustRepository: trustRepository,
+                directory: peerDirectory,
+                routes: commandClient,
+                registry: registry
+            )
+            let transferCoordinator = try await TransferCoordinator.restoring(
+                connector: connector,
+                database: database
+            )
+            cleanup.push { await transferCoordinator.shutdownForRestart() }
+            let source = MeshTransferConnectionSource(
+                listener: listener,
+                identity: identity,
+                trustRepository: trustRepository,
+                directory: peerDirectory,
+                routes: commandClient,
+                registry: registry
+            )
+            let incoming = IncomingRuntimeController(
+                source: source,
+                trustRepository: trustRepository,
+                settings: settingsStore,
+                database: database,
+                ownerID: identity.id,
+                onReceiveFinished: { result in await history.recordInboundResult(result) }
+            )
+            await incoming.start()
+            cleanup.push { await incoming.stop() }
+            settingsService.onReceiveConfigurationChanged = { await incoming.restart() }
+            pairingService.onReceiveConfigurationChanged = { await incoming.restart() }
+            await history.start(snapshots: { await transferCoordinator.snapshots() })
+            cleanup.push { await history.stop() }
+            let container = AppContainer(
+                deviceDirectory: directory,
+                transferCoordinator: transferCoordinator,
+                pairingSurfaceService: pairingService,
+                settingsSurfaceService: settingsService,
+                transferSnapshots: { await transferCoordinator.snapshots() },
+                pairingStates: pairingCoordinator.states,
+                settingsSnapshots: { await settingsStore.snapshots() },
+                transferHistory: { await history.stream() },
+                runtimeIdentityID: identity.id,
+                runtimeConnectivityMode: .personalMesh
+            )
+            let additionalShutdown: @Sendable () async -> Void = {
+                await bridge.stop()
+                await peerDirectory.stop()
+                await probeHost.stop()
+                await pairingHost.stop()
+                await registry.stop()
+            }
+            meshCleanup.disarm()
+            return ProductionAppRuntime(
+                container: container,
+                initialStatus: .ready,
+                browser: browser,
+                advertiser: advertiser,
+                trustPersistenceTask: trustPersistenceTask,
+                historySource: history,
+                statusSource: statusSource,
+                presenceSession: nil,
+                presenceTask: nil,
+                pairingTransport: nil,
+                connectionListener: nil,
+                incomingController: incoming,
+                transferCoordinator: transferCoordinator,
+                trustRepository: trustRepository,
+                trustStore: trustStore,
+                launchTestKeychain: configuration.isIsolatedLaunchTest
+                    ? KeychainStore(policy: configuration.identityPolicy) : nil,
+                launchTestDataDirectory: configuration.isIsolatedLaunchTest
+                    ? configuration.dataDirectory : nil,
+                additionalShutdown: additionalShutdown
+            )
+        } catch {
+            await meshCleanup.run()
+            await settingsStore.updatePersonalMeshStatus(.unavailable)
+            let container = AppContainer(
+                deviceDirectory: directory,
+                transferCoordinator: UnavailableTransferCoordinator(),
+                settingsSurfaceService: settingsService,
+                settingsSnapshots: { await settingsStore.snapshots() },
+                transferHistory: { await history.stream() },
+                runtimeIdentityID: identity.id,
+                runtimeConnectivityMode: .personalMesh
+            )
+            return ProductionAppRuntime(
+                container: container,
+                initialStatus: .offline(PersonalMeshStatus.unavailable.localizedText),
+                browser: browser,
+                advertiser: advertiser,
+                trustPersistenceTask: trustPersistenceTask,
+                historySource: history,
+                statusSource: statusSource,
+                presenceSession: nil,
+                presenceTask: nil,
+                pairingTransport: nil,
+                connectionListener: nil,
+                incomingController: nil,
+                transferCoordinator: nil,
+                trustRepository: trustRepository,
+                trustStore: trustStore,
+                launchTestKeychain: configuration.isIsolatedLaunchTest
+                    ? KeychainStore(policy: configuration.identityPolicy)
+                    : nil,
+                launchTestDataDirectory: configuration.isIsolatedLaunchTest
+                    ? configuration.dataDirectory
+                    : nil
+            )
+        }
+    }
+
     func shutdown() async {
         guard !stopped else { return }
         stopped = true
@@ -487,6 +825,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         if let connectionListener { await connectionListener.stop() }
         if let transferCoordinator { await transferCoordinator.shutdownForRestart() }
         if let pairingTransport { await pairingTransport.stop() }
+        if let additionalShutdown { await additionalShutdown() }
         do {
             try await trustStore.persistLatest(from: trustRepository)
         } catch {
@@ -494,8 +833,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         }
         trustPersistenceTask.cancel()
         await trustPersistenceTask.value
-        await browser.stop()
-        await advertiser.stopAndWait()
+        if let browser { await browser.stop() }
+        if let advertiser { await advertiser.stopAndWait() }
         try? launchTestKeychain?.removeAll()
         if let launchTestDataDirectory {
             try? FileManager.default.removeItem(at: launchTestDataDirectory)
@@ -504,6 +843,48 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     }
 
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { statusSource.stream }
+}
+
+private actor MeshDirectoryBridge {
+    private let mesh: MeshPeerDirectory
+    private let directory: DeviceDirectory
+    private let trustRepository: TrustRepository
+    private var task: Task<Void, Never>?
+
+    init(
+        mesh: MeshPeerDirectory,
+        directory: DeviceDirectory,
+        trustRepository: TrustRepository
+    ) {
+        self.mesh = mesh
+        self.directory = directory
+        self.trustRepository = trustRepository
+    }
+
+    func start() {
+        guard task == nil else { return }
+        task = Task { [weak self] in
+            guard let self else { return }
+            let stream = await mesh.peers()
+            for await peers in stream {
+                guard !Task.isCancelled else { return }
+                let trust = await trustRepository.currentTrustStore()
+                for device in trust.trustedDeviceIDs {
+                    let hash = MeshPeerDirectory.deviceIDHash(for: device)
+                    if peers.contains(where: { $0.deviceIDHash == hash }) {
+                        await directory.apply(.internet(device, online: true))
+                    }
+                }
+            }
+        }
+    }
+
+    func stop() async {
+        let current = task
+        task = nil
+        current?.cancel()
+        await current?.value
+    }
 }
 
 enum RuntimePresenceConnect {
@@ -551,12 +932,15 @@ actor RuntimeSettingsStore {
     private struct Wire: Codable {
         var defaultDirectoryPath: String?
         var rendezvousURL: String?
+        var connectivityMode: ConnectivityMode?
+        var personalMeshEnabled: Bool?
         var devices: [UUID: DeviceWire]
     }
 
     private let url: URL
     private let defaultRendezvousURL: String
     private var wire: Wire
+    private var personalMeshStatus: PersonalMeshStatus = .checking
     private var subscribers: [UUID: AsyncStream<SettingsSurfaceSnapshot>.Continuation] = [:]
 
     init(
@@ -566,11 +950,20 @@ actor RuntimeSettingsStore {
     ) throws {
         self.url = url
         self.defaultRendezvousURL = defaultRendezvousURL
-        if FileManager.default.fileExists(atPath: url.path) {
+        let existed = FileManager.default.fileExists(atPath: url.path)
+        if existed {
             wire = try JSONDecoder().decode(Wire.self, from: Data(contentsOf: url))
+            if wire.connectivityMode == nil { wire.connectivityMode = .publicService }
         } else {
-            wire = Wire(defaultDirectoryPath: nil, rendezvousURL: nil, devices: [:])
+            wire = Wire(
+                defaultDirectoryPath: nil,
+                rendezvousURL: nil,
+                connectivityMode: .personalMesh,
+                personalMeshEnabled: false,
+                devices: [:]
+            )
         }
+        if wire.personalMeshEnabled == nil { wire.personalMeshEnabled = false }
         for device in trustedDevices where wire.devices[device.rawValue] == nil {
             wire.devices[device.rawValue] = DeviceWire(
                 displayName: "已配对 Mac",
@@ -627,6 +1020,20 @@ actor RuntimeSettingsStore {
         try mutate { $0.rendezvousURL = endpoints.webSocketURL.absoluteString }
     }
 
+    func updateConnectivityMode(_ mode: ConnectivityMode) throws {
+        try mutate { $0.connectivityMode = mode }
+    }
+
+    func updatePersonalMeshEnabled(_ enabled: Bool) throws {
+        try mutate { $0.personalMeshEnabled = enabled }
+    }
+
+    func updatePersonalMeshStatus(_ status: PersonalMeshStatus) {
+        personalMeshStatus = status
+        let value = snapshot(wire)
+        subscribers.values.forEach { $0.yield(value) }
+    }
+
     func updateDirectory(_ directory: URL?, for id: DeviceID) throws {
         try mutate { candidate in
             guard candidate.devices[id.rawValue] != nil else {
@@ -675,14 +1082,42 @@ actor RuntimeSettingsStore {
 
     private static func persist(_ candidate: Wire, to url: URL) throws {
         let data = try JSONEncoder().encode(candidate)
-        try data.write(to: url, options: .atomic)
-        guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else { throw SettingsStoreError.persistence }
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let temporary = directory.appendingPathComponent(".settings-\(UUID().uuidString).tmp")
+        do {
+            try data.write(to: temporary, options: .withoutOverwriting)
+            guard chmod(temporary.path, S_IRUSR | S_IWUSR) == 0 else {
+                throw SettingsStoreError.persistence
+            }
+            let descriptor = open(temporary.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            guard descriptor >= 0 else { throw SettingsStoreError.persistence }
+            defer { close(descriptor) }
+            guard fsync(descriptor) == 0 else { throw SettingsStoreError.persistence }
+            guard Darwin.rename(temporary.path, url.path) == 0 else {
+                throw SettingsStoreError.persistence
+            }
+            let directoryDescriptor = open(directory.path, O_RDONLY | O_CLOEXEC)
+            guard directoryDescriptor >= 0 else { throw SettingsStoreError.persistence }
+            defer { close(directoryDescriptor) }
+            guard fsync(directoryDescriptor) == 0 else { throw SettingsStoreError.persistence }
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
+        }
     }
 
     private func snapshot(_ wire: Wire) -> SettingsSurfaceSnapshot {
         SettingsSurfaceSnapshot(
             defaultDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:)),
             rendezvousURL: wire.rendezvousURL ?? defaultRendezvousURL,
+            connectivityMode: wire.connectivityMode ?? .publicService,
+            personalMeshEnabled: wire.personalMeshEnabled ?? false,
+            personalMeshStatus: personalMeshStatus,
             devices: wire.devices.map { id, value in
                 DeviceSetting(
                     device: DeviceSummary(
@@ -712,15 +1147,21 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
     private let store: RuntimeSettingsStore
     private let trustRepository: TrustRepository
     private let trustStore: any TrustSnapshotPersisting
+    private let personalMeshSetup: PersonalMeshSetupCoordinator?
+    private let openURL: (URL) -> Void
 
     init(
         store: RuntimeSettingsStore,
         trustRepository: TrustRepository,
-        trustStore: any TrustSnapshotPersisting
+        trustStore: any TrustSnapshotPersisting,
+        personalMeshSetup: PersonalMeshSetupCoordinator? = nil,
+        openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }
     ) {
         self.store = store
         self.trustRepository = trustRepository
         self.trustStore = trustStore
+        self.personalMeshSetup = personalMeshSetup
+        self.openURL = openURL
     }
 
     func rename(_ id: DeviceID, to displayName: String) async throws {
@@ -758,6 +1199,36 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
     func updateRendezvousURL(_ value: String) async throws {
         try await store.updateRendezvousURL(value)
     }
+    func updateConnectivityMode(_ mode: ConnectivityMode) async throws {
+        let current = await store.current()
+        if mode == .publicService, current.personalMeshEnabled, let personalMeshSetup {
+            try await personalMeshSetup.disable()
+            try await store.updatePersonalMeshEnabled(false)
+            await store.updatePersonalMeshStatus(.readyToEnable)
+        }
+        try await store.updateConnectivityMode(mode)
+    }
+    func enablePersonalMesh() async throws -> PersonalMeshStatus {
+        guard let personalMeshSetup else { throw TailscaleCommandError.notConnected }
+        do {
+            let status = try await personalMeshSetup.enable()
+            do {
+                try await store.updatePersonalMeshEnabled(true)
+                await store.updatePersonalMeshStatus(status)
+                return status
+            } catch {
+                try? await personalMeshSetup.disable()
+                throw error
+            }
+        } catch {
+            let status = await personalMeshSetup.inspect()
+            await store.updatePersonalMeshStatus(status)
+            throw error
+        }
+    }
+    func openTailscaleInstallGuide() {
+        openURL(PersonalMeshInstallGuide.officialURL)
+    }
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {
         try await store.updateDirectory(directory, for: id)
         await onReceiveConfigurationChanged?()
@@ -781,27 +1252,53 @@ extension PairingCoordinator: ProductionPairingCoordinating {
 @MainActor
 final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     let isAvailable = true
+    var codeLifetime: TimeInterval { meshTransport == nil ? 300 : 600 }
     var onReceiveConfigurationChanged: (() async -> Void)?
     private let coordinator: any ProductionPairingCoordinating
     private let settings: RuntimeSettingsStore
     private let trustStore: any TrustSnapshotPersisting
     private let trustRepository: TrustRepository
+    private let meshDirectory: MeshPeerDirectory?
+    private let meshTransport: MeshPairingTransport?
+    private var meshCandidates: [String: MeshPeerCandidate] = [:]
 
     init(
         coordinator: any ProductionPairingCoordinating,
         settings: RuntimeSettingsStore,
         trustStore: any TrustSnapshotPersisting,
-        trustRepository: TrustRepository
+        trustRepository: TrustRepository,
+        meshDirectory: MeshPeerDirectory? = nil,
+        meshTransport: MeshPairingTransport? = nil
     ) {
         self.coordinator = coordinator
         self.settings = settings
         self.trustStore = trustStore
         self.trustRepository = trustRepository
+        self.meshDirectory = meshDirectory
+        self.meshTransport = meshTransport
     }
 
     func createCode() async throws -> String { try await coordinator.createCode() }
     func join(code: String) async throws -> PairingJoinResult {
-        try await coordinator.join(code: code)
+        if let meshTransport, meshCandidates.count == 1, let candidate = meshCandidates.values.first
+        {
+            await meshTransport.select(candidate)
+        }
+        return try await coordinator.join(code: code)
+    }
+    func availableMeshPeers() async -> [MeshPairingPeerChoice] {
+        guard let meshDirectory else { return [] }
+        let candidates = (try? await meshDirectory.refresh()) ?? []
+        meshCandidates = Dictionary(uniqueKeysWithValues: candidates.map { ($0.nodeID, $0) })
+        return candidates.map {
+            MeshPairingPeerChoice(id: $0.nodeID, displayName: $0.displayName)
+        }.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+    }
+    func selectMeshPeer(_ id: String) async throws {
+        guard let meshTransport, let candidate = meshCandidates[id] else {
+            throw MeshTransferConnectionError.unavailablePeer
+        }
+        await meshTransport.select(candidate)
     }
     func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
         let pendingPeer = await coordinator.pendingPeerSummary()

@@ -3,14 +3,48 @@ import Combine
 import MacChannelCore
 import SwiftUI
 
+enum ConnectivityMode: String, Codable, CaseIterable, Sendable {
+    case personalMesh
+    case publicService
+
+    var localizedName: String {
+        switch self {
+        case .personalMesh: "个人网络"
+        case .publicService: "公共服务"
+        }
+    }
+}
+
+enum PersonalMeshStatus: Equatable, Sendable {
+    case checking
+    case tailscaleNotInstalled
+    case tailscaleDisconnected
+    case readyToEnable
+    case enabled
+    case portConflict
+    case unavailable
+
+    var localizedText: String {
+        switch self {
+        case .checking: "正在检查 Tailscale…"
+        case .tailscaleNotInstalled: "安装 Tailscale"
+        case .tailscaleDisconnected: "请先连接 Tailscale"
+        case .readyToEnable: "启用个人网络通道"
+        case .enabled: "个人网络通道已启用"
+        case .portConflict: "端口已被其他服务使用"
+        case .unavailable: "无法检查个人网络状态，请稍后重试"
+        }
+    }
+}
+
 enum SettingsSizeLimit {
     static func bytes(megabytes value: String) -> UInt64? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard hasValidDecimalSyntax(trimmed),
-              let megabytes = Decimal(
-            string: trimmed,
-            locale: Locale(identifier: "en_US_POSIX")
-        ), megabytes > 0
+            let megabytes = Decimal(
+                string: trimmed,
+                locale: Locale(identifier: "en_US_POSIX")
+            ), megabytes > 0
         else { return nil }
 
         var unroundedBytes = megabytes * Decimal(1_000_000)
@@ -66,15 +100,24 @@ struct DeviceSetting: Identifiable, Equatable, Sendable {
 struct SettingsSurfaceSnapshot: Equatable, Sendable {
     let defaultDirectory: URL?
     let rendezvousURL: String
+    let connectivityMode: ConnectivityMode
+    let personalMeshEnabled: Bool
+    let personalMeshStatus: PersonalMeshStatus
     let devices: [DeviceSetting]
 
     init(
         defaultDirectory: URL?,
         rendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault,
+        connectivityMode: ConnectivityMode = .personalMesh,
+        personalMeshEnabled: Bool = false,
+        personalMeshStatus: PersonalMeshStatus = .checking,
         devices: [DeviceSetting]
     ) {
         self.defaultDirectory = defaultDirectory
         self.rendezvousURL = rendezvousURL
+        self.connectivityMode = connectivityMode
+        self.personalMeshEnabled = personalMeshEnabled
+        self.personalMeshStatus = personalMeshStatus
         self.devices = devices
     }
 }
@@ -96,6 +139,9 @@ protocol DeviceSettingsServicing: AnyObject {
     ) async throws
     func updateDefaultDirectory(_ directory: URL) async throws
     func updateRendezvousURL(_ value: String) async throws
+    func updateConnectivityMode(_ mode: ConnectivityMode) async throws
+    func enablePersonalMesh() async throws -> PersonalMeshStatus
+    func openTailscaleInstallGuide()
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws
 }
 
@@ -103,6 +149,13 @@ extension DeviceSettingsServicing {
     func updateRendezvousURL(_ value: String) async throws {
         throw DeviceSettingsSurfaceError.unavailable
     }
+    func updateConnectivityMode(_ mode: ConnectivityMode) async throws {
+        throw DeviceSettingsSurfaceError.unavailable
+    }
+    func enablePersonalMesh() async throws -> PersonalMeshStatus {
+        throw DeviceSettingsSurfaceError.unavailable
+    }
+    func openTailscaleInstallGuide() {}
 }
 
 private enum DeviceSettingsSurfaceError: Error { case unavailable }
@@ -111,6 +164,9 @@ private enum DeviceSettingsSurfaceError: Error { case unavailable }
 final class SettingsSurfaceModel: ObservableObject {
     @Published var defaultDirectory: URL?
     @Published var rendezvousURL: String
+    @Published var connectivityMode: ConnectivityMode
+    @Published var personalMeshEnabled: Bool
+    @Published var personalMeshStatus: PersonalMeshStatus
     @Published var devices: [DeviceSetting]
     @Published var actionError: String?
     @Published var actionNotice: String?
@@ -119,15 +175,54 @@ final class SettingsSurfaceModel: ObservableObject {
     init(
         defaultDirectory: URL? = nil,
         rendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault,
+        connectivityMode: ConnectivityMode = .personalMesh,
+        personalMeshEnabled: Bool = false,
+        personalMeshStatus: PersonalMeshStatus = .checking,
         devices: [DeviceSetting] = [],
         actionError: String? = nil,
         announcer: (any AccessibilityAnnouncing)? = nil
     ) {
         self.defaultDirectory = defaultDirectory
         self.rendezvousURL = rendezvousURL
+        self.connectivityMode = connectivityMode
+        self.personalMeshEnabled = personalMeshEnabled
+        self.personalMeshStatus = personalMeshStatus
         self.devices = devices
         self.actionError = actionError
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
+    }
+
+    func updateConnectivityMode(
+        _ mode: ConnectivityMode,
+        using service: any DeviceSettingsServicing
+    ) async {
+        let previous = connectivityMode
+        do {
+            try await service.updateConnectivityMode(mode)
+            connectivityMode = mode
+            actionError = nil
+            let notice = "连接方式已保存；正在传输的文件不受影响，新连接将在重新启动后使用。"
+            actionNotice = notice
+            announcer.announce(notice)
+        } catch {
+            connectivityMode = previous
+            publishError("无法保存连接方式，请检查本地存储权限后重试。")
+        }
+    }
+
+    func enablePersonalMesh(using service: any DeviceSettingsServicing) async {
+        do {
+            personalMeshStatus = try await service.enablePersonalMesh()
+            personalMeshEnabled = personalMeshStatus == .enabled
+            actionError = nil
+            if personalMeshEnabled {
+                let notice = "个人网络通道已启用；请重新启动 Mac 通道后开始传输。"
+                actionNotice = notice
+                announcer.announce(notice)
+            }
+        } catch {
+            publishError("无法启用个人网络通道，请检查 Tailscale 状态后重试。")
+        }
     }
 
     func updateRendezvousURL(
@@ -322,28 +417,48 @@ struct SettingsView: View {
             Divider()
 
             Form {
-                Section("安全中继") {
-                    HStack {
-                        TextField("wss://localhost:8443/v1/ws", text: $draftRendezvousURL)
-                            .focused($rendezvousFocused)
-                            .frame(minHeight: 40)
-                            .onSubmit(saveRendezvousURL)
-                            .accessibilityLabel("安全中继地址")
-                            .accessibilityHint(rendezvousValidationGuidance)
-                            .accessibilityLabeledPair(
-                                role: .content,
-                                id: "rendezvous-url",
-                                in: rendezvousValidation
-                            )
-                        Button("保存地址", action: saveRendezvousURL)
-                            .disabled(!RendezvousEndpointConfiguration.isValid(draftRendezvousURL))
-                            .frame(minHeight: 40)
+                Section("连接方式") {
+                    Picker("连接方式", selection: connectivityModeBinding) {
+                        ForEach(ConnectivityMode.allCases, id: \.self) { mode in
+                            Text(mode.localizedName).tag(mode)
+                        }
                     }
-                    Text("仅支持不含账号、密码或查询参数的 https / wss 地址；保存后需重新启动。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if !RendezvousEndpointConfiguration.isValid(draftRendezvousURL) {
-                        Label(rendezvousValidationGuidance, systemImage: "exclamationmark.circle")
+                    .pickerStyle(.segmented)
+                    .accessibilityLabel("连接方式")
+                    .accessibilityHint("选择个人网络或公共服务；变更只影响重新启动后的新连接")
+
+                    if model.connectivityMode == .personalMesh {
+                        personalMeshStatusRow
+                    }
+                }
+
+                if model.connectivityMode == .publicService {
+                    Section("安全中继") {
+                        HStack {
+                            TextField("wss://localhost:8443/v1/ws", text: $draftRendezvousURL)
+                                .focused($rendezvousFocused)
+                                .frame(minHeight: 40)
+                                .onSubmit(saveRendezvousURL)
+                                .accessibilityLabel("安全中继地址")
+                                .accessibilityHint(rendezvousValidationGuidance)
+                                .accessibilityLabeledPair(
+                                    role: .content,
+                                    id: "rendezvous-url",
+                                    in: rendezvousValidation
+                                )
+                            Button("保存地址", action: saveRendezvousURL)
+                                .disabled(
+                                    !RendezvousEndpointConfiguration.isValid(draftRendezvousURL)
+                                )
+                                .frame(minHeight: 40)
+                        }
+                        Text("仅支持不含账号、密码或查询参数的 https / wss 地址；保存后需重新启动。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if !RendezvousEndpointConfiguration.isValid(draftRendezvousURL) {
+                            Label(
+                                rendezvousValidationGuidance, systemImage: "exclamationmark.circle"
+                            )
                             .font(.caption)
                             .foregroundStyle(.red)
                             .accessibilityLabel(rendezvousValidationGuidance)
@@ -352,6 +467,7 @@ struct SettingsView: View {
                                 id: "rendezvous-url",
                                 in: rendezvousValidation
                             )
+                        }
                     }
                 }
 
@@ -363,9 +479,11 @@ struct SettingsView: View {
                             .accessibilityLabel("默认接收目录，\(defaultDirectoryText)")
                         Spacer()
                         Button("选择…") {
-                            guard let selected = directorySelector.chooseDirectory(
-                                current: model.defaultDirectory
-                            ) else { return }
+                            guard
+                                let selected = directorySelector.chooseDirectory(
+                                    current: model.defaultDirectory
+                                )
+                            else { return }
                             Task {
                                 await model.updateDefaultDirectory(selected, using: service)
                             }
@@ -379,9 +497,11 @@ struct SettingsView: View {
 
                 Section("已配对设备") {
                     if model.devices.isEmpty {
-                        Label("尚未配对设备", systemImage: "desktopcomputer.trianglebadge.exclamationmark")
-                            .foregroundStyle(.secondary)
-                            .frame(minHeight: 60)
+                        Label(
+                            "尚未配对设备", systemImage: "desktopcomputer.trianglebadge.exclamationmark"
+                        )
+                        .foregroundStyle(.secondary)
+                        .frame(minHeight: 60)
                     } else {
                         ForEach(model.devices) { device in
                             DeviceSettingRow(
@@ -410,6 +530,56 @@ struct SettingsView: View {
             return
         }
         Task { await model.updateRendezvousURL(draftRendezvousURL, using: service) }
+    }
+
+    private var connectivityModeBinding: Binding<ConnectivityMode> {
+        Binding(
+            get: { model.connectivityMode },
+            set: { mode in
+                Task { await model.updateConnectivityMode(mode, using: service) }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var personalMeshStatusRow: some View {
+        HStack(spacing: 12) {
+            Label(model.personalMeshStatus.localizedText, systemImage: personalMeshStatusSymbol)
+                .accessibilityLabel(model.personalMeshStatus.localizedText)
+            Spacer()
+            switch model.personalMeshStatus {
+            case .tailscaleNotInstalled:
+                Button("安装 Tailscale") { service.openTailscaleInstallGuide() }
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityHint("在浏览器中打开 Tailscale 官方安装说明")
+            case .readyToEnable:
+                Button("启用个人网络通道") {
+                    Task { await model.enablePersonalMesh(using: service) }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .accessibilityHint("创建仅属于 Mac 通道的 Tailscale Serve 映射")
+            default:
+                EmptyView()
+            }
+        }
+        if model.personalMeshStatus == .tailscaleDisconnected {
+            Text("请在 Tailscale 应用中登录并连接；Mac 通道不会代替你登录。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var personalMeshStatusSymbol: String {
+        switch model.personalMeshStatus {
+        case .enabled: "checkmark.shield.fill"
+        case .portConflict: "exclamationmark.triangle.fill"
+        case .tailscaleNotInstalled: "square.and.arrow.down"
+        case .tailscaleDisconnected: "network.slash"
+        case .readyToEnable: "switch.2"
+        case .checking: "hourglass"
+        case .unavailable: "exclamationmark.triangle"
+        }
     }
 
     private var rendezvousValidationGuidance: String {
@@ -516,9 +686,11 @@ private struct DeviceSettingRow: View {
                 .disabled(device.directory == nil)
                 .frame(minHeight: 40)
                 Button("选择目录…") {
-                    guard let selected = directorySelector.chooseDirectory(
-                        current: device.directory
-                    ) else { return }
+                    guard
+                        let selected = directorySelector.chooseDirectory(
+                            current: device.directory
+                        )
+                    else { return }
                     Task {
                         await model.updateDirectory(selected, for: device.id, using: service)
                     }
@@ -589,7 +761,9 @@ private struct DeviceSettingRow: View {
 @MainActor
 final class UnavailableDeviceSettingsService: DeviceSettingsServicing {
     let isAvailable = false
-    func rename(_ id: DeviceID, to displayName: String) async throws { throw SettingsSurfaceError.unavailable }
+    func rename(_ id: DeviceID, to displayName: String) async throws {
+        throw SettingsSurfaceError.unavailable
+    }
     func revoke(_ id: DeviceID) async throws -> SurfaceActionResult {
         throw SettingsSurfaceError.unavailable
     }
@@ -598,9 +772,15 @@ final class UnavailableDeviceSettingsService: DeviceSettingsServicing {
         autoAccept: Bool,
         maximumBytes: UInt64?
     ) async throws { throw SettingsSurfaceError.unavailable }
-    func updateDefaultDirectory(_ directory: URL) async throws { throw SettingsSurfaceError.unavailable }
-    func updateRendezvousURL(_ value: String) async throws { throw SettingsSurfaceError.unavailable }
-    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws { throw SettingsSurfaceError.unavailable }
+    func updateDefaultDirectory(_ directory: URL) async throws {
+        throw SettingsSurfaceError.unavailable
+    }
+    func updateRendezvousURL(_ value: String) async throws {
+        throw SettingsSurfaceError.unavailable
+    }
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {
+        throw SettingsSurfaceError.unavailable
+    }
 }
 
 private enum SettingsSurfaceError: Error { case unavailable }

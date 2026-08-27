@@ -22,7 +22,8 @@ final class MeshConnectionListenerTests: XCTestCase {
         try await MeshFramedConnection(transport: client).send(sent, limit: .preauthentication)
 
         let accepted = try await nextValue(from: &iterator)
-        let received = try await MeshFramedConnection(transport: accepted).receive(limit: .preauthentication)
+        let received = try await MeshFramedConnection(transport: accepted).receive(
+            limit: .preauthentication)
 
         XCTAssertEqual(received, sent)
         await client.close()
@@ -116,7 +117,8 @@ final class MeshConnectionListenerTests: XCTestCase {
         XCTAssertEqual(rejectedCloseCount, 1)
         for expected in 0..<34 {
             let value = try await nextValue(from: &iterator)
-            let frame = try await MeshFramedConnection(transport: value).receive(limit: .preauthentication)
+            let frame = try await MeshFramedConnection(transport: value).receive(
+                limit: .preauthentication)
             XCTAssertEqual(frame.payload, Data([UInt8(expected)]))
         }
         await listener.stop()
@@ -158,6 +160,40 @@ final class MeshConnectionListenerTests: XCTestCase {
         XCTAssertEqual(waiting, 0)
         await listener.stop()
     }
+
+    func testProbeHostReturnsOnlyBoundedNonceDeviceHashAndDisplayName() async throws {
+        let transport = RecordingMeshListenerTransport()
+        let listener = MeshConnectionListener(transport: transport)
+        let device = DeviceID(rawValue: UUID())
+        let host = MeshProbeHost(listener: listener, device: device, displayName: "书房 Mac")
+        try await host.start()
+        let nonce = Data(repeating: 7, count: 32)
+        let request = try MeshPeerProbeCodec.encode(MeshPeerProbeRequest(nonce: nonce))
+        let connection = RecordingListenerByteConnection(
+            input: try MeshWireProtocol.encode(
+                purpose: .probe,
+                payload: request,
+                limit: .preauthentication
+            )
+        )
+
+        await transport.accept(connection)
+        try await waitUntil { await connection.closeCount() == 1 }
+
+        let output = await connection.sentBytes()
+        let decoded = try MeshWireProtocol.decodeHeader(
+            Data(output.prefix(8)),
+            limit: .preauthentication
+        )
+        XCTAssertEqual(decoded.purpose, .probe)
+        let payload = Data(output.dropFirst(8))
+        XCTAssertEqual(payload.count, decoded.payloadLength)
+        let response = try MeshPeerProbeCodec.decode(payload, expectedNonce: nonce)
+        XCTAssertEqual(response.deviceIDHash, MeshPeerDirectory.deviceIDHash(for: device))
+        XCTAssertEqual(response.displayName, "书房 Mac")
+        await host.stop()
+        await listener.stop()
+    }
 }
 
 private actor RecordingMeshListenerTransport: MeshListenerTransport {
@@ -182,9 +218,10 @@ private actor RecordingMeshListenerTransport: MeshListenerTransport {
 private actor RecordingListenerByteConnection: MeshByteConnection {
     private var input: Data
     private var closes = 0
+    private var output = Data()
 
     init(input: Data) { self.input = input }
-    func send(_ bytes: Data) {}
+    func send(_ bytes: Data) { output.append(bytes) }
     func receive(minimum: Int, maximum: Int) throws -> Data {
         guard !input.isEmpty else { throw MeshWireError.connectionClosed }
         let bytes = Data(input.prefix(maximum))
@@ -193,6 +230,7 @@ private actor RecordingListenerByteConnection: MeshByteConnection {
     }
     func close() { closes += 1 }
     func closeCount() -> Int { closes }
+    func sentBytes() -> Data { output }
 }
 
 private actor CountingListenerByteConnection: MeshByteConnection {

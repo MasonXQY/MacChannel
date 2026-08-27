@@ -5,6 +5,25 @@ import XCTest
 @testable import MacChannelCore
 
 final class AppRuntimeTests: XCTestCase {
+    func testIsolatedLaunchCanExerciseBothConnectivityModesWithoutProductionOverride() throws {
+        let marker = "/tmp/macchannel-mode-\(UUID().uuidString)"
+        let personal = try ProductionRuntimeConfiguration.current(
+            environment: ["MACCHANNEL_LAUNCH_TEST_CONNECTIVITY_MODE": "personalMesh"],
+            arguments: ["MacChannel", "--production-launch-test", marker]
+        )
+        let publicMode = try ProductionRuntimeConfiguration.current(
+            environment: ["MACCHANNEL_LAUNCH_TEST_CONNECTIVITY_MODE": "publicService"],
+            arguments: ["MacChannel", "--production-launch-test", marker]
+        )
+        let ignored = try ProductionRuntimeConfiguration.current(
+            environment: ["MACCHANNEL_LAUNCH_TEST_CONNECTIVITY_MODE": "publicService"],
+            arguments: ["MacChannel"]
+        )
+
+        XCTAssertEqual(personal.isolatedConnectivityMode, .personalMesh)
+        XCTAssertEqual(publicMode.isolatedConnectivityMode, .publicService)
+        XCTAssertNil(ignored.isolatedConnectivityMode)
+    }
     func testLaunchModeUsesProductionUnlessShellIsExplicit() {
         XCTAssertEqual(AppLaunchMode.resolve(arguments: [], environment: [:]), .production)
         XCTAssertEqual(

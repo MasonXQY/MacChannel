@@ -165,6 +165,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
             marker: URL(fileURLWithPath: arguments[flag + 1]),
             status: statusName,
             identityID: container.runtimeIdentityID!.rawValue.uuidString.lowercased(),
+            connectivityMode: container.runtimeConnectivityMode?.rawValue ?? "unknown",
             settingsAvailable: container.settingsSurfaceService.isAvailable,
             statusInstalled: statusItemController != nil
         )
@@ -181,6 +182,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         guard let diagnostics = productionLaunchDiagnostics else { return }
         let object: [String: Any] = [
             "identityID": diagnostics.identityID,
+            "connectivityMode": diagnostics.connectivityMode,
             "runtimeStatus": diagnostics.status,
             "settingsAvailable": diagnostics.settingsAvailable,
             "shutdownComplete": true,
@@ -196,6 +198,7 @@ private struct ProductionLaunchDiagnostics {
     let marker: URL
     let status: String
     let identityID: String
+    let connectivityMode: String
     let settingsAvailable: Bool
     let statusInstalled: Bool
 }

@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+
 @testable import MacChannelAppKit
 @testable import MacChannelCore
 
@@ -47,7 +48,7 @@ final class TransferSurfaceTests: XCTestCase {
             devices: [
                 DeviceSetting(
                     device: DeviceSummary(id: id, displayName: "原名称", availability: .lan)
-                ),
+                )
             ],
             announcer: announcer
         )
@@ -70,7 +71,7 @@ final class TransferSurfaceTests: XCTestCase {
                 autoAccept: true,
                 maximumBytes: 10_000_000,
                 directory: originalDirectory
-            ),
+            )
         ])
         let service = FailingSettingsSurfaceService()
 
@@ -130,6 +131,54 @@ final class TransferSurfaceTests: XCTestCase {
             "安全中继地址已保存；请重新启动 Mac 通道后生效。"
         )
         XCTAssertEqual(announcer.messages, ["安全中继地址已保存；请重新启动 Mac 通道后生效。"])
+    }
+
+    func testPersonalMeshStatesAndEstablishedRoutesUsePlainChineseLabels() {
+        XCTAssertEqual(PersonalMeshStatus.tailscaleNotInstalled.localizedText, "安装 Tailscale")
+        XCTAssertEqual(PersonalMeshStatus.tailscaleDisconnected.localizedText, "请先连接 Tailscale")
+        XCTAssertEqual(PersonalMeshStatus.readyToEnable.localizedText, "启用个人网络通道")
+        XCTAssertEqual(PersonalMeshStatus.portConflict.localizedText, "端口已被其他服务使用")
+
+        let direct = TransferSurfaceItem(
+            snapshot: TransferSnapshot(
+                id: TransferID(rawValue: UUID()),
+                peer: DeviceID(rawValue: UUID()),
+                phase: .transferring,
+                completedBytes: 1,
+                totalBytes: 2,
+                route: .directInternet
+            ),
+            peerName: "Mac",
+            displayName: "文件",
+            bytesPerSecond: nil,
+            estimatedTimeRemaining: nil,
+            outputURL: nil,
+            updatedAt: Date()
+        )
+        XCTAssertEqual(direct.routeText, "互联网直连")
+        XCTAssertEqual(direct.routeSymbol, "network")
+    }
+
+    @MainActor
+    func testPersonalMeshModeAndEnableActionsCommitAndAnnounce() async {
+        let announcer = RecordingAccessibilityAnnouncer()
+        let model = SettingsSurfaceModel(
+            connectivityMode: .publicService,
+            personalMeshStatus: .readyToEnable,
+            announcer: announcer
+        )
+        let service = SuccessfulPersonalMeshSettingsService()
+
+        await model.updateConnectivityMode(.personalMesh, using: service)
+        await model.enablePersonalMesh(using: service)
+
+        XCTAssertEqual(model.connectivityMode, .personalMesh)
+        XCTAssertEqual(model.personalMeshStatus, .enabled)
+        XCTAssertTrue(model.personalMeshEnabled)
+        XCTAssertEqual(service.mode, .personalMesh)
+        XCTAssertEqual(service.enableCount, 1)
+        XCTAssertTrue(announcer.messages.contains { $0.contains("新连接") })
+        XCTAssertTrue(announcer.messages.contains { $0.contains("个人网络通道已启用") })
     }
 
     @MainActor
@@ -454,7 +503,7 @@ final class TransferSurfaceTests: XCTestCase {
 
         surfaces.updateHistoryItems([persisted])
         surfaces.updateTransferSnapshots([
-            completedSnapshot(id: id, peer: peer),
+            completedSnapshot(id: id, peer: peer)
         ])
 
         let merged = try XCTUnwrap(model.history.first { $0.id == id })
@@ -472,7 +521,7 @@ final class TransferSurfaceTests: XCTestCase {
         let surfaces = makeSurfaces(transferModel: model)
 
         surfaces.updateTransferSnapshots([
-            completedSnapshot(id: id, peer: peer),
+            completedSnapshot(id: id, peer: peer)
         ])
         surfaces.updateHistoryItems([
             completedHistoryItem(
@@ -480,7 +529,7 @@ final class TransferSurfaceTests: XCTestCase {
                 peer: peer,
                 displayName: "照片.zip",
                 outputURL: output
-            ),
+            )
         ])
         surfaces.updateTransferSnapshots([
             TransferSnapshot(
@@ -490,7 +539,7 @@ final class TransferSurfaceTests: XCTestCase {
                 completedBytes: 1,
                 totalBytes: 10,
                 route: .relay
-            ),
+            )
         ])
 
         let merged = try XCTUnwrap(model.history.first { $0.id == id })
@@ -505,12 +554,15 @@ final class TransferSurfaceTests: XCTestCase {
         let peer = DeviceID(rawValue: UUID())
         let model = TransferSurfaceModel()
         var timestamp: TimeInterval = 2_000
-        let surfaces = makeSurfaces(transferModel: model, now: { Date(timeIntervalSince1970: timestamp) })
+        let surfaces = makeSurfaces(
+            transferModel: model, now: { Date(timeIntervalSince1970: timestamp) })
 
         surfaces.updateTransferSnapshots([completedSnapshot(id: id, peer: peer)])
         timestamp = 1_000
         surfaces.updateHistoryItems([
-            historyItem(id: id, peer: peer, phase: .transferring, completed: 5, updatedAt: Date(timeIntervalSince1970: 1_000)),
+            historyItem(
+                id: id, peer: peer, phase: .transferring, completed: 5,
+                updatedAt: Date(timeIntervalSince1970: 1_000))
         ])
 
         let item = try XCTUnwrap(model.history.first { $0.id == id })
@@ -526,13 +578,18 @@ final class TransferSurfaceTests: XCTestCase {
         let peer = DeviceID(rawValue: UUID())
         let model = TransferSurfaceModel()
         let timestamp: TimeInterval = 1_000
-        let surfaces = makeSurfaces(transferModel: model, now: { Date(timeIntervalSince1970: timestamp) })
+        let surfaces = makeSurfaces(
+            transferModel: model, now: { Date(timeIntervalSince1970: timestamp) })
 
         surfaces.updateHistoryItems([
-            historyItem(id: id, peer: peer, phase: .completed, completed: 10, updatedAt: Date(timeIntervalSince1970: 2_000)),
+            historyItem(
+                id: id, peer: peer, phase: .completed, completed: 10,
+                updatedAt: Date(timeIntervalSince1970: 2_000))
         ])
         surfaces.updateTransferSnapshots([
-            TransferSnapshot(id: id, peer: peer, phase: .transferring, completedBytes: 5, totalBytes: 10, route: .relay),
+            TransferSnapshot(
+                id: id, peer: peer, phase: .transferring, completedBytes: 5, totalBytes: 10,
+                route: .relay)
         ])
 
         XCTAssertTrue(model.active.isEmpty)
@@ -587,7 +644,7 @@ final class TransferSurfaceTests: XCTestCase {
             let id = TransferID(rawValue: UUID())
             ids.append(id)
             surfaces.updateTransferSnapshots([
-                completedSnapshot(id: id, peer: DeviceID(rawValue: UUID())),
+                completedSnapshot(id: id, peer: DeviceID(rawValue: UUID()))
             ])
         }
 
@@ -902,8 +959,12 @@ private final class PendingPeerPairingService: PairingSurfaceServicing {
     }
 
     func createCode() async throws -> String { throw SurfaceActionFailure.expected }
-    func join(code: String) async throws -> PairingJoinResult { throw SurfaceActionFailure.expected }
-    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult { .committed }
+    func join(code: String) async throws -> PairingJoinResult {
+        throw SurfaceActionFailure.expected
+    }
+    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
+        .committed
+    }
     func cancel() async throws {}
     func pendingPeer() async -> DeviceSummary? { peer }
 }
@@ -912,7 +973,9 @@ private final class PendingPeerPairingService: PairingSurfaceServicing {
 private final class FailingPairingSurfaceService: PairingSurfaceServicing {
     let isAvailable = true
     func createCode() async throws -> String { throw SurfaceActionFailure.expected }
-    func join(code: String) async throws -> PairingJoinResult { throw SurfaceActionFailure.expected }
+    func join(code: String) async throws -> PairingJoinResult {
+        throw SurfaceActionFailure.expected
+    }
     func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
         throw SurfaceActionFailure.expected
     }
@@ -941,16 +1004,22 @@ private final class WarningPairingSurfaceService: PairingSurfaceServicing {
 @MainActor
 private final class FailingSettingsSurfaceService: DeviceSettingsServicing {
     let isAvailable = true
-    func rename(_ id: DeviceID, to displayName: String) async throws { throw SurfaceActionFailure.expected }
+    func rename(_ id: DeviceID, to displayName: String) async throws {
+        throw SurfaceActionFailure.expected
+    }
     func revoke(_ id: DeviceID) async throws -> SurfaceActionResult {
         throw SurfaceActionFailure.expected
     }
     func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {
         throw SurfaceActionFailure.expected
     }
-    func updateDefaultDirectory(_ directory: URL) async throws { throw SurfaceActionFailure.expected }
+    func updateDefaultDirectory(_ directory: URL) async throws {
+        throw SurfaceActionFailure.expected
+    }
     func updateRendezvousURL(_ value: String) async throws { throw SurfaceActionFailure.expected }
-    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws { throw SurfaceActionFailure.expected }
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {
+        throw SurfaceActionFailure.expected
+    }
 }
 
 @MainActor
@@ -958,9 +1027,29 @@ private final class SuccessfulRendezvousSettingsService: DeviceSettingsServicing
     let isAvailable = true
     func rename(_ id: DeviceID, to displayName: String) async throws {}
     func revoke(_ id: DeviceID) async throws -> SurfaceActionResult { .committed }
-    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {}
+    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {
+    }
     func updateDefaultDirectory(_ directory: URL) async throws {}
     func updateRendezvousURL(_ value: String) async throws {}
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
+}
+
+@MainActor
+private final class SuccessfulPersonalMeshSettingsService: DeviceSettingsServicing {
+    let isAvailable = true
+    private(set) var mode: ConnectivityMode?
+    private(set) var enableCount = 0
+    func rename(_ id: DeviceID, to displayName: String) async throws {}
+    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult { .committed }
+    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {
+    }
+    func updateDefaultDirectory(_ directory: URL) async throws {}
+    func updateRendezvousURL(_ value: String) async throws {}
+    func updateConnectivityMode(_ mode: ConnectivityMode) async throws { self.mode = mode }
+    func enablePersonalMesh() async throws -> PersonalMeshStatus {
+        enableCount += 1
+        return .enabled
+    }
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
 }
 
@@ -972,7 +1061,8 @@ private final class WarningSettingsSurfaceService: DeviceSettingsServicing {
     func revoke(_ id: DeviceID) async throws -> SurfaceActionResult {
         .committedWithWarning(Self.warning)
     }
-    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {}
+    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {
+    }
     func updateDefaultDirectory(_ directory: URL) async throws {}
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
 }
