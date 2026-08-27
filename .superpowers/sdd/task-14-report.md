@@ -19,20 +19,16 @@ Docker, signing, or notarization evidence was invented.
   checks still blocked.
 - `Scripts/audit-privacy.sh --static-only` checks forbidden server columns,
   sensitive Swift/Go/shell logging, and coturn mount/logging contracts. Default
-  mode exits 2 after `STATIC PASS` with `RUNTIME BLOCKED`; runtime PASS requires
-  an explicit transferred fixture plus client, rendezvous, coturn, PostgreSQL,
-  metrics, mount, and expiry evidence.
+  mode exits 2 after `STATIC PASS` with `RUNTIME BLOCKED`. There is no runtime
+  PASS code path and evidence arguments are deliberately ignored.
 - `Scripts/test-privacy-audit.sh` proves the scanner rejects Go payload, Swift
   path, and shell private-key logging mutants while accepting a fixed-category
   error log.
-- Runtime evidence now requires a signed manifest chained to the code commit,
-  canary ID, TransferID, source/destination hashes, UTC capture window, live
-  container IDs, raw inspect/mount data, PostgreSQL before/after expiry queries,
-  and metrics. The independently controlled auditor public key is not provisioned,
-  so fabricated or self-signed evidence cannot produce PASS on this checkout.
-- Evidence mutants reject empty bundles; pairing-code, private-key and TURN-user
-  leaks; newline-split content canaries; binary leaks; and files over 16 MiB.
-  Failures never echo the canary value or matching line.
+- `privacy-evidence-schema.md` is retained only as a NOT IMPLEMENTED future
+  producer specification. The incomplete runtime scanner/verifier was deleted.
+- Runtime block contract tests prove default, arbitrary arguments, empty,
+  self-signed, unreadable and symlink evidence all return status 2 and never
+  emit `RUNTIME PASS`.
 - `docs/operations/deployment.md` covers DNS, TLS, PostgreSQL 17 migrations,
   TURN ports, secret rotation, health and capacity alerts, rate limits, retention,
   client signing/update, and service/client/database rollback.
@@ -80,7 +76,5 @@ to its service image digests and Git commit.
 
 The immutable Task 14 privacy-finding revision is commit `764e280`; its audit
 document records the exact script content hashes and UTC evidence timestamp.
-The runtime-evidence hardening content revision is commit `5158d40`; this exact
-identifier is recorded by the subsequent append-only provenance commit.
-The producer-contract and pattern-channel hardening revision is `0ba4bb2`; it is
-also pinned by a subsequent append-only provenance commit.
+Historical runtime-verifier revisions `5158d40` and `0ba4bb2` are superseded by
+the final fail-closed convergence commit pinned in the audit document.

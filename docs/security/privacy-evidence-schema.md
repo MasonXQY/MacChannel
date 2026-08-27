@@ -1,8 +1,9 @@
-# Privacy runtime evidence schema
+# Privacy runtime evidence schema — NOT IMPLEMENTED
 
-This bundle may be produced only by the Docker-backed `verify-e2e` run or a real-Mac acceptance
-runner. The repository currently has no trusted producer or pinned auditor key, so runtime privacy
-remains BLOCKED. Hand-written bundles are not acceptance evidence.
+This is a future implementation specification, not a verifier and not an acceptance gate. The
+repository has no trusted producer, pinned independent trust root, or runtime verifier. Therefore
+runtime privacy remains BLOCKED and `audit-privacy.sh` deliberately ignores all evidence arguments.
+Hand-written or self-signed bundles are never acceptance evidence.
 
 `manifest.json` is UTF-8 canonical JSON signed as raw bytes by the independent audit key. Required
 fields are:
