@@ -1,6 +1,6 @@
 # Mac 通道真实 Mac 验收记录
 
-状态：**NOT RUN**  
+状态：**NOT RUN**
 规则：所有行必须在相同 Git commit 的签名、公证构建上完成。不得用模拟器、单机
 loopback、单元测试或 Docker 内部流量替代。失败必须重开对应实现任务，不接受 waiver。
 
