@@ -40,6 +40,8 @@ type stunAttribute struct {
 func main() {
 	serverText := flag.String("server", "127.0.0.1:3478", "host-published TURN UDP endpoint")
 	expectedText := flag.String("expected-ip", "", "expected advertised relay IPv4 address")
+	minimumPort := flag.Int("min-port", 49160, "lowest host-published relay port")
+	maximumPort := flag.Int("max-port", 49200, "highest host-published relay port")
 	secretPath := flag.String("secret-file", "", "TURN REST shared-secret file")
 	flag.Parse()
 	if *expectedText == "" || *secretPath == "" {
@@ -57,10 +59,20 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	if !address.IP.Equal(expected) {
-		fatal("XOR-RELAYED-ADDRESS does not match the configured host/deployment address")
+	if err := validateRelayAddress(address, expected, *minimumPort, *maximumPort); err != nil {
+		fatal(err.Error())
 	}
 	fmt.Printf("XOR-RELAYED-ADDRESS verified as %s\n", address)
+}
+
+func validateRelayAddress(address *net.UDPAddr, expected net.IP, minimumPort, maximumPort int) error {
+	if address == nil || !address.IP.Equal(expected) {
+		return errors.New("XOR-RELAYED-ADDRESS does not match the configured host/deployment address")
+	}
+	if minimumPort < 1 || maximumPort > 65535 || minimumPort > maximumPort || address.Port < minimumPort || address.Port > maximumPort {
+		return errors.New("XOR-RELAYED-ADDRESS port is outside the host-published relay range")
+	}
+	return nil
 }
 
 func readSecret(path string) ([]byte, error) {

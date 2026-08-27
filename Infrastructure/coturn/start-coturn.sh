@@ -15,14 +15,15 @@ if [ "${#secret}" -lt 32 ] || printf '%s' "$secret" | grep -q '[^A-Za-z0-9_+/=-]
   exit 1
 fi
 
-if ! printf '%s\n' "${TURN_EXTERNAL_IP:-}" | awk -F. '
+external_ip=${TURN_EXTERNAL_IP:-host.docker.internal}
+if [ "$external_ip" != host.docker.internal ] && ! printf '%s\n' "$external_ip" | awk -F. '
   NF == 4 && $1 != 0 && $1 != 127 {
     for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1
     exit 0
   }
   { exit 1 }
 '; then
-  echo "coturn: TURN_EXTERNAL_IP must be a non-loopback IPv4 address" >&2
+  echo "coturn: TURN_EXTERNAL_IP must be host.docker.internal or a non-loopback IPv4 address" >&2
   exit 1
 fi
 
@@ -40,5 +41,5 @@ fi
 
 umask 077
 cp /etc/coturn/turnserver.conf "$runtime_config"
-printf '\nstatic-auth-secret=%s\nexternal-ip=%s/%s\n' "$secret" "$TURN_EXTERNAL_IP" "$container_ip" >> "$runtime_config"
+printf '\nstatic-auth-secret=%s\nexternal-ip=%s/%s\n' "$secret" "$external_ip" "$container_ip" >> "$runtime_config"
 exec turnserver -c "$runtime_config"

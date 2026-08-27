@@ -1,18 +1,36 @@
 name: macchannel-local
 
 services:
+  secret-init:
+    build:
+      context: ..
+      dockerfile: Infrastructure/secrets/Dockerfile
+    volumes:
+      - stack_secrets:/stack-secrets
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   postgres:
     image: postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    depends_on:
+      secret-init:
+        condition: service_completed_successfully
     environment:
       POSTGRES_DB: macchannel
       POSTGRES_USER: macchannel
-      # The official entrypoint reads this while PID 1 is root, then drops to postgres.
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    secrets:
-      - postgres_password
+      # The official entrypoint reads this as root, then drops to postgres.
+      POSTGRES_PASSWORD_FILE: /stack-secrets/postgres-password
     volumes:
+      - stack_secrets:/stack-secrets:ro
       - postgres_data:/var/lib/postgresql/data
       - ../Services/migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U macchannel -d macchannel"]
       interval: 3s
@@ -28,6 +46,8 @@ services:
       context: ..
       dockerfile: Infrastructure/rendezvous/Dockerfile
     depends_on:
+      secret-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
@@ -44,11 +64,11 @@ services:
       TURN_SHARED_SECRET_FILE: /run/macchannel/turn-shared-secret
       TURN_URLS: stun:localhost:3478,turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp,turns:localhost:5349?transport=tcp
       MACCHANNEL_ALLOWED_WS_ORIGINS: https://localhost:8443
-    secrets:
-      - postgres_password
-      - turn_shared_secret
-      - localhost_cert
-      - localhost_key
+    volumes:
+      - stack_secrets:/stack-secrets:ro
+    networks:
+      - backend
+      - edge
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:8443:8443"
@@ -59,8 +79,7 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      # PID 1 needs only enough privilege to read the 0600 bind secrets, copy,
-      # chown, and drop identity. Linux clears these when setuid(65532) succeeds.
+      # PID 1 reads the 0600 volume files, copies/chowns, then setuid clears all.
       - CHOWN
       - DAC_OVERRIDE
       - SETGID
@@ -79,12 +98,19 @@ services:
     build:
       context: ..
       dockerfile: Infrastructure/coturn/Dockerfile
+    depends_on:
+      secret-init:
+        condition: service_completed_successfully
     environment:
-      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:?Run Scripts/run-local-stack.sh or set TURN_EXTERNAL_IP}
-    secrets:
-      - turn_shared_secret
-      - localhost_cert
-      - localhost_key
+      # Clean-checkout Docker Desktop default; the runner supplies a verified
+      # LAN/deployment IPv4 for real relay use.
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-host.docker.internal}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - stack_secrets:/stack-secrets:ro
+    networks:
+      - relay
     ports:
       - "3478:3478/udp"
       - "3478:3478/tcp"
@@ -116,13 +142,10 @@ services:
 
 volumes:
   postgres_data:
+  stack_secrets:
 
-secrets:
-  postgres_password:
-    file: ${MACCHANNEL_SECRET_ROOT:?Run Scripts/run-local-stack.sh}/postgres-password
-  turn_shared_secret:
-    file: ${MACCHANNEL_SECRET_ROOT:?Run Scripts/run-local-stack.sh}/turn-shared-secret
-  localhost_cert:
-    file: ${MACCHANNEL_SECRET_ROOT:?Run Scripts/run-local-stack.sh}/tls/localhost.pem
-  localhost_key:
-    file: ${MACCHANNEL_SECRET_ROOT:?Run Scripts/run-local-stack.sh}/tls/localhost-key.pem
+networks:
+  backend:
+    internal: true
+  edge:
+  relay:

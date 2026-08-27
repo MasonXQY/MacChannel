@@ -13,4 +13,4 @@ COPY --from=launcher-build /out/secret-launcher /usr/local/bin/secret-launcher
 COPY Infrastructure/coturn/start-coturn.sh /usr/local/bin/start-coturn.sh
 COPY Infrastructure/coturn/turnserver.conf /etc/coturn/turnserver.conf
 
-ENTRYPOINT ["/usr/local/bin/secret-launcher", "--uid", "65534", "--gid", "65534", "--copy", "/run/secrets/turn_shared_secret=/run/coturn/secrets/turn-shared-secret", "--copy", "/run/secrets/localhost_cert=/run/coturn/secrets/localhost.pem", "--copy", "/run/secrets/localhost_key=/run/coturn/secrets/localhost-key.pem", "--", "/usr/local/bin/start-coturn.sh"]
+ENTRYPOINT ["/usr/local/bin/secret-launcher", "--uid", "65534", "--gid", "65534", "--copy", "/stack-secrets/turn-shared-secret=/run/coturn/secrets/turn-shared-secret", "--copy", "/stack-secrets/tls/localhost.pem=/run/coturn/secrets/localhost.pem", "--copy", "/stack-secrets/tls/localhost-key.pem=/run/coturn/secrets/localhost-key.pem", "--", "/usr/local/bin/start-coturn.sh"]

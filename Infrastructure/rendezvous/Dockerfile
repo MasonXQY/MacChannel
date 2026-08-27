@@ -14,4 +14,4 @@ COPY --from=build /out/secret-launcher /usr/local/bin/secret-launcher
 
 USER 0:0
 EXPOSE 8080 8443
-ENTRYPOINT ["/usr/local/bin/secret-launcher", "--uid", "65532", "--gid", "65532", "--copy", "/run/secrets/postgres_password=/run/macchannel/postgres-password", "--copy", "/run/secrets/turn_shared_secret=/run/macchannel/turn-shared-secret", "--copy", "/run/secrets/localhost_cert=/run/macchannel/localhost.pem", "--copy", "/run/secrets/localhost_key=/run/macchannel/localhost-key.pem", "--", "/usr/local/bin/rendezvous"]
+ENTRYPOINT ["/usr/local/bin/secret-launcher", "--uid", "65532", "--gid", "65532", "--copy", "/stack-secrets/postgres-password=/run/macchannel/postgres-password", "--copy", "/stack-secrets/turn-shared-secret=/run/macchannel/turn-shared-secret", "--copy", "/stack-secrets/tls/localhost.pem=/run/macchannel/localhost.pem", "--copy", "/stack-secrets/tls/localhost-key.pem=/run/macchannel/localhost-key.pem", "--", "/usr/local/bin/rendezvous"]

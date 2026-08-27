@@ -1,36 +1,59 @@
 # 本地 rendezvous 与 TURN 栈
 
-从全新检出的仓库，在 macOS 安装 Docker Desktop、Go 与 OpenSSL 后，运行：
+## 全新检出直接启动
+
+Task 12 的原始入口不依赖环境变量，也不要求预先创建未跟踪 secret：
+
+```sh
+docker compose -f Infrastructure/docker-compose.yml up -d --build
+curl --fail http://localhost:8080/healthz
+docker compose -f Infrastructure/docker-compose.yml ps
+```
+
+一次性的 `secret-init` 容器会在名为 `macchannel-local_stack_secrets` 的
+Docker volume 中安全生成数据库密码、TURN 共享密钥、本地 CA 和 localhost 证书。
+完成标记最后原子写入；未完成的首次生成可以恢复，已完成但被篡改的 volume 会失败
+关闭，绝不会静默轮换并破坏现有数据库。重启和普通 `docker compose down` 会保留
+这些材料；若要完全重置，必须同时明确删除 `stack_secrets` 和 `postgres_data` volume。
+
+直接入口把 `host.docker.internal` 作为 Docker Desktop 的本地 advertised relay
+默认值，足以启动 clean-checkout 栈。需要验证真实 relay 地址、系统信任和错误路径时，
+应使用完整 runner：
 
 ```sh
 Scripts/run-local-stack.sh
 ```
 
-脚本会创建仅当前用户可读的数据库密码、TURN 共享密钥和本地 CA，检测 Mac
-当前局域网 IPv4，构建并启动 PostgreSQL 17、rendezvous、STUN/TURN。默认应用配置
-`wss://localhost:8443/v1/ws` 无需环境变量覆盖。若自动检测不适合当前网络，或在其他
-主机部署，请明确指定该主机可被客户端访问的 IPv4：
+runner 会检测 Mac 当前局域网 IPv4，也可显式指定部署宿主机的一对一映射地址：
 
 ```sh
 Scripts/run-local-stack.sh --turn-external-ip 192.0.2.44
 ```
 
-不能使用 `127.0.0.1` 作为 TURN 对外地址：coturn 在容器 bridge 网络内运行，返回的
-`XOR-RELAYED-ADDRESS` 必须是宿主机或部署入口的可达地址。脚本从宿主机实际发起
-TURN Allocate，并核对服务器返回的 relay 地址。
+它从 named volume 只导出本机验证需要的 TURN secret、公开 CA/证书和 server key，
+保持目录 `0700`、私密文件 `0600`，然后校验链、hostname 与公私钥匹配。rendezvous
+与 coturn 的 PID 1 则从只读 named volume 复制到容器私有 tmpfs，设置为运行 UID
+所有的 `0400` 文件，再清空附加组、降权 exec；服务最终没有有效 capability。
 
-Compose 的 secret 源文件保持目录 `0700`、私密文件 `0600`。rendezvous 与 coturn
-镜像的 PID 1 先以 root 打开这些只读挂载，复制到容器私有 tmpfs、设置为运行 UID
-所有的 `0400` 文件，然后清空附加组并降权 exec 服务；服务本身不以 root 运行。
-PostgreSQL 官方入口同样先读取 `_FILE` secret，再降权为 postgres。启动后脚本会核验
-PID 1 UID 与 tmpfs 文件所有权。
+宿主 TURN probe 会完成带 MESSAGE-INTEGRITY 的真实 Allocate，并同时核对返回的
+`XOR-RELAYED-ADDRESS` 及端口处于已发布的 `49160...49200`。完整 peer 数据面验证
+留给 Task 13。
 
-任何启动、健康检查、TLS、TURN 或日志检查失败，脚本都会停止本次 Compose 栈，并
-删除本次才加入用户钥匙串的本地 CA 信任。已有信任不会被删除。只准备密钥可用
-`--prepare-only --no-trust`。
+## 网络与 peer 策略
 
-所有基础镜像同时固定可读 tag 和不可变 manifest digest。可在不安装 Docker 的机器上
-检查 tag 是否发生上游漂移：
+- PostgreSQL 只连接 Docker internal `backend` 网络。
+- rendezvous 同时连接 `backend` 与独立 `edge` 网络。
+- coturn 只连接 `relay` 网络，与 PostgreSQL/rendezvous 不共享任何容器网络。
+- TURN 拒绝 loopback、RFC1918、共享地址空间、link-local、IPv6 ULA/link-local peer，
+  防止 relay 访问宿主或 backend。局域网设备仍可作为 TURN 客户端；局域网设备之间
+  的传输使用优先级更高的直连 LAN 路径，TURN 只服务公网 fallback。
+
+任何 runner 启动、健康检查、TLS、TURN 或日志检查失败，都会保留原始失败码，停止
+本次 Compose 栈，删除本次新建的 stack/database volume，并删除仅由本次加入用户
+钥匙串的 CA 信任。已有 volume 和已有信任不会被删除。
+
+所有基础镜像同时固定可读 tag 和不可变 manifest digest。无需 Docker 即可检查 tag
+是否发生上游漂移：
 
 ```sh
 Scripts/verify-image-digests.sh

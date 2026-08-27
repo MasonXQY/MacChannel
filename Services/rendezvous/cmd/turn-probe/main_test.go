@@ -35,6 +35,17 @@ func TestXORRelayedAddressRejectsMissingAttribute(t *testing.T) {
 	}
 }
 
+func TestValidateRelayAddressRequiresConfiguredPublishedPortRange(t *testing.T) {
+	if err := validateRelayAddress(&net.UDPAddr{IP: net.ParseIP("192.0.2.44"), Port: 49160}, net.ParseIP("192.0.2.44"), 49160, 49200); err != nil {
+		t.Fatal(err)
+	}
+	for _, port := range []int{49159, 49201} {
+		if err := validateRelayAddress(&net.UDPAddr{IP: net.ParseIP("192.0.2.44"), Port: port}, net.ParseIP("192.0.2.44"), 49160, 49200); err == nil {
+			t.Fatalf("accepted unpublished relay port %d", port)
+		}
+	}
+}
+
 func TestAllocateCompletesLongTermAuthenticationAndReturnsHostRelay(t *testing.T) {
 	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
