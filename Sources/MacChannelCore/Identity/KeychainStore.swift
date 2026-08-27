@@ -33,7 +33,7 @@ public enum KeychainStoreError: Error, Equatable {
     case operationFailed(Int32)
 }
 
-public struct KeychainStore: SecretStore {
+public struct KeychainStore: SecretStore, Sendable {
     public static let identityService = "com.mason.macchannel.identity"
     public static let identityPolicy = KeychainPolicy(
         service: identityService,

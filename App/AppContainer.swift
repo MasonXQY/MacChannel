@@ -41,13 +41,20 @@ final class AppContainer {
             transferCoordinator: UnavailableTransferCoordinator()
         )
     }
+
+    static func loadingShell() -> AppContainer {
+        AppContainer(
+            deviceDirectory: DeviceDirectory(trust: DeviceTrust(trustedIDs: [])),
+            transferCoordinator: UnavailableTransferCoordinator()
+        )
+    }
 }
 
-private enum AppContainerError: Error {
+enum AppContainerError: Error {
     case transferServicesUnavailable
 }
 
-private actor UnavailableTransferCoordinator: TransferCoordinating {
+actor UnavailableTransferCoordinator: TransferCoordinating {
     func send(items: [URL], to device: DeviceID) async throws -> TransferID {
         throw AppContainerError.transferServicesUnavailable
     }

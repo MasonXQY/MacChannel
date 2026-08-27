@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import CoreGraphics
 import MacChannelCore
@@ -98,6 +99,8 @@ enum DeviceFanTarget: Hashable {
         case .more: "展开全部在线设备"
         }
     }
+
+    var accessibilityRole: NSAccessibility.Role { .button }
 }
 
 enum DeviceFanTargets {
@@ -172,8 +175,8 @@ struct DeviceFanDropSession {
 
 enum DeviceFanStripLayout {
     static let targetSize = CGSize(width: 96, height: 100)
-    static let spacing: CGFloat = 10
-    static let padding: CGFloat = 12
+    static let spacing: CGFloat = 18
+    static let padding: CGFloat = 18
 
     static func contentSize(count: Int) -> CGSize {
         let targetCount = CGFloat(max(count, 0))
@@ -194,6 +197,31 @@ enum DeviceFanStripLayout {
             )
         }
     }
+
+    static func hoverFrame(for frame: CGRect) -> CGRect {
+        let width = frame.width * 1.15
+        let height = frame.height * 1.15
+        return CGRect(
+            x: frame.midX - width / 2,
+            y: frame.minY,
+            width: width,
+            height: height
+        )
+    }
+
+    static func hitTest(
+        _ point: CGPoint,
+        in frames: [CGRect],
+        hoveredIndex: Int?
+    ) -> Int? {
+        if let hoveredIndex,
+           frames.indices.contains(hoveredIndex),
+           hoverFrame(for: frames[hoveredIndex]).contains(point)
+        {
+            return hoveredIndex
+        }
+        return DeviceFanLayout.hitTest(point, in: frames)
+    }
 }
 
 @MainActor
@@ -201,6 +229,7 @@ final class DeviceFanViewModel: ObservableObject {
     @Published private(set) var targets: [DeviceFanTarget]
     @Published private(set) var hoveredTarget: DeviceFanTarget?
     var onMoreHovered: (() -> Void)?
+    var onActivate: ((DeviceFanTarget) -> Bool)?
 
     init(targets: [DeviceFanTarget]) {
         self.targets = targets
@@ -219,6 +248,11 @@ final class DeviceFanViewModel: ObservableObject {
             onMoreHovered?()
         }
     }
+
+    @discardableResult
+    func activate(_ target: DeviceFanTarget) -> Bool {
+        onActivate?(target) ?? false
+    }
 }
 
 struct DeviceFanView: View {
@@ -231,7 +265,8 @@ struct DeviceFanView: View {
                 DeviceFanTargetView(
                     target: target,
                     isHovered: model.hoveredTarget == target,
-                    reduceMotion: reduceMotion
+                    reduceMotion: reduceMotion,
+                    activate: { model.activate(target) }
                 )
                 .onHover { hovering in
                     model.hover(hovering ? target : nil)
@@ -254,39 +289,46 @@ private struct DeviceFanTargetView: View {
     let target: DeviceFanTarget
     let isHovered: Bool
     let reduceMotion: Bool
+    let activate: () -> Bool
 
     var body: some View {
-        VStack(spacing: 5) {
-            Image(systemName: target.symbolName)
-                .font(.system(size: 30, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .accessibilityHidden(true)
-            Text(target.title)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Label(isHovered && target.deviceID != nil ? "松开发送" : target.statusText,
-                  systemImage: statusSymbol)
-                .font(.caption2)
-                .foregroundStyle(isHovered ? Color.blue : .secondary)
-                .lineLimit(1)
+        Button {
+            _ = activate()
+        } label: {
+            VStack(spacing: 5) {
+                Image(systemName: target.symbolName)
+                    .font(.system(size: 30, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
+                    .accessibilityHidden(true)
+                Text(target.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Label(isHovered && target.deviceID != nil ? "松开发送" : target.statusText,
+                      systemImage: statusSymbol)
+                    .font(.caption2)
+                    .foregroundStyle(isHovered ? Color.blue : .secondary)
+                    .lineLimit(1)
+            }
+            .frame(
+                width: DeviceFanStripLayout.targetSize.width,
+                height: DeviceFanStripLayout.targetSize.height
+            )
+            .foregroundStyle(isHovered ? Color.blue : .primary)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(isHovered ? Color.blue.opacity(0.14) : .clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(isHovered ? Color.blue : Color.secondary.opacity(0.22), lineWidth: 1.5)
+            )
+            .scaleEffect(isHovered && !reduceMotion ? 1.15 : 1, anchor: .bottom)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovered)
         }
-        .frame(
-            minWidth: DeviceFanStripLayout.targetSize.width,
-            minHeight: DeviceFanStripLayout.targetSize.height
-        )
-        .foregroundStyle(isHovered ? Color.blue : .primary)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(isHovered ? Color.blue.opacity(0.14) : .clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(isHovered ? Color.blue : Color.secondary.opacity(0.22), lineWidth: 1.5)
-        )
-        .scaleEffect(isHovered && !reduceMotion ? 1.15 : 1)
+        .buttonStyle(.plain)
+        .frame(width: DeviceFanStripLayout.targetSize.width, height: DeviceFanStripLayout.targetSize.height)
         .zIndex(isHovered ? 1 : 0)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovered)
         .contentShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(target.accessibilityLabel)

@@ -30,15 +30,18 @@ struct PairingFingerprintPresentation: Equatable {
         return peer == nil ? "等待获取对端设备身份" : "等待你在另一台 Mac 上人工核对"
     }
     var statusSymbol: String { canConfirm ? "person.2.badge.key" : "exclamationmark.triangle" }
+    var accessibilityFingerprint: String {
+        fingerprint.filter { !$0.isWhitespace }.map(String.init).joined(separator: " ")
+    }
 }
 
 @MainActor
 protocol PairingSurfaceServicing: AnyObject {
     var isAvailable: Bool { get }
-    func createCode() async -> String?
-    func join(code: String) async -> PairingJoinResult?
-    func confirmFingerprint(_ fingerprint: String) async
-    func cancel()
+    func createCode() async throws -> String
+    func join(code: String) async throws -> PairingJoinResult
+    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult
+    func cancel() async throws
     func pendingPeer() async -> DeviceSummary?
 }
 
@@ -52,17 +55,78 @@ final class PairingSurfaceModel: ObservableObject {
     @Published var hostedCode: String?
     @Published var entryCode: String
     @Published var pendingPeer: DeviceSummary?
+    @Published var actionError: String?
+    private let announcer: any AccessibilityAnnouncing
 
     init(
         state: PairingState = .idle,
         hostedCode: String? = nil,
         entryCode: String = "",
-        pendingPeer: DeviceSummary? = nil
+        pendingPeer: DeviceSummary? = nil,
+        actionError: String? = nil,
+        announcer: (any AccessibilityAnnouncing)? = nil
     ) {
         self.state = state
         self.hostedCode = hostedCode.map(PairingCodeInput.sanitize)
         self.entryCode = PairingCodeInput.sanitize(entryCode)
         self.pendingPeer = pendingPeer
+        self.actionError = actionError
+        self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
+    }
+
+    func createCode(using service: any PairingSurfaceServicing) async {
+        actionError = nil
+        do {
+            let code = try await service.createCode()
+            hostedCode = PairingCodeInput.sanitize(code)
+            state = .displayingCode(expiresAt: Date().addingTimeInterval(300))
+        } catch {
+            publishError("无法生成配对码，请检查网络后重试。")
+        }
+    }
+
+    func join(using service: any PairingSurfaceServicing) async {
+        let code = PairingCodeInput.sanitize(entryCode)
+        guard PairingCodeInput.isComplete(code) else { return }
+        actionError = nil
+        do {
+            let result = try await service.join(code: code)
+            pendingPeer = result.peer
+            state = .awaitingFingerprint(local: result.fingerprint, remote: result.fingerprint)
+        } catch {
+            publishError("无法验证配对码，请检查网络后重试。")
+        }
+    }
+
+    func confirm(fingerprint: String, using service: any PairingSurfaceServicing) async {
+        actionError = nil
+        do {
+            let result = try await service.confirmFingerprint(fingerprint)
+            if let peer = pendingPeer {
+                state = .confirmed(peer)
+            }
+            if let warning = result.warning {
+                publishError(warning)
+            }
+        } catch {
+            publishError("无法确认安全指纹，请重新核对后重试。")
+        }
+    }
+
+    func cancel(using service: any PairingSurfaceServicing) async -> Bool {
+        actionError = nil
+        do {
+            try await service.cancel()
+            return true
+        } catch {
+            publishError("无法取消配对，请稍后重试。")
+            return false
+        }
+    }
+
+    private func publishError(_ message: String) {
+        actionError = message
+        announcer.announce(message)
     }
 }
 
@@ -87,6 +151,13 @@ struct PairingView: View {
             }
 
             content
+
+            if let error = model.actionError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(error)
+            }
         }
         .padding(20)
         .frame(width: 420)
@@ -151,13 +222,7 @@ struct PairingView: View {
                     .disabled(!PairingCodeInput.isComplete(model.entryCode))
                     .frame(minHeight: 40)
                 Button("在本机生成配对码", systemImage: "number") {
-                    Task {
-                        guard let code = await service.createCode() else { return }
-                        model.hostedCode = PairingCodeInput.sanitize(code)
-                        model.state = .displayingCode(
-                            expiresAt: Date().addingTimeInterval(300)
-                        )
-                    }
+                    Task { await model.createCode(using: service) }
                 }
                 .frame(minHeight: 40)
             }
@@ -200,7 +265,7 @@ struct PairingView: View {
                     .frame(minHeight: 40)
                 Spacer()
                 Button("我已在另一台 Mac 核对一致", systemImage: "checkmark.shield") {
-                    Task { await service.confirmFingerprint(fingerprint) }
+                    Task { await model.confirm(fingerprint: fingerprint, using: service) }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!presentation.canConfirm)
@@ -219,6 +284,9 @@ struct PairingView: View {
                 .textSelection(.enabled)
         }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(title)，\(PairingFingerprintPresentation(peer: nil, fingerprint: value).accessibilityFingerprint)"
+        )
     }
 
     private func failedContent(_ error: MacChannelError) -> some View {
@@ -241,21 +309,19 @@ struct PairingView: View {
     }
 
     private func join() {
-        let code = PairingCodeInput.sanitize(model.entryCode)
-        guard PairingCodeInput.isComplete(code) else { return }
-        Task {
-            guard let result = await service.join(code: code) else { return }
-            model.pendingPeer = result.peer
-            model.state = .awaitingFingerprint(
-                local: result.fingerprint,
-                remote: result.fingerprint
-            )
-        }
+        Task { await model.join(using: service) }
     }
 
     private func dismiss() {
-        service.cancel()
-        onDismiss()
+        guard service.isAvailable else {
+            onDismiss()
+            return
+        }
+        Task {
+            if await model.cancel(using: service) {
+                onDismiss()
+            }
+        }
     }
 
     private func pairingErrorText(_ error: MacChannelError) -> String {
@@ -274,10 +340,12 @@ struct PairingView: View {
 @MainActor
 final class UnavailablePairingSurfaceService: PairingSurfaceServicing {
     let isAvailable = false
-    func createCode() async -> String? { nil }
-    func join(code: String) async -> PairingJoinResult? { nil }
-    func confirmFingerprint(_ fingerprint: String) async {}
-    func cancel() {}
+    func createCode() async throws -> String { throw PairingSurfaceError.unavailable }
+    func join(code: String) async throws -> PairingJoinResult { throw PairingSurfaceError.unavailable }
+    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
+        throw PairingSurfaceError.unavailable
+    }
+    func cancel() async throws { throw PairingSurfaceError.unavailable }
 }
 
 @MainActor
@@ -289,23 +357,26 @@ final class PairingCoordinatorSurfaceService: PairingSurfaceServicing {
         self.coordinator = coordinator
     }
 
-    func createCode() async -> String? {
-        try? await coordinator.createCode()
+    func createCode() async throws -> String {
+        try await coordinator.createCode()
     }
 
-    func join(code: String) async -> PairingJoinResult? {
-        try? await coordinator.join(code: code)
+    func join(code: String) async throws -> PairingJoinResult {
+        try await coordinator.join(code: code)
     }
 
-    func confirmFingerprint(_ fingerprint: String) async {
-        _ = try? await coordinator.confirmFingerprint(fingerprint)
+    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
+        _ = try await coordinator.confirmFingerprint(fingerprint)
+        return .committed
     }
 
-    func cancel() {
-        Task { try? await coordinator.cancelPendingPairing() }
+    func cancel() async throws {
+        try await coordinator.cancelPendingPairing()
     }
 
     func pendingPeer() async -> DeviceSummary? {
         await coordinator.pendingPeerSummary()
     }
 }
+
+private enum PairingSurfaceError: Error { case unavailable }

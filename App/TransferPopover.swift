@@ -82,7 +82,7 @@ struct TransferSurfaceItem: Identifiable, Sendable {
     }
 
     var canPause: Bool { snapshot.phase == .transferring }
-    var canResume: Bool { snapshot.phase == .paused || snapshot.phase == .failed }
+    var canResume: Bool { snapshot.phase == .paused }
     var canCancel: Bool {
         ![.completed, .failed, .cancelled, .cancelling].contains(snapshot.phase)
     }
@@ -106,9 +106,9 @@ struct TransferSurfaceItem: Identifiable, Sendable {
 
 @MainActor
 protocol TransferSurfaceServicing: AnyObject {
-    func pause(_ id: TransferID) async
-    func resume(_ id: TransferID) async
-    func cancel(_ id: TransferID) async
+    func pause(_ id: TransferID) async throws
+    func resume(_ id: TransferID) async throws
+    func cancel(_ id: TransferID) async throws
     func showInFinder(_ url: URL)
 }
 
@@ -116,10 +116,41 @@ protocol TransferSurfaceServicing: AnyObject {
 final class TransferSurfaceModel: ObservableObject {
     @Published var active: [TransferSurfaceItem]
     @Published var history: [TransferSurfaceItem]
+    @Published var actionError: String?
+    private let announcer: any AccessibilityAnnouncing
 
-    init(active: [TransferSurfaceItem] = [], history: [TransferSurfaceItem] = []) {
+    init(
+        active: [TransferSurfaceItem] = [],
+        history: [TransferSurfaceItem] = [],
+        actionError: String? = nil,
+        announcer: (any AccessibilityAnnouncing)? = nil
+    ) {
         self.active = active
         self.history = history
+        self.actionError = actionError
+        self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
+    }
+
+    func pause(_ id: TransferID, using service: any TransferSurfaceServicing) async {
+        await perform("无法暂停传输，请稍后重试。") { try await service.pause(id) }
+    }
+
+    func resume(_ id: TransferID, using service: any TransferSurfaceServicing) async {
+        await perform("无法继续传输，请检查设备连接后重试。") { try await service.resume(id) }
+    }
+
+    func cancel(_ id: TransferID, using service: any TransferSurfaceServicing) async {
+        await perform("无法取消传输，传输可能已经结束。") { try await service.cancel(id) }
+    }
+
+    private func perform(_ message: String, action: () async throws -> Void) async {
+        actionError = nil
+        do {
+            try await action()
+        } catch {
+            actionError = message
+            announcer.announce(message)
+        }
     }
 }
 
@@ -154,6 +185,13 @@ struct TransferPopover: View {
             }
             .pickerStyle(.segmented)
 
+            if let error = model.actionError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(error)
+            }
+
             ScrollView {
                 LazyVStack(spacing: 10) {
                     let items = section == .active ? model.active : model.history
@@ -165,7 +203,7 @@ struct TransferPopover: View {
                         .frame(minHeight: 180)
                     } else {
                         ForEach(items) { item in
-                            TransferRow(item: item, service: service)
+                            TransferRow(item: item, model: model, service: service)
                         }
                     }
                 }
@@ -179,6 +217,7 @@ struct TransferPopover: View {
 
 private struct TransferRow: View {
     let item: TransferSurfaceItem
+    let model: TransferSurfaceModel
     let service: any TransferSurfaceServicing
 
     var body: some View {
@@ -216,19 +255,19 @@ private struct TransferRow: View {
             HStack(spacing: 8) {
                 if item.canPause {
                     Button("暂停", systemImage: "pause") {
-                        Task { await service.pause(item.id) }
+                        Task { await model.pause(item.id, using: service) }
                     }
                     .frame(minHeight: 40)
                 }
                 if item.canResume {
                     Button("继续", systemImage: "play") {
-                        Task { await service.resume(item.id) }
+                        Task { await model.resume(item.id, using: service) }
                     }
                     .frame(minHeight: 40)
                 }
                 if item.canCancel {
                     Button("取消", systemImage: "xmark", role: .destructive) {
-                        Task { await service.cancel(item.id) }
+                        Task { await model.cancel(item.id, using: service) }
                     }
                     .frame(minHeight: 40)
                 }
@@ -261,19 +300,23 @@ final class NativeTransferSurfaceService: TransferSurfaceServicing {
         self.workspace = workspace
     }
 
-    func pause(_ id: TransferID) async {
+    func pause(_ id: TransferID) async throws {
         await coordinator.pause(id)
     }
 
-    func resume(_ id: TransferID) async {
-        try? await coordinator.resume(id)
+    func resume(_ id: TransferID) async throws {
+        try await coordinator.resume(id)
     }
 
-    func cancel(_ id: TransferID) async {
-        _ = await coordinator.cancel(id)
+    func cancel(_ id: TransferID) async throws {
+        guard await coordinator.cancel(id) == .requested else {
+            throw TransferSurfaceError.tooLate
+        }
     }
 
     func showInFinder(_ url: URL) {
         workspace.activateFileViewerSelecting([url])
     }
 }
+
+private enum TransferSurfaceError: Error { case tooLate }

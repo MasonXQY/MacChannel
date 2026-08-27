@@ -68,6 +68,7 @@ public actor IncomingTransferListener {
     private let incomingDirectory: URL?
     private let capacity: any ReceiveCapacityProviding
     private let inactivityTimeout: Duration
+    private let onReceiveFinished: @Sendable (TransferReceiveResult?) async -> Void
     private let resources = BoundedChannelResourceRegistry.shared
     private let closeRegistry = IncomingChannelCloseRegistry.shared
 
@@ -85,7 +86,8 @@ public actor IncomingTransferListener {
         database: TransferDatabase,
         incomingDirectory: URL? = nil,
         capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
-        inactivityTimeout: Duration = .seconds(30)
+        inactivityTimeout: Duration = .seconds(30),
+        onReceiveFinished: @escaping @Sendable (TransferReceiveResult?) async -> Void = { _ in }
     ) {
         self.source = source
         self.policy = policy
@@ -94,6 +96,7 @@ public actor IncomingTransferListener {
         self.incomingDirectory = incomingDirectory
         self.capacity = capacity
         self.inactivityTimeout = max(.milliseconds(1), inactivityTimeout)
+        self.onReceiveFinished = onReceiveFinished
     }
 
     deinit {
@@ -267,7 +270,7 @@ public actor IncomingTransferListener {
     ) async {
         defer { receiveFinished(token) }
         do {
-            _ = try await ReceiveSession(
+            let result = try await ReceiveSession(
                 transferID: connection.transferID,
                 source: connection.source,
                 policy: policy,
@@ -283,7 +286,10 @@ public actor IncomingTransferListener {
                     token: resourceToken
                 )
             ).run(on: connection.channel)
-        } catch {}
+            await onReceiveFinished(result)
+        } catch {
+            await onReceiveFinished(nil)
+        }
     }
 
     private func receiveFinished(_ token: UUID) {

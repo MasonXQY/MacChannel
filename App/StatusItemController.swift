@@ -39,6 +39,8 @@ final class StatusItemController: NSObject {
     private var dragRegionSession: DragRegionSession!
     private var statusItem: NSStatusItem?
     private var deviceTask: Task<Void, Never>?
+    private var runtimeStatus: AppRuntimeStatus?
+    private var runtimeStatusItem: NSMenuItem?
 
     init(
         button: StatusItemButton,
@@ -221,6 +223,16 @@ final class StatusItemController: NSObject {
         }
     }
 
+    func setRuntimeStatus(_ status: AppRuntimeStatus) {
+        runtimeStatus = status
+        runtimeStatusItem?.title = status.localizedText
+        runtimeStatusItem?.image = NSImage(
+            systemSymbolName: status.symbolName,
+            accessibilityDescription: status.localizedText
+        )
+        renderPhase()
+    }
+
     private func selectTarget(_ device: DeviceID, token: StatusItemDragToken) -> Bool {
         guard devices.contains(where: { $0.id == device && $0.availability != .offline }) else {
             if activeSelectionToken == token, announcedOfflineToken != token {
@@ -281,6 +293,17 @@ final class StatusItemController: NSObject {
     }
 
     private func configureMenu() {
+        let initialRuntimeStatus = runtimeStatus ?? .loading
+        let runtime = NSMenuItem(title: initialRuntimeStatus.localizedText, action: nil, keyEquivalent: "")
+        runtime.isEnabled = false
+        runtime.image = NSImage(
+            systemSymbolName: initialRuntimeStatus.symbolName,
+            accessibilityDescription: initialRuntimeStatus.localizedText
+        )
+        runtimeStatusItem = runtime
+        statusMenu.addItem(runtime)
+        statusMenu.addItem(.separator())
+
         let send = NSMenuItem(
             title: "发送文件…",
             action: #selector(chooseFiles(_:)),
@@ -360,8 +383,14 @@ final class StatusItemController: NSObject {
 
     private func renderPhase() {
         button.phase = state.phase
-        nativeButton?.setAccessibilityValue(state.phase.localizedAccessibilityValue)
-        nativeButton?.toolTip = state.phase.localizedAccessibilityValue
+        let accessibilityValue = if let runtimeStatus {
+            "\(state.phase.localizedAccessibilityValue)，\(runtimeStatus.localizedText)"
+        } else {
+            state.phase.localizedAccessibilityValue
+        }
+        button.setAccessibilityValue(accessibilityValue)
+        nativeButton?.setAccessibilityValue(accessibilityValue)
+        nativeButton?.toolTip = accessibilityValue
         statusItem?.length = button.preferredWidth
     }
 
@@ -399,5 +428,16 @@ final class StatusItemController: NSObject {
 
     @objc private func showSettings(_ sender: Any?) {
         onShowSettings?()
+    }
+}
+
+private extension AppRuntimeStatus {
+    var symbolName: String {
+        switch self {
+        case .loading: "hourglass"
+        case .ready: "checkmark.shield"
+        case .offline: "network.slash"
+        case .error: "exclamationmark.triangle"
+        }
     }
 }

@@ -4,7 +4,8 @@ import SwiftUI
 
 @MainActor
 final class AppSurfaceController: NSObject, NSPopoverDelegate {
-    static let liveHistoryLimit = 100
+    static let historyLimit = 200
+    static let liveHistoryLimit = historyLimit
 
     let fanPanel: DeviceFanPanel
     let transferModel: TransferSurfaceModel
@@ -196,9 +197,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     func updateTransferSnapshots(_ snapshots: [TransferSnapshot]) {
-        latestSnapshots = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.id, $0) })
         let timestamp = now()
-        let items = snapshots.map { snapshot in
+        let incoming = snapshots.map { snapshot in
             let speed = speed(for: snapshot, at: timestamp)
             let remaining = speed.flatMap { speed -> TimeInterval? in
                 guard speed > 0 else { return nil }
@@ -216,12 +216,26 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 estimatedTimeRemaining: remaining,
                 outputURL: persistedHistory[snapshot.id]?.outputURL
                     ?? liveTerminalHistory[snapshot.id]?.outputURL,
-                updatedAt: persistedHistory[snapshot.id]?.updatedAt
-                    ?? liveTerminalHistory[snapshot.id]?.updatedAt
-                    ?? timestamp
+                updatedAt: timestamp
             )
         }
         let terminal: Set<TransferPhase> = [.completed, .failed, .cancelled]
+        let items = incoming.map { item -> TransferSurfaceItem in
+            if let live = liveTerminalHistory[item.id],
+               terminal.contains(live.snapshot.phase),
+               !terminal.contains(item.snapshot.phase)
+            {
+                return merge(persisted: persistedHistory[item.id], live: live)
+            }
+            if let persisted = persistedHistory[item.id],
+               terminal.contains(persisted.snapshot.phase),
+               !terminal.contains(item.snapshot.phase)
+            {
+                return merge(persisted: persisted, live: item)
+            }
+            return item
+        }
+        latestSnapshots = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.snapshot) })
         transferModel.active = items.filter { !terminal.contains($0.snapshot.phase) }
         let activeIDs = Set(transferModel.active.map(\.id))
         previousSamples = previousSamples.filter { activeIDs.contains($0.key) }
@@ -411,29 +425,20 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     private func replacePersistedHistory(_ items: [TransferSurfaceItem]) {
-        persistedHistory = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
-        for id in persistedHistory.keys {
-            liveTerminalHistory.removeValue(forKey: id)
-        }
+        persistedHistory = Dictionary(
+            uniqueKeysWithValues: sortedHistory(items).prefix(Self.historyLimit).map { ($0.id, $0) }
+        )
         rebuildHistory()
     }
 
     private func rebuildHistory() {
         let activeIDs = Set(transferModel.active.map(\.id))
         let ids = Set(persistedHistory.keys).union(liveTerminalHistory.keys)
-        transferModel.history = ids.compactMap { id in
+        let merged: [TransferSurfaceItem] = ids.compactMap { id -> TransferSurfaceItem? in
             guard !activeIDs.contains(id) else { return nil }
             switch (persistedHistory[id], liveTerminalHistory[id]) {
             case let (persisted?, live?):
-                return TransferSurfaceItem(
-                    snapshot: live.snapshot,
-                    peerName: persisted.peerName,
-                    displayName: persisted.displayName,
-                    bytesPerSecond: live.bytesPerSecond,
-                    estimatedTimeRemaining: live.estimatedTimeRemaining,
-                    outputURL: persisted.outputURL ?? live.outputURL,
-                    updatedAt: persisted.updatedAt
-                )
+                return merge(persisted: persisted, live: live)
             case let (persisted?, nil):
                 return persisted
             case let (nil, live?):
@@ -441,7 +446,58 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
             case (nil, nil):
                 return nil
             }
-        }.sorted { $0.updatedAt > $1.updatedAt }
+        }
+        transferModel.history = Array(sortedHistory(merged).prefix(Self.historyLimit))
+    }
+
+    private func merge(
+        persisted: TransferSurfaceItem?,
+        live: TransferSurfaceItem
+    ) -> TransferSurfaceItem {
+        guard let persisted else { return live }
+        let preferred = preferredSnapshot(persisted: persisted, live: live)
+        return TransferSurfaceItem(
+            snapshot: preferred.snapshot,
+            peerName: persisted.peerName.isEmpty ? live.peerName : persisted.peerName,
+            displayName: persisted.displayName.isEmpty ? live.displayName : persisted.displayName,
+            bytesPerSecond: preferred.source == .live ? live.bytesPerSecond : persisted.bytesPerSecond,
+            estimatedTimeRemaining: preferred.source == .live
+                ? live.estimatedTimeRemaining
+                : persisted.estimatedTimeRemaining,
+            outputURL: persisted.outputURL ?? live.outputURL,
+            updatedAt: max(persisted.updatedAt, live.updatedAt)
+        )
+    }
+
+    private enum SnapshotPreference: Equatable { case persisted, live }
+
+    private func preferredSnapshot(
+        persisted: TransferSurfaceItem,
+        live: TransferSurfaceItem
+    ) -> (snapshot: TransferSnapshot, source: SnapshotPreference) {
+        let terminal: Set<TransferPhase> = [.completed, .failed, .cancelled]
+        let persistedTerminal = terminal.contains(persisted.snapshot.phase)
+        let liveTerminal = terminal.contains(live.snapshot.phase)
+        if persistedTerminal != liveTerminal {
+            return persistedTerminal
+                ? (persisted.snapshot, .persisted)
+                : (live.snapshot, .live)
+        }
+        if persisted.updatedAt != live.updatedAt {
+            return persisted.updatedAt > live.updatedAt
+                ? (persisted.snapshot, .persisted)
+                : (live.snapshot, .live)
+        }
+        return persisted.snapshot.completedBytes >= live.snapshot.completedBytes
+            ? (persisted.snapshot, .persisted)
+            : (live.snapshot, .live)
+    }
+
+    private func sortedHistory(_ items: [TransferSurfaceItem]) -> [TransferSurfaceItem] {
+        items.sorted {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return $0.id.rawValue.uuidString < $1.id.rawValue.uuidString
+        }
     }
 
     private func updateStatusItem(with snapshots: [TransferSnapshot]) {

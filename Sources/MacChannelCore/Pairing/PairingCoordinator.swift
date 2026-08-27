@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-public actor PairingCoordinator: PairingHostEndpoint {
+public actor PairingCoordinator: RendezvousPairingHostEndpoint {
     private struct HostedSession {
         let code: String
         let expiresAt: Date
@@ -238,6 +238,13 @@ public actor PairingCoordinator: PairingHostEndpoint {
     }
 
     public func accept(_ request: PairingJoinRequest) async throws -> PairingJoinResponse {
+        try await accept(request, sessionID: PairingSessionID())
+    }
+
+    public func accept(
+        _ request: PairingJoinRequest,
+        sessionID: PairingSessionID
+    ) async throws -> PairingJoinResponse {
         do {
             guard !codeCreationInProgress, !commitInProgress, pendingConfirmation == nil else {
                 throw PairingError.operationInProgress
@@ -288,7 +295,6 @@ public actor PairingCoordinator: PairingHostEndpoint {
 
             session.used = true
             hostedSession = session
-            let sessionID = PairingSessionID()
             let responseTranscript = PairingCryptography.sessionBoundTranscript(
                 transcript,
                 sessionID: sessionID

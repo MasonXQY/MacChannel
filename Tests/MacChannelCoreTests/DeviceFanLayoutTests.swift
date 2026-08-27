@@ -18,6 +18,27 @@ final class DeviceFanLayoutTests: XCTestCase {
         XCTAssertTrue(frames.allSatisfy { $0.width >= 40 && $0.height >= 40 })
     }
 
+    func testScaledHoverFrameDoesNotOverlapNeighborHitTargets() throws {
+        let frames = DeviceFanStripLayout.frames(count: 6)
+        let hovered = DeviceFanStripLayout.hoverFrame(for: frames[2])
+
+        XCTAssertFalse(hovered.intersects(frames[1]))
+        XCTAssertFalse(hovered.intersects(frames[3]))
+    }
+
+    func testHoveredVisualEdgeRemainsTheSameDropTarget() {
+        let frames = DeviceFanStripLayout.frames(count: 3)
+        let hoveredIndex = 1
+        let visual = DeviceFanStripLayout.hoverFrame(for: frames[hoveredIndex])
+        let edge = CGPoint(x: visual.maxX - 1, y: visual.midY)
+
+        XCTAssertFalse(frames[hoveredIndex].contains(edge))
+        XCTAssertEqual(
+            DeviceFanStripLayout.hitTest(edge, in: frames, hoveredIndex: hoveredIndex),
+            hoveredIndex
+        )
+    }
+
     func testFanClampsToEveryScreenEdgeWithoutChangingTargetOrder() {
         let screen = CGRect(x: -500, y: -300, width: 700, height: 500)
 
@@ -165,6 +186,29 @@ final class DeviceFanLayoutTests: XCTestCase {
         XCTAssertEqual(more.title, "更多")
         XCTAssertEqual(more.statusText, "另外 3 台设备")
         XCTAssertEqual(more.accessibilityLabel, "更多，另外 3 台设备")
+        XCTAssertEqual(target.accessibilityRole, .button)
+        XCTAssertEqual(more.accessibilityRole, .button)
+    }
+
+    @MainActor
+    func testAccessibilityActivationUsesExactAdmissionAndMoreExpands() {
+        let devices = makeDevices(count: 8)
+        let model = DeviceFanViewModel(targets: DeviceFanTargets.collapsed(devices))
+        var selected: [DeviceID] = []
+        var expanded = 0
+        model.onActivate = { target in
+            if case let .device(device) = target {
+                selected.append(device.id)
+                return false
+            }
+            expanded += 1
+            return true
+        }
+
+        XCTAssertFalse(model.activate(.device(devices[0])))
+        XCTAssertTrue(model.activate(.more(hiddenCount: 3)))
+        XCTAssertEqual(selected, [devices[0].id])
+        XCTAssertEqual(expanded, 1)
     }
 
     @MainActor
@@ -253,6 +297,32 @@ final class DeviceFanLayoutTests: XCTestCase {
         XCTAssertTrue(panel.usesHorizontalScroller)
         XCTAssertGreaterThan(panel.contentStripWidth, panel.frame.width)
         XCTAssertEqual(panel.dropDestinationIdentity, originalDestination)
+    }
+
+    @MainActor
+    func testCollapsedFanEnablesScrollerOnNarrowScreen() throws {
+        var state = StatusItemDropStateMachine()
+        let intent = try DropIntent(items: [.fileURL(URL(fileURLWithPath: "/tmp/drop.txt"))])
+        let token = try XCTUnwrap(state.begin(intent: intent))
+        let panel = DeviceFanPanel()
+        panel.prepare(
+            request: DeviceFanRequest(
+                token: token,
+                intent: intent,
+                devices: makeDevices(count: 4),
+                fingerprint: StatusItemDragFingerprint(sequenceNumber: 4, pasteboardChangeCount: 5),
+                dragEntered: { _ in true },
+                dragExited: { _ in true },
+                select: { _ in true },
+                cancel: {}
+            ),
+            anchor: CGRect(x: -1_200, y: 880, width: 30, height: 24),
+            screen: CGRect(x: -1_280, y: 0, width: 360, height: 900)
+        )
+
+        XCTAssertTrue(panel.usesHorizontalScroller)
+        XCTAssertTrue(CGRect(x: -1_280, y: 0, width: 360, height: 900).contains(panel.frame))
+        XCTAssertGreaterThan(panel.contentStripWidth, panel.frame.width)
     }
 
     @MainActor

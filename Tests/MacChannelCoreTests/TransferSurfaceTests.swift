@@ -31,11 +31,124 @@ final class TransferSurfaceTests: XCTestCase {
         XCTAssertEqual(presentation.peerText, "正在配对：书房 Mac")
         XCTAssertEqual(presentation.statusText, "等待你在另一台 Mac 上人工核对")
         XCTAssertEqual(presentation.statusSymbol, "person.2.badge.key")
+        XCTAssertEqual(presentation.accessibilityFingerprint, "A B C D E F G H")
 
         let unavailable = PairingFingerprintPresentation(peer: nil, fingerprint: "")
         XCTAssertFalse(unavailable.canConfirm)
         XCTAssertEqual(unavailable.peerText, "尚未确认对端设备身份")
         XCTAssertEqual(unavailable.statusText, "尚未生成安全指纹")
+    }
+
+    @MainActor
+    func testSettingsRenameFailureDoesNotCommitAndPublishesActionableError() async {
+        let id = DeviceID(rawValue: UUID())
+        let announcer = RecordingAccessibilityAnnouncer()
+        let model = SettingsSurfaceModel(
+            devices: [
+                DeviceSetting(
+                    device: DeviceSummary(id: id, displayName: "原名称", availability: .lan)
+                ),
+            ],
+            announcer: announcer
+        )
+        let service = FailingSettingsSurfaceService()
+
+        await model.rename(id, to: "新名称", using: service)
+
+        XCTAssertEqual(model.devices[0].displayName, "原名称")
+        XCTAssertEqual(model.actionError, "无法保存设备名称，请稍后重试。")
+        XCTAssertEqual(announcer.messages, ["无法保存设备名称，请稍后重试。"])
+    }
+
+    @MainActor
+    func testSettingsDirectoryAndPolicyFailuresRollBack() async {
+        let id = DeviceID(rawValue: UUID())
+        let originalDirectory = URL(fileURLWithPath: "/tmp/original")
+        let model = SettingsSurfaceModel(devices: [
+            DeviceSetting(
+                device: DeviceSummary(id: id, displayName: "Mac", availability: .lan),
+                autoAccept: true,
+                maximumBytes: 10_000_000,
+                directory: originalDirectory
+            ),
+        ])
+        let service = FailingSettingsSurfaceService()
+
+        await model.updatePolicy(
+            id,
+            autoAccept: false,
+            maximumBytes: 20_000_000,
+            using: service
+        )
+        await model.updateDirectory(
+            URL(fileURLWithPath: "/tmp/new"),
+            for: id,
+            using: service
+        )
+
+        XCTAssertTrue(model.devices[0].autoAccept)
+        XCTAssertEqual(model.devices[0].maximumMegabytes, "10")
+        XCTAssertEqual(model.devices[0].directory, originalDirectory)
+        XCTAssertEqual(model.actionError, "无法保存接收目录，请确认目录仍可访问后重试。")
+    }
+
+    @MainActor
+    func testPairingFailureKeepsIdleStateAndPublishesActionableError() async {
+        let announcer = RecordingAccessibilityAnnouncer()
+        let model = PairingSurfaceModel(entryCode: "123456", announcer: announcer)
+
+        await model.join(using: FailingPairingSurfaceService())
+
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertEqual(model.entryCode, "123456")
+        XCTAssertEqual(model.actionError, "无法验证配对码，请检查网络后重试。")
+        XCTAssertEqual(announcer.messages, ["无法验证配对码，请检查网络后重试。"])
+    }
+
+    @MainActor
+    func testCommittedSecurityChangesHydrateUIAndAnnouncePersistenceWarnings() async {
+        let peer = DeviceSummary(
+            id: DeviceID(rawValue: UUID()),
+            displayName: "书房 Mac",
+            availability: .lan
+        )
+        let settingsAnnouncer = RecordingAccessibilityAnnouncer()
+        let settings = SettingsSurfaceModel(
+            devices: [DeviceSetting(device: peer)],
+            announcer: settingsAnnouncer
+        )
+        await settings.revoke(peer.id, using: WarningSettingsSurfaceService())
+
+        XCTAssertTrue(settings.devices.isEmpty)
+        XCTAssertEqual(settings.actionError, WarningSettingsSurfaceService.warning)
+        XCTAssertEqual(settingsAnnouncer.messages, [WarningSettingsSurfaceService.warning])
+
+        let pairingAnnouncer = RecordingAccessibilityAnnouncer()
+        let pairing = PairingSurfaceModel(
+            state: .awaitingFingerprint(local: "ABCD", remote: "ABCD"),
+            pendingPeer: peer,
+            announcer: pairingAnnouncer
+        )
+        await pairing.confirm(
+            fingerprint: "ABCD",
+            using: WarningPairingSurfaceService(peer: peer)
+        )
+
+        XCTAssertEqual(pairing.state, .confirmed(peer))
+        XCTAssertEqual(pairing.actionError, WarningPairingSurfaceService.warning)
+        XCTAssertEqual(pairingAnnouncer.messages, [WarningPairingSurfaceService.warning])
+    }
+
+    @MainActor
+    func testResumeFailurePublishesVisibleTransferError() async {
+        let announcer = RecordingAccessibilityAnnouncer()
+        let model = TransferSurfaceModel(announcer: announcer)
+        let id = TransferID(rawValue: UUID())
+
+        await model.resume(id, using: FailingTransferSurfaceService())
+
+        XCTAssertEqual(model.actionError, "无法继续传输，请检查设备连接后重试。")
+        XCTAssertEqual(announcer.messages, ["无法继续传输，请检查设备连接后重试。"])
     }
 
     func testTransferPresentationShowsTextAndIconForRoutePhaseSpeedAndETA() {
@@ -95,6 +208,28 @@ final class TransferSurfaceTests: XCTestCase {
         XCTAssertFalse(item.canCancel)
         XCTAssertTrue(item.canShowInFinder)
         XCTAssertFalse(item.showsLiveMetrics)
+    }
+
+    func testFailedTransferDoesNotOfferAResumeActionThatCannotRun() {
+        let item = TransferSurfaceItem(
+            snapshot: TransferSnapshot(
+                id: TransferID(rawValue: UUID()),
+                peer: DeviceID(rawValue: UUID()),
+                phase: .failed,
+                completedBytes: 5,
+                totalBytes: 10,
+                route: .relay
+            ),
+            peerName: "办公室 Mac",
+            displayName: "失败.bin",
+            bytesPerSecond: nil,
+            estimatedTimeRemaining: nil,
+            outputURL: nil,
+            updatedAt: Date()
+        )
+
+        XCTAssertFalse(item.canResume)
+        XCTAssertFalse(item.canCancel)
     }
 
     func testSettingsSizeLimitConvertsOnlyPositiveFiniteMegabytes() {
@@ -325,6 +460,71 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testStalePersistedHistoryCannotRegressLiveCompletedSnapshot() throws {
+        let id = TransferID(rawValue: UUID())
+        let peer = DeviceID(rawValue: UUID())
+        let model = TransferSurfaceModel()
+        var timestamp: TimeInterval = 2_000
+        let surfaces = makeSurfaces(transferModel: model, now: { Date(timeIntervalSince1970: timestamp) })
+
+        surfaces.updateTransferSnapshots([completedSnapshot(id: id, peer: peer)])
+        timestamp = 1_000
+        surfaces.updateHistoryItems([
+            historyItem(id: id, peer: peer, phase: .transferring, completed: 5, updatedAt: Date(timeIntervalSince1970: 1_000)),
+        ])
+
+        let item = try XCTUnwrap(model.history.first { $0.id == id })
+        XCTAssertEqual(item.snapshot.phase, .completed)
+        XCTAssertEqual(item.snapshot.completedBytes, 10)
+        XCTAssertFalse(item.canResume)
+        XCTAssertFalse(item.canCancel)
+    }
+
+    @MainActor
+    func testStaleLiveSnapshotCannotRegressPersistedCompletedHistory() throws {
+        let id = TransferID(rawValue: UUID())
+        let peer = DeviceID(rawValue: UUID())
+        let model = TransferSurfaceModel()
+        let timestamp: TimeInterval = 1_000
+        let surfaces = makeSurfaces(transferModel: model, now: { Date(timeIntervalSince1970: timestamp) })
+
+        surfaces.updateHistoryItems([
+            historyItem(id: id, peer: peer, phase: .completed, completed: 10, updatedAt: Date(timeIntervalSince1970: 2_000)),
+        ])
+        surfaces.updateTransferSnapshots([
+            TransferSnapshot(id: id, peer: peer, phase: .transferring, completedBytes: 5, totalBytes: 10, route: .relay),
+        ])
+
+        XCTAssertTrue(model.active.isEmpty)
+        let item = try XCTUnwrap(model.history.first { $0.id == id })
+        XCTAssertEqual(item.snapshot.phase, .completed)
+        XCTAssertFalse(item.canResume)
+        XCTAssertFalse(item.canCancel)
+    }
+
+    @MainActor
+    func testMergedHistoryIsDeterministicallyCapped() {
+        let model = TransferSurfaceModel()
+        let surfaces = makeSurfaces(transferModel: model)
+        let peer = DeviceID(rawValue: UUID())
+        let items = (0..<240).map { index in
+            historyItem(
+                id: TransferID(rawValue: UUID()),
+                peer: peer,
+                phase: .completed,
+                completed: 10,
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(index))
+            )
+        }
+
+        surfaces.updateHistoryItems(items)
+
+        XCTAssertEqual(model.history.count, AppSurfaceController.historyLimit)
+        XCTAssertEqual(model.history.first?.updatedAt, Date(timeIntervalSince1970: 239))
+        XCTAssertEqual(model.history.last?.updatedAt, Date(timeIntervalSince1970: 40))
+    }
+
+    @MainActor
     func testLiveTerminalHistoryIsBoundedForLongRunningMenuBarProcess() {
         let model = TransferSurfaceModel()
         var timestamp: TimeInterval = 1_000
@@ -343,7 +543,7 @@ final class TransferSurfaceTests: XCTestCase {
         )
         var ids: [TransferID] = []
 
-        for _ in 0..<125 {
+        for _ in 0..<225 {
             let id = TransferID(rawValue: UUID())
             ids.append(id)
             surfaces.updateTransferSnapshots([
@@ -353,7 +553,7 @@ final class TransferSurfaceTests: XCTestCase {
 
         XCTAssertEqual(model.history.count, AppSurfaceController.liveHistoryLimit)
         XCTAssertFalse(model.history.contains { $0.id == ids[0] })
-        XCTAssertTrue(model.history.contains { $0.id == ids[124] })
+        XCTAssertTrue(model.history.contains { $0.id == ids[224] })
     }
 
     @MainActor
@@ -507,7 +707,8 @@ final class TransferSurfaceTests: XCTestCase {
 
     @MainActor
     private func makeSurfaces(
-        transferModel: TransferSurfaceModel
+        transferModel: TransferSurfaceModel,
+        now: @escaping () -> Date = Date.init
     ) -> AppSurfaceController {
         AppSurfaceController(
             transferService: NativeTransferSurfaceService(
@@ -516,7 +717,33 @@ final class TransferSurfaceTests: XCTestCase {
             pairingService: UnavailablePairingSurfaceService(),
             settingsService: UnavailableDeviceSettingsService(),
             directorySelector: NativeDirectorySelector(),
-            transferModel: transferModel
+            transferModel: transferModel,
+            now: now
+        )
+    }
+
+    private func historyItem(
+        id: TransferID,
+        peer: DeviceID,
+        phase: TransferPhase,
+        completed: Int64,
+        updatedAt: Date
+    ) -> TransferSurfaceItem {
+        TransferSurfaceItem(
+            snapshot: TransferSnapshot(
+                id: id,
+                peer: peer,
+                phase: phase,
+                completedBytes: completed,
+                totalBytes: 10,
+                route: .lan
+            ),
+            peerName: "Mac",
+            displayName: "文件",
+            bytesPerSecond: nil,
+            estimatedTimeRemaining: nil,
+            outputURL: phase == .completed ? URL(fileURLWithPath: "/tmp/file") : nil,
+            updatedAt: updatedAt
         )
     }
 
@@ -590,11 +817,84 @@ private final class PendingPeerPairingService: PairingSurfaceServicing {
         self.peer = peer
     }
 
-    func createCode() async -> String? { nil }
-    func join(code: String) async -> PairingJoinResult? { nil }
-    func confirmFingerprint(_ fingerprint: String) async {}
-    func cancel() {}
+    func createCode() async throws -> String { throw SurfaceActionFailure.expected }
+    func join(code: String) async throws -> PairingJoinResult { throw SurfaceActionFailure.expected }
+    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult { .committed }
+    func cancel() async throws {}
     func pendingPeer() async -> DeviceSummary? { peer }
+}
+
+@MainActor
+private final class FailingPairingSurfaceService: PairingSurfaceServicing {
+    let isAvailable = true
+    func createCode() async throws -> String { throw SurfaceActionFailure.expected }
+    func join(code: String) async throws -> PairingJoinResult { throw SurfaceActionFailure.expected }
+    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
+        throw SurfaceActionFailure.expected
+    }
+    func cancel() async throws { throw SurfaceActionFailure.expected }
+}
+
+@MainActor
+private final class WarningPairingSurfaceService: PairingSurfaceServicing {
+    static let warning = "设备信任已建立，但本地信任记录未保存；请检查存储权限后重启确认。"
+    let isAvailable = true
+    let peer: DeviceSummary
+
+    init(peer: DeviceSummary) { self.peer = peer }
+
+    func createCode() async throws -> String { "123456" }
+    func join(code: String) async throws -> PairingJoinResult {
+        throw SurfaceActionFailure.expected
+    }
+    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
+        .committedWithWarning(Self.warning)
+    }
+    func cancel() async throws {}
+    func pendingPeer() async -> DeviceSummary? { peer }
+}
+
+@MainActor
+private final class FailingSettingsSurfaceService: DeviceSettingsServicing {
+    let isAvailable = true
+    func rename(_ id: DeviceID, to displayName: String) async throws { throw SurfaceActionFailure.expected }
+    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult {
+        throw SurfaceActionFailure.expected
+    }
+    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {
+        throw SurfaceActionFailure.expected
+    }
+    func updateDefaultDirectory(_ directory: URL) async throws { throw SurfaceActionFailure.expected }
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws { throw SurfaceActionFailure.expected }
+}
+
+@MainActor
+private final class WarningSettingsSurfaceService: DeviceSettingsServicing {
+    static let warning = "设备信任已撤销，但部分本地记录未保存；请检查存储权限后重启确认。"
+    let isAvailable = true
+    func rename(_ id: DeviceID, to displayName: String) async throws {}
+    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult {
+        .committedWithWarning(Self.warning)
+    }
+    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {}
+    func updateDefaultDirectory(_ directory: URL) async throws {}
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
+}
+
+@MainActor
+private final class FailingTransferSurfaceService: TransferSurfaceServicing {
+    func pause(_ id: TransferID) async throws { throw SurfaceActionFailure.expected }
+    func resume(_ id: TransferID) async throws { throw SurfaceActionFailure.expected }
+    func cancel(_ id: TransferID) async throws { throw SurfaceActionFailure.expected }
+    func showInFinder(_ url: URL) {}
+}
+
+private enum SurfaceActionFailure: Error { case expected }
+
+@MainActor
+private final class RecordingAccessibilityAnnouncer: AccessibilityAnnouncing {
+    private(set) var messages: [String] = []
+    func announce(_ message: String) { messages.append(message) }
 }
 
 @MainActor

@@ -34,6 +34,19 @@ public final class BonjourPeerAdvertiser: @unchecked Sendable {
         self.generation &+= 1; self.listener?.cancel(); self.listener = nil; self.lifecycleState = .stopped
     } }
 
+    public func stopAndWait() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self else { continuation.resume(); return }
+                self.generation &+= 1
+                self.listener?.cancel()
+                self.listener = nil
+                self.lifecycleState = .stopped
+                continuation.resume()
+            }
+        }
+    }
+
     private func startOnQueue() {
         guard listener == nil else { return }
         generation &+= 1

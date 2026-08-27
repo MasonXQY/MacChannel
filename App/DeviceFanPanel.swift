@@ -96,7 +96,7 @@ final class DeviceFanPanel: NSPanel {
 
         let contentSize = DeviceFanStripLayout.contentSize(count: visibleTargets.count)
         contentStripWidth = contentSize.width
-        usesHorizontalScroller = isExpanded && contentSize.width > screenFrame.width - 16
+        usesHorizontalScroller = contentSize.width > screenFrame.width - 16
         let scrollerHeight = usesHorizontalScroller
             ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
             : 0
@@ -172,14 +172,14 @@ private final class DeviceFanDropView: NSView {
         session = DeviceFanDropSession(fingerprint: request.fingerprint)
         super.init(frame: frame)
         registerForDraggedTypes([.fileURL])
-        setAccessibilityElement(true)
-        setAccessibilityRole(.group)
-        setAccessibilityLabel("选择接收设备")
-        setAccessibilityHelp("将文件拖到一台在线设备上，松开即可发送")
+        setAccessibilityElement(false)
 
         host.frame = bounds
         host.autoresizingMask = [.width, .height]
         addSubview(host)
+        model.onActivate = { [weak self] target in
+            self?.activate(target) ?? false
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -191,6 +191,22 @@ private final class DeviceFanDropView: NSView {
         frame.size = contentSize
         host.frame = bounds
         model.replaceTargets(targets)
+    }
+
+    private func activate(_ target: DeviceFanTarget) -> Bool {
+        switch target {
+        case .more:
+            model.hover(target)
+            return true
+        case .device:
+            _ = session.hover(target)
+            model.hover(nil)
+            return session.perform(
+                fingerprint: request.fingerprint,
+                select: request.select,
+                cancel: request.cancel
+            )
+        }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -246,7 +262,12 @@ private final class DeviceFanDropView: NSView {
     private func updateHover(_ sender: NSDraggingInfo) {
         let point = convert(sender.draggingLocation, from: nil)
         let frames = DeviceFanStripLayout.frames(count: targets.count)
-        let target = DeviceFanLayout.hitTest(point, in: frames).map { targets[$0] }
+        let hoveredIndex = model.hoveredTarget.flatMap { targets.firstIndex(of: $0) }
+        let target = DeviceFanStripLayout.hitTest(
+            point,
+            in: frames,
+            hoveredIndex: hoveredIndex
+        ).map { targets[$0] }
         switch session.hover(target) {
         case .expandRequested:
             model.hover(target)

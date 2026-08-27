@@ -5,7 +5,28 @@ import Foundation
 public enum MacChannelApplication {
     public static func run() {
         let application = NSApplication.shared
-        let delegate = MacChannelApplicationDelegate(container: .localShell())
+        let mode = AppLaunchMode.resolve()
+        let delegate: MacChannelApplicationDelegate
+        switch mode {
+        case .localShell:
+            delegate = MacChannelApplicationDelegate(
+                initialContainer: .localShell(),
+                initialStatus: .offline("本地测试模式；网络服务未启动。"),
+                runtimeHost: nil
+            )
+        case .production:
+            let builder: any AppRuntimeBuilding
+            do {
+                builder = try ProductionAppRuntimeBuilder()
+            } catch {
+                builder = FailedProductionRuntimeBuilder()
+            }
+            delegate = MacChannelApplicationDelegate(
+                initialContainer: .loadingShell(),
+                initialStatus: .loading,
+                runtimeHost: AppRuntimeHost(builder: builder)
+            )
+        }
         application.delegate = delegate
         application.setActivationPolicy(.accessory)
         application.run()
@@ -14,15 +35,45 @@ public enum MacChannelApplication {
 
 @MainActor
 private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
-    private let container: AppContainer
+    private var container: AppContainer
+    private let initialStatus: AppRuntimeStatus
+    private let runtimeHost: AppRuntimeHost?
     private var statusItemController: StatusItemController?
     private var surfaceController: AppSurfaceController?
+    private var bootstrapTask: Task<Void, Never>?
+    private var terminationPending = false
 
-    init(container: AppContainer) {
-        self.container = container
+    init(
+        initialContainer: AppContainer,
+        initialStatus: AppRuntimeStatus,
+        runtimeHost: AppRuntimeHost?
+    ) {
+        container = initialContainer
+        self.initialStatus = initialStatus
+        self.runtimeHost = runtimeHost
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        install(container, status: initialStatus)
+        guard let runtimeHost else {
+            completeLaunchSmokeTestIfRequested()
+            return
+        }
+        runtimeHost.onChange = { [weak self] status, container in
+            guard let self else { return }
+            if let container {
+                self.container = container
+                self.install(container, status: status)
+            } else {
+                self.statusItemController?.setRuntimeStatus(status)
+            }
+        }
+        bootstrapTask = Task { await runtimeHost.bootstrap() }
+    }
+
+    private func install(_ container: AppContainer, status: AppRuntimeStatus) {
+        surfaceController?.invalidate()
+        statusItemController?.invalidate()
         let statusController = StatusItemController(
             deviceDirectory: container.deviceDirectory,
             transferCoordinator: container.transferCoordinator
@@ -36,6 +87,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
             directorySelector: container.directorySelector
         )
         surfaces.bind(to: statusController)
+        statusController.setRuntimeStatus(status)
         surfaces.observe(container.deviceDirectory)
         if let transferSnapshots = container.transferSnapshots {
             surfaces.observeTransferSnapshots(transferSnapshots)
@@ -51,12 +103,24 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         }
         statusItemController = statusController
         surfaceController = surfaces
-        completeLaunchSmokeTestIfRequested()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        bootstrapTask?.cancel()
         surfaceController?.invalidate()
         statusItemController?.invalidate()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let runtimeHost else { return .terminateNow }
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
+        bootstrapTask?.cancel()
+        Task {
+            await runtimeHost.shutdown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     private func completeLaunchSmokeTestIfRequested() {
@@ -72,5 +136,12 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         DispatchQueue.main.async {
             NSApplication.shared.terminate(nil)
         }
+    }
+}
+
+@MainActor
+private final class FailedProductionRuntimeBuilder: AppRuntimeBuilding {
+    func build() async throws -> AppRuntimeLaunch {
+        throw ProductionRuntimeError.insecureRendezvousURL
     }
 }

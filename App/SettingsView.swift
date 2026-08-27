@@ -76,25 +76,123 @@ protocol DirectorySelecting: AnyObject {
 @MainActor
 protocol DeviceSettingsServicing: AnyObject {
     var isAvailable: Bool { get }
-    func rename(_ id: DeviceID, to displayName: String) async
-    func revoke(_ id: DeviceID) async
+    func rename(_ id: DeviceID, to displayName: String) async throws
+    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult
     func updateReceivePolicy(
         _ id: DeviceID,
         autoAccept: Bool,
         maximumBytes: UInt64?
-    ) async
-    func updateDefaultDirectory(_ directory: URL) async
-    func updateDirectory(_ directory: URL?, for id: DeviceID) async
+    ) async throws
+    func updateDefaultDirectory(_ directory: URL) async throws
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws
 }
 
 @MainActor
 final class SettingsSurfaceModel: ObservableObject {
     @Published var defaultDirectory: URL?
     @Published var devices: [DeviceSetting]
+    @Published var actionError: String?
+    private let announcer: any AccessibilityAnnouncing
 
-    init(defaultDirectory: URL? = nil, devices: [DeviceSetting] = []) {
+    init(
+        defaultDirectory: URL? = nil,
+        devices: [DeviceSetting] = [],
+        actionError: String? = nil,
+        announcer: (any AccessibilityAnnouncing)? = nil
+    ) {
         self.defaultDirectory = defaultDirectory
         self.devices = devices
+        self.actionError = actionError
+        self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
+    }
+
+    func rename(
+        _ id: DeviceID,
+        to displayName: String,
+        using service: any DeviceSettingsServicing
+    ) async {
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        do {
+            try await service.rename(id, to: name)
+            mutate(id) { $0.displayName = name }
+            actionError = nil
+        } catch {
+            publishError("无法保存设备名称，请稍后重试。")
+        }
+    }
+
+    func revoke(_ id: DeviceID, using service: any DeviceSettingsServicing) async {
+        do {
+            let result = try await service.revoke(id)
+            devices.removeAll { $0.id == id }
+            if let warning = result.warning {
+                publishError(warning)
+            } else {
+                actionError = nil
+            }
+        } catch {
+            publishError("无法撤销设备信任，请稍后重试。")
+        }
+    }
+
+    func updatePolicy(
+        _ id: DeviceID,
+        autoAccept: Bool,
+        maximumBytes: UInt64?,
+        using service: any DeviceSettingsServicing
+    ) async {
+        do {
+            try await service.updateReceivePolicy(
+                id,
+                autoAccept: autoAccept,
+                maximumBytes: maximumBytes
+            )
+            mutate(id) {
+                $0.autoAccept = autoAccept
+                $0.maximumMegabytes = SettingsSizeLimit.megabytes(bytes: maximumBytes)
+            }
+            actionError = nil
+        } catch {
+            publishError("无法保存接收策略，请稍后重试。")
+        }
+    }
+
+    func updateDefaultDirectory(
+        _ directory: URL,
+        using service: any DeviceSettingsServicing
+    ) async {
+        do {
+            try await service.updateDefaultDirectory(directory)
+            defaultDirectory = directory
+            actionError = nil
+        } catch {
+            publishError("无法保存默认接收目录，请确认目录仍可访问后重试。")
+        }
+    }
+
+    func updateDirectory(
+        _ directory: URL?,
+        for id: DeviceID,
+        using service: any DeviceSettingsServicing
+    ) async {
+        do {
+            try await service.updateDirectory(directory, for: id)
+            mutate(id) { $0.directory = directory }
+            actionError = nil
+        } catch {
+            publishError("无法保存接收目录，请确认目录仍可访问后重试。")
+        }
+    }
+
+    private func publishError(_ message: String) {
+        actionError = message
+        announcer.announce(message)
+    }
+
+    private func mutate(_ id: DeviceID, _ body: (inout DeviceSetting) -> Void) {
+        guard let index = devices.firstIndex(where: { $0.id == id }) else { return }
+        body(&devices[index])
     }
 }
 
@@ -142,6 +240,14 @@ struct SettingsView: View {
                     .accessibilityLabel("设置存储尚未配置，控件已停用")
             }
 
+            if let error = model.actionError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                    .accessibilityLabel(error)
+            }
+
             Divider()
 
             Form {
@@ -156,8 +262,9 @@ struct SettingsView: View {
                             guard let selected = directorySelector.chooseDirectory(
                                 current: model.defaultDirectory
                             ) else { return }
-                            model.defaultDirectory = selected
-                            Task { await service.updateDefaultDirectory(selected) }
+                            Task {
+                                await model.updateDefaultDirectory(selected, using: service)
+                            }
                         }
                         .frame(minHeight: 40)
                     }
@@ -172,9 +279,10 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                             .frame(minHeight: 60)
                     } else {
-                        ForEach($model.devices) { $device in
+                        ForEach(model.devices) { device in
                             DeviceSettingRow(
-                                device: $device,
+                                device: device,
+                                model: model,
                                 service: service,
                                 directorySelector: directorySelector
                             )
@@ -195,11 +303,31 @@ struct SettingsView: View {
 }
 
 private struct DeviceSettingRow: View {
-    @Binding var device: DeviceSetting
+    let device: DeviceSetting
+    let model: SettingsSurfaceModel
     let service: any DeviceSettingsServicing
     let directorySelector: any DirectorySelecting
+    @State private var draftName: String
+    @State private var draftAutoAccept: Bool
+    @State private var draftMaximumMegabytes: String
     @FocusState private var nameFocused: Bool
     @FocusState private var sizeFocused: Bool
+    @Namespace private var sizeValidation
+
+    init(
+        device: DeviceSetting,
+        model: SettingsSurfaceModel,
+        service: any DeviceSettingsServicing,
+        directorySelector: any DirectorySelecting
+    ) {
+        self.device = device
+        self.model = model
+        self.service = service
+        self.directorySelector = directorySelector
+        _draftName = State(initialValue: device.displayName)
+        _draftAutoAccept = State(initialValue: device.autoAccept)
+        _draftMaximumMegabytes = State(initialValue: device.maximumMegabytes)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -212,46 +340,49 @@ private struct DeviceSettingRow: View {
                     .accessibilityLabel(statusText)
                 Spacer()
                 Button("撤销信任", systemImage: "trash", role: .destructive) {
-                    Task { await service.revoke(device.id) }
+                    Task { await model.revoke(device.id, using: service) }
                 }
                 .frame(minHeight: 40)
                 .accessibilityHint("撤销后，此设备无法再连接或发送文件")
             }
 
             HStack {
-                TextField("设备名称", text: $device.displayName)
+                TextField("设备名称", text: $draftName)
                     .frame(minHeight: 40)
                     .focused($nameFocused)
                     .onSubmit(saveName)
                     .accessibilityLabel("设备名称")
                 Button("保存名称", action: saveName)
-                    .disabled(device.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .frame(minHeight: 40)
             }
 
-            Toggle("自动接收此设备发送的内容", isOn: $device.autoAccept)
-                .onChange(of: device.autoAccept) { _, _ in savePolicy() }
+            Toggle("自动接收此设备发送的内容", isOn: $draftAutoAccept)
+                .onChange(of: draftAutoAccept) { _, _ in savePolicy() }
 
             HStack {
-                TextField("不限", text: $device.maximumMegabytes)
+                TextField("不限", text: $draftMaximumMegabytes)
                     .focused($sizeFocused)
                     .onSubmit(savePolicy)
                     .frame(width: 100)
                     .frame(minHeight: 40)
                     .accessibilityLabel("单次自动接收大小上限，MB")
+                    .accessibilityHint(sizeValidationGuidance)
+                    .accessibilityLabeledPair(role: .content, id: "size-limit", in: sizeValidation)
                 Text("MB 单次大小上限；留空表示不限")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("保存上限", action: savePolicy)
-                    .disabled(!SettingsSizeLimit.isValidInput(device.maximumMegabytes))
+                    .disabled(!SettingsSizeLimit.isValidInput(draftMaximumMegabytes))
                     .frame(minHeight: 40)
             }
-            if !SettingsSizeLimit.isValidInput(device.maximumMegabytes) {
-                Label("请输入大于 0 的 MB 数值，或留空表示不限", systemImage: "exclamationmark.circle")
+            if !SettingsSizeLimit.isValidInput(draftMaximumMegabytes) {
+                Label(sizeValidationGuidance, systemImage: "exclamationmark.circle")
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .accessibilityLabel("大小上限无效")
+                    .accessibilityLabel(sizeValidationGuidance)
+                    .accessibilityLabeledPair(role: .label, id: "size-limit", in: sizeValidation)
             }
 
             HStack {
@@ -261,8 +392,7 @@ private struct DeviceSettingRow: View {
                     .accessibilityLabel("此设备专用目录，\(directoryText)")
                 Spacer()
                 Button("恢复默认") {
-                    device.directory = nil
-                    Task { await service.updateDirectory(nil, for: device.id) }
+                    Task { await model.updateDirectory(nil, for: device.id, using: service) }
                 }
                 .disabled(device.directory == nil)
                 .frame(minHeight: 40)
@@ -270,13 +400,19 @@ private struct DeviceSettingRow: View {
                     guard let selected = directorySelector.chooseDirectory(
                         current: device.directory
                     ) else { return }
-                    device.directory = selected
-                    Task { await service.updateDirectory(selected, for: device.id) }
+                    Task {
+                        await model.updateDirectory(selected, for: device.id, using: service)
+                    }
                 }
                 .frame(minHeight: 40)
             }
         }
         .padding(.vertical, 8)
+        .onChange(of: device) { _, updated in
+            draftName = updated.displayName
+            draftAutoAccept = updated.autoAccept
+            draftMaximumMegabytes = updated.maximumMegabytes
+        }
     }
 
     private var statusText: String {
@@ -299,21 +435,34 @@ private struct DeviceSettingRow: View {
         device.directory?.path(percentEncoded: false) ?? "使用默认目录"
     }
 
+    private var sizeValidationGuidance: String {
+        "请输入大于 0 的 MB 数值，或留空表示不限。可使用小数点，例如 1.5。"
+    }
+
     private func saveName() {
-        let name = device.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-        device.displayName = name
-        Task { await service.rename(device.id, to: name) }
+        Task {
+            await model.rename(device.id, to: name, using: service)
+            if model.actionError != nil {
+                draftName = device.displayName
+            }
+        }
     }
 
     private func savePolicy() {
-        guard SettingsSizeLimit.isValidInput(device.maximumMegabytes) else { return }
+        guard SettingsSizeLimit.isValidInput(draftMaximumMegabytes) else { return }
         Task {
-            await service.updateReceivePolicy(
+            await model.updatePolicy(
                 device.id,
-                autoAccept: device.autoAccept,
-                maximumBytes: SettingsSizeLimit.bytes(megabytes: device.maximumMegabytes)
+                autoAccept: draftAutoAccept,
+                maximumBytes: SettingsSizeLimit.bytes(megabytes: draftMaximumMegabytes),
+                using: service
             )
+            if model.actionError != nil {
+                draftAutoAccept = device.autoAccept
+                draftMaximumMegabytes = device.maximumMegabytes
+            }
         }
     }
 }
@@ -321,13 +470,17 @@ private struct DeviceSettingRow: View {
 @MainActor
 final class UnavailableDeviceSettingsService: DeviceSettingsServicing {
     let isAvailable = false
-    func rename(_ id: DeviceID, to displayName: String) async {}
-    func revoke(_ id: DeviceID) async {}
+    func rename(_ id: DeviceID, to displayName: String) async throws { throw SettingsSurfaceError.unavailable }
+    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult {
+        throw SettingsSurfaceError.unavailable
+    }
     func updateReceivePolicy(
         _ id: DeviceID,
         autoAccept: Bool,
         maximumBytes: UInt64?
-    ) async {}
-    func updateDefaultDirectory(_ directory: URL) async {}
-    func updateDirectory(_ directory: URL?, for id: DeviceID) async {}
+    ) async throws { throw SettingsSurfaceError.unavailable }
+    func updateDefaultDirectory(_ directory: URL) async throws { throw SettingsSurfaceError.unavailable }
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws { throw SettingsSurfaceError.unavailable }
 }
+
+private enum SettingsSurfaceError: Error { case unavailable }

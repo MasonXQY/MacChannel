@@ -212,7 +212,7 @@ public actor TransferCoordinator: TransferCoordinating {
 
     /// Test/process-lifecycle hook: stops in-memory work without mutating durable
     /// phases or deleting packages, matching abrupt process termination.
-    func shutdownForRestart() async {
+    public func shutdownForRestart() async {
         guard !shuttingDown else { return }
         shuttingDown = true
         for transfer in transfers.values {

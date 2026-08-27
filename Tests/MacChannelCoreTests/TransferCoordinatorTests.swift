@@ -4,6 +4,18 @@ import XCTest
 
 @testable import MacChannelCore
 
+private actor IncomingResultRecorder {
+    private var results: [TransferReceiveResult?] = []
+
+    func record(_ result: TransferReceiveResult?) {
+        results.append(result)
+    }
+
+    func successfulResult() -> TransferReceiveResult? {
+        results.compactMap { $0 }.last
+    }
+}
+
 final class TransferCoordinatorTests: XCTestCase {
     func testCoordinatorSendsOneItemToExactlyOnePeer() async throws {
         let fixture = try CoordinatorFixture(twoPeers: true)
@@ -127,15 +139,22 @@ final class TransferCoordinatorTests: XCTestCase {
             at: destination,
             withIntermediateDirectories: true
         )
+        let occupiedDestination = destination.appendingPathComponent(sourceURL.lastPathComponent)
+        let existingData = Data("existing destination".utf8)
+        try existingData.write(to: occupiedDestination)
         let sourceDevice = DeviceID(rawValue: UUID())
         let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
         let source = MemoryIncomingTransferSource()
+        let receivedResults = IncomingResultRecorder()
         let listener = IncomingTransferListener(
             source: source,
             policy: ReceivePolicy(trustedSources: [sourceDevice]),
             directories: DownloadDirectory(globalDirectory: destination),
             database: database,
-            incomingDirectory: incoming
+            incomingDirectory: incoming,
+            onReceiveFinished: { result in
+                await receivedResults.record(result)
+            }
         )
         await listener.start()
         defer { Task { await listener.stop() } }
@@ -153,10 +172,13 @@ final class TransferCoordinatorTests: XCTestCase {
         try await waitForDatabasePhase(.completed, id: manifest.id, database: database)
         try await waitForClose(on: pair.receiver)
 
-        XCTAssertEqual(
-            try Data(contentsOf: destination.appendingPathComponent(sourceURL.lastPathComponent)),
-            sourceData
-        )
+        XCTAssertEqual(try Data(contentsOf: occupiedDestination), existingData)
+        let recorded = await receivedResults.successfulResult()
+        let result = try XCTUnwrap(recorded)
+        XCTAssertEqual(result.transferID, manifest.id)
+        let actualOutput = try XCTUnwrap(result.receivedURLs.first)
+        XCTAssertNotEqual(actualOutput, occupiedDestination)
+        XCTAssertEqual(try Data(contentsOf: actualOutput), sourceData)
     }
 
     func testProductionConnectionCoordinatorBindsConnectionToTransferID() async throws {
