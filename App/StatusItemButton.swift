@@ -7,11 +7,16 @@ final class StatusItemButton: NSStatusBarButton {
         didSet { render() }
     }
 
-    var onDragEntered: ((DropIntent) -> StatusItemDragToken?)?
-    var onDragCancelled: ((StatusItemDragToken) -> Void)?
-    var onDropOutside: ((StatusItemDragToken) -> Void)?
+    var onDragEntered: ((DropIntent, StatusItemDragFingerprint) -> StatusItemDragToken?)?
+    var onDragCancelled: ((StatusItemDragToken, StatusItemDragFingerprint) -> Void)?
+    var onDropOutside: ((StatusItemDragToken, StatusItemDragFingerprint) -> Void)?
 
-    private var dragToken: StatusItemDragToken?
+    private struct ActiveDrag {
+        let token: StatusItemDragToken
+        let fingerprint: StatusItemDragFingerprint
+    }
+
+    private var activeDrag: ActiveDrag?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -34,30 +39,33 @@ final class StatusItemButton: NSStatusBarButton {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let fingerprint = fingerprint(for: sender)
         guard let intent = try? DropIntent(pasteboard: sender.draggingPasteboard),
-              let token = onDragEntered?(intent)
+              let token = onDragEntered?(intent, fingerprint)
         else { return [] }
-        dragToken = token
+        activeDrag = ActiveDrag(token: token, fingerprint: fingerprint)
         return .copy
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard dragToken != nil,
+        guard activeDrag?.fingerprint == fingerprint(for: sender),
               (try? DropIntent(pasteboard: sender.draggingPasteboard)) != nil
         else { return [] }
         return .copy
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        guard let token = dragToken else { return }
-        dragToken = nil
-        onDragCancelled?(token)
+        guard let activeDrag else { return }
+        self.activeDrag = nil
+        onDragCancelled?(activeDrag.token, activeDrag.fingerprint)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let token = dragToken else { return false }
-        dragToken = nil
-        onDropOutside?(token)
+        guard let activeDrag,
+              activeDrag.fingerprint == fingerprint(for: sender)
+        else { return false }
+        self.activeDrag = nil
+        onDropOutside?(activeDrag.token, activeDrag.fingerprint)
         return false
     }
 
@@ -124,5 +132,12 @@ final class StatusItemButton: NSStatusBarButton {
         setAccessibilityValue(presentation.accessibilityValue)
         toolTip = presentation.accessibilityValue
         needsDisplay = true
+    }
+
+    private func fingerprint(for sender: NSDraggingInfo) -> StatusItemDragFingerprint {
+        StatusItemDragFingerprint(
+            sequenceNumber: sender.draggingSequenceNumber,
+            pasteboardChangeCount: sender.draggingPasteboard.changeCount
+        )
     }
 }

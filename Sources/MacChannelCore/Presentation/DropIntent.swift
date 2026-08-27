@@ -70,7 +70,7 @@ public enum StatusItemPhase: Equatable, Sendable {
                 progress: nil
             )
         case let .transferring(progress):
-            let clamped = min(max(progress, 0), 1)
+            let clamped = progress.isFinite ? min(max(progress, 0), 1) : 0
             let percent = Int((clamped * 100).rounded())
             return StatusItemPresentation(
                 symbolName: nil,
@@ -166,7 +166,8 @@ public struct StatusItemDropStateMachine {
 
     public mutating func updateProgress(token: StatusItemDragToken, progress: Double) {
         guard case let .transferring(currentToken) = session,
-              currentToken == token
+              currentToken == token,
+              progress.isFinite
         else { return }
         phase = .transferring(progress: min(max(progress, 0), 1))
     }

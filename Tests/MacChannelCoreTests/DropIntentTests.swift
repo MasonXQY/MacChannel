@@ -117,4 +117,31 @@ final class DropIntentTests: XCTestCase {
         XCTAssertEqual(transfer.accessibilityValue, "Transferring, 42 percent")
         XCTAssertEqual(transfer.progress, 0.42)
     }
+
+    func testStatusItemPresentationNormalizesNonfiniteProgressToZero() {
+        for progress in [Double.nan, .infinity, -.infinity] {
+            let presentation = StatusItemPhase.transferring(progress: progress).presentation
+            XCTAssertEqual(presentation.title, "0%")
+            XCTAssertEqual(presentation.accessibilityValue, "Transferring, 0 percent")
+            XCTAssertEqual(presentation.progress, 0)
+        }
+    }
+
+    @MainActor
+    func testStateMachineKeepsLastFiniteProgressWhenUpdateIsNonfinite() throws {
+        var state = StatusItemDropStateMachine()
+        let token = try XCTUnwrap(
+            state.begin(
+                intent: DropIntent(items: [.fileURL(URL(fileURLWithPath: "/tmp/a"))])
+            )
+        )
+        _ = state.claimDrop(token: token, target: DeviceID(rawValue: UUID()))
+        state.updateProgress(token: token, progress: 0.42)
+
+        state.updateProgress(token: token, progress: .nan)
+        state.updateProgress(token: token, progress: .infinity)
+        state.updateProgress(token: token, progress: -.infinity)
+
+        XCTAssertEqual(state.phase, .transferring(progress: 0.42))
+    }
 }

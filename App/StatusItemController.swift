@@ -5,9 +5,10 @@ import MacChannelCore
 struct DeviceFanRequest {
     let intent: DropIntent
     let devices: [DeviceSummary]
-    let dragEntered: @MainActor () -> Void
-    let dragExited: @MainActor () -> Void
-    let select: @MainActor (DeviceID) -> Void
+    let fingerprint: StatusItemDragFingerprint
+    let dragEntered: @MainActor (StatusItemDragFingerprint) -> Bool
+    let dragExited: @MainActor (StatusItemDragFingerprint) -> Bool
+    let select: @MainActor (DeviceID) -> Bool
     let cancel: @MainActor () -> Void
 }
 
@@ -18,29 +19,44 @@ final class StatusItemController: NSObject {
     var onPresentDeviceFan: ((DeviceFanRequest) -> Void)?
     var onDismissDeviceFan: ((StatusItemDragToken) -> Void)?
     var onTransferStarted: ((TransferID, StatusItemDragToken) -> Void)?
+    var onAnnouncement: ((String) -> Void)?
 
     var phase: StatusItemPhase { state.phase }
     var nativeButton: NSStatusBarButton? { statusItem?.button }
 
     private let transferCoordinator: any TransferCoordinating
+    private let filePicker: any StatusItemFilePicking
+    private let deviceMenuPresenter: any StatusItemDeviceMenuPresenting
     private var state = StatusItemDropStateMachine()
     private var devices: [DeviceSummary]
     private var currentFanToken: StatusItemDragToken?
-    private var fanDragToken: StatusItemDragToken?
-    private var deferredExitTask: Task<Void, Never>?
+    private var dragRegionSession: DragRegionSession!
     private var statusItem: NSStatusItem?
     private var deviceTask: Task<Void, Never>?
 
     init(
         button: StatusItemButton,
         devices: [DeviceSummary],
-        transferCoordinator: any TransferCoordinating
+        transferCoordinator: any TransferCoordinating,
+        filePicker: (any StatusItemFilePicking)? = nil,
+        deviceMenuPresenter: (any StatusItemDeviceMenuPresenting)? = nil,
+        dragRegionSchedule: DragRegionSchedule? = nil
     ) {
         self.button = button
         self.devices = devices
         self.transferCoordinator = transferCoordinator
+        self.filePicker = filePicker ?? NativeStatusItemFilePicker()
+        self.deviceMenuPresenter = deviceMenuPresenter ?? NativeStatusItemDeviceMenuPresenter()
         statusMenu = NSMenu(title: "MacChannel")
         super.init()
+        dragRegionSession = if let dragRegionSchedule {
+            DragRegionSession(schedule: dragRegionSchedule)
+        } else {
+            DragRegionSession()
+        }
+        dragRegionSession.onExpired = { [weak self] token in
+            self?.cancelDrag(token)
+        }
         configureMenu()
         configureButton()
         renderPhase()
@@ -61,11 +77,16 @@ final class StatusItemController: NSObject {
     }
 
     @discardableResult
-    func beginDrop(_ intent: DropIntent) -> StatusItemDragToken? {
+    func beginDrop(
+        _ intent: DropIntent,
+        fingerprint: StatusItemDragFingerprint = StatusItemDragFingerprint(
+            sequenceNumber: 0,
+            pasteboardChangeCount: 0
+        )
+    ) -> StatusItemDragToken? {
         let staleFan = currentFanToken
         guard let token = state.begin(intent: intent) else { return nil }
-        deferredExitTask?.cancel()
-        fanDragToken = nil
+        dragRegionSession.begin(token: token, fingerprint: fingerprint, in: .icon)
         currentFanToken = token
         renderPhase()
 
@@ -76,14 +97,15 @@ final class StatusItemController: NSObject {
             DeviceFanRequest(
                 intent: intent,
                 devices: devices.filter { $0.availability != .offline },
-                dragEntered: { [weak self] in
-                    self?.dragEnteredFan(token)
+                fingerprint: fingerprint,
+                dragEntered: { [weak self] observedFingerprint in
+                    self?.dragEnteredFan(token, fingerprint: observedFingerprint) ?? false
                 },
-                dragExited: { [weak self] in
-                    self?.dragExitedFan(token)
+                dragExited: { [weak self] observedFingerprint in
+                    self?.dragExitedFan(token, fingerprint: observedFingerprint) ?? false
                 },
                 select: { [weak self] device in
-                    self?.selectTarget(device, token: token)
+                    self?.selectTarget(device, token: token) ?? false
                 },
                 cancel: { [weak self] in
                     self?.cancelDrag(token)
@@ -93,22 +115,33 @@ final class StatusItemController: NSObject {
         return token
     }
 
-    func dragExitedButton(_ token: StatusItemDragToken) {
-        deferredExitTask?.cancel()
-        deferredExitTask = Task { [weak self] in
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            self?.cancelAfterRegionExit(token)
+    @discardableResult
+    func dragEnteredButton(
+        _ intent: DropIntent,
+        fingerprint: StatusItemDragFingerprint
+    ) -> StatusItemDragToken? {
+        if let token = currentFanToken,
+           state.phase == .ready,
+           dragRegionSession.enter(.icon, token: token, fingerprint: fingerprint)
+        {
+            return token
         }
+        return beginDrop(intent, fingerprint: fingerprint)
+    }
+
+    @discardableResult
+    func dragExitedButton(
+        _ token: StatusItemDragToken,
+        fingerprint: StatusItemDragFingerprint
+    ) -> Bool {
+        dragRegionSession.exit(.icon, token: token, fingerprint: fingerprint)
     }
 
     func cancelDrag(_ token: StatusItemDragToken) {
         let phaseBefore = state.phase
         state.cancelDrag(token: token)
         guard state.phase != phaseBefore else { return }
-        deferredExitTask?.cancel()
-        deferredExitTask = nil
-        fanDragToken = nil
+        dragRegionSession.invalidate(token: token)
         if currentFanToken == token {
             currentFanToken = nil
         }
@@ -126,8 +159,46 @@ final class StatusItemController: NSObject {
         renderPhase()
     }
 
+    func performKeyboardSend() {
+        guard let urls = filePicker.chooseFiles() else { return }
+        guard let intent = try? DropIntent(items: urls.map(DropItem.fileURL)) else {
+            announce("The selected items cannot be sent.")
+            return
+        }
+
+        let onlineDevices = devices
+            .filter { $0.availability != .offline }
+            .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        guard !onlineDevices.isEmpty else {
+            announce("No online devices available.")
+            return
+        }
+
+        let staleFan = currentFanToken
+        guard let token = state.begin(intent: intent) else {
+            announce("A transfer is already active.")
+            return
+        }
+        if let staleFan {
+            dragRegionSession.invalidate(token: staleFan)
+            onDismissDeviceFan?(staleFan)
+        }
+        currentFanToken = nil
+        renderPhase()
+
+        deviceMenuPresenter.present(
+            devices: onlineDevices,
+            anchor: nativeButton ?? button,
+            select: { [weak self] device in
+                self?.selectTarget(device, token: token) ?? false
+            },
+            cancel: { [weak self] in
+                self?.cancelDrag(token)
+            }
+        )
+    }
+
     func invalidate() {
-        deferredExitTask?.cancel()
         deviceTask?.cancel()
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
@@ -135,15 +206,13 @@ final class StatusItemController: NSObject {
         }
     }
 
-    private func selectTarget(_ device: DeviceID, token: StatusItemDragToken) {
+    private func selectTarget(_ device: DeviceID, token: StatusItemDragToken) -> Bool {
         guard devices.contains(where: {
             $0.id == device && $0.availability != .offline
         }), let claim = state.claimDrop(token: token, target: device)
-        else { return }
+        else { return false }
 
-        deferredExitTask?.cancel()
-        deferredExitTask = nil
-        fanDragToken = nil
+        dragRegionSession.invalidate(token: token)
         currentFanToken = nil
         onDismissDeviceFan?(token)
         renderPhase()
@@ -160,33 +229,34 @@ final class StatusItemController: NSObject {
                 self?.completeTransfer(token: token)
             }
         }
+        return true
     }
 
-    private func dragEnteredFan(_ token: StatusItemDragToken) {
-        guard currentFanToken == token, state.phase == .ready else { return }
-        deferredExitTask?.cancel()
-        deferredExitTask = nil
-        fanDragToken = token
+    private func dragEnteredFan(
+        _ token: StatusItemDragToken,
+        fingerprint: StatusItemDragFingerprint
+    ) -> Bool {
+        guard currentFanToken == token, state.phase == .ready else { return false }
+        return dragRegionSession.enter(.fan, token: token, fingerprint: fingerprint)
     }
 
-    private func dragExitedFan(_ token: StatusItemDragToken) {
-        guard fanDragToken == token else { return }
-        fanDragToken = nil
-        dragExitedButton(token)
-    }
-
-    private func cancelAfterRegionExit(_ token: StatusItemDragToken) {
-        guard fanDragToken != token else { return }
-        deferredExitTask = nil
-        cancelDrag(token)
+    private func dragExitedFan(
+        _ token: StatusItemDragToken,
+        fingerprint: StatusItemDragFingerprint
+    ) -> Bool {
+        dragRegionSession.exit(.fan, token: token, fingerprint: fingerprint)
     }
 
     private func configureButton() {
         button.target = self
         button.action = #selector(showStatusMenu(_:))
-        button.onDragEntered = { [weak self] intent in self?.beginDrop(intent) }
-        button.onDragCancelled = { [weak self] token in self?.dragExitedButton(token) }
-        button.onDropOutside = { [weak self] token in self?.cancelDrag(token) }
+        button.onDragEntered = { [weak self] intent, fingerprint in
+            self?.dragEnteredButton(intent, fingerprint: fingerprint)
+        }
+        button.onDragCancelled = { [weak self] token, fingerprint in
+            self?.dragExitedButton(token, fingerprint: fingerprint)
+        }
+        button.onDropOutside = { [weak self] token, _ in self?.cancelDrag(token) }
     }
 
     private func configureMenu() {
@@ -246,6 +316,18 @@ final class StatusItemController: NSObject {
         statusItem?.length = button.preferredWidth
     }
 
+    private func announce(_ message: String) {
+        onAnnouncement?(message)
+        NSAccessibility.post(
+            element: nativeButton ?? button,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ]
+        )
+    }
+
     @objc private func showStatusMenu(_ sender: Any?) {
         statusMenu.popUp(
             positioning: nil,
@@ -255,15 +337,6 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func chooseFiles(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = false
-        panel.prompt = "Choose"
-        guard panel.runModal() == .OK,
-              let intent = try? DropIntent(items: panel.urls.map(DropItem.fileURL))
-        else { return }
-        beginDrop(intent)
+        performKeyboardSend()
     }
 }
