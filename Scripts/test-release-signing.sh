@@ -2,6 +2,8 @@
 set -euo pipefail
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
+version="${MACCHANNEL_VERSION:-1.0.0}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-1}"
 if [[ -z "$identity" ]]; then
     echo "MACCHANNEL_CODESIGN_IDENTITY is required" >&2
     exit 2
@@ -22,6 +24,8 @@ trap cleanup EXIT
 
 MACCHANNEL_BUILD_CONFIGURATION=release \
 MACCHANNEL_CODESIGN_IDENTITY="$identity" \
+MACCHANNEL_VERSION="$version" \
+MACCHANNEL_BUILD_NUMBER="$build_number" \
 MACCHANNEL_APP_OUTPUT="$app_path" \
     bash Scripts/build-app.sh
 
@@ -30,6 +34,12 @@ codesign --verify --deep --strict --verbose=2 "$app_path"
 details="$(codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$details" >/dev/null
 grep -E 'flags=.*runtime' <<<"$details" >/dev/null
+team_id="$(sed -E 's/^.*\(([A-Z0-9]{10})\)$/\1/' <<<"$identity")"
+grep -F "TeamIdentifier=$team_id" <<<"$details" >/dev/null
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = \
+    "$version"
+test "$(plutil -extract CFBundleVersion raw -o - "$app_path/Contents/Info.plist")" = \
+    "$build_number"
 
 if find "$app_path" -name CodeResources -o -name _CodeSignature | grep -q .; then
     :

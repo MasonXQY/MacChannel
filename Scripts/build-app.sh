@@ -3,6 +3,8 @@ set -euo pipefail
 
 build_configuration="${MACCHANNEL_BUILD_CONFIGURATION:-debug}"
 codesign_identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
+app_version="${MACCHANNEL_VERSION:-1.0.0}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-1}"
 
 case "$build_configuration" in
     debug|release) ;;
@@ -11,6 +13,15 @@ case "$build_configuration" in
         exit 2
         ;;
 esac
+
+if [[ ! "$app_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    echo "MACCHANNEL_VERSION must be a release SemVer such as 1.2.3" >&2
+    exit 2
+fi
+if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
+    echo "MACCHANNEL_BUILD_NUMBER must be a positive integer" >&2
+    exit 2
+fi
 
 swift build -c "$build_configuration"
 
@@ -48,7 +59,7 @@ else
     cp -X -R ".build/$build_configuration/MacChannel_MacChannelAppKit.bundle" "$working_app/MacChannel_MacChannelAppKit.bundle"
 fi
 
-cat > "$contents_path/Info.plist" <<'PLIST'
+cat > "$contents_path/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -60,9 +71,9 @@ cat > "$contents_path/Info.plist" <<'PLIST'
     <key>CFBundleName</key>
     <string>MacChannel</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>$app_version</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$build_number</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
@@ -70,6 +81,7 @@ cat > "$contents_path/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+plutil -lint "$contents_path/Info.plist" >/dev/null
 
 if [[ -n "$codesign_identity" ]]; then
     signing_args=(

@@ -3,12 +3,15 @@
 Mac 通道是一款原生 macOS 菜单栏文件传输工具。把文件或文件夹拖到菜单栏图标，
 选择一台已配对且在线的 Mac，松手即可发送。它支持多台 Mac，但每次只发送到一个目标。
 
-> 当前尚未完成双/三台真实 Mac、生产 TURN 和 Apple 公证验收，请勿把它当作已发布版本分发。
+> 当前尚未完成双/三台真实 Mac 和 Apple 公证验收。未公证安装包只适合已知测试者，
+> 请勿把它当作公开发布版本分发。
 
 ## 使用要求
 
 - macOS 14 或更高版本。
-- 两台或更多 Mac；异地传输还需要已部署的 rendezvous 与 TURN 服务。
+- 两台或更多 Mac。
+- 推荐在每台 Mac 安装并登录 Tailscale；个人网络模式不需要自行部署服务器。
+- 若改用公共服务模式，异地传输需要已部署的 rendezvous 与 TURN 服务。
 - 首次打开时允许应用访问本地网络、通知和所选下载目录。
 
 ## 本地构建与打开
@@ -30,12 +33,28 @@ bash Scripts/build-app.sh
 构建器会启用 hardened runtime、签名嵌入 framework，并申请可信时间戳。正式分发前仍须完成
 Apple 公证、staple 和 Gatekeeper 验证；不要关闭系统整体安全设置。
 
+## 制作可安装镜像
+
+工作树必须没有未提交改动，并使用已安装的 Developer ID Application 身份：
+
+```sh
+MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: 组织名称 (TEAMID)" \
+bash Scripts/build-distribution.sh
+```
+
+完成后得到 `dist/MacChannel.dmg` 和对应的 `dist/MacChannel.manifest.json`。打开 DMG，
+把 MacChannel 拖到“应用程序”即可。若设置 `MACCHANNEL_NOTARY_PROFILE`，构建器还会等待
+Apple 公证、装订票据并执行 Gatekeeper 检查；未设置时清单会明确标为
+`internalSignedNotNotarized`。
+
 ## 第一次配对
 
-1. 在已信任的 Mac 上打开菜单栏图标，选择“添加 Mac”并显示六位码。
-2. 在新 Mac 上输入六位码。
-3. 两台 Mac 会显示设备名称和密钥指纹；面对面或通过可信通道逐字核对。
-4. 双方确认后，新设备出现在设备列表。六位码短时有效且只能使用一次。
+1. 两台 Mac 都登录 Tailscale。在 MacChannel 设置里选择“个人网络（推荐）”，点击
+   “启用个人网络通道”。
+2. 在已信任的 Mac 上打开菜单栏图标，选择“添加 Mac”并显示六位码。
+3. 在新 Mac 上选择发现的目标设备并输入六位码。
+4. 两台 Mac 会显示设备名称和密钥指纹；面对面或通过可信通道逐字核对。
+5. 双方确认后，新设备出现在设备列表。个人网络配对码十分钟内有效且只能使用一次。
 
 不要把配对码或指纹确认交给陌生人。设备遗失后，应立即在其他 Mac 的设备设置中撤销。
 
