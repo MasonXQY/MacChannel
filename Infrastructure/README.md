@@ -12,9 +12,16 @@ docker compose -f Infrastructure/docker-compose.yml ps
 
 一次性的 `secret-init` 容器会在名为 `macchannel-local_stack_secrets` 的
 Docker volume 中安全生成数据库密码、TURN 共享密钥、本地 CA 和 localhost 证书。
-完成标记最后原子写入；未完成的首次生成可以恢复，已完成但被篡改的 volume 会失败
-关闭，绝不会静默轮换并破坏现有数据库。重启和普通 `docker compose down` 会保留
-这些材料；若要完全重置，必须同时明确删除 `stack_secrets` 和 `postgres_data` volume。
+每一代都有随机 generation ID 和持久 manifest，manifest 记录固定文件集合、mode、size
+与 SHA-256；完成标记在所有文件及父目录同步后最后写入。标记单独丢失时会从 manifest
+验证并恢复同一代，完整 pending 会原样续发；没有 manifest 却已有 live 数据则失败关闭，
+绝不会猜测状态或轮换数据库密码。生成器用跨进程排他锁覆盖检查、恢复和发布，后来的
+实例会等待并复用同一代。重启和普通 `docker compose down` 会保留这些材料；若要完全
+重置，必须同时明确删除 `stack_secrets` 和 `postgres_data` volume。
+
+生成过程对文件执行 `fsync`，对 rename 的源/目标父目录执行同步；macOS 优先
+`F_FULLFSYNC` 并在不支持时回退 `fsync`，Linux 使用 `fsync`。live 文件完全持久化前，
+pending 中仍保留同代备份，所以断电恢复不会依赖重新生成。
 
 直接入口把 `host.docker.internal` 作为 Docker Desktop 的本地 advertised relay
 默认值，足以启动 clean-checkout 栈。需要验证真实 relay 地址、系统信任和错误路径时，
@@ -49,8 +56,11 @@ Scripts/run-local-stack.sh --turn-external-ip 192.0.2.44
   的传输使用优先级更高的直连 LAN 路径，TURN 只服务公网 fallback。
 
 任何 runner 启动、健康检查、TLS、TURN 或日志检查失败，都会保留原始失败码，停止
-本次 Compose 栈，删除本次新建的 stack/database volume，并删除仅由本次加入用户
-钥匙串的 CA 信任。已有 volume 和已有信任不会被删除。
+本次 Compose 栈，并删除仅由本次加入用户钥匙串的 CA 信任。runner 使用固定 Compose
+项目专属的宿主排他锁，所以不同 checkout 也不能并发操作同一组 named volume；
+并用每进程随机 token 标记其明确创建的 stack/database volume；回滚前会重新核对
+token，只有仍由本实例拥有的 volume 才会删除。已有、被其他实例接管的 volume 和
+已有信任不会被删除。
 
 所有基础镜像同时固定可读 tag 和不可变 manifest digest。无需 Docker 即可检查 tag
 是否发生上游漂移：

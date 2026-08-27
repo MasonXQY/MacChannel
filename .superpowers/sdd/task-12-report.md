@@ -31,12 +31,29 @@ Status: implementation and all host-executable verification complete; container 
   PostgreSQL/TURN secrets plus an ECDSA P-256 CA and localhost certificate.
   Directories are `0700`, private material is `0600`, and public certificates
   are `0644`.
-- Generation is group-committed by publishing `.ready-v1` last. A crash before
-  that marker is recoverable; once marked complete, every file mode, secret
-  strength, certificate chain, hostname, and public/private key pair is
-  revalidated. Completed tampering fails closed with an instruction to remove
-  the named volume explicitly; it never silently rotates a password underneath
-  an existing PostgreSQL volume.
+- Each generation has an 18-byte random identity and a canonical durable
+  manifest containing the exact file set, mode, size, and SHA-256 digest.
+  A complete pending manifest is promoted without regenerating; the manifest is
+  committed before any live payload and the ready marker is committed last.
+  Marker-only loss therefore restores the same marker from the same manifest.
+  Any live material without either a valid manifest or the validated legacy
+  completion marker fails closed and leaves `postgres-password` byte-for-byte
+  untouched.
+- A blocking OS advisory lock spans classification, generation/recovery,
+  publication, and final validation. It uses `flock` on both macOS and Linux;
+  later processes wait, then validate and reuse the committed generation.
+  Pending directories carry the unique generation identity. A prior complete
+  legacy generation is migrated through one fixed lock-protected pending
+  manifest, so an interrupted migration cannot leave ambiguous generations.
+- Every file is chmoded and synced before publication. Every rename syncs both
+  source and destination parent directories. macOS attempts `F_FULLFSYNC` and
+  falls back to `fsync`; Linux uses `fsync`. Staged payload copies remain until
+  all live renames are directory-synced, so even loss of a just-renamed live
+  entry recovers from the same bytes instead of rotating credentials.
+- Once marked complete, the manifest, file modes, secret strength, certificate
+  chain, hostname, and public/private key pairs are revalidated. Completed
+  tampering fails closed with an instruction to remove both named volumes
+  explicitly.
 - PostgreSQL, rendezvous, and coturn all mount the same persistent generation.
   PostgreSQL uses its supported root-time `_FILE` flow. The other images begin
   with a minimal root launcher which opens regular non-symlink sources, copies
@@ -86,9 +103,14 @@ Status: implementation and all host-executable verification complete; container 
   exact code. A curl exit 23 remains exit 23 after Compose/trust rollback.
   Missing Docker or Go exits 1 without creating the local state directory,
   calling Docker, or changing trust.
-- On failure, the runner stops its Compose state, removes only stack/database
-  volumes that did not exist before this invocation, and removes only CA trust
-  added by this invocation. Existing volumes and existing trust are preserved.
+- A per-Compose-project host lock prevents runners from different checkouts
+  from entering the same named-volume mutation window concurrently. The exact
+  Compose project name is fixed, and
+  missing named volumes are explicitly created with a cryptographically random
+  per-process ownership label. On failure, the runner stops its Compose state,
+  removes CA trust added by this invocation, and deletes a newly created volume
+  only after re-reading and matching that ownership token. Existing or replaced
+  volumes and existing trust are preserved.
 
 ## Supply-chain and build-context controls
 
@@ -111,17 +133,30 @@ Status: implementation and all host-executable verification complete; container 
 - Secret-launcher tests use real modes/ownership and cover source symlinks,
   oversized inputs, malicious destination links, persistent-tmpfs restart, and
   byte preservation.
-- Stack-secret tests first failed to compile. They now generate and
-  cryptographically verify a real CA/server pair, assert modes and secret
-  strength, prove repeated startup is stable, recover an incomplete generation,
-  and reject completed tampering.
+- Stack-secret tests first demonstrated that deleting only the marker rotated
+  every credential and that unmanifested live material was silently replaced.
+  They now generate and cryptographically verify a real CA/server pair, assert
+  modes and manifest checksums, restore marker-only loss without changing any
+  payload, promote a provably complete pending generation, reject unmanifested
+  live material and completed tampering, and preserve legacy payload bytes
+  across interrupted manifest migration.
+- The cross-process test holds the real advisory lock, proves a second process
+  waits, then releases it and launches twelve processes behind one barrier. All
+  twelve succeed and observe a byte-identical generation.
+- A deterministic power-loss matrix interrupts before and after every chmod,
+  file sync, rename, parent-directory sync, and marker boundary. Every state
+  either safely regenerates only unpublished bytes, resumes the same manifested
+  generation, or fails closed; every successful recovery is byte-stable on the
+  next startup. A separate model removes a rename destination before its parent
+  sync and proves recovery from the retained pending copy.
 - Stack contract tests first failed on required host files/environment,
   unsegmented networks, missing private-peer denies, absent `simple-log`,
   unbraced Bash variables, and the unbounded relay port. All now pass.
 - Failure tests execute the real Bash 3.2 script with isolated state and fake
-  Docker/keychain/curl. They prove missing Docker/Go has no side effects and a
-  post-start curl 23 produces this ordered rollback: init, trust add, main up,
-  down, new secret volume removal, new database volume removal, trust removal.
+  Docker/keychain/curl. They prove missing Docker/Go has no side effects, a
+  concurrent second runner never reaches Docker mutation, a post-start curl 23
+  preserves its status while removing only token-owned volumes, and a simulated
+  ownership replacement prevents both volume deletions.
 - The UDP fake TURN server performs a live challenge/authenticated Allocate and
   returns encoded relay addresses. Missing address and out-of-range ports are
   rejected.

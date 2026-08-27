@@ -6,16 +6,21 @@ infrastructure_root="${repository_root}/Infrastructure"
 secret_root="${MACCHANNEL_LOCAL_STATE_ROOT:-${infrastructure_root}/.local-secrets}"
 tls_root="${secret_root}/tls"
 compose_file="${infrastructure_root}/docker-compose.yml"
+export COMPOSE_PROJECT_NAME=macchannel-local
 prepare_only=false
 install_trust=true
 turn_external_ip=
 trust_added=false
 stack_touched=false
-stack_secret_volume_existed=true
-postgres_volume_existed=true
+stack_secret_volume_owned=false
+postgres_volume_owned=false
+runner_lock_owned=false
 completed=false
 login_keychain=
 certificate_hash=
+runner_token=
+runner_lock_directory=
+volume_owner_label=com.macchannel.runner-token
 
 usage() {
   echo "用法: ${0} [--prepare-only] [--no-trust] [--turn-external-ip IPv4]" >&2
@@ -42,10 +47,10 @@ rollback() {
     if [[ "${stack_touched}" == true ]]; then
       TURN_EXTERNAL_IP="${turn_external_ip:-127.0.0.1}" \
         docker compose -f "${compose_file}" down --remove-orphans >/dev/null 2>&1
-      if [[ "${stack_secret_volume_existed}" == false ]]; then
+      if [[ "${stack_secret_volume_owned}" == true ]] && volume_is_still_owned macchannel-local_stack_secrets; then
         docker volume rm macchannel-local_stack_secrets >/dev/null 2>&1
       fi
-      if [[ "${postgres_volume_existed}" == false ]]; then
+      if [[ "${postgres_volume_owned}" == true ]] && volume_is_still_owned macchannel-local_postgres_data; then
         docker volume rm macchannel-local_postgres_data >/dev/null 2>&1
       fi
     fi
@@ -54,6 +59,7 @@ rollback() {
     fi
     echo "启动失败；本次新增的钥匙串信任和 Compose 状态已回滚。" >&2
   fi
+  release_runner_lock
   exit "${original_code}"
 }
 trap 'saved_exit_code=${?}; rollback "${saved_exit_code}"' EXIT
@@ -68,6 +74,61 @@ is_valid_external_ipv4() {
     }
     { exit 1 }
   '
+}
+
+acquire_runner_lock() {
+  local lock_root="${MACCHANNEL_RUNNER_LOCK_ROOT:-${TMPDIR:-/tmp}}"
+  local lock_hash
+  lock_hash="$(printf '%s' "${COMPOSE_PROJECT_NAME}" | openssl dgst -sha256 | awk '{print $NF}')"
+  runner_token="$(openssl rand -hex 32)"
+  runner_lock_directory="${lock_root%/}/macchannel-local-stack-${lock_hash}.lock"
+  if ! mkdir "${runner_lock_directory}" 2>/dev/null; then
+    echo "已有另一个本地栈 runner 正在运行；本次未更改 Compose 或 volume。" >&2
+    return 1
+  fi
+  runner_lock_owned=true
+  chmod 700 "${runner_lock_directory}"
+  printf '%s\n' "${runner_token}" > "${runner_lock_directory}/owner-token"
+  chmod 600 "${runner_lock_directory}/owner-token"
+}
+
+release_runner_lock() {
+  if [[ "${runner_lock_owned}" != true || -z "${runner_lock_directory}" ]]; then
+    return
+  fi
+  local current_token=
+  if [[ -f "${runner_lock_directory}/owner-token" ]]; then
+    IFS= read -r current_token < "${runner_lock_directory}/owner-token" || true
+  fi
+  if [[ -z "${current_token}" || "${current_token}" == "${runner_token}" ]]; then
+    rm -f "${runner_lock_directory}/owner-token"
+    rmdir "${runner_lock_directory}" 2>/dev/null || true
+  fi
+  runner_lock_owned=false
+}
+
+volume_owner_token() {
+  docker volume inspect --format "{{ index .Labels \"${volume_owner_label}\" }}" "${1}" 2>/dev/null || true
+}
+
+volume_is_still_owned() {
+  [[ "$(volume_owner_token "${1}")" == "${runner_token}" ]]
+}
+
+ensure_runner_volume() {
+  local volume_name="${1}"
+  local ownership_variable="${2}"
+  if docker volume inspect "${volume_name}" >/dev/null 2>&1; then
+    return
+  fi
+  local create_status=0
+  docker volume create --label "${volume_owner_label}=${runner_token}" "${volume_name}" >/dev/null || create_status=${?}
+  if volume_is_still_owned "${volume_name}"; then
+    printf -v "${ownership_variable}" '%s' true
+  fi
+  if [[ "${create_status}" -ne 0 ]]; then
+    return "${create_status}"
+  fi
 }
 
 validate_exported_material() {
@@ -188,6 +249,8 @@ if [[ "${prepare_only}" == false ]]; then
   fi
 fi
 
+acquire_runner_lock
+
 if [[ "${prepare_only}" == true ]]; then
   prepare_standalone_material
   install_local_trust_if_needed
@@ -201,13 +264,9 @@ mkdir -p "${tls_root}"
 chmod 700 "${secret_root}" "${tls_root}"
 export TURN_EXTERNAL_IP="${turn_external_ip}"
 
-if ! docker volume inspect macchannel-local_stack_secrets >/dev/null 2>&1; then
-  stack_secret_volume_existed=false
-fi
-if ! docker volume inspect macchannel-local_postgres_data >/dev/null 2>&1; then
-  postgres_volume_existed=false
-fi
 stack_touched=true
+ensure_runner_volume macchannel-local_stack_secrets stack_secret_volume_owned
+ensure_runner_volume macchannel-local_postgres_data postgres_volume_owned
 docker compose -f "${compose_file}" up --build --no-deps secret-init
 docker compose -f "${compose_file}" cp secret-init:/stack-secrets/turn-shared-secret "${secret_root}/turn-shared-secret"
 docker compose -f "${compose_file}" cp secret-init:/stack-secrets/tls/local-ca.pem "${tls_root}/local-ca.pem"

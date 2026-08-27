@@ -1,6 +1,7 @@
 package turn
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLocalStackPinsServicesAndProtectsSecrets(t *testing.T) {
@@ -93,6 +95,33 @@ func TestAllServicesConsumeOnePersistentSecretGeneration(t *testing.T) {
 			!strings.Contains(dockerfile, "/stack-secrets/tls/localhost-key.pem=") {
 			t.Errorf("%s does not copy the shared TURN/TLS generation", name)
 		}
+	}
+}
+
+func TestStackSecretGeneratorUsesManifestLockAndPlatformDurabilityPrimitives(t *testing.T) {
+	root := repositoryRoot(t)
+	mainSource := readContractFile(t, filepath.Join(root, "Services", "rendezvous", "cmd", "stack-secrets", "main.go"))
+	lockSource := readContractFile(t, filepath.Join(root, "Services", "rendezvous", "cmd", "stack-secrets", "lock_unix.go"))
+	darwinSync := readContractFile(t, filepath.Join(root, "Services", "rendezvous", "cmd", "stack-secrets", "sync_darwin.go"))
+	linuxSync := readContractFile(t, filepath.Join(root, "Services", "rendezvous", "cmd", "stack-secrets", "sync_linux.go"))
+	for _, required := range []string{
+		".manifest-v2.json", "Generation", "SHA256", "stackSecretsPendingPrefix",
+		"syncFileDurable", "renameDurable", "syncDirectoryDurable", "publishReadyMarker",
+	} {
+		if !strings.Contains(mainSource, required) {
+			t.Errorf("stack-secret durable state machine missing %q", required)
+		}
+	}
+	if !strings.Contains(lockSource, "syscall.Flock") || !strings.Contains(lockSource, "syscall.LOCK_EX") {
+		t.Fatal("stack-secret lock is not a blocking cross-process advisory lock")
+	}
+	for _, required := range []string{"SYS_FCNTL", "fullFileSync", "file.Sync()"} {
+		if !strings.Contains(darwinSync, required) {
+			t.Errorf("Darwin durability path missing %q", required)
+		}
+	}
+	if !strings.Contains(linuxSync, "file.Sync()") {
+		t.Fatal("Linux durability path does not fsync files and parent directories")
 	}
 }
 
@@ -208,6 +237,13 @@ func TestRunnerUsesBracedNamedExpansionsForBash32(t *testing.T) {
 	if match := regexp.MustCompile(`\$[A-Za-z_][A-Za-z0-9_]*`).FindString(withoutSingleQuotedShellSegments(runner)); match != "" {
 		t.Fatalf("unbraced named expansion is unsafe beside non-ASCII text on Bash 3.2: %q", match)
 	}
+	if !strings.Contains(runner, "export COMPOSE_PROJECT_NAME=macchannel-local") {
+		t.Fatal("runner ownership checks are not bound to the exact Compose project volume names")
+	}
+	if !strings.Contains(runner, `printf '%s' "${COMPOSE_PROJECT_NAME}"`) ||
+		strings.Contains(runner, `printf '%s' "${compose_file}" | openssl dgst`) {
+		t.Fatal("runner lock must be global to the fixed Compose project, not scoped to one checkout path")
+	}
 }
 
 func withoutSingleQuotedShellSegments(script string) string {
@@ -302,6 +338,8 @@ func TestRunnerRollsBackTrustAndComposeAfterPostStartFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := filepath.Join(temporary, "events")
+	secretOwner := filepath.Join(temporary, "secret-owner")
+	postgresOwner := filepath.Join(temporary, "postgres-owner")
 	state := filepath.Join(temporary, "state")
 	prepare := exec.Command("/bin/bash", filepath.Join(root, "Scripts", "run-local-stack.sh"), "--prepare-only", "--no-trust")
 	prepare.Env = append(os.Environ(), "MACCHANNEL_LOCAL_STATE_ROOT="+state)
@@ -310,10 +348,37 @@ func TestRunnerRollsBackTrustAndComposeAfterPostStartFailure(t *testing.T) {
 	}
 	writeExecutable(t, filepath.Join(bin, "docker"), `#!/bin/sh
 set -eu
+owner_file_for() {
+  case "${1}" in
+    macchannel-local_stack_secrets) printf '%s\n' "${TEST_SECRET_OWNER}" ;;
+    macchannel-local_postgres_data) printf '%s\n' "${TEST_POSTGRES_OWNER}" ;;
+    *) exit 2 ;;
+  esac
+}
+if [ "${1:-}" = volume ] && [ "${2:-}" = inspect ]; then
+  last=
+  for argument in "$@"; do last="${argument}"; done
+  owner_file="$(owner_file_for "${last}")"
+  if [ "${3:-}" = --format ]; then
+    [ -f "${owner_file}" ] && /bin/cat "${owner_file}"
+  else
+    [ -f "${owner_file}" ]
+  fi
+  exit
+fi
+if [ "${1:-}" = volume ] && [ "${2:-}" = create ]; then
+  last=
+  token=
+  for argument in "$@"; do
+    last="${argument}"
+    case "${argument}" in com.macchannel.runner-token=*) token="${argument#*=}" ;; esac
+  done
+  owner_file="$(owner_file_for "${last}")"
+  printf '%s\n' "${token}" > "${owner_file}"
+  exit 0
+fi
 case "$*" in
   "compose version") exit 0 ;;
-  "volume inspect macchannel-local_stack_secrets") exit 1 ;;
-  "volume inspect macchannel-local_postgres_data") exit 1 ;;
   "volume rm macchannel-local_stack_secrets") printf '%s\n' volume-secret-rm >> "$TEST_EVENTS"; exit 0 ;;
   "volume rm macchannel-local_postgres_data") printf '%s\n' volume-postgres-rm >> "$TEST_EVENTS"; exit 0 ;;
   *" up "*" secret-init") printf '%s\n' docker-init >> "$TEST_EVENTS"; exit 0 ;;
@@ -339,6 +404,9 @@ esac
 	command.Env = append(os.Environ(),
 		"PATH="+bin+":"+os.Getenv("PATH"),
 		"TEST_EVENTS="+events,
+		"TEST_SECRET_OWNER="+secretOwner,
+		"TEST_POSTGRES_OWNER="+postgresOwner,
+		"TMPDIR="+temporary,
 		"MACCHANNEL_LOCAL_STATE_ROOT="+state,
 	)
 	output, err := command.CombinedOutput()
@@ -352,6 +420,172 @@ esac
 	}
 	if got := strings.Fields(string(eventData)); strings.Join(got, ",") != "docker-init,trust-add,docker-up,docker-down,volume-secret-rm,volume-postgres-rm,trust-delete" {
 		t.Fatalf("rollback events = %v; runner: %s", got, output)
+	}
+}
+
+func TestRunnerLockPreventsConcurrentVolumeOwnershipAndMutation(t *testing.T) {
+	root := repositoryRoot(t)
+	temporary := t.TempDir()
+	bin := filepath.Join(temporary, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entered := filepath.Join(temporary, "entered")
+	release := filepath.Join(temporary, "release")
+	events := filepath.Join(temporary, "events")
+	writeExecutable(t, filepath.Join(bin, "docker"), `#!/bin/sh
+set -eu
+case "$*" in
+  "compose version") exit 0 ;;
+  "volume inspect macchannel-local_stack_secrets")
+    printf '%s\n' inspect >> "${TEST_EVENTS}"
+    printf '%s\n' entered > "${TEST_ENTERED}"
+    while [ ! -f "${TEST_RELEASE}" ]; do /bin/sleep 0.01; done
+    exit 1
+    ;;
+  *"volume create"*) printf '%s\n' volume-create >> "${TEST_EVENTS}"; exit 19 ;;
+  *) exit 0 ;;
+esac
+`)
+	baseEnvironment := append(os.Environ(),
+		"PATH="+bin+":"+os.Getenv("PATH"),
+		"TMPDIR="+temporary,
+		"TEST_ENTERED="+entered,
+		"TEST_RELEASE="+release,
+		"TEST_EVENTS="+events,
+	)
+	first := exec.Command("/bin/bash", filepath.Join(root, "Scripts", "run-local-stack.sh"),
+		"--no-trust", "--turn-external-ip", "192.0.2.44")
+	first.Env = append(baseEnvironment, "MACCHANNEL_LOCAL_STATE_ROOT="+filepath.Join(temporary, "state-first"))
+	var firstOutput bytes.Buffer
+	first.Stdout = &firstOutput
+	first.Stderr = &firstOutput
+	if err := first.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, entered)
+
+	second := exec.Command("/bin/bash", filepath.Join(root, "Scripts", "run-local-stack.sh"),
+		"--no-trust", "--turn-external-ip", "192.0.2.44")
+	second.Env = append(baseEnvironment, "MACCHANNEL_LOCAL_STATE_ROOT="+filepath.Join(temporary, "state-second"))
+	var secondOutput bytes.Buffer
+	second.Stdout = &secondOutput
+	second.Stderr = &secondOutput
+	if err := second.Start(); err != nil {
+		t.Fatal(err)
+	}
+	secondFinished := make(chan error, 1)
+	go func() { secondFinished <- second.Wait() }()
+	var secondError error
+	select {
+	case secondError = <-secondFinished:
+	case <-time.After(750 * time.Millisecond):
+		_ = os.WriteFile(release, []byte("go"), 0o600)
+		_ = <-secondFinished
+		_ = first.Wait()
+		t.Fatal("second runner entered Docker mutation instead of failing on the ownership lock")
+	}
+	if secondError == nil || !strings.Contains(secondOutput.String(), "已有另一个本地栈 runner") {
+		t.Fatalf("second runner did not fail on the ownership lock: %v, %s", secondError, secondOutput.String())
+	}
+	if data, err := os.ReadFile(events); err != nil || strings.Fields(string(data))[0] != "inspect" || len(strings.Fields(string(data))) != 1 {
+		t.Fatalf("second runner mutated Docker state: %v, %q", err, data)
+	}
+	if err := os.WriteFile(release, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Wait(); err == nil {
+		t.Fatalf("failure-injected first runner succeeded: %s", firstOutput.String())
+	}
+	locks, err := filepath.Glob(filepath.Join(temporary, "macchannel-local-stack-*.lock"))
+	if err != nil || len(locks) != 0 {
+		t.Fatalf("failed runner left an ownership lock: %v, %v", locks, err)
+	}
+}
+
+func TestRunnerRollbackNeverRemovesVolumeWhoseOwnershipTokenChanged(t *testing.T) {
+	root := repositoryRoot(t)
+	temporary := t.TempDir()
+	bin := filepath.Join(temporary, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	events := filepath.Join(temporary, "events")
+	secretOwner := filepath.Join(temporary, "secret-owner")
+	postgresOwner := filepath.Join(temporary, "postgres-owner")
+	state := filepath.Join(temporary, "state")
+	prepare := exec.Command("/bin/bash", filepath.Join(root, "Scripts", "run-local-stack.sh"), "--prepare-only", "--no-trust")
+	prepare.Env = append(os.Environ(), "TMPDIR="+temporary, "MACCHANNEL_LOCAL_STATE_ROOT="+state)
+	if output, err := prepare.CombinedOutput(); err != nil {
+		t.Fatalf("prepare ownership fixture: %v, %s", err, output)
+	}
+	writeExecutable(t, filepath.Join(bin, "docker"), `#!/bin/sh
+set -eu
+owner_file_for() {
+  case "${1}" in
+    macchannel-local_stack_secrets) printf '%s\n' "${TEST_SECRET_OWNER}" ;;
+    macchannel-local_postgres_data) printf '%s\n' "${TEST_POSTGRES_OWNER}" ;;
+    *) exit 2 ;;
+  esac
+}
+if [ "${1:-}" = volume ] && [ "${2:-}" = inspect ]; then
+  last=
+  for argument in "$@"; do last="${argument}"; done
+  owner_file="$(owner_file_for "${last}")"
+  if [ "${3:-}" = --format ]; then
+    [ -f "${owner_file}" ] && /bin/cat "${owner_file}"
+  else
+    [ -f "${owner_file}" ]
+  fi
+  exit
+fi
+if [ "${1:-}" = volume ] && [ "${2:-}" = create ]; then
+  last=
+  token=
+  for argument in "$@"; do
+    last="${argument}"
+    case "${argument}" in com.macchannel.runner-token=*) token="${argument#*=}" ;; esac
+  done
+  printf '%s\n' "${token}" > "$(owner_file_for "${last}")"
+  exit 0
+fi
+case "$*" in
+  "compose version") exit 0 ;;
+  *" up "*" secret-init") printf '%s\n' docker-init >> "${TEST_EVENTS}"; exit 0 ;;
+  *" up "*)
+    printf '%s\n' replacement-instance > "${TEST_SECRET_OWNER}"
+    printf '%s\n' replacement-instance > "${TEST_POSTGRES_OWNER}"
+    printf '%s\n' docker-up >> "${TEST_EVENTS}"
+    exit 0
+    ;;
+  *" down "*) printf '%s\n' docker-down >> "${TEST_EVENTS}"; exit 0 ;;
+  "volume rm "*) printf '%s\n' unexpected-volume-remove >> "${TEST_EVENTS}"; exit 0 ;;
+  *" exec "*) exit 0 ;;
+  *) exit 0 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "curl"), "#!/bin/sh\nexit 23\n")
+	command := exec.Command("/bin/bash", filepath.Join(root, "Scripts", "run-local-stack.sh"),
+		"--no-trust", "--turn-external-ip", "192.0.2.44")
+	command.Env = append(os.Environ(),
+		"PATH="+bin+":"+os.Getenv("PATH"),
+		"TMPDIR="+temporary,
+		"TEST_EVENTS="+events,
+		"TEST_SECRET_OWNER="+secretOwner,
+		"TEST_POSTGRES_OWNER="+postgresOwner,
+		"MACCHANNEL_LOCAL_STATE_ROOT="+state,
+	)
+	output, err := command.CombinedOutput()
+	exitError, ok := err.(*exec.ExitError)
+	if !ok || exitError.ExitCode() != 23 {
+		t.Fatalf("ownership replacement exit = %v, output=%s", err, output)
+	}
+	eventData, err := os.ReadFile(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(strings.Fields(string(eventData)), ","); got != "docker-init,docker-up,docker-down" {
+		t.Fatalf("ownership replacement rollback events = %s, output=%s", got, output)
 	}
 }
 
@@ -398,6 +632,20 @@ func linkCommand(t *testing.T, directory, name string) {
 	}
 	if err := os.Symlink(path, filepath.Join(directory, name)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
