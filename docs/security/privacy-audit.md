@@ -2,13 +2,13 @@
 
 审计日期：2026-08-27
 被审计代码 commit：`cf75945`
-静态证据时间（UTC）：`2026-08-27T12:52:49Z`
+静态证据时间（UTC）：`2026-08-27T12:54:46Z`
 静态审计脚本 SHA-256：
 
 - `audit-privacy.sh`: `6bdc32e3884f6df086b0436f30c3c121f4d60393c1defba0ccd217e1a5472d9e`
 - `check-sensitive-logging.sh`: `09a7c7935f6733d84aca65f517c72c078c078a5bc5c5d0a7f54a869e72b11b02`
 - `test-privacy-audit.sh`: `f2665537b47b549dfa0907f00382f12bee27b35d0be8df88003c1b0db5f492e6`
-- `scan-privacy-evidence.sh`: `c31107bce311e4d0c1abd306f4d46c207cc2a495cdbf211a70b37e672b36a273`
+- `scan-privacy-evidence.sh`: `8ddc121bdc09fb66942b6dfa4f493d39ad78bbc55c83fe9084b50161837d54eb`
 
 审计文档 commit：见本文件末尾“不可变文档版本”；首次提交后单独追加，避免自引用哈希。
 总体状态：**PARTIAL / 运行中服务审计 BLOCKED**
@@ -63,6 +63,8 @@ canary 分类文件、源/目标回执、限定时间窗的 client/rendezvous/co
 PostgreSQL 查询前后 JSON、`docker compose ps`、原始 `docker inspect`/mount JSON 与
 metrics 快照。manifest 绑定 code commit、canary ID、TransferID、源/目标 SHA-256、
 起止 UTC、实际容器 ID 和日志捕获边界。
+完整 producer/bundle 合同见 `privacy-evidence-schema.md`。当前 `verify-e2e` 尚未实现该
+可信 producer，且独立审计公钥尚未配置，所以运行时状态保持 BLOCKED。
 
 ```sh
 bash Scripts/audit-privacy.sh \

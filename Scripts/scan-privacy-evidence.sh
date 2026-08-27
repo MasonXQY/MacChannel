@@ -46,7 +46,8 @@ for evidence_name in "${required_outputs[@]}"; do
     canary="$(canary_for "${category}")"
     set +o pipefail
     set +e
-    LC_ALL=C tr -d '\r\n' < "${evidence_path}" | rg -a -q -F -- "${canary}"
+    LC_ALL=C tr -d '\r\n' < "${evidence_path}" \
+      | rg -a -q -F -f <(printf '%s\n' "${canary}")
     scan_status="${PIPESTATUS[1]}"
     set -e
     set -o pipefail
