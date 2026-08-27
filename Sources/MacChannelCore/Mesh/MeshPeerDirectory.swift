@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 
@@ -134,7 +135,9 @@ public actor MeshPeerDirectory {
     private let statusProvider: any TailscaleStatusProviding
     private let prober: any MeshPeerProbing
     private let sleeper: any MeshRefreshSleeping
+    private let now: @Sendable () -> Date
     private var currentPeers: [MeshPeerCandidate] = []
+    private var currentPeersExpireAt: Date?
     private var subscribers: [UUID: AsyncStream<[MeshPeerCandidate]>.Continuation] = [:]
     private var refreshTask: Task<Void, Never>?
     private var refreshGeneration: UInt64 = 0
@@ -142,11 +145,13 @@ public actor MeshPeerDirectory {
     public init(
         status: any TailscaleStatusProviding,
         prober: any MeshPeerProbing = NWMeshPeerProber(),
-        sleeper: any MeshRefreshSleeping = ContinuousMeshRefreshSleeper()
+        sleeper: any MeshRefreshSleeping = ContinuousMeshRefreshSleeper(),
+        now: @escaping @Sendable () -> Date = Date.init
     ) {
         statusProvider = status
         self.prober = prober
         self.sleeper = sleeper
+        self.now = now
     }
 
     public func refresh() async throws -> [MeshPeerCandidate] {
@@ -164,6 +169,7 @@ public actor MeshPeerDirectory {
             probed
             .filter { hashCounts[$0.deviceIDHash] == 1 }
             .sorted { $0.nodeID < $1.nodeID }
+        currentPeersExpireAt = now().addingTimeInterval(15)
         for continuation in subscribers.values { continuation.yield(currentPeers) }
         return currentPeers
     }
@@ -203,6 +209,18 @@ public actor MeshPeerDirectory {
     }
 
     public func isRefreshingPeriodically() -> Bool { refreshTask != nil }
+
+    public func candidate(for device: DeviceID) -> MeshPeerCandidate? {
+        guard let expiry = currentPeersExpireAt, now() < expiry else { return nil }
+        let expected = Self.deviceIDHash(for: device)
+        let matches = currentPeers.filter { $0.deviceIDHash == expected }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
+    public static func deviceIDHash(for device: DeviceID) -> Data {
+        Data(SHA256.hash(data: Data(device.rawValue.uuidString.lowercased().utf8)))
+    }
 
     private func probe(_ inputs: [ProbeInput]) async -> [MeshPeerCandidate] {
         await withTaskGroup(of: MeshPeerCandidate?.self) { group in
