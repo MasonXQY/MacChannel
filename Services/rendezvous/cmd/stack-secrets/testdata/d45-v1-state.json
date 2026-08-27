@@ -1,0 +1,12 @@
+{
+  "sourceCommit": "d45df85c9a0fdb63262d2b48251264a49f41efb6",
+  "readyMarker": "stack-secrets-v1\n",
+  "files": [
+    { "path": "postgres-password", "mode": 384 },
+    { "path": "turn-shared-secret", "mode": 384 },
+    { "path": "tls/local-ca-key.pem", "mode": 384 },
+    { "path": "tls/local-ca.pem", "mode": 420 },
+    { "path": "tls/localhost-key.pem", "mode": 384 },
+    { "path": "tls/localhost.pem", "mode": 420 }
+  ]
+}

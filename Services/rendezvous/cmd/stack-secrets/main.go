@@ -134,6 +134,19 @@ func ensureSecretsLocked(directory string, hook persistenceHook) error {
 			return completedGenerationError(err)
 		}
 		if readyExists {
+			marker, err := readRegularFile(readyPath, 0o600)
+			if err != nil {
+				return completedGenerationError(err)
+			}
+			if bytes.Equal(marker, []byte(legacyStackSecretsReadyValue)) {
+				if err := validatePublishedGeneration(directory, manifest); err != nil {
+					return completedGenerationError(err)
+				}
+				if err := cleanupMatchingPending(directory, manifest.Generation, hook); err != nil {
+					return completedGenerationError(err)
+				}
+				return publishReadyMarker(directory, manifest, manifestBytes, hook)
+			}
 			if err := validateReadyMarker(readyPath, manifest, manifestBytes); err != nil {
 				return completedGenerationError(err)
 			}

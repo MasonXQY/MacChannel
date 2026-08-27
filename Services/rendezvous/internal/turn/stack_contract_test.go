@@ -476,17 +476,12 @@ esac
 	}
 	secondFinished := make(chan error, 1)
 	go func() { secondFinished <- second.Wait() }()
-	var secondError error
 	select {
-	case secondError = <-secondFinished:
-	case <-time.After(750 * time.Millisecond):
+	case secondError := <-secondFinished:
 		_ = os.WriteFile(release, []byte("go"), 0o600)
-		_ = <-secondFinished
 		_ = first.Wait()
-		t.Fatal("second runner entered Docker mutation instead of failing on the ownership lock")
-	}
-	if secondError == nil || !strings.Contains(secondOutput.String(), "已有另一个本地栈 runner") {
-		t.Fatalf("second runner did not fail on the ownership lock: %v, %s", secondError, secondOutput.String())
+		t.Fatalf("second runner did not wait on the ownership lock: %v, %s", secondError, secondOutput.String())
+	case <-time.After(250 * time.Millisecond):
 	}
 	if data, err := os.ReadFile(events); err != nil || strings.Fields(string(data))[0] != "inspect" || len(strings.Fields(string(data))) != 1 {
 		t.Fatalf("second runner mutated Docker state: %v, %q", err, data)
@@ -497,9 +492,91 @@ esac
 	if err := first.Wait(); err == nil {
 		t.Fatalf("failure-injected first runner succeeded: %s", firstOutput.String())
 	}
-	locks, err := filepath.Glob(filepath.Join(temporary, "macchannel-local-stack-*.lock"))
-	if err != nil || len(locks) != 0 {
-		t.Fatalf("failed runner left an ownership lock: %v, %v", locks, err)
+	select {
+	case secondError := <-secondFinished:
+		if secondError == nil {
+			t.Fatalf("failure-injected second runner succeeded: %s", secondOutput.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = second.Process.Kill()
+		t.Fatal("second runner did not acquire the lock after the first exited")
+	}
+	if data, err := os.ReadFile(events); err != nil || strings.Count(string(data), "inspect\n") != 2 {
+		t.Fatalf("waiting runner did not enter Docker exactly once after release: %v, %q", err, data)
+	}
+}
+
+func TestRunnerAdvisoryLockAutoReleasesAfterSIGKILL(t *testing.T) {
+	root := repositoryRoot(t)
+	temporary := t.TempDir()
+	bin := filepath.Join(temporary, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entered := filepath.Join(temporary, "entered")
+	release := filepath.Join(temporary, "release")
+	writeExecutable(t, filepath.Join(bin, "docker"), `#!/bin/sh
+set -eu
+case "$*" in
+  "compose version") exit 0 ;;
+  "volume inspect macchannel-local_stack_secrets")
+    printf '%s\n' entered > "${TEST_ENTERED}"
+    while [ ! -f "${TEST_RELEASE}" ]; do /bin/sleep 0.01; done
+    exit 1
+    ;;
+  *) exit 19 ;;
+esac
+`)
+	baseEnvironment := append(os.Environ(),
+		"PATH="+bin+":"+os.Getenv("PATH"),
+		"TMPDIR="+temporary,
+		"MACCHANNEL_RUNNER_LOCK_ROOT="+temporary,
+		"TEST_ENTERED="+entered,
+		"TEST_RELEASE="+release,
+	)
+	holder := exec.Command("/bin/bash", filepath.Join(root, "Scripts", "run-local-stack.sh"),
+		"--no-trust", "--turn-external-ip", "192.0.2.44")
+	holder.Env = append(baseEnvironment, "MACCHANNEL_LOCAL_STATE_ROOT="+filepath.Join(temporary, "holder-state"))
+	var holderOutput bytes.Buffer
+	holder.Stdout = &holderOutput
+	holder.Stderr = &holderOutput
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, entered)
+	if err := holder.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Wait(); err == nil {
+		t.Fatalf("SIGKILL holder unexpectedly succeeded: %s", holderOutput.String())
+	}
+	if err := os.WriteFile(release, []byte("release orphaned fake docker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := exec.Command("/bin/bash", filepath.Join(root, "Scripts", "run-local-stack.sh"), "--prepare-only", "--no-trust")
+	retry.Env = append(baseEnvironment, "MACCHANNEL_LOCAL_STATE_ROOT="+filepath.Join(temporary, "retry-state"))
+	retryFinished := make(chan struct {
+		output []byte
+		err    error
+	}, 1)
+	go func() {
+		output, err := retry.CombinedOutput()
+		retryFinished <- struct {
+			output []byte
+			err    error
+		}{output: output, err: err}
+	}()
+	select {
+	case result := <-retryFinished:
+		if result.err != nil {
+			t.Fatalf("immediate retry after SIGKILL failed: %v, %s", result.err, result.output)
+		}
+	case <-time.After(10 * time.Second):
+		if retry.Process != nil {
+			_ = retry.Process.Kill()
+		}
+		t.Fatal("immediate retry remained blocked after SIGKILL released the holder")
 	}
 }
 

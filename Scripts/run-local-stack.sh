@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+original_arguments=("${@}")
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 infrastructure_root="${repository_root}/Infrastructure"
 secret_root="${MACCHANNEL_LOCAL_STATE_ROOT:-${infrastructure_root}/.local-secrets}"
@@ -14,12 +15,11 @@ trust_added=false
 stack_touched=false
 stack_secret_volume_owned=false
 postgres_volume_owned=false
-runner_lock_owned=false
 completed=false
 login_keychain=
 certificate_hash=
-runner_token=
-runner_lock_directory=
+runner_token="${MACCHANNEL_RUNNER_TOKEN:-}"
+runner_lock_helper=
 volume_owner_label=com.macchannel.runner-token
 
 usage() {
@@ -77,34 +77,31 @@ is_valid_external_ipv4() {
 }
 
 acquire_runner_lock() {
-  local lock_root="${MACCHANNEL_RUNNER_LOCK_ROOT:-${TMPDIR:-/tmp}}"
+  local lock_root="${MACCHANNEL_RUNNER_LOCK_ROOT:-${TMPDIR:-/tmp}/macchannel-runner-${UID}}"
   local lock_hash
+  mkdir -p "${lock_root}"
+  chmod 700 "${lock_root}"
   lock_hash="$(printf '%s' "${COMPOSE_PROJECT_NAME}" | openssl dgst -sha256 | awk '{print $NF}')"
   runner_token="$(openssl rand -hex 32)"
-  runner_lock_directory="${lock_root%/}/macchannel-local-stack-${lock_hash}.lock"
-  if ! mkdir "${runner_lock_directory}" 2>/dev/null; then
-    echo "已有另一个本地栈 runner 正在运行；本次未更改 Compose 或 volume。" >&2
+  export MACCHANNEL_RUNNER_TOKEN="${runner_token}"
+  local runner_lock_file="${lock_root%/}/macchannel-local-stack-${lock_hash}.lock"
+  runner_lock_helper="$(mktemp "${TMPDIR:-/tmp}/macchannel-runner-lock.XXXXXX")"
+  if ! (cd "${repository_root}/Services/rendezvous" && go build -o "${runner_lock_helper}" ./cmd/runner-lock); then
+    rm -f "${runner_lock_helper}"
+    runner_lock_helper=
     return 1
   fi
-  runner_lock_owned=true
-  chmod 700 "${runner_lock_directory}"
-  printf '%s\n' "${runner_token}" > "${runner_lock_directory}/owner-token"
-  chmod 600 "${runner_lock_directory}/owner-token"
+  chmod 700 "${runner_lock_helper}"
+  exec "${runner_lock_helper}" \
+    --lock-file "${runner_lock_file}" \
+    --self-delete "${runner_lock_helper}" \
+    -- /bin/bash "${BASH_SOURCE[0]}" "${original_arguments[@]}"
 }
 
 release_runner_lock() {
-  if [[ "${runner_lock_owned}" != true || -z "${runner_lock_directory}" ]]; then
-    return
+  if [[ -n "${runner_lock_helper}" && -f "${runner_lock_helper}" ]]; then
+    rm -f "${runner_lock_helper}"
   fi
-  local current_token=
-  if [[ -f "${runner_lock_directory}/owner-token" ]]; then
-    IFS= read -r current_token < "${runner_lock_directory}/owner-token" || true
-  fi
-  if [[ -z "${current_token}" || "${current_token}" == "${runner_token}" ]]; then
-    rm -f "${runner_lock_directory}/owner-token"
-    rmdir "${runner_lock_directory}" 2>/dev/null || true
-  fi
-  runner_lock_owned=false
 }
 
 volume_owner_token() {
@@ -218,14 +215,14 @@ install_local_trust_if_needed() {
   fi
 }
 
-for command_name in openssl curl awk; do
+for command_name in openssl curl awk go; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     echo "缺少必需命令：${command_name}" >&2
     exit 1
   fi
 done
 if [[ "${prepare_only}" == false ]]; then
-  for command_name in docker go; do
+  for command_name in docker; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
       echo "缺少必需命令：${command_name}；无法启动并验证本地服务。" >&2
       exit 1
@@ -249,7 +246,14 @@ if [[ "${prepare_only}" == false ]]; then
   fi
 fi
 
-acquire_runner_lock
+if [[ "${MACCHANNEL_RUNNER_ADVISORY_LOCK_HELD:-}" != 1 ]]; then
+  acquire_runner_lock
+fi
+if [[ -z "${runner_token}" ]]; then
+  echo "runner advisory lock 未提供 volume ownership token。" >&2
+  exit 1
+fi
+unset MACCHANNEL_RUNNER_ADVISORY_LOCK_HELD MACCHANNEL_RUNNER_TOKEN
 
 if [[ "${prepare_only}" == true ]]; then
   prepare_standalone_material

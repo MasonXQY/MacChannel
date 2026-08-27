@@ -19,6 +19,10 @@ Docker volume 中安全生成数据库密码、TURN 共享密钥、本地 CA 和
 实例会等待并复用同一代。重启和普通 `docker compose down` 会保留这些材料；若要完全
 重置，必须同时明确删除 `stack_secrets` 和 `postgres_data` volume。
 
+旧 V1 volume 会原字节迁移到 manifest 合同。即使 V2 manifest 已持久化而 V1 完成
+标记尚未替换，下一次启动也会同时验证 manifest、旧标记与全部 payload，再继续提交
+V2 标记；不会把这个合法混合态当成篡改，也不会生成新密码。
+
 生成过程对文件执行 `fsync`，对 rename 的源/目标父目录执行同步；macOS 优先
 `F_FULLFSYNC` 并在不支持时回退 `fsync`，Linux 使用 `fsync`。live 文件完全持久化前，
 pending 中仍保留同代备份，所以断电恢复不会依赖重新生成。
@@ -57,8 +61,11 @@ Scripts/run-local-stack.sh --turn-external-ip 192.0.2.44
 
 任何 runner 启动、健康检查、TLS、TURN 或日志检查失败，都会保留原始失败码，停止
 本次 Compose 栈，并删除仅由本次加入用户钥匙串的 CA 信任。runner 使用固定 Compose
-项目专属的宿主排他锁，所以不同 checkout 也不能并发操作同一组 named volume；
-并用每进程随机 token 标记其明确创建的 stack/database volume；回滚前会重新核对
+项目专属的 POSIX `fcntl` advisory lock，所以不同 checkout 也不能并发操作同一组
+named volume。锁由小型 Go helper 取得后 exec 到 macOS Bash 3.2；它属于 runner
+进程且不会被 fork 出的 Docker 命令继承，正常退出、崩溃或 `SIGKILL` 都由内核自动
+释放，无需残留目录清理。runner 用每进程随机 token 标记其明确创建的
+stack/database volume；回滚前会重新核对
 token，只有仍由本实例拥有的 volume 才会删除。已有、被其他实例接管的 volume 和
 已有信任不会被删除。
 

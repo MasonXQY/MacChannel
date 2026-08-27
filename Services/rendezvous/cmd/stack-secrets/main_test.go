@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"os"
@@ -356,18 +357,7 @@ func TestEnsureSecretsFailsClosedOnCompletedTampering(t *testing.T) {
 
 func TestLegacyCompletedGenerationMigrationRecoversFixedPendingManifest(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "stack-secrets")
-	if err := ensureSecrets(directory); err != nil {
-		t.Fatal(err)
-	}
-	before := snapshotPublishedGeneration(t, directory)
-	if err := os.Remove(filepath.Join(directory, stackSecretsManifestName)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(directory, stackSecretsReadyMarkerName), []byte(legacyStackSecretsReadyValue), 0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	before := writeD45V1Fixture(t, directory)
 	injected := errors.New("power loss before legacy manifest rename")
 	err := ensureSecretsWithPersistenceHook(directory, func(event persistenceEvent) error {
 		if event.operation == "rename" && event.phase == "before" && event.path == filepath.Join(directory, stackSecretsManifestName) {
@@ -394,6 +384,119 @@ func TestLegacyCompletedGenerationMigrationRecoversFixedPendingManifest(t *testi
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), stackSecretsManifestName+".pending-") {
 			t.Fatalf("legacy recovery left ambiguous manifest %s", entry.Name())
+		}
+	}
+}
+
+func TestD45V1FixtureMigrationRecoversEveryDurabilityBoundaryWithoutChangingPayload(t *testing.T) {
+	traceDirectory := filepath.Join(t.TempDir(), "trace")
+	writeD45V1Fixture(t, traceDirectory)
+	var trace []persistenceEvent
+	if err := ensureSecretsWithPersistenceHook(traceDirectory, func(event persistenceEvent) error {
+		trace = append(trace, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(trace) == 0 {
+		t.Fatal("legacy migration exposed no durability boundaries")
+	}
+
+	for boundary := range trace {
+		boundary := boundary
+		event := trace[boundary]
+		t.Run(strings.Join([]string{event.operation, event.phase, filepath.Base(event.path)}, "-"), func(t *testing.T) {
+			directory := filepath.Join(t.TempDir(), "stack-secrets")
+			before := writeD45V1Fixture(t, directory)
+			injected := errors.New("injected legacy migration power loss")
+			seen := 0
+			err := ensureSecretsWithPersistenceHook(directory, func(event persistenceEvent) error {
+				if seen == boundary {
+					return injected
+				}
+				seen++
+				return nil
+			})
+			if !errors.Is(err, injected) {
+				t.Fatalf("boundary %d returned %v", boundary, err)
+			}
+			if err := ensureSecrets(directory); err != nil {
+				t.Fatalf("recover legacy boundary %d (%s/%s): %v", boundary, event.operation, event.phase, err)
+			}
+			assertPayloadMatches(t, directory, before)
+			if err := ensureSecrets(directory); err != nil {
+				t.Fatalf("repeat legacy recovery boundary %d: %v", boundary, err)
+			}
+			assertPayloadMatches(t, directory, before)
+		})
+	}
+}
+
+type d45V1Fixture struct {
+	SourceCommit string `json:"sourceCommit"`
+	ReadyMarker  string `json:"readyMarker"`
+	Files        []struct {
+		Path string `json:"path"`
+		Mode uint32 `json:"mode"`
+	} `json:"files"`
+}
+
+func writeD45V1Fixture(t *testing.T, directory string) map[string][]byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "d45-v1-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture d45V1Fixture
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.SourceCommit != "d45df85c9a0fdb63262d2b48251264a49f41efb6" ||
+		fixture.ReadyMarker != legacyStackSecretsReadyValue || len(fixture.Files) != len(managedPayloadFiles) {
+		t.Fatal("d45 V1 fixture contract is invalid")
+	}
+	generated, err := generateStackFiles(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	generatedByPath := make(map[string]generatedFile, len(generated))
+	for _, file := range generated {
+		generatedByPath[file.relative] = file
+	}
+	if err := os.MkdirAll(filepath.Join(directory, "tls"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(directory, "tls"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := make(map[string][]byte, len(fixture.Files))
+	for _, expected := range fixture.Files {
+		file, ok := generatedByPath[expected.Path]
+		if !ok || uint32(file.mode.Perm()) != expected.Mode {
+			t.Fatalf("d45 fixture entry %s does not match the legacy binary contract", expected.Path)
+		}
+		if err := os.WriteFile(filepath.Join(directory, expected.Path), file.data, os.FileMode(expected.Mode)); err != nil {
+			t.Fatal(err)
+		}
+		snapshot[expected.Path] = append([]byte(nil), file.data...)
+	}
+	if err := os.WriteFile(
+		filepath.Join(directory, stackSecretsReadyMarkerName), []byte(fixture.ReadyMarker), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func assertPayloadMatches(t *testing.T, directory string, expected map[string][]byte) {
+	t.Helper()
+	for relative, before := range expected {
+		after, err := os.ReadFile(filepath.Join(directory, relative))
+		if err != nil || !bytes.Equal(after, before) {
+			t.Fatalf("legacy migration changed %s: %v", relative, err)
 		}
 	}
 }

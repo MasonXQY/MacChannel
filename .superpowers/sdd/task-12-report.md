@@ -44,7 +44,9 @@ Status: implementation and all host-executable verification complete; container 
   later processes wait, then validate and reuse the committed generation.
   Pending directories carry the unique generation identity. A prior complete
   legacy generation is migrated through one fixed lock-protected pending
-  manifest, so an interrupted migration cannot leave ambiguous generations.
+  manifest. The mixed state containing a durable V2 manifest and the still
+  valid V1 marker is explicitly verified and resumed, so every migration
+  boundary preserves the legacy payload instead of becoming unrecoverable.
 - Every file is chmoded and synced before publication. Every rename syncs both
   source and destination parent directories. macOS attempts `F_FULLFSYNC` and
   falls back to `fsync`; Linux uses `fsync`. Staged payload copies remain until
@@ -92,8 +94,8 @@ Status: implementation and all host-executable verification complete; container 
 
 ## Runner and rollback
 
-- `Scripts/run-local-stack.sh` checks OpenSSL/curl/awk and, for a full run,
-  Docker/Go/Compose before creating local state or touching trust. All named
+- `Scripts/run-local-stack.sh` checks OpenSSL/curl/awk/Go and, for a full run,
+  Docker/Compose before creating local state or touching trust. All named
   shell expansions outside single-quoted awk programs are braced, and the
   script is parsed/executed by macOS `/bin/bash` 3.2.57 in tests.
 - The runner initializes the named volume, exports only the TURN secret and TLS
@@ -103,10 +105,14 @@ Status: implementation and all host-executable verification complete; container 
   exact code. A curl exit 23 remains exit 23 after Compose/trust rollback.
   Missing Docker or Go exits 1 without creating the local state directory,
   calling Docker, or changing trust.
-- A per-Compose-project host lock prevents runners from different checkouts
-  from entering the same named-volume mutation window concurrently. The exact
-  Compose project name is fixed, and
-  missing named volumes are explicitly created with a cryptographically random
+- A per-Compose-project POSIX `fcntl(F_SETLKW)` advisory lock prevents runners
+  from different checkouts from entering the same named-volume mutation window
+  concurrently. A tiny Go helper acquires the process-scoped record lock and
+  execs macOS Bash 3.2 with the descriptor retained. Forked Docker commands do
+  not inherit the record lock; normal exit, crash, power loss, and `SIGKILL`
+  therefore release it in the kernel without a cleanup callback. The exact
+  Compose project name is fixed. Missing named volumes are explicitly created
+  with a cryptographically random
   per-process ownership label. On failure, the runner stops its Compose state,
   removes CA trust added by this invocation, and deletes a newly created volume
   only after re-reading and matching that ownership token. Existing or replaced
@@ -139,7 +145,9 @@ Status: implementation and all host-executable verification complete; container 
   modes and manifest checksums, restore marker-only loss without changing any
   payload, promote a provably complete pending generation, reject unmanifested
   live material and completed tampering, and preserve legacy payload bytes
-  across interrupted manifest migration.
+  across interrupted manifest migration. An exact fixture records the d45 V1
+  disk contract, and the migration test injects failure before and after every
+  durability event, including the V2-manifest/V1-marker mixed state.
 - The cross-process test holds the real advisory lock, proves a second process
   waits, then releases it and launches twelve processes behind one barrier. All
   twelve succeed and observe a byte-identical generation.
@@ -154,9 +162,10 @@ Status: implementation and all host-executable verification complete; container 
   unbraced Bash variables, and the unbounded relay port. All now pass.
 - Failure tests execute the real Bash 3.2 script with isolated state and fake
   Docker/keychain/curl. They prove missing Docker/Go has no side effects, a
-  concurrent second runner never reaches Docker mutation, a post-start curl 23
-  preserves its status while removing only token-owned volumes, and a simulated
-  ownership replacement prevents both volume deletions.
+  concurrent second runner waits without reaching Docker mutation, killing the
+  real holder with `SIGKILL` permits an immediate successful retry, a post-start
+  curl 23 preserves its status while removing only token-owned volumes, and a
+  simulated ownership replacement prevents both volume deletions.
 - The UDP fake TURN server performs a live challenge/authenticated Allocate and
   returns encoded relay addresses. Missing address and out-of-range ports are
   rejected.
@@ -166,7 +175,8 @@ Status: implementation and all host-executable verification complete; container 
 - `go test -race ./... -count=1`: pass for all rendezvous packages.
 - `go vet ./...`: pass.
 - Linux static builds for `cmd/server`, `cmd/secret-launcher`,
-  `cmd/stack-secrets`, and `cmd/turn-probe`: pass for amd64 and arm64.
+  `cmd/runner-lock`, `cmd/stack-secrets`, and `cmd/turn-probe`: pass for amd64
+  and arm64.
 - Two consecutive real `go run ./cmd/stack-secrets` executions against an
   isolated directory: pass; the second retained the exact TURN-secret digest,
   directory/private/public modes were `0700`/`0600`/`0644`, and the temporary
