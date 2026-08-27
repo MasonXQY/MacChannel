@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	ossignal "os/signal"
@@ -22,12 +25,27 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("rendezvous stopped: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	clock := time.Now
 	pairingStore, registry, verifier, closeDatabase, err := configuredStores(clock)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer closeDatabase()
+	turnSecret, turnURLs, err := configuredTURN()
+	if err != nil {
+		return err
+	}
+	listeners, err := configuredListeners()
+	if err != nil {
+		return err
+	}
 
 	handler := httpapi.NewRouter(httpapi.Config{
 		Clock:                   clock,
@@ -38,12 +56,44 @@ func main() {
 		Signals:                 signal.NewHub(registry),
 		PairingTTL:              5 * time.Minute,
 		AllowedWebSocketOrigins: splitCommaSeparated(os.Getenv("MACCHANNEL_ALLOWED_WS_ORIGINS")),
+		TURNSharedSecret:        turnSecret,
+		TURNURLs:                turnURLs,
 	})
-	address := os.Getenv("RENDEZVOUS_ADDR")
-	if address == "" {
-		address = ":8080"
+	servers := []configuredServer{{server: hardenedHTTPServer(listeners.HTTPAddress, handler)}}
+	if listeners.TLSAddress != "" {
+		servers = append(servers, configuredServer{
+			server: hardenedHTTPServer(listeners.TLSAddress, handler),
+			cert:   listeners.TLSCertFile,
+			key:    listeners.TLSKeyFile,
+		})
 	}
-	server := &http.Server{
+
+	shutdownContext, stop := ossignal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go cleanupExpired(shutdownContext, pairingStore, registry, verifier, clock, time.Minute)
+	for _, configured := range servers {
+		scheme := "http"
+		if configured.cert != "" {
+			scheme = "https"
+		}
+		log.Printf("rendezvous listening on %s://%s", scheme, configured.server.Addr)
+	}
+	return serve(shutdownContext, servers)
+}
+
+type configuredServer struct {
+	server *http.Server
+	cert   string
+	key    string
+}
+
+type activeServer struct {
+	server   *http.Server
+	listener net.Listener
+}
+
+func hardenedHTTPServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
 		Addr:              address,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -52,22 +102,78 @@ func main() {
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    16 * 1024,
 	}
+}
 
-	shutdownContext, stop := ossignal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go cleanupExpired(shutdownContext, pairingStore, registry, verifier, clock, time.Minute)
-	go func() {
-		<-shutdownContext.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			log.Printf("rendezvous shutdown: %v", err)
+func serve(ctx context.Context, servers []configuredServer) error {
+	active := make([]activeServer, 0, len(servers))
+	for _, configured := range servers {
+		listener, err := net.Listen("tcp", configured.server.Addr)
+		if err != nil {
+			closeListeners(active)
+			return err
 		}
-	}()
+		if configured.cert != "" {
+			certificate, err := tls.LoadX509KeyPair(configured.cert, configured.key)
+			if err != nil {
+				_ = listener.Close()
+				closeListeners(active)
+				return err
+			}
+			listener = tls.NewListener(listener, &tls.Config{
+				Certificates: []tls.Certificate{certificate},
+				MinVersion:   tls.VersionTLS12,
+			})
+		}
+		active = append(active, activeServer{server: configured.server, listener: listener})
+	}
 
-	log.Printf("rendezvous listening on %s", address)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+	results := make(chan error, len(servers))
+	for _, running := range active {
+		go func(item activeServer) {
+			err := item.server.Serve(item.listener)
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			results <- err
+		}(running)
+	}
+
+	completed := 0
+	var firstError error
+	select {
+	case firstError = <-results:
+		completed++
+	case <-ctx.Done():
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdownResults := make(chan error, len(servers))
+	for _, configured := range servers {
+		go func(server *http.Server) {
+			err := server.Shutdown(shutdownContext)
+			if err != nil {
+				_ = server.Close()
+			}
+			shutdownResults <- err
+		}(configured.server)
+	}
+	for range servers {
+		if err := <-shutdownResults; err != nil && firstError == nil {
+			firstError = fmt.Errorf("rendezvous shutdown: %w", err)
+		}
+	}
+	for completed < len(servers) {
+		if err := <-results; err != nil && firstError == nil {
+			firstError = err
+		}
+		completed++
+	}
+	return firstError
+}
+
+func closeListeners(servers []activeServer) {
+	for _, item := range servers {
+		_ = item.listener.Close()
 	}
 }
 
@@ -106,7 +212,10 @@ func splitCommaSeparated(value string) []string {
 }
 
 func configuredStores(clock func() time.Time) (pairing.Store, *auth.TrustRegistry, *auth.Verifier, func(), error) {
-	databaseURL := os.Getenv("DATABASE_URL")
+	databaseURL, err := configuredDatabaseURL()
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 	if databaseURL == "" {
 		if os.Getenv("MACCHANNEL_DEV_IN_MEMORY") != "true" {
 			return nil, nil, nil, nil, errors.New("DATABASE_URL is required unless MACCHANNEL_DEV_IN_MEMORY=true")

@@ -33,6 +33,7 @@ import (
 	"macchannel/rendezvous/internal/pairing"
 	"macchannel/rendezvous/internal/presence"
 	"macchannel/rendezvous/internal/signal"
+	turnauth "macchannel/rendezvous/internal/turn"
 )
 
 func TestLiveSwiftClientPairingAndWebSocketAuthentication(t *testing.T) {
@@ -233,13 +234,19 @@ func newTestAPIWithRegistry(t *testing.T, registry *auth.TrustRegistry) *testAPI
 		ReplayCapacity:    1024,
 	})
 	api := NewRouter(Config{
-		Clock:      clock.Now,
-		Verifier:   verifier,
-		Registry:   registry,
-		Pairings:   pairing.NewMemoryStore(pairing.StoreConfig{Capacity: 128}),
-		Presence:   presence.NewHub(registry),
-		Signals:    signal.NewHub(registry),
-		PairingTTL: 5 * time.Minute,
+		Clock:            clock.Now,
+		Verifier:         verifier,
+		Registry:         registry,
+		Pairings:         pairing.NewMemoryStore(pairing.StoreConfig{Capacity: 128}),
+		Presence:         presence.NewHub(registry),
+		Signals:          signal.NewHub(registry),
+		PairingTTL:       5 * time.Minute,
+		TURNSharedSecret: []byte("test-turn-shared-secret-at-least-32-bytes"),
+		TURNURLs: []string{
+			"stun:localhost:3478",
+			"turn:localhost:3478?transport=udp",
+			"turns:localhost:5349?transport=tcp",
+		},
 	})
 	server := httptest.NewServer(api)
 	t.Cleanup(server.Close)
@@ -346,6 +353,105 @@ func TestHealth(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
+	}
+}
+
+func TestTURNCredentialsRequireEstablishedAuthenticatedDevice(t *testing.T) {
+	registry := auth.NewTrustRegistry()
+	api := newTestAPIWithRegistry(t, registry)
+	payload := map[string]string{"type": "turn-credentials-v1"}
+
+	unsigned, err := http.Get(api.server.URL + "/v1/turn-credentials")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned.Body.Close()
+	if unsigned.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", unsigned.StatusCode)
+	}
+
+	untrusted := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, payload), nil)
+	defer untrusted.Body.Close()
+	if untrusted.StatusCode != http.StatusForbidden {
+		t.Fatalf("untrusted status = %d, body = %s", untrusted.StatusCode, readBody(untrusted.Body))
+	}
+
+	peer := newIdentity(t)
+	record := api.identity.trustRecord(t, peer, 1)
+	if err := registry.AuthenticateDevice(api.identity.id, api.identity.publicKey, []auth.SignedTrustRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(peer.id, peer.publicKey, []auth.SignedTrustRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, payload), nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("trusted status = %d, body = %s", response.StatusCode, readBody(response.Body))
+	}
+	var got struct {
+		URLs       []string  `json:"urls"`
+		Username   string    `json:"username"`
+		Credential string    `json:"credential"`
+		ExpiresAt  time.Time `json:"expiresAt"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ExpiresAt != api.clock.Now().Add(10*time.Minute) {
+		t.Fatalf("expiry = %v", got.ExpiresAt)
+	}
+	if len(got.URLs) != 3 || got.Username == "" || got.Credential == "" {
+		t.Fatalf("incomplete TURN response: %#v", got)
+	}
+	if !turnauth.Verify(turnauth.Credential{
+		Username: got.Username, Credential: got.Credential, ExpiresAt: got.ExpiresAt,
+	}, []byte("test-turn-shared-secret-at-least-32-bytes")) {
+		t.Fatal("endpoint credential does not verify with coturn's shared secret")
+	}
+}
+
+func TestTURNCredentialsRejectRevokedAndMalformedRequests(t *testing.T) {
+	registry := auth.NewTrustRegistry()
+	api := newTestAPIWithRegistry(t, registry)
+	peer := newIdentity(t)
+	authorization := api.identity.trustRecord(t, peer, 1)
+	if err := registry.AuthenticateDevice(api.identity.id, api.identity.publicKey, []auth.SignedTrustRecord{authorization}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.AuthenticateDevice(peer.id, peer.publicKey, []auth.SignedTrustRecord{authorization}); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongPayload := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "something-else"}), nil)
+	wrongPayload.Body.Close()
+	if wrongPayload.StatusCode != http.StatusBadRequest {
+		t.Fatalf("wrong-payload status = %d", wrongPayload.StatusCode)
+	}
+
+	revocation := api.identity.trustRecordAction(t, peer, 2, auth.TrustRevoke)
+	if err := registry.AuthenticateDevice(api.identity.id, api.identity.publicKey, []auth.SignedTrustRecord{revocation}); err != nil {
+		t.Fatal(err)
+	}
+	revoked := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "turn-credentials-v1"}), nil)
+	defer revoked.Body.Close()
+	if revoked.StatusCode != http.StatusForbidden {
+		t.Fatalf("revoked status = %d, body = %s", revoked.StatusCode, readBody(revoked.Body))
+	}
+}
+
+func TestTURNCredentialsRejectSelfAuthorization(t *testing.T) {
+	registry := auth.NewTrustRegistry()
+	api := newTestAPIWithRegistry(t, registry)
+	selfAuthorization := api.identity.trustRecord(t, api.identity, 1)
+	if err := registry.AuthenticateDevice(api.identity.id, api.identity.publicKey, []auth.SignedTrustRecord{selfAuthorization}); err != nil {
+		t.Fatal(err)
+	}
+	response := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "turn-credentials-v1"}), nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("self-authorized status = %d, body = %s", response.StatusCode, readBody(response.Body))
 	}
 }
 

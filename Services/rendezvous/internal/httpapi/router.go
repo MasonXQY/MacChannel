@@ -20,6 +20,7 @@ import (
 	"macchannel/rendezvous/internal/pairing"
 	"macchannel/rendezvous/internal/presence"
 	"macchannel/rendezvous/internal/signal"
+	"macchannel/rendezvous/internal/turn"
 )
 
 const (
@@ -103,6 +104,8 @@ type Config struct {
 	WebSocketPerSourceLimit int
 	WebSocketPerDeviceLimit int
 	AllowedWebSocketOrigins []string
+	TURNSharedSecret        []byte
+	TURNURLs                []string
 }
 
 type Router struct {
@@ -118,6 +121,8 @@ type Router struct {
 	trustWatchMu sync.Mutex
 	trustWatches int
 	trustStop    chan struct{}
+	turnSecret   []byte
+	turnURLs     []string
 }
 
 func NewRouter(config Config) http.Handler {
@@ -160,6 +165,8 @@ func NewRouter(config Config) http.Handler {
 				return webSocketOriginAllowed(request.Header.Get("Origin"), request.Host, allowedOrigins)
 			},
 		},
+		turnSecret: append([]byte(nil), config.TURNSharedSecret...),
+		turnURLs:   append([]string(nil), config.TURNURLs...),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", router.health)
@@ -175,7 +182,41 @@ func NewRouter(config Config) http.Handler {
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/cancel", router.cancelAuthorization)
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/retrieve", router.retrieveAuthorization)
 	mux.HandleFunc("GET /v1/ws", router.webSocket)
+	mux.HandleFunc("GET /v1/turn-credentials", router.turnCredentials)
 	return securityHeaders(mux)
+}
+
+func (r *Router) turnCredentials(writer http.ResponseWriter, request *http.Request) {
+	if request.Body == nil || request.ContentLength == 0 {
+		writeError(writer, http.StatusUnauthorized, "authentication_required")
+		return
+	}
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		Type string `json:"type"`
+	}
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.Type != "turn-credentials-v1" {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !r.registry.IsEstablishedDevice(envelope.DeviceID, envelope.PublicKey) {
+		writeError(writer, http.StatusForbidden, "device_not_trusted")
+		return
+	}
+	if len(r.turnSecret) < 32 || len(r.turnURLs) == 0 {
+		writeError(writer, http.StatusServiceUnavailable, "turn_unavailable")
+		return
+	}
+	credential := turn.Mint(envelope.DeviceID, r.clock(), r.turnSecret)
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"urls":       r.turnURLs,
+		"username":   credential.Username,
+		"credential": credential.Credential,
+		"expiresAt":  credential.ExpiresAt,
+	})
 }
 
 func (r *Router) removePairing(writer http.ResponseWriter, request *http.Request) {

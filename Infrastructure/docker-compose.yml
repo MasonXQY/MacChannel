@@ -1,0 +1,117 @@
+name: macchannel-local
+
+services:
+  postgres:
+    image: postgres:17.11-alpine3.24
+    environment:
+      POSTGRES_DB: macchannel
+      POSTGRES_USER: macchannel
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../Services/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U macchannel -d macchannel"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  rendezvous:
+    build:
+      context: ..
+      dockerfile: Infrastructure/rendezvous/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: macchannel
+      POSTGRES_USER: macchannel
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_SSLMODE: disable
+      RENDEZVOUS_ADDR: ":8080"
+      RENDEZVOUS_TLS_ADDR: ":8443"
+      RENDEZVOUS_TLS_CERT_FILE: /run/secrets/localhost_cert
+      RENDEZVOUS_TLS_KEY_FILE: /run/secrets/localhost_key
+      TURN_SHARED_SECRET_FILE: /run/secrets/turn_shared_secret
+      TURN_URLS: stun:localhost:3478,turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp,turns:localhost:5349?transport=tcp
+      MACCHANNEL_ALLOWED_WS_ORIGINS: https://localhost:8443
+    secrets:
+      - postgres_password
+      - turn_shared_secret
+      - localhost_cert
+      - localhost_key
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8443:8443"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:4.17.2-r0-alpine
+    entrypoint: ["/usr/local/bin/start-coturn.sh"]
+    secrets:
+      - turn_shared_secret
+      - localhost_cert
+      - localhost_key
+      - local_ca_cert
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./coturn/start-coturn.sh:/usr/local/bin/start-coturn.sh:ro
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+      - "49160-49200:49160-49200/tcp"
+      - "127.0.0.1:9641:9641"
+    read_only: true
+    tmpfs:
+      - /run/coturn:size=1m,uid=65534,gid=65534,mode=0700
+      - /var/lib/coturn:size=1m,uid=65534,gid=65534,mode=0700
+      - /tmp:size=4m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "turnutils_stunclient", "-p", "3478", "127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+secrets:
+  postgres_password:
+    file: ./.local-secrets/postgres-password
+  turn_shared_secret:
+    file: ./.local-secrets/turn-shared-secret
+  localhost_cert:
+    file: ./.local-secrets/tls/localhost.pem
+  localhost_key:
+    file: ./.local-secrets/tls/localhost-key.pem
+  local_ca_cert:
+    file: ./.local-secrets/tls/local-ca.pem

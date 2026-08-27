@@ -1211,6 +1211,28 @@ func (r *TrustRegistry) ShareGraph(left, right string) bool {
 	return false
 }
 
+// IsEstablishedDevice reports whether the presented key belongs to a device in
+// at least one currently established, non-revoked trust relationship. A valid
+// self-signature alone is deliberately insufficient for relay access.
+func (r *TrustRegistry) IsEstablishedDevice(deviceID string, publicKey []byte) bool {
+	deviceID = strings.ToLower(deviceID)
+	if r.refreshPersistent() != nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	pinned, ok := r.publicKeys[deviceID]
+	if !ok || !equalBytes(pinned, publicKey) {
+		return false
+	}
+	for peer, active := range r.adjacency[deviceID] {
+		if active && peer != deviceID {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *TrustRegistry) DevicesInGraph(deviceID string) []string {
 	deviceID = strings.ToLower(deviceID)
 	if r.refreshPersistent() != nil {
