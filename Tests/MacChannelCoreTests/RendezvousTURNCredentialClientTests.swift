@@ -80,23 +80,167 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
             XCTAssertEqual(error as? RendezvousTURNClientError, .invalidResponse)
         }
     }
+
+    func testMapsAuthenticationAvailabilityAndNonHTTPResponses() async throws {
+        let statuses: [(Int, RendezvousTURNClientError)] = [
+            (401, .authenticationRejected),
+            (403, .authenticationRejected),
+            (503, .unavailable),
+        ]
+        for (status, expected) in statuses {
+            let client = try makeClient(statusCode: status, response: Data())
+            do {
+                _ = try await client.fetch()
+                XCTFail("Expected HTTP \(status) to fail")
+            } catch {
+                XCTAssertEqual(error as? RendezvousTURNClientError, expected)
+            }
+        }
+
+        TURNClientURLProtocol.transportError = URLError(.notConnectedToInternet)
+        let transport = try makeClient(statusCode: 200, response: Data())
+        TURNClientURLProtocol.transportError = URLError(.notConnectedToInternet)
+        do {
+            _ = try await transport.fetch()
+            XCTFail("Expected transport failure")
+        } catch {
+            XCTAssertEqual(error as? RendezvousTURNClientError, .transport)
+        }
+
+        let nonHTTP = try makeClient(statusCode: nil, response: Data())
+        do {
+            _ = try await nonHTTP.fetch()
+            XCTFail("Expected a non-HTTP response to fail")
+        } catch {
+            XCTAssertEqual(error as? RendezvousTURNClientError, .invalidResponse)
+        }
+    }
+
+    func testRejectsOversizedBodiesFieldsAndTooManyURLs() async throws {
+        let valid = validResponse()
+        let malformed: [Data] = [
+            Data(repeating: 0x20, count: 65_537),
+            response(
+                urls: (0..<9).map { "turn:turn\($0).test:3478?transport=udp" },
+                username: "1800000600:opaque",
+                credential: "secret"
+            ),
+            response(
+                urls: ["turn:turn.test:3478?transport=udp"],
+                username: "1800000600:" + String(repeating: "a", count: 257),
+                credential: "secret"
+            ),
+            response(
+                urls: ["turn:turn.test:3478?transport=udp"],
+                username: "1800000600:opaque",
+                credential: String(repeating: "s", count: 513)
+            ),
+        ]
+        XCTAssertFalse(valid.isEmpty)
+        for body in malformed {
+            let client = try makeClient(statusCode: 200, response: body)
+            do {
+                _ = try await client.fetch()
+                XCTFail("Expected oversized response to fail")
+            } catch {
+                XCTAssertEqual(error as? RendezvousTURNClientError, .invalidResponse)
+            }
+        }
+    }
+
+    func testStrictlyParsesTURNHostPortAndTransport() async throws {
+        let malformedURLs = [
+            "turn::3478?transport=udp",
+            "turn:turn.test?transport=udp",
+            "turn:turn.test:0?transport=udp",
+            "turn:turn.test:70000?transport=udp",
+            "turn:turn.test:3478",
+            "turn:turn.test:3478?transport=tls",
+            "turn:turn.test:3478?transport=udp&token=secret",
+            "turns:turn.test:5349?transport=udp",
+            "turn://user:secret@turn.test:3478?transport=udp",
+            "turn:turn test:3478?transport=udp",
+            "turn:-turn.test:3478?transport=udp",
+            "turn:turn-.test:3478?transport=udp",
+            "turn:turn..test:3478?transport=udp",
+        ]
+        for url in malformedURLs {
+            let client = try makeClient(
+                statusCode: 200,
+                response: response(
+                    urls: [url],
+                    username: "1800000600:opaque",
+                    credential: "secret"
+                )
+            )
+            do {
+                _ = try await client.fetch()
+                XCTFail("Expected malformed TURN URL to fail: \(url)")
+            } catch {
+                XCTAssertEqual(error as? RendezvousTURNClientError, .invalidResponse)
+            }
+        }
+    }
+
+    private func makeClient(
+        statusCode: Int?,
+        response: Data
+    ) throws -> RendezvousTURNCredentialClient {
+        TURNClientURLProtocol.reset()
+        TURNClientURLProtocol.statusCode = statusCode
+        TURNClientURLProtocol.response = response
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TURNClientURLProtocol.self]
+        return try RendezvousTURNCredentialClient(
+            identity: DeviceIdentity.ephemeral(),
+            origin: URL(string: "http://rendezvous.test")!,
+            session: URLSession(configuration: configuration),
+            now: { Date(timeIntervalSince1970: 1_800_000_000) },
+            allowInsecureForTesting: true
+        )
+    }
+
+    private func validResponse() -> Data {
+        response(
+            urls: ["turn:turn.test:3478?transport=udp"],
+            username: "1800000600:opaque",
+            credential: "secret"
+        )
+    }
+
+    private func response(urls: [String], username: String, credential: String) -> Data {
+        try! JSONSerialization.data(withJSONObject: [
+            "urls": urls,
+            "username": username,
+            "credential": credential,
+            "expiresAt": "2027-01-15T08:10:00Z",
+        ], options: [.sortedKeys])
+    }
 }
 
 private final class TURNClientURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var response = Data()
+    nonisolated(unsafe) static var statusCode: Int? = 200
     nonisolated(unsafe) static var lastRequest: URLRequest?
     nonisolated(unsafe) static var lastBody: Data?
+    nonisolated(unsafe) static var transportError: Error?
 
     static func reset() {
         response = Data()
+        statusCode = 200
         lastRequest = nil
         lastBody = nil
+        transportError = nil
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if let transportError = Self.transportError {
+            client?.urlProtocol(self, didFailWithError: transportError)
+            return
+        }
         Self.lastRequest = request
         Self.lastBody = request.httpBody ?? request.httpBodyStream.flatMap { stream in
             stream.open()
@@ -110,12 +254,22 @@ private final class TURNClientURLProtocol: URLProtocol, @unchecked Sendable {
             }
             return body
         }
-        let response = HTTPURLResponse(
-            url: request.url!,
-            statusCode: 200,
-            httpVersion: nil,
-            headerFields: ["Content-Type": "application/json"]
-        )!
+        let response: URLResponse
+        if let statusCode = Self.statusCode {
+            response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: statusCode,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+        } else {
+            response = URLResponse(
+                url: request.url!,
+                mimeType: "application/json",
+                expectedContentLength: Self.response.count,
+                textEncodingName: nil
+            )
+        }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Self.response)
         client?.urlProtocolDidFinishLoading(self)

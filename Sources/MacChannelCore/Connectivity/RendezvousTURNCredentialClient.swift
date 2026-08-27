@@ -8,6 +8,27 @@ public enum RendezvousTURNClientError: Error, Equatable, Sendable {
     case transport
 }
 
+public protocol RendezvousTURNCredentialFetching: Sendable {
+    func fetch() async throws -> RendezvousTURNCredentials
+}
+
+public protocol ICEConfigurationProviding: Sendable {
+    func configuration(for route: ConnectionRoute) async throws -> ICEConfiguration
+}
+
+public struct StaticICEConfigurationProvider: ICEConfigurationProviding {
+    private let configuration: ICEConfiguration
+
+    public init(_ configuration: ICEConfiguration) {
+        self.configuration = configuration
+    }
+
+    public func configuration(for route: ConnectionRoute) async throws -> ICEConfiguration {
+        _ = route
+        return configuration
+    }
+}
+
 public struct RendezvousTURNCredentials: Equatable, Sendable {
     public let urls: [String]
     public let username: String
@@ -128,10 +149,20 @@ public struct RendezvousTURNCredentialClient: Sendable {
         request.httpBody = try JSONEncoder.sorted.encode(envelope)
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let data: Data
+        var data = Data()
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            let (bytes, receivedResponse) = try await session.bytes(for: request)
+            response = receivedResponse
+            data.reserveCapacity(4_096)
+            for try await byte in bytes {
+                guard data.count < 65_536 else {
+                    throw RendezvousTURNClientError.invalidResponse
+                }
+                data.append(byte)
+            }
+        } catch let error as RendezvousTURNClientError {
+            throw error
         } catch {
             throw RendezvousTURNClientError.transport
         }
@@ -152,6 +183,9 @@ public struct RendezvousTURNCredentialClient: Sendable {
     }
 
     private func decode(_ data: Data, requestDate: Date) throws -> RendezvousTURNCredentials {
+        guard data.count <= 65_536 else {
+            throw RendezvousTURNClientError.invalidResponse
+        }
         struct Response: Decodable {
             let urls: [String]
             let username: String
@@ -168,12 +202,22 @@ public struct RendezvousTURNCredentialClient: Sendable {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let expiry = formatter.date(from: decoded.expiresAt)
             ?? ISO8601DateFormatter().date(from: decoded.expiresAt)
-        let schemes = decoded.urls.compactMap {
-            URLComponents(string: $0)?.scheme?.lowercased()
-        }
-        guard decoded.urls.count == schemes.count,
+        let schemes = decoded.urls.compactMap { $0.split(separator: ":", maxSplits: 1).first }
+            .map { $0.lowercased() }
+        guard (1...8).contains(decoded.urls.count),
+              Set(decoded.urls).count == decoded.urls.count,
+              decoded.urls.allSatisfy(Self.isStrictICEURL),
               !decoded.username.isEmpty,
+              decoded.username.utf8.count <= 256,
+              decoded.username.unicodeScalars.allSatisfy({
+                !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0)
+              }),
               !decoded.credential.isEmpty,
+              decoded.credential.utf8.count <= 512,
+              decoded.credential.unicodeScalars.allSatisfy({
+                !CharacterSet.controlCharacters.contains($0)
+              }),
+              decoded.expiresAt.utf8.count <= 64,
               let expiry,
               expiry > requestDate,
               expiry.timeIntervalSince(requestDate) <= 600,
@@ -189,6 +233,167 @@ public struct RendezvousTURNCredentialClient: Sendable {
             username: decoded.username,
             credential: decoded.credential,
             expiresAt: expiry
+        )
+    }
+
+    private static func isStrictICEURL(_ value: String) -> Bool {
+        guard !value.isEmpty,
+              value.utf8.count <= 2_048,
+              value.unicodeScalars.allSatisfy({
+                $0.isASCII && !$0.properties.isWhitespace
+                    && !CharacterSet.controlCharacters.contains($0)
+              }),
+              let schemeEnd = value.firstIndex(of: ":")
+        else { return false }
+        let scheme = value[..<schemeEnd].lowercased()
+        guard ["stun", "stuns", "turn", "turns"].contains(scheme) else { return false }
+        let remainderStart = value.index(after: schemeEnd)
+        let remainder = value[remainderStart...]
+        guard !remainder.hasPrefix("//") else { return false }
+        let pieces = remainder.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard !pieces.isEmpty, pieces.count <= 2, validHostAndPort(pieces[0]) else { return false }
+        let query = pieces.count == 2 ? String(pieces[1]) : nil
+        switch scheme {
+        case "stun", "stuns":
+            return query == nil
+        case "turn":
+            return query == "transport=udp" || query == "transport=tcp"
+        case "turns":
+            return query == "transport=tcp"
+        default:
+            return false
+        }
+    }
+
+    private static func validHostAndPort(_ value: Substring) -> Bool {
+        guard !value.isEmpty else { return false }
+        let host: Substring
+        let portText: Substring
+        if value.first == "[" {
+            guard let closing = value.firstIndex(of: "]"),
+                  closing > value.startIndex,
+                  value.index(after: closing) < value.endIndex,
+                  value[value.index(after: closing)] == ":"
+            else { return false }
+            host = value[value.index(after: value.startIndex)..<closing]
+            portText = value[value.index(closing, offsetBy: 2)...]
+            guard host.allSatisfy({ $0.isHexDigit || $0 == ":" || $0 == "." }),
+                  host.contains(":")
+            else { return false }
+        } else {
+            guard let separator = value.lastIndex(of: ":"),
+                  separator > value.startIndex,
+                  value.index(after: separator) < value.endIndex
+            else { return false }
+            host = value[..<separator]
+            portText = value[value.index(after: separator)...]
+            guard !host.contains(":"),
+                  host.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }),
+                  host.first != ".",
+                  host.last != ".",
+                  host.utf8.count <= 253,
+                  host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy({ label in
+                      (1...63).contains(label.utf8.count)
+                          && label.first.map({ $0.isLetter || $0.isNumber }) == true
+                          && label.last.map({ $0.isLetter || $0.isNumber }) == true
+                  })
+            else { return false }
+        }
+        guard let port = UInt16(portText), port > 0 else { return false }
+        return true
+    }
+}
+
+extension RendezvousTURNCredentialClient: RendezvousTURNCredentialFetching {}
+
+/// Resolves public STUN configuration locally and obtains authenticated ICE
+/// endpoints when a public route needs them. TURN secrets are exposed only to
+/// relay attempts, remain in memory, and concurrent refreshes are coalesced.
+public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
+    private let base: ICEConfiguration
+    private let fetcher: any RendezvousTURNCredentialFetching
+    private let now: @Sendable () -> Date
+    private var cached: RendezvousTURNCredentials?
+    private var refreshTask: Task<RendezvousTURNCredentials, Error>?
+    private var refreshGeneration = 0
+    private var refreshWaiters: Set<UUID> = []
+
+    public init(
+        base: ICEConfiguration,
+        fetcher: any RendezvousTURNCredentialFetching,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        self.base = ICEConfiguration(stunURLs: base.stunURLs, turnServers: [])
+        self.fetcher = fetcher
+        self.now = now
+    }
+
+    public func configuration(for route: ConnectionRoute) async throws -> ICEConfiguration {
+        try Task.checkCancellation()
+        if route == .lan || (route == .directInternet && !base.stunURLs.isEmpty) {
+            return base
+        }
+        let requestDate = now()
+        if let cached, cached.isUsable(at: requestDate) {
+            return combined(with: cached, for: route)
+        }
+        let task: Task<RendezvousTURNCredentials, Error>
+        let generation: Int
+        let waiter = UUID()
+        if let refreshTask {
+            task = refreshTask
+            generation = refreshGeneration
+            refreshWaiters.insert(waiter)
+        } else {
+            let fetcher = self.fetcher
+            task = Task { try await fetcher.fetch() }
+            refreshGeneration += 1
+            generation = refreshGeneration
+            refreshTask = task
+            refreshWaiters = [waiter]
+        }
+        do {
+            let credentials = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                Task { await self.cancel(waiter: waiter, generation: generation) }
+            }
+            try Task.checkCancellation()
+            guard credentials.isUsable(at: now()) else {
+                finish(waiter: waiter, generation: generation)
+                throw RendezvousTURNClientError.invalidResponse
+            }
+            cached = credentials
+            finish(waiter: waiter, generation: generation)
+            return combined(with: credentials, for: route)
+        } catch {
+            finish(waiter: waiter, generation: generation)
+            if Task.isCancelled { throw CancellationError() }
+            throw error
+        }
+    }
+
+    private func cancel(waiter: UUID, generation: Int) {
+        guard refreshGeneration == generation else { return }
+        refreshWaiters.remove(waiter)
+        guard refreshWaiters.isEmpty else { return }
+        refreshTask?.cancel()
+        refreshTask = nil
+    }
+
+    private func finish(waiter: UUID, generation: Int) {
+        guard refreshGeneration == generation else { return }
+        refreshWaiters.remove(waiter)
+        if refreshWaiters.isEmpty { refreshTask = nil }
+    }
+
+    private func combined(
+        with credentials: RendezvousTURNCredentials,
+        for route: ConnectionRoute
+    ) -> ICEConfiguration {
+        ICEConfiguration(
+            stunURLs: base.stunURLs + credentials.iceConfiguration.stunURLs,
+            turnServers: route == .relay ? credentials.iceConfiguration.turnServers : []
         )
     }
 }

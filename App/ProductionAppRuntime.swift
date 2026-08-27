@@ -378,12 +378,21 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         cleanup.push { await presence.stop() }
 
         let signaling = RendezvousWebRTCSignaling(session: presence)
+        let turnClient = try RendezvousTURNCredentialClient(
+            identity: identity,
+            origin: httpOrigin,
+            session: httpSession
+        )
+        let iceProvider = RefreshingICEConfigurationProvider(
+            base: configuration.ice,
+            fetcher: turnClient
+        )
         let connector = ConnectionCoordinator(
             directory: directory,
             identity: identity,
             trustRepository: trustRepository,
             signaling: signaling,
-            ice: configuration.ice
+            iceProvider: iceProvider
         )
         let transferCoordinator = try await TransferCoordinator.restoring(
             connector: connector,
@@ -395,7 +404,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             identity: identity,
             trustRepository: trustRepository,
             signaling: signaling,
-            ice: configuration.ice
+            iceProvider: iceProvider
         )
         cleanup.push { await connectionListener.stop() }
         let incoming = IncomingRuntimeController(

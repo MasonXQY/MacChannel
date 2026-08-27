@@ -3,6 +3,7 @@ package turn
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,49 @@ func TestLocalStackPinsServicesAndProtectsSecrets(t *testing.T) {
 		if strings.Contains(dockerfile, "apk add") {
 			t.Errorf("%s mutates a pinned image with an unpinned package repository", relative)
 		}
+	}
+}
+
+func TestVerifyE2ERemovesTemporaryLogsWhenLocalSwiftFails(t *testing.T) {
+	root := repositoryRoot(t)
+	temporary := t.TempDir()
+	bin := filepath.Join(temporary, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeSwift := filepath.Join(bin, "swift")
+	if err := os.WriteFile(fakeSwift, []byte("#!/bin/sh\necho injected-swift-failure >&2\nexit 9\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", filepath.Join(root, "Scripts", "verify-e2e.sh"), "--local-only")
+	command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "TMPDIR="+temporary)
+	if err := command.Run(); err == nil {
+		t.Fatal("failure injection unexpectedly succeeded")
+	}
+	matches, err := filepath.Glob(filepath.Join(temporary, "macchannel-*-e2e.*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("verify-e2e leaked temporary logs after failure: %v", matches)
+	}
+}
+
+func TestVerifyE2EWithoutDockerExitsCleanlyWithNoTemporaryLogs(t *testing.T) {
+	root := repositoryRoot(t)
+	temporary := t.TempDir()
+	command := exec.Command("/bin/bash", filepath.Join(root, "Scripts", "verify-e2e.sh"))
+	command.Env = append(os.Environ(), "PATH=/usr/bin:/bin", "TMPDIR="+temporary)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatal("missing-Docker gate unexpectedly succeeded")
+	}
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 2 {
+		t.Fatalf("missing-Docker gate status = %v, output=%s", err, output)
+	}
+	if !strings.Contains(string(output), "缺少 docker") || strings.Contains(string(output), "unbound variable") {
+		t.Fatalf("missing-Docker output is not clean: %s", output)
 	}
 }
 

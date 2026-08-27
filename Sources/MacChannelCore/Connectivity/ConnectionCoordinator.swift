@@ -407,12 +407,30 @@ public struct ConnectionCoordinator: TransferAwarePeerConnector, Sendable {
         ice: ICEConfiguration,
         factory: WebRTCFactory = WebRTCFactory()
     ) {
+        self.init(
+            directory: directory,
+            identity: identity,
+            trustRepository: trustRepository,
+            signaling: signaling,
+            iceProvider: StaticICEConfigurationProvider(ice),
+            factory: factory
+        )
+    }
+
+    public init(
+        directory: DeviceDirectory,
+        identity: DeviceIdentity,
+        trustRepository: TrustRepository,
+        signaling: any WebRTCSignalTransport,
+        iceProvider: any ICEConfigurationProviding,
+        factory: any WebRTCChannelFactory = WebRTCFactory()
+    ) {
         attempts = WebRTCConnectionAttempts(
             directory: directory,
             identity: identity,
             trustRepository: trustRepository,
             signaling: signaling,
-            ice: ice,
+            iceProvider: iceProvider,
             factory: factory
         )
     }
@@ -463,8 +481,8 @@ public actor WebRTCConnectionAttempts: TransferAwareConnectionAttempting {
     private let identity: DeviceIdentity
     private let trustRepository: TrustRepository
     private let signaling: any WebRTCSignalTransport
-    private let ice: ICEConfiguration
-    private let factory: WebRTCFactory
+    private let iceProvider: any ICEConfigurationProviding
+    private let factory: any WebRTCChannelFactory
 
     public init(
         directory: DeviceDirectory,
@@ -474,11 +492,29 @@ public actor WebRTCConnectionAttempts: TransferAwareConnectionAttempting {
         ice: ICEConfiguration,
         factory: WebRTCFactory = WebRTCFactory()
     ) {
+        self.init(
+            directory: directory,
+            identity: identity,
+            trustRepository: trustRepository,
+            signaling: signaling,
+            iceProvider: StaticICEConfigurationProvider(ice),
+            factory: factory
+        )
+    }
+
+    public init(
+        directory: DeviceDirectory,
+        identity: DeviceIdentity,
+        trustRepository: TrustRepository,
+        signaling: any WebRTCSignalTransport,
+        iceProvider: any ICEConfigurationProviding,
+        factory: any WebRTCChannelFactory = WebRTCFactory()
+    ) {
         self.directory = directory
         self.identity = identity
         self.trustRepository = trustRepository
         self.signaling = signaling
-        self.ice = ice
+        self.iceProvider = iceProvider
         self.factory = factory
     }
 
@@ -508,6 +544,8 @@ public actor WebRTCConnectionAttempts: TransferAwareConnectionAttempting {
         guard let remotePublicKey = await trustRepository.publicKey(for: device) else {
             throw ConnectionAttemptError.authenticationFailed
         }
+        let ice = try await iceProvider.configuration(for: route)
+        try Task.checkCancellation()
         let channel = try await factory.connect(
             localIdentity: identity,
             remoteDevice: device,
@@ -548,7 +586,7 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
     private let identity: DeviceIdentity
     private let trustRepository: TrustRepository
     private let signaling: RendezvousWebRTCSignaling
-    private let ice: ICEConfiguration
+    private let iceProvider: any ICEConfigurationProviding
     private let factory: any WebRTCChannelFactory
     private let channelStream: AsyncThrowingStream<WebRTCSecureChannel, Error>
     private let channelContinuation: AsyncThrowingStream<WebRTCSecureChannel, Error>.Continuation
@@ -568,11 +606,29 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         ice: ICEConfiguration,
         factory: any WebRTCChannelFactory = WebRTCFactory()
     ) {
+        self.init(
+            directory: directory,
+            identity: identity,
+            trustRepository: trustRepository,
+            signaling: signaling,
+            iceProvider: StaticICEConfigurationProvider(ice),
+            factory: factory
+        )
+    }
+
+    public init(
+        directory: DeviceDirectory,
+        identity: DeviceIdentity,
+        trustRepository: TrustRepository,
+        signaling: RendezvousWebRTCSignaling,
+        iceProvider: any ICEConfigurationProviding,
+        factory: any WebRTCChannelFactory = WebRTCFactory()
+    ) {
         self.directory = directory
         self.identity = identity
         self.trustRepository = trustRepository
         self.signaling = signaling
-        self.ice = ice
+        self.iceProvider = iceProvider
         self.factory = factory
         var continuation: AsyncThrowingStream<WebRTCSecureChannel, Error>.Continuation!
         channelStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(32)) {
@@ -650,6 +706,8 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
             return
         }
         do {
+            let ice = try await iceProvider.configuration(for: offer.route)
+            try Task.checkCancellation()
             let channel = try await factory.connect(
                 localIdentity: identity,
                 remoteDevice: offer.remoteDevice,

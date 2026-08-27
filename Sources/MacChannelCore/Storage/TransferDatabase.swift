@@ -157,6 +157,16 @@ public actor TransferDatabase {
         if let connection { sqlite3_close(connection) }
     }
 
+    /// Releases the SQLite handle at an explicit runtime lifecycle boundary.
+    /// A closed instance fails subsequent operations and must not be reused.
+    public func close() throws {
+        guard let connection else { return }
+        guard sqlite3_close(connection) == SQLITE_OK else {
+            throw ReceiveStoreError.databaseFailure
+        }
+        self.connection = nil
+    }
+
     func preparationRecord(
         manifest: TransferManifest,
         source: DeviceID

@@ -23,6 +23,8 @@ enum TwoClientHarnessError: Error, Equatable {
     case timedOut(TransferID)
     case missingTransfer
     case fileGenerationFailed
+    case interruptionDidNotOccur
+    case restartUnsupported
 }
 
 struct RelayRouteEvidence: Equatable, Sendable {
@@ -31,37 +33,78 @@ struct RelayRouteEvidence: Equatable, Sendable {
     let usernameIsOpaque: Bool
 }
 
+struct NetworkInterruptionEvidence: Equatable, Sendable {
+    let transferID: TransferID
+    let senderDurableOffset: Int64
+    let receiverDurableOffset: Int64
+    let closedChannelCount: Int
+    let connectionCount: Int
+    let connectionInstanceID: UUID
+}
+
+struct NetworkResumeEvidence: Equatable, Sendable {
+    let connectionCount: Int
+    let connectionInstanceID: UUID
+    let resumeOffset: Int64
+    let bytesSentOnNewConnection: Int64
+}
+
+struct RuntimeRestartEvidence: Equatable, Sendable {
+    let transferID: TransferID
+    let identityBefore: DeviceID
+    let identityAfter: DeviceID
+    let runtimeGenerationBefore: UUID
+    let runtimeGenerationAfter: UUID
+    let databaseWasClosedAndReopened: Bool
+}
+
+struct TransferFailureEvidence: Equatable, Sendable {
+    let senderPhase: TransferPhase
+    let receiveFailure: IncomingTransferFailure?
+    let receiveError: ReceiveStoreError?
+    let stagingEntries: [String]
+}
+
 final class TwoClientHarness: @unchecked Sendable {
     let sender: HarnessSender
     let receiverID: DeviceID
     let senderID: DeviceID
     let root: URL
-    let senderDatabase: TransferDatabase
     let receiverDatabase: TransferDatabase
     let senderDownloadRoot: URL
     let receiverDownloadRoot: URL
     let thirdDownloadRoot: URL?
 
-    private let senderTrust: TrustRepository
+    private var senderTrust: TrustRepository
     private let receiverTrust: TrustRepository
-    private let senderDirectory: DeviceDirectory
-    private let connector: HarnessRouteConnector
+    private var senderDirectory: DeviceDirectory
+    private let connectionControl: HarnessConnectionControl
+    private let channelFaults: HarnessChannelFaults
+    private let routePolicy: IntegrationRoutePolicy
+    private let senderICEProvider: any ICEConfigurationProviding
+    private var senderDatabase: TransferDatabase
+    private var senderIdentity: DeviceIdentity
+    private var senderRuntimeGeneration = UUID()
     private let results: HarnessReceiveResults
     private let incomingListener: IncomingTransferListener
     private let connectionListener: WebRTCConnectionListener
     private let signalHub: LocalRendezvousHub?
     private let stackPresence: StackPresenceLifecycle?
-    private let relayCredentials: RendezvousTURNCredentials?
+    private let relayCredentialRecorder: RecordingTURNCredentialFetcher?
     private let senderOutgoing: URL
     private let thirdIncomingListener: IncomingTransferListener?
     private let thirdConnectionListener: WebRTCConnectionListener?
+    private let thirdDatabase: TransferDatabase?
+    private let cleanupState = HarnessCleanupState()
 
     init(
         routePolicy: IntegrationRoutePolicy,
         root: URL? = nil,
         capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
         additionalOnlineClient: Bool = false,
-        maximumConnectionAttempts: Int = 8
+        maximumConnectionAttempts: Int = 8,
+        constructionCleanup: HarnessConstructionCleanup? = nil,
+        failAfterStartingResourcesForTesting: Bool = false
     ) async throws {
         guard routePolicy == .lanOnly || !additionalOnlineClient else {
             throw TwoClientHarnessError.stackConfigurationRequired
@@ -86,8 +129,13 @@ final class TwoClientHarness: @unchecked Sendable {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
 
-        let senderIdentity = try DeviceIdentity.loadOrCreate(keychain: MemorySecretStore())
-        let receiverIdentity = try DeviceIdentity.loadOrCreate(keychain: MemorySecretStore())
+        let senderIdentity = try DeviceIdentity.loadOrCreate(
+            keychain: try FileSecretStore(root: senderRoot.appendingPathComponent("secrets"))
+        )
+        let receiverIdentity = try DeviceIdentity.loadOrCreate(
+            keychain: try FileSecretStore(root: receiverRoot.appendingPathComponent("secrets"))
+        )
+        self.senderIdentity = senderIdentity
         senderID = senderIdentity.id
         receiverID = receiverIdentity.id
 
@@ -149,19 +197,19 @@ final class TwoClientHarness: @unchecked Sendable {
 
         let senderSignalSession: any RendezvousSignalSession
         let receiverSignalSession: any RendezvousSignalSession
-        let senderICE: ICEConfiguration
-        let receiverICE: ICEConfiguration
+        let senderProvider: any ICEConfigurationProviding
+        let receiverProvider: any ICEConfigurationProviding
         if let stackOrigin {
-            let senderCredential = try await RendezvousTURNCredentialClient(
+            let senderFetcher = RecordingTURNCredentialFetcher(base: try RendezvousTURNCredentialClient(
                 identity: senderIdentity,
                 origin: stackOrigin,
                 session: URLSession(configuration: .ephemeral)
-            ).fetch()
-            let receiverCredential = try await RendezvousTURNCredentialClient(
+            ))
+            let receiverFetcher = RecordingTURNCredentialFetcher(base: try RendezvousTURNCredentialClient(
                 identity: receiverIdentity,
                 origin: stackOrigin,
                 session: URLSession(configuration: .ephemeral)
-            ).fetch()
+            ))
             guard let webSocketURL = Self.webSocketURL(from: stackOrigin) else {
                 throw TwoClientHarnessError.stackConfigurationRequired
             }
@@ -195,22 +243,31 @@ final class TwoClientHarness: @unchecked Sendable {
                 do { try await receiverPresence.run() } catch {}
             }
             signalHub = nil
-            stackPresence = StackPresenceLifecycle(
+            let lifecycle = StackPresenceLifecycle(
                 sender: senderPresence,
                 receiver: receiverPresence,
                 senderTask: senderPresenceTask,
                 receiverTask: receiverPresenceTask
             )
-            relayCredentials = routePolicy == .relayOnly ? senderCredential : nil
+            stackPresence = lifecycle
+            constructionCleanup?.push { await lifecycle.shutdown() }
+            relayCredentialRecorder = routePolicy == .relayOnly ? senderFetcher : nil
             senderSignalSession = senderPresence
             receiverSignalSession = receiverPresence
-            senderICE = senderCredential.iceConfiguration
-            receiverICE = receiverCredential.iceConfiguration
+            senderProvider = RefreshingICEConfigurationProvider(
+                base: ICEConfiguration(stunURLs: [], turnServers: []),
+                fetcher: senderFetcher
+            )
+            receiverProvider = RefreshingICEConfigurationProvider(
+                base: ICEConfiguration(stunURLs: [], turnServers: []),
+                fetcher: receiverFetcher
+            )
         } else {
             let hub = LocalRendezvousHub()
             signalHub = hub
+            constructionCleanup?.push { await hub.finish() }
             stackPresence = nil
-            relayCredentials = nil
+            relayCredentialRecorder = nil
             senderSignalSession = LocalRendezvousSignalSession(
                 localDevice: senderIdentity.id,
                 hub: hub
@@ -219,8 +276,11 @@ final class TwoClientHarness: @unchecked Sendable {
                 localDevice: receiverIdentity.id,
                 hub: hub
             )
-            senderICE = ICEConfiguration(stunURLs: [], turnServers: [])
-            receiverICE = senderICE
+            let localProvider = StaticICEConfigurationProvider(
+                ICEConfiguration(stunURLs: [], turnServers: [])
+            )
+            senderProvider = localProvider
+            receiverProvider = localProvider
         }
         let senderSignaling = RendezvousWebRTCSignaling(
             session: senderSignalSession
@@ -228,22 +288,36 @@ final class TwoClientHarness: @unchecked Sendable {
         let receiverSignaling = RendezvousWebRTCSignaling(
             session: receiverSignalSession
         )
+        senderICEProvider = senderProvider
+        self.routePolicy = routePolicy
+        let control = HarnessConnectionControl()
+        connectionControl = control
+        let faults = HarnessChannelFaults()
+        channelFaults = faults
         let attempts = WebRTCConnectionAttempts(
             directory: senderDirectory,
             identity: senderIdentity,
             trustRepository: senderTrust,
             signaling: senderSignaling,
-            ice: senderICE,
+            iceProvider: senderProvider,
             factory: WebRTCFactory(connectionTimeout: .seconds(15))
         )
-        connector = HarnessRouteConnector(attempts: attempts, route: routePolicy.route)
+        let routeAttempts = HarnessRouteAttempts(
+            attempts: attempts,
+            policy: routePolicy,
+            control: control,
+            faults: faults
+        )
+        let connector = ConnectionCoordinator(attempts: routeAttempts)
 
         senderDatabase = try TransferDatabase(
             url: senderRoot.appendingPathComponent("history.sqlite")
         )
+        constructionCleanup?.push { [senderDatabase] in try? await senderDatabase.close() }
         receiverDatabase = try TransferDatabase(
             url: receiverRoot.appendingPathComponent("history.sqlite")
         )
+        constructionCleanup?.push { [receiverDatabase] in try? await receiverDatabase.close() }
         let coordinator = try await TransferCoordinator.restoring(
             connector: connector,
             database: senderDatabase,
@@ -252,6 +326,7 @@ final class TwoClientHarness: @unchecked Sendable {
             persistenceRetryDelay: .milliseconds(20),
             cancellationWatchdogDelay: .seconds(1)
         )
+        constructionCleanup?.push { await coordinator.shutdownForRestart() }
         sender = HarnessSender(coordinator: coordinator)
 
         connectionListener = WebRTCConnectionListener(
@@ -259,7 +334,7 @@ final class TwoClientHarness: @unchecked Sendable {
             identity: receiverIdentity,
             trustRepository: receiverTrust,
             signaling: receiverSignaling,
-            ice: receiverICE,
+            iceProvider: receiverProvider,
             factory: WebRTCFactory(connectionTimeout: .seconds(15))
         )
         results = HarnessReceiveResults()
@@ -273,9 +348,16 @@ final class TwoClientHarness: @unchecked Sendable {
             inactivityTimeout: .seconds(15),
             onReceiveFinished: { [results] result in
                 await results.record(result)
+            },
+            onReceiveFailed: { [results] transferID, failure in
+                await results.recordFailure(failure, for: transferID)
             }
         )
         await incomingListener.start()
+        constructionCleanup?.push { [incomingListener, connectionListener] in
+            await incomingListener.stop()
+            await connectionListener.stop()
+        }
 
         if additionalOnlineClient {
             let thirdRoot = self.root.appendingPathComponent("third", isDirectory: true)
@@ -284,7 +366,9 @@ final class TwoClientHarness: @unchecked Sendable {
                 at: thirdDownloads,
                 withIntermediateDirectories: true
             )
-            let thirdIdentity = try DeviceIdentity.loadOrCreate(keychain: MemorySecretStore())
+            let thirdIdentity = try DeviceIdentity.loadOrCreate(
+                keychain: try FileSecretStore(root: thirdRoot.appendingPathComponent("secrets"))
+            )
             let thirdTrust = try TrustRepository(
                 ownerIdentity: thirdIdentity,
                 trustStore: TrustStore(owner: thirdIdentity.id),
@@ -320,7 +404,7 @@ final class TwoClientHarness: @unchecked Sendable {
                 identity: thirdIdentity,
                 trustRepository: thirdTrust,
                 signaling: thirdSignaling,
-                ice: senderICE,
+                iceProvider: senderProvider,
                 factory: WebRTCFactory(connectionTimeout: .seconds(15))
             )
             let thirdDatabase = try TransferDatabase(
@@ -337,11 +421,21 @@ final class TwoClientHarness: @unchecked Sendable {
             thirdDownloadRoot = thirdDownloads
             thirdConnectionListener = thirdConnection
             thirdIncomingListener = thirdIncoming
+            self.thirdDatabase = thirdDatabase
             await thirdIncoming.start()
+            constructionCleanup?.push { [thirdIncoming, thirdConnection, thirdDatabase] in
+                await thirdIncoming.stop()
+                await thirdConnection.stop()
+                try? await thirdDatabase.close()
+            }
         } else {
             thirdDownloadRoot = nil
             thirdConnectionListener = nil
             thirdIncomingListener = nil
+            thirdDatabase = nil
+        }
+        if failAfterStartingResourcesForTesting {
+            throw TwoClientHarnessError.fileGenerationFailed
         }
         await Task.yield()
     }
@@ -422,25 +516,90 @@ final class TwoClientHarness: @unchecked Sendable {
         throw TwoClientHarnessError.timedOut(transfer)
     }
 
-    func cutNetwork(afterBytes: Int64) async {
-        guard let transfer = await sender.latestTransferID else { return }
-        while let snapshot = await sender.snapshot(for: transfer),
-              snapshot.completedBytes < afterBytes,
-              snapshot.phase != .failed,
-              snapshot.phase != .completed,
-              snapshot.phase != .cancelled
-        {
-            try? await Task.sleep(for: .milliseconds(5))
+    func cutNetwork(afterBytes: Int64) async throws -> NetworkInterruptionEvidence {
+        guard let transfer = await sender.latestTransferID else {
+            throw TwoClientHarnessError.missingTransfer
         }
-        await connector.interruptNetwork()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(120))
+        var senderOffset: UInt64 = 0
+        var receiverOffset: UInt64 = 0
+        while ContinuousClock.now < deadline {
+            let senderRecord = try await senderDatabase.history(limit: 200)
+                .first(where: { $0.id == transfer })
+            let receiverRecord = try await receiverDatabase.history(limit: 200)
+                .first(where: { $0.id == transfer })
+            senderOffset = senderRecord?.completedBytes ?? 0
+            receiverOffset = receiverRecord?.completedBytes ?? 0
+            if senderOffset >= UInt64(afterBytes), receiverOffset >= UInt64(afterBytes) { break }
+            if let phase = senderRecord?.phase,
+               phase == .failed || phase == .completed || phase == .cancelled
+            {
+                throw TwoClientHarnessError.interruptionDidNotOccur
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        guard senderOffset >= UInt64(afterBytes), receiverOffset >= UInt64(afterBytes) else {
+            throw TwoClientHarnessError.interruptionDidNotOccur
+        }
+        let connectionCount = await connectionControl.connectionCount()
+        guard let connectionInstanceID = await connectionControl.latestConnectionID() else {
+            throw TwoClientHarnessError.interruptionDidNotOccur
+        }
+        let closed = await connectionControl.interruptNetwork()
+        guard closed > 0 else { throw TwoClientHarnessError.interruptionDidNotOccur }
+        return NetworkInterruptionEvidence(
+            transferID: transfer,
+            senderDurableOffset: Int64(senderOffset),
+            receiverDurableOffset: Int64(receiverOffset),
+            closedChannelCount: closed,
+            connectionCount: connectionCount,
+            connectionInstanceID: connectionInstanceID
+        )
     }
 
     func restoreNetwork() async {
-        await connector.restoreNetwork()
+        await connectionControl.restoreNetwork()
+    }
+
+    func waitForResume(
+        after interruption: NetworkInterruptionEvidence,
+        timeout: Duration
+    ) async throws -> NetworkResumeEvidence {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            let count = await connectionControl.connectionCount()
+            let connectionID = await connectionControl.latestConnectionID()
+            let bytes = await connectionControl.latestConnectionBytes()
+            let record = try await senderDatabase.history(limit: 200)
+                .first(where: { $0.id == interruption.transferID })
+            let offset = Int64(record?.completedBytes ?? 0)
+            if count > interruption.connectionCount,
+               let connectionID,
+               connectionID != interruption.connectionInstanceID,
+               offset >= interruption.receiverDurableOffset,
+               bytes > 0
+            {
+                return NetworkResumeEvidence(
+                    connectionCount: count,
+                    connectionInstanceID: connectionID,
+                    resumeOffset: offset,
+                    bytesSentOnNewConnection: bytes
+                )
+            }
+            if let phase = record?.phase, phase == .failed || phase == .cancelled {
+                throw TwoClientHarnessError.transferFailed(interruption.transferID)
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw TwoClientHarnessError.timedOut(interruption.transferID)
     }
 
     func actualRoutes() async -> [ConnectionRoute] {
-        await connector.actualRoutes
+        await connectionControl.actualRoutes
+    }
+
+    func attemptedRoutes() async -> [ConnectionRoute] {
+        await connectionControl.attemptedRoutes
     }
 
     func makeReceiverDirectoryUnwritable() throws {
@@ -456,7 +615,7 @@ final class TwoClientHarness: @unchecked Sendable {
     }
 
     func tamperNextChunk() async {
-        await connector.tamperNextChunk()
+        await channelFaults.tamperNextChunk()
     }
 
     func receiveFailureCount() async -> Int {
@@ -468,20 +627,29 @@ final class TwoClientHarness: @unchecked Sendable {
         await senderDirectory.waitForTrustUpdates()
     }
 
-    func restartSender(afterBytes: Int64) async throws {
+    func restartSender(afterBytes: Int64) async throws -> RuntimeRestartEvidence {
         guard let transfer = await sender.latestTransferID else {
             throw TwoClientHarnessError.missingTransfer
         }
-        while let snapshot = await sender.snapshot(for: transfer),
-              snapshot.completedBytes < afterBytes,
-              snapshot.phase != .failed,
-              snapshot.phase != .completed,
-              snapshot.phase != .cancelled
+        guard let hub = signalHub, routePolicy == .lanOnly else {
+            throw TwoClientHarnessError.restartUnsupported
+        }
+        while let record = try await senderDatabase.history(limit: 200)
+            .first(where: { $0.id == transfer }),
+            record.completedBytes < UInt64(afterBytes),
+            record.phase != .failed,
+            record.phase != .completed,
+            record.phase != .cancelled
         {
             try await Task.sleep(for: .milliseconds(5))
         }
-        await connector.interruptNetwork()
+        let identityBefore = senderIdentity.id
+        let generationBefore = senderRuntimeGeneration
+        guard await connectionControl.interruptNetwork() > 0 else {
+            throw TwoClientHarnessError.interruptionDidNotOccur
+        }
         await sender.shutdownForRestart()
+        try await senderDatabase.close()
         let receiveDeadline = ContinuousClock.now.advanced(by: .seconds(10))
         while ContinuousClock.now < receiveDeadline {
             if try await receiverDatabase.history(limit: 100)
@@ -491,16 +659,55 @@ final class TwoClientHarness: @unchecked Sendable {
             }
             try await Task.sleep(for: .milliseconds(10))
         }
-        await connector.restoreNetwork()
+        let senderRoot = root.appendingPathComponent("sender", isDirectory: true)
+        let reopenedIdentity = try DeviceIdentity.loadOrCreate(
+            keychain: try FileSecretStore(root: senderRoot.appendingPathComponent("secrets"))
+        )
+        guard reopenedIdentity.id == identityBefore else {
+            throw TwoClientHarnessError.restartUnsupported
+        }
+        let reopenedDatabase = try TransferDatabase(
+            url: senderRoot.appendingPathComponent("history.sqlite")
+        )
+        let signaling = RendezvousWebRTCSignaling(
+            session: LocalRendezvousSignalSession(localDevice: reopenedIdentity.id, hub: hub)
+        )
+        let attempts = WebRTCConnectionAttempts(
+            directory: senderDirectory,
+            identity: reopenedIdentity,
+            trustRepository: senderTrust,
+            signaling: signaling,
+            iceProvider: senderICEProvider,
+            factory: WebRTCFactory(connectionTimeout: .seconds(15))
+        )
+        let routeAttempts = HarnessRouteAttempts(
+            attempts: attempts,
+            policy: routePolicy,
+            control: connectionControl,
+            faults: channelFaults
+        )
+        let connector = ConnectionCoordinator(attempts: routeAttempts)
+        await connectionControl.restoreNetwork()
         let restored = try await TransferCoordinator.restoring(
             connector: connector,
-            database: senderDatabase,
+            database: reopenedDatabase,
             outgoingDirectory: senderOutgoing,
             maximumConnectionAttempts: 8,
             persistenceRetryDelay: .milliseconds(20),
             cancellationWatchdogDelay: .seconds(1)
         )
+        senderIdentity = reopenedIdentity
+        senderDatabase = reopenedDatabase
+        senderRuntimeGeneration = UUID()
         await sender.install(restored)
+        return RuntimeRestartEvidence(
+            transferID: transfer,
+            identityBefore: identityBefore,
+            identityAfter: reopenedIdentity.id,
+            runtimeGenerationBefore: generationBefore,
+            runtimeGenerationAfter: senderRuntimeGeneration,
+            databaseWasClosedAndReopened: true
+        )
     }
 
     func onlinePeerCount() async -> Int {
@@ -508,7 +715,7 @@ final class TwoClientHarness: @unchecked Sendable {
     }
 
     func relayEvidence() async throws -> RelayRouteEvidence {
-        guard let relayCredentials else {
+        guard let relayCredentials = await relayCredentialRecorder?.latest else {
             throw TwoClientHarnessError.stackConfigurationRequired
         }
         return RelayRouteEvidence(
@@ -521,14 +728,43 @@ final class TwoClientHarness: @unchecked Sendable {
         )
     }
 
+    func failureEvidence(for transfer: TransferID) async throws -> TransferFailureEvidence {
+        let senderPhase = try await senderDatabase.history(limit: 200)
+            .first(where: { $0.id == transfer })?.phase
+        guard let senderPhase else { throw TwoClientHarnessError.missingTransfer }
+        let failure = await results.failure(for: transfer)
+        let receiveError: ReceiveStoreError?
+        if case let .receiveStore(error) = failure { receiveError = error } else { receiveError = nil }
+        let incoming = root.appendingPathComponent("receiver/incoming", isDirectory: true)
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: incoming.path)) ?? []
+        return TransferFailureEvidence(
+            senderPhase: senderPhase,
+            receiveFailure: failure,
+            receiveError: receiveError,
+            stagingEntries: entries.sorted()
+        )
+    }
+
     func shutdown() async {
+        guard await cleanupState.beginShutdown() else { return }
         await sender.shutdownForRestart()
+        _ = await connectionControl.interruptNetwork()
         await incomingListener.stop()
         await connectionListener.stop()
         await thirdIncomingListener?.stop()
         await thirdConnectionListener?.stop()
         await signalHub?.finish()
         await stackPresence?.shutdown()
+        try? await senderDatabase.close()
+        try? await receiverDatabase.close()
+        try? await thirdDatabase?.close()
+    }
+
+    func shutdownAndRemoveRoot() async {
+        await shutdown()
+        guard await cleanupState.beginRemoval() else { return }
+        try? restoreReceiverDirectoryPermissions()
+        try? FileManager.default.removeItem(at: root)
     }
 
     private func writeDeterministicFile(at url: URL, size: Int) throws {
@@ -630,6 +866,7 @@ actor HarnessSender {
 
 private actor HarnessReceiveResults {
     private var results: [TransferID: TransferReceiveResult] = [:]
+    private var receiveFailures: [TransferID: IncomingTransferFailure] = [:]
     private(set) var failures = 0
 
     func record(_ result: TransferReceiveResult?) {
@@ -643,71 +880,154 @@ private actor HarnessReceiveResults {
     func result(for transfer: TransferID) -> TransferReceiveResult? {
         results[transfer]
     }
+
+    func recordFailure(_ failure: IncomingTransferFailure, for transfer: TransferID) {
+        receiveFailures[transfer] = failure
+    }
+
+    func failure(for transfer: TransferID) -> IncomingTransferFailure? {
+        receiveFailures[transfer]
+    }
 }
 
-private actor HarnessRouteConnector: TransferAwarePeerConnector {
+private actor HarnessRouteAttempts: TransferAwareConnectionAttempting {
     private let attempts: WebRTCConnectionAttempts
-    private let route: ConnectionRoute
-    private var online = true
-    private var channels: [UUID: HarnessSecureChannel] = [:]
-    private(set) var actualRoutes: [ConnectionRoute] = []
-    private let faults = HarnessChannelFaults()
+    private let policy: IntegrationRoutePolicy
+    private let control: HarnessConnectionControl
+    private let faults: HarnessChannelFaults
 
-    init(attempts: WebRTCConnectionAttempts, route: ConnectionRoute) {
+    init(
+        attempts: WebRTCConnectionAttempts,
+        policy: IntegrationRoutePolicy,
+        control: HarnessConnectionControl,
+        faults: HarnessChannelFaults
+    ) {
         self.attempts = attempts
-        self.route = route
+        self.policy = policy
+        self.control = control
+        self.faults = faults
     }
 
-    func connect(to device: DeviceID) async throws -> any SecureChannel {
-        try await connect(to: device, transferID: TransferID(rawValue: UUID()))
+    func connect(to device: DeviceID, route: ConnectionRoute) async throws -> any SecureChannel {
+        try await connect(
+            to: device,
+            route: route,
+            transferID: TransferID(rawValue: UUID())
+        )
     }
 
-    func connect(to device: DeviceID, transferID: TransferID) async throws -> any SecureChannel {
-        while !online {
-            try Task.checkCancellation()
-            try await Task.sleep(for: .milliseconds(10))
-        }
+    func connect(
+        to device: DeviceID,
+        route: ConnectionRoute,
+        transferID: TransferID
+    ) async throws -> any SecureChannel {
+        try await control.waitUntilOnline()
+        await control.recordAttempt(route)
+        guard route == policy.route else { throw ConnectionAttemptError.routeUnavailable }
         let channel = try await attempts.connect(
             to: device,
             route: route,
             transferID: transferID
         )
-        await faults.channelOpened()
-        let wrapped = HarnessSecureChannel(base: channel, faults: faults)
-        channels[UUID()] = wrapped
-        actualRoutes.append(channel.route)
+        let identifier = UUID()
+        let wrapped = HarnessSecureChannel(
+            identifier: identifier,
+            base: channel,
+            faults: faults,
+            control: control
+        )
+        await control.register(identifier, channel: wrapped, route: channel.route)
         return wrapped
     }
+}
 
-    func interruptNetwork() async {
+private actor HarnessConnectionControl {
+    private var online = true
+    private var channels: [UUID: HarnessSecureChannel] = [:]
+    private var connectionOrder: [UUID] = []
+    private var bytesByConnection: [UUID: Int64] = [:]
+    private(set) var attemptedRoutes: [ConnectionRoute] = []
+    private(set) var actualRoutes: [ConnectionRoute] = []
+
+    func waitUntilOnline() async throws {
+        while !online {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func recordAttempt(_ route: ConnectionRoute) {
+        attemptedRoutes.append(route)
+    }
+
+    func register(
+        _ identifier: UUID,
+        channel: HarnessSecureChannel,
+        route: ConnectionRoute
+    ) {
+        channels[identifier] = channel
+        connectionOrder.append(identifier)
+        bytesByConnection[identifier] = 0
+        actualRoutes.append(route)
+    }
+
+    func recordSentBytes(_ count: Int, on identifier: UUID) {
+        bytesByConnection[identifier, default: 0] += Int64(count)
+    }
+
+    func channelClosed(_ identifier: UUID) {
+        channels.removeValue(forKey: identifier)
+    }
+
+    func interruptNetwork() async -> Int {
         online = false
         let current = Array(channels.values)
-        channels.removeAll()
         for channel in current { await channel.close() }
+        return current.count
     }
 
     func restoreNetwork() {
         online = true
     }
 
-    func tamperNextChunk() async {
-        await faults.tamperNextChunk()
+    func connectionCount() -> Int { connectionOrder.count }
+
+    func latestConnectionID() -> UUID? { connectionOrder.last }
+
+    func latestConnectionBytes() -> Int64 {
+        guard let identifier = connectionOrder.last else { return 0 }
+        return bytesByConnection[identifier] ?? 0
     }
 }
 
 private final class HarnessSecureChannel: SecureChannel, @unchecked Sendable {
     let route: ConnectionRoute
+    private let identifier: UUID
     private let base: any SecureChannel
     private let faults: HarnessChannelFaults
+    private let control: HarnessConnectionControl
+    private let lock = NSLock()
+    private var didClose = false
+    private var outboundOrdinal = 0
 
-    init(base: any SecureChannel, faults: HarnessChannelFaults) {
+    init(
+        identifier: UUID,
+        base: any SecureChannel,
+        faults: HarnessChannelFaults,
+        control: HarnessConnectionControl
+    ) {
+        self.identifier = identifier
         self.base = base
         self.faults = faults
+        self.control = control
         route = base.route
     }
 
     func send(_ frame: Data) async throws {
-        try await base.send(await faults.transform(frame))
+        outboundOrdinal += 1
+        let transformed = await faults.transform(frame, ordinal: outboundOrdinal)
+        try await base.send(transformed)
+        await control.recordSentBytes(transformed.count, on: identifier)
     }
 
     func frames() -> AsyncThrowingStream<Data, Error> {
@@ -719,25 +1039,26 @@ private final class HarnessSecureChannel: SecureChannel, @unchecked Sendable {
     }
 
     func close() async {
+        let shouldClose = lock.withLock {
+            guard !didClose else { return false }
+            didClose = true
+            return true
+        }
+        guard shouldClose else { return }
         await base.close()
+        await control.channelClosed(identifier)
     }
 }
 
 private actor HarnessChannelFaults {
-    private var outboundOrdinal = 0
     private var tamperArmed = false
-
-    func channelOpened() {
-        outboundOrdinal = 0
-    }
 
     func tamperNextChunk() {
         tamperArmed = true
     }
 
-    func transform(_ frame: Data) -> Data {
-        outboundOrdinal += 1
-        guard tamperArmed, outboundOrdinal >= 2, !frame.isEmpty else { return frame }
+    func transform(_ frame: Data, ordinal: Int) -> Data {
+        guard tamperArmed, ordinal >= 2, !frame.isEmpty else { return frame }
         tamperArmed = false
         var mutated = frame
         mutated[mutated.index(before: mutated.endIndex)] ^= 0x01
@@ -843,16 +1164,107 @@ private extension Optional {
     }
 }
 
-private final class MemorySecretStore: SecretStore, @unchecked Sendable {
+private actor HarnessCleanupState {
+    private var didShutdown = false
+    private var didRemove = false
+
+    func beginShutdown() -> Bool {
+        guard !didShutdown else { return false }
+        didShutdown = true
+        return true
+    }
+
+    func beginRemoval() -> Bool {
+        guard !didRemove else { return false }
+        didRemove = true
+        return true
+    }
+}
+
+final class HarnessConstructionCleanup: @unchecked Sendable {
     private let lock = NSLock()
-    private var values: [String: Data] = [:]
+    private var actions: [@Sendable () async -> Void] = []
+    private var active = true
+
+    func push(_ action: @escaping @Sendable () async -> Void) {
+        lock.withLock {
+            guard active else { return }
+            actions.append(action)
+        }
+    }
+
+    func disarm() {
+        lock.withLock {
+            active = false
+            actions.removeAll()
+        }
+    }
+
+    func run() async {
+        let pending: [@Sendable () async -> Void] = lock.withLock {
+            guard active else { return [] }
+            active = false
+            defer { actions.removeAll() }
+            return Array(actions.reversed())
+        }
+        for action in pending { await action() }
+    }
+}
+
+private actor RecordingTURNCredentialFetcher: RendezvousTURNCredentialFetching {
+    private let base: any RendezvousTURNCredentialFetching
+    private(set) var latest: RendezvousTURNCredentials?
+
+    init(base: any RendezvousTURNCredentialFetching) {
+        self.base = base
+    }
+
+    func fetch() async throws -> RendezvousTURNCredentials {
+        let credentials = try await base.fetch()
+        latest = credentials
+        return credentials
+    }
+}
+
+private final class FileSecretStore: SecretStore, @unchecked Sendable {
+    private let root: URL
+    private let lock = NSLock()
+
+    init(root: URL) throws {
+        self.root = root.standardizedFileURL
+        try FileManager.default.createDirectory(
+            at: self.root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        guard chmod(self.root.path, S_IRWXU) == 0 else {
+            throw TwoClientHarnessError.fileGenerationFailed
+        }
+    }
 
     func data(for account: String, policy: KeychainPolicy) throws -> Data? {
-        lock.withLock { values["\(policy.service):\(account)"] }
+        try lock.withLock {
+            let url = fileURL(account: account, policy: policy)
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            return try Data(contentsOf: url, options: [.mappedIfSafe])
+        }
     }
 
     func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
-        lock.withLock { values["\(policy.service):\(account)"] = data }
+        try lock.withLock {
+            let url = fileURL(account: account, policy: policy)
+            try data.write(to: url, options: [.atomic])
+            guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else {
+                throw TwoClientHarnessError.fileGenerationFailed
+            }
+        }
+    }
+
+    private func fileURL(account: String, policy: KeychainPolicy) -> URL {
+        let digest = SHA256.hash(data: Data("\(policy.service)\u{0}\(account)".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return root.appendingPathComponent(digest)
     }
 }
 

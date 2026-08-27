@@ -45,6 +45,22 @@ public enum IncomingTransferCapacity {
         + maximumAdmissionWaiters
 }
 
+public enum IncomingTransferFailure: Equatable, Sendable {
+    case receiveStore(ReceiveStoreError)
+    case transferProtocol(TransferProtocolError)
+    case other
+
+    init(_ error: any Error) {
+        if let error = error as? ReceiveStoreError {
+            self = .receiveStore(error)
+        } else if let error = error as? TransferProtocolError {
+            self = .transferProtocol(error)
+        } else {
+            self = .other
+        }
+    }
+}
+
 /// Runs trusted inbound transfers through `ReceiveSession` and its hardened
 /// `ReceiveStore` configuration. The listener owns no alternate staging path.
 public actor IncomingTransferListener {
@@ -69,6 +85,7 @@ public actor IncomingTransferListener {
     private let capacity: any ReceiveCapacityProviding
     private let inactivityTimeout: Duration
     private let onReceiveFinished: @Sendable (TransferReceiveResult?) async -> Void
+    private let onReceiveFailed: @Sendable (TransferID, IncomingTransferFailure) async -> Void
     private let resources = BoundedChannelResourceRegistry.shared
     private let closeRegistry = IncomingChannelCloseRegistry.shared
 
@@ -87,7 +104,8 @@ public actor IncomingTransferListener {
         incomingDirectory: URL? = nil,
         capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
         inactivityTimeout: Duration = .seconds(30),
-        onReceiveFinished: @escaping @Sendable (TransferReceiveResult?) async -> Void = { _ in }
+        onReceiveFinished: @escaping @Sendable (TransferReceiveResult?) async -> Void = { _ in },
+        onReceiveFailed: @escaping @Sendable (TransferID, IncomingTransferFailure) async -> Void = { _, _ in }
     ) {
         self.source = source
         self.policy = policy
@@ -97,6 +115,7 @@ public actor IncomingTransferListener {
         self.capacity = capacity
         self.inactivityTimeout = max(.milliseconds(1), inactivityTimeout)
         self.onReceiveFinished = onReceiveFinished
+        self.onReceiveFailed = onReceiveFailed
     }
 
     deinit {
@@ -289,6 +308,7 @@ public actor IncomingTransferListener {
             await onReceiveFinished(result)
         } catch {
             await onReceiveFinished(nil)
+            await onReceiveFailed(connection.transferID, IncomingTransferFailure(error))
         }
     }
 

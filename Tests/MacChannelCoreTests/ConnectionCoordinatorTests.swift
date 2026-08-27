@@ -3,6 +3,96 @@ import XCTest
 @testable import MacChannelCore
 
 final class ConnectionCoordinatorTests: XCTestCase {
+    func testProductionAttemptsResolveFreshICEForEveryFallbackRoute() async throws {
+        let local = try DeviceIdentity.ephemeral()
+        let remote = try DeviceIdentity.ephemeral()
+        let repository = try TrustRepository(
+            ownerIdentity: local,
+            trustStore: TrustStore(owner: local.id),
+            persistedGeneration: 0
+        )
+        _ = try await repository.issueAuthorization(
+            subject: remote.id,
+            subjectPublicKey: remote.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+        let directory = DeviceDirectory(trust: await repository.currentTrustStore())
+        await directory.apply(.lan(remote.id, host: "127.0.0.1", port: 9_001))
+        let provider = RecordingICEConfigurationProvider()
+        let factory = RecordingFailingWebRTCFactory()
+        let attempts = WebRTCConnectionAttempts(
+            directory: directory,
+            identity: local,
+            trustRepository: repository,
+            signaling: RendezvousWebRTCSignaling(session: MemoryRendezvousSignalSession()),
+            iceProvider: provider,
+            factory: factory
+        )
+        let connector = ConnectionCoordinator(attempts: attempts)
+
+        do {
+            _ = try await connector.connect(to: remote.id)
+            XCTFail("Expected all recorded attempts to fail")
+        } catch {}
+
+        let providerRoutes = await provider.requestedRoutes()
+        let factoryRoutes = await factory.requestedRoutes()
+        let turnCounts = await factory.requestedICE().map(\.turnServers.count)
+        XCTAssertEqual(providerRoutes, [.lan, .directInternet, .relay])
+        XCTAssertEqual(factoryRoutes, [.lan, .directInternet, .relay])
+        XCTAssertEqual(turnCounts, [0, 0, 1])
+    }
+
+    func testInboundListenerResolvesCurrentICEForOfferRoute() async throws {
+        let local = try DeviceIdentity.ephemeral()
+        let remote = try DeviceIdentity.ephemeral()
+        let repository = try TrustRepository(
+            ownerIdentity: local,
+            trustStore: TrustStore(owner: local.id),
+            persistedGeneration: 0
+        )
+        _ = try await repository.issueAuthorization(
+            subject: remote.id,
+            subjectPublicKey: remote.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+        let session = MemoryRendezvousSignalSession()
+        let signaling = RendezvousWebRTCSignaling(session: session)
+        let provider = RecordingICEConfigurationProvider()
+        let factory = RecordingFailingWebRTCFactory()
+        let listener = WebRTCConnectionListener(
+            directory: DeviceDirectory(trust: await repository.currentTrustStore()),
+            identity: local,
+            trustRepository: repository,
+            signaling: signaling,
+            iceProvider: provider,
+            factory: factory
+        )
+        _ = await listener.connections()
+        try await signaling.send(
+            .offer(sdp: "v=0\r\n", route: .relay),
+            to: remote.id,
+            connectionID: UUID()
+        )
+        let sentPayload = await session.lastSentPayload()
+        let payload = try XCTUnwrap(sentPayload)
+        await session.deliver(RendezvousSignalFrame(
+            from: remote.id,
+            payload: payload
+        ))
+
+        for _ in 0..<1_000 {
+            if await factory.requestedRoutes() == [.relay] { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let providerRoutes = await provider.requestedRoutes()
+        let turnCount = await factory.requestedICE().first?.turnServers.count
+        XCTAssertEqual(providerRoutes, [.relay])
+        XCTAssertEqual(turnCount, 1)
+        await listener.stop()
+    }
+
     func testFallsBackFromLANToInternetToRelay() async throws {
         let attempts = AttemptRecorder(results: [
             .failure(.timeout),
@@ -402,6 +492,55 @@ final class ConnectionCoordinatorTests: XCTestCase {
         }
         XCTFail("Signaling reader did not process \(count) frames")
     }
+}
+
+private actor RecordingICEConfigurationProvider: ICEConfigurationProviding {
+    private var routes: [ConnectionRoute] = []
+
+    func configuration(for route: ConnectionRoute) async throws -> ICEConfiguration {
+        routes.append(route)
+        return ICEConfiguration(
+            stunURLs: route == .directInternet ? ["stun:stun.test:3478"] : [],
+            turnServers: route == .relay
+                ? [TURNServer(
+                    urls: ["turn:turn.test:3478?transport=udp"],
+                    username: "1800000600:opaque",
+                    credential: "secret"
+                )]
+                : []
+        )
+    }
+
+    func requestedRoutes() -> [ConnectionRoute] { routes }
+}
+
+private actor RecordingFailingWebRTCFactory: WebRTCChannelFactory {
+    private var routes: [ConnectionRoute] = []
+    private var configurations: [ICEConfiguration] = []
+
+    func connect(
+        localIdentity: DeviceIdentity,
+        remoteDevice: DeviceID,
+        remotePublicKey: Data,
+        connectionID: UUID,
+        role: WebRTCRole,
+        route: ConnectionRoute,
+        ice: ICEConfiguration,
+        signaling: any WebRTCSignalTransport
+    ) async throws -> WebRTCSecureChannel {
+        _ = localIdentity
+        _ = remoteDevice
+        _ = remotePublicKey
+        _ = connectionID
+        _ = role
+        _ = signaling
+        routes.append(route)
+        configurations.append(ice)
+        throw WebRTCFactoryError.timeout
+    }
+
+    func requestedRoutes() -> [ConnectionRoute] { routes }
+    func requestedICE() -> [ICEConfiguration] { configurations }
 }
 
 private actor AttemptRecorder: ConnectionAttempting {

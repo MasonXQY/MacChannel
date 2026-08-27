@@ -9,6 +9,7 @@ trust_added=false
 state_root=
 login_keychain=
 certificate_hash=
+temporary_files=()
 
 if [[ ${#} -gt 1 ]]; then
   echo "用法: ${0} [--local-only]" >&2
@@ -31,6 +32,17 @@ cleanup() {
   fi
   if [[ "${trust_added}" == true && -n "${certificate_hash}" && -n "${login_keychain}" ]]; then
     security delete-certificate -Z "${certificate_hash}" -t "${login_keychain}" >/dev/null 2>&1
+  fi
+  local temporary_file
+  if ((${#temporary_files[@]} > 0)); then
+    for temporary_file in "${temporary_files[@]}"; do
+      case "${temporary_file}" in
+        "${TMPDIR:-/tmp}"/macchannel-local-e2e.*|"${TMPDIR:-/tmp}"/macchannel-stack-e2e.*)
+          rm -f "${temporary_file}"
+          ;;
+        *) echo "拒绝清理未验证的临时日志：${temporary_file}" >&2 ;;
+      esac
+    done
   fi
   if [[ -n "${state_root}" && -d "${state_root}" ]]; then
     case "${state_root}" in
@@ -56,6 +68,7 @@ run_local_integration() {
 
 if [[ "${local_only}" == true ]]; then
   local_output="$(mktemp "${TMPDIR:-/tmp}/macchannel-local-e2e.XXXXXX")"
+  temporary_files+=("${local_output}")
   run_local_integration "${local_output}"
   rm -f "${local_output}"
   echo "local direct integration PASS；Internet/TURN 未运行。"
@@ -102,6 +115,7 @@ fi
 )
 
 e2e_output="$(mktemp "${TMPDIR:-/tmp}/macchannel-stack-e2e.XXXXXX")"
+temporary_files+=("${e2e_output}")
 (
   cd "${repository_root}"
   MACCHANNEL_E2E_STACK=1 \
