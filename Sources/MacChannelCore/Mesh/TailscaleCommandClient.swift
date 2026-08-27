@@ -119,10 +119,19 @@ public actor TailscaleCommandClient {
     }
 
     public func status() async throws -> TailscaleStatus {
+        try Self.parseStatus(await execute(arguments: ["status", "--json"]))
+    }
+
+    public func connectionKind(to nodeID: String) async throws -> TailscaleConnectionKind {
+        let current = try await status()
+        return current.peers.first(where: { $0.nodeID == nodeID })?.connectionKind ?? .unknown
+    }
+
+    func execute(arguments: [String]) async throws -> Data {
         let executable = try locateExecutable()
         let output = try await runner.run(
             executable: executable,
-            arguments: ["status", "--json"],
+            arguments: arguments,
             timeout: .seconds(5),
             maximumOutputBytes: Self.maximumOutputBytes
         )
@@ -133,12 +142,7 @@ public actor TailscaleCommandClient {
         guard String(data: output.stdout, encoding: .utf8) != nil,
             String(data: output.stderr, encoding: .utf8) != nil
         else { throw TailscaleCommandError.invalidUTF8 }
-        return try Self.parseStatus(output.stdout)
-    }
-
-    public func connectionKind(to nodeID: String) async throws -> TailscaleConnectionKind {
-        let current = try await status()
-        return current.peers.first(where: { $0.nodeID == nodeID })?.connectionKind ?? .unknown
+        return output.stdout
     }
 
     private func locateExecutable() throws -> URL {
