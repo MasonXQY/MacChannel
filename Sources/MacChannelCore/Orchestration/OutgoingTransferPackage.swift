@@ -78,9 +78,7 @@ struct OutgoingTransferPackage: Sendable {
             ".\(identifier).creating.\(UUID().uuidString.lowercased())",
             isDirectory: true
         )
-        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: false)
-        guard chmod(temporary.path, S_IRWXU) == 0 else {
-            try? FileManager.default.removeItem(at: temporary)
+        guard Darwin.mkdir(temporary.path, S_IRWXU) == 0 else {
             throw TransferProtocolError.unsupportedSource
         }
         var renamed = false
@@ -177,6 +175,7 @@ struct OutgoingTransferPackage: Sendable {
     static func loadAll(from outgoingDirectory: URL) throws -> [OutgoingTransferPackage] {
         let outgoing = outgoingDirectory.standardizedFileURL
         try preparePrivateDirectory(outgoing)
+        try reclaimAuthenticationKeyTemps(in: outgoing)
         let children = try FileManager.default.contentsOfDirectory(
             at: outgoing,
             includingPropertiesForKeys: nil,
@@ -186,7 +185,7 @@ struct OutgoingTransferPackage: Sendable {
         var removedTemporary = false
         for child in children {
             if isCreatingDirectoryName(child.lastPathComponent) {
-                try validatePrivateDirectory(child, exactMode: S_IRWXU)
+                try validateReclaimablePrivateDirectory(child)
                 try makeTreeRemovable(child)
                 try FileManager.default.removeItem(at: child)
                 removedTemporary = true
@@ -355,18 +354,64 @@ struct OutgoingTransferPackage: Sendable {
 
     private static func authenticationKey(in outgoingDirectory: URL) throws -> SymmetricKey {
         let keyURL = outgoingDirectory.appendingPathComponent(".package-authentication-key")
-        var created = false
+        try reclaimAuthenticationKeyTemps(in: outgoingDirectory)
         if !FileManager.default.fileExists(atPath: keyURL.path) {
             let generated = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
-            do {
-                try generated.write(to: keyURL, options: .withoutOverwriting)
-                guard chmod(keyURL.path, S_IRUSR) == 0 else {
-                    throw TransferProtocolError.unsupportedSource
+            let directoryDescriptor = Darwin.open(
+                outgoingDirectory.path,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+            guard directoryDescriptor >= 0 else {
+                throw TransferProtocolError.unsupportedSource
+            }
+            defer { Darwin.close(directoryDescriptor) }
+            let temporaryName =
+                ".package-authentication-key.creating.\(UUID().uuidString.lowercased())"
+            let descriptor = Darwin.openat(
+                directoryDescriptor,
+                temporaryName,
+                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                S_IRUSR | S_IWUSR
+            )
+            guard descriptor >= 0 else { throw TransferProtocolError.unsupportedSource }
+            var published = false
+            defer {
+                Darwin.close(descriptor)
+                if !published { _ = Darwin.unlinkat(directoryDescriptor, temporaryName, 0) }
+            }
+            let wrote = generated.withUnsafeBytes { bytes -> Bool in
+                guard let base = bytes.baseAddress else { return false }
+                var offset = 0
+                while offset < bytes.count {
+                    let count = Darwin.write(
+                        descriptor,
+                        base.advanced(by: offset),
+                        bytes.count - offset
+                    )
+                    if count <= 0 { return false }
+                    offset += count
                 }
-                created = true
-            } catch CocoaError.fileWriteFileExists {
-                // A concurrent creator won the O_EXCL-style write. Validate and
-                // use the single durable key below.
+                return true
+            }
+            guard wrote,
+                fchmod(descriptor, S_IRUSR | S_IWUSR) == 0,
+                fcntl(descriptor, F_FULLFSYNC) == 0 || Darwin.fsync(descriptor) == 0
+            else { throw TransferProtocolError.unsupportedSource }
+            let renameResult = Darwin.renameatx_np(
+                directoryDescriptor,
+                temporaryName,
+                directoryDescriptor,
+                ".package-authentication-key",
+                UInt32(RENAME_EXCL)
+            )
+            if renameResult == 0 {
+                published = true
+                try synchronize(outgoingDirectory, isDirectory: true)
+            } else if errno == EEXIST {
+                // A concurrent atomic publisher won. The deferred unlink removes
+                // only our exact private temporary file.
+            } else {
+                throw TransferProtocolError.unsupportedSource
             }
         }
         var before = stat()
@@ -374,7 +419,7 @@ struct OutgoingTransferPackage: Sendable {
             before.st_mode & S_IFMT == S_IFREG,
             before.st_uid == geteuid(),
             before.st_nlink == 1,
-            before.st_mode & 0o777 == S_IRUSR,
+            before.st_mode & 0o777 == (S_IRUSR | S_IWUSR),
             before.st_size == 32
         else { throw TransferProtocolError.sourceChanged }
         let descriptor = Darwin.open(keyURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
@@ -387,19 +432,13 @@ struct OutgoingTransferPackage: Sendable {
             after.st_uid == before.st_uid,
             after.st_nlink == 1,
             after.st_size == 32,
-            after.st_mode & 0o777 == S_IRUSR
+            after.st_mode & 0o777 == (S_IRUSR | S_IWUSR)
         else { throw TransferProtocolError.sourceChanged }
         var bytes = Data(count: 32)
         let readCount = bytes.withUnsafeMutableBytes { buffer in
             Darwin.read(descriptor, buffer.baseAddress, buffer.count)
         }
         guard readCount == 32 else { throw TransferProtocolError.sourceChanged }
-        if created {
-            guard fcntl(descriptor, F_FULLFSYNC) == 0 || Darwin.fsync(descriptor) == 0 else {
-                throw TransferProtocolError.unsupportedSource
-            }
-            try synchronize(outgoingDirectory, isDirectory: true)
-        }
         return SymmetricKey(data: bytes)
     }
 
@@ -411,16 +450,13 @@ struct OutgoingTransferPackage: Sendable {
         if grandparent.path != parent.path {
             try synchronize(grandparent, isDirectory: true)
         }
+        var status = stat()
         var created = false
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            try FileManager.default.createDirectory(
-                at: directory,
-                withIntermediateDirectories: false
-            )
+        if lstat(directory.path, &status) != 0 {
+            guard errno == ENOENT, Darwin.mkdir(directory.path, S_IRWXU) == 0 else {
+                throw TransferProtocolError.unsupportedSource
+            }
             created = true
-        }
-        guard chmod(directory.path, S_IRWXU) == 0 else {
-            throw TransferProtocolError.unsupportedSource
         }
         try validatePrivateDirectory(directory, exactMode: S_IRWXU)
         if created {
@@ -436,6 +472,17 @@ struct OutgoingTransferPackage: Sendable {
             status.st_uid == geteuid(),
             status.st_nlink >= 2,
             status.st_mode & 0o777 == exactMode
+        else { throw TransferProtocolError.unsupportedSource }
+    }
+
+    private static func validateReclaimablePrivateDirectory(_ directory: URL) throws {
+        var status = stat()
+        guard lstat(directory.path, &status) == 0,
+            status.st_mode & S_IFMT == S_IFDIR,
+            status.st_uid == geteuid(),
+            status.st_nlink >= 2,
+            status.st_mode & 0o077 == 0,
+            status.st_mode & 0o7000 == 0
         else { throw TransferProtocolError.unsupportedSource }
     }
 
@@ -464,6 +511,60 @@ struct OutgoingTransferPackage: Sendable {
         else { return false }
         return UUID(uuidString: String(components[0])) != nil
             && UUID(uuidString: String(components[2])) != nil
+    }
+
+    private static func reclaimAuthenticationKeyTemps(in outgoing: URL) throws {
+        let children = try FileManager.default.contentsOfDirectory(
+            at: outgoing,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
+        let temporaryKeys = children.filter {
+            isAuthenticationKeyTemporaryName($0.lastPathComponent)
+        }
+        guard !temporaryKeys.isEmpty else { return }
+        let finalKey = outgoing.appendingPathComponent(".package-authentication-key")
+        var finalStatus = stat()
+        let finalKeyExists = lstat(finalKey.path, &finalStatus) == 0
+        let eligiblePackagesExist = children.contains {
+            !$0.lastPathComponent.hasPrefix(".")
+        }
+        guard finalKeyExists || !eligiblePackagesExist else {
+            throw TransferProtocolError.sourceChanged
+        }
+        for temporary in temporaryKeys {
+            var status = stat()
+            guard lstat(temporary.path, &status) == 0,
+                status.st_mode & S_IFMT == S_IFREG,
+                status.st_uid == geteuid(),
+                status.st_mode & 0o077 == 0,
+                status.st_mode & 0o111 == 0,
+                status.st_mode & 0o7000 == 0
+            else { throw TransferProtocolError.sourceChanged }
+            if status.st_nlink != 1 {
+                // Versions that used linkat could crash after publishing the
+                // final name but before removing the private temporary link.
+                // Reclaim only that exact same-inode two-link state.
+                guard status.st_nlink == 2,
+                    finalKeyExists,
+                    finalStatus.st_mode & S_IFMT == S_IFREG,
+                    finalStatus.st_uid == geteuid(),
+                    finalStatus.st_nlink == 2,
+                    finalStatus.st_mode & 0o777 == (S_IRUSR | S_IWUSR),
+                    finalStatus.st_size == 32,
+                    finalStatus.st_dev == status.st_dev,
+                    finalStatus.st_ino == status.st_ino
+                else { throw TransferProtocolError.sourceChanged }
+            }
+            try FileManager.default.removeItem(at: temporary)
+        }
+        try synchronize(outgoing, isDirectory: true)
+    }
+
+    private static func isAuthenticationKeyTemporaryName(_ name: String) -> Bool {
+        let prefix = ".package-authentication-key.creating."
+        guard name.hasPrefix(prefix) else { return false }
+        return UUID(uuidString: String(name.dropFirst(prefix.count))) != nil
     }
 
     private static func synchronizeTree(_ root: URL) throws {

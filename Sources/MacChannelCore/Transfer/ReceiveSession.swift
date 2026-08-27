@@ -24,6 +24,8 @@ public struct ReceiveSession: Sendable {
     private let durableStorage: DurableStorage?
     private let initialOfferTimeout: Duration?
     private let inactivityTimeout: Duration?
+    private let closeChannelOnExit: Bool
+    private let resourceOwnership: TransferIOResourceOwnership?
     private let onStagingPrepared: (@Sendable (URL) -> Void)?
     private let onCheckpointValidated: (@Sendable (String) -> Void)?
     private let onMetadataValidated: (@Sendable (String) -> Void)?
@@ -33,7 +35,8 @@ public struct ReceiveSession: Sendable {
         destinationDirectory: URL,
         control: TransferSessionControl? = nil,
         initialOfferTimeout: Duration? = nil,
-        inactivityTimeout: Duration? = nil
+        inactivityTimeout: Duration? = nil,
+        closeChannelOnExit: Bool = true
     ) {
         self.transferID = transferID
         self.destinationDirectory = destinationDirectory
@@ -41,6 +44,8 @@ public struct ReceiveSession: Sendable {
         durableStorage = nil
         self.initialOfferTimeout = initialOfferTimeout
         self.inactivityTimeout = inactivityTimeout
+        self.closeChannelOnExit = closeChannelOnExit
+        resourceOwnership = nil
         onStagingPrepared = nil
         onCheckpointValidated = nil
         onMetadataValidated = nil
@@ -60,6 +65,8 @@ public struct ReceiveSession: Sendable {
         durableStorage = nil
         initialOfferTimeout = nil
         inactivityTimeout = nil
+        closeChannelOnExit = true
+        resourceOwnership = nil
         self.onStagingPrepared = onStagingPrepared
         self.onCheckpointValidated = onCheckpointValidated
         self.onMetadataValidated = onMetadataValidated
@@ -77,7 +84,8 @@ public struct ReceiveSession: Sendable {
         capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
         control: TransferSessionControl? = nil,
         initialOfferTimeout: Duration? = nil,
-        inactivityTimeout: Duration? = nil
+        inactivityTimeout: Duration? = nil,
+        closeChannelOnExit: Bool = true
     ) {
         self.transferID = transferID
         destinationDirectory = directories.directory(for: source)
@@ -92,12 +100,56 @@ public struct ReceiveSession: Sendable {
         )
         self.initialOfferTimeout = initialOfferTimeout
         self.inactivityTimeout = inactivityTimeout
+        self.closeChannelOnExit = closeChannelOnExit
+        resourceOwnership = nil
+        onStagingPrepared = nil
+        onCheckpointValidated = nil
+        onMetadataValidated = nil
+    }
+
+    init(
+        transferID: TransferID,
+        source: DeviceID,
+        policy: ReceivePolicy,
+        directories: DownloadDirectory,
+        database: TransferDatabase,
+        incomingDirectory: URL?,
+        capacity: any ReceiveCapacityProviding,
+        control: TransferSessionControl? = nil,
+        initialOfferTimeout: Duration?,
+        inactivityTimeout: Duration?,
+        closeChannelOnExit: Bool,
+        resourceOwnership: TransferIOResourceOwnership
+    ) {
+        self.transferID = transferID
+        destinationDirectory = directories.directory(for: source)
+        self.control = control
+        durableStorage = DurableStorage(
+            source: source,
+            policy: policy,
+            directories: directories,
+            database: database,
+            incomingDirectory: incomingDirectory,
+            capacity: capacity
+        )
+        self.initialOfferTimeout = initialOfferTimeout
+        self.inactivityTimeout = inactivityTimeout
+        self.closeChannelOnExit = closeChannelOnExit
+        self.resourceOwnership = resourceOwnership
         onStagingPrepared = nil
         onCheckpointValidated = nil
         onMetadataValidated = nil
     }
 
     public func run(on channel: any SecureChannel) async throws -> TransferReceiveResult {
+        try await TransferIOResourceContext.$ownership.withValue(resourceOwnership) {
+            try await runWithResourceOwnership(on: channel)
+        }
+    }
+
+    private func runWithResourceOwnership(
+        on channel: any SecureChannel
+    ) async throws -> TransferReceiveResult {
         var outboundSequence: UInt64 = 0
         var terminationCrypto: TransferCryptographicContext?
         var receiveStorage: ReceiveSessionStorage?
@@ -111,7 +163,7 @@ public struct ReceiveSession: Sendable {
                 timeout: initialOfferTimeout
             )
             terminationCrypto = crypto
-            let frameReader = TransferFrameReader(
+            let frameReader = await TransferFrameReader(
                 stream: channel.frames(),
                 transferID: transferID,
                 direction: .senderToReceiver,
@@ -337,7 +389,7 @@ public struct ReceiveSession: Sendable {
                     case .sent:
                         break
                     case .failed, .timedOut:
-                        await channel.close()
+                        if closeChannelOnExit { await channel.close() }
                     }
                     return TransferReceiveResult(
                         transferID: transferID,
@@ -388,7 +440,7 @@ public struct ReceiveSession: Sendable {
                     )
                 }
             }
-            await channel.close()
+            if closeChannelOnExit { await channel.close() }
             if error is CancellationError { throw TransferProtocolError.cancelled }
             throw error
         }
@@ -536,15 +588,17 @@ final class TransferFrameReader: @unchecked Sendable {
         transferID: TransferID,
         direction: TransferDirection,
         cipher: ChunkCipher
-    ) {
+    ) async {
         let inbox = TransferFrameInbox()
+        let retainedOwnership = await Self.retainResourceOwnership()
         self.inbox = inbox
         readerTask = Self.startReader(
             iterator: stream.makeAsyncIterator(),
             inbox: inbox,
             transferID: transferID,
             direction: direction,
-            cipher: cipher
+            cipher: cipher,
+            retainedOwnership: retainedOwnership
         )
     }
 
@@ -553,15 +607,17 @@ final class TransferFrameReader: @unchecked Sendable {
         transferID: TransferID,
         direction: TransferDirection,
         cipher: ChunkCipher
-    ) {
+    ) async {
         let inbox = TransferFrameInbox()
+        let retainedOwnership = await Self.retainResourceOwnership()
         self.inbox = inbox
         readerTask = Self.startReader(
             iterator: iterator,
             inbox: inbox,
             transferID: transferID,
             direction: direction,
-            cipher: cipher
+            cipher: cipher,
+            retainedOwnership: retainedOwnership
         )
     }
 
@@ -575,7 +631,8 @@ final class TransferFrameReader: @unchecked Sendable {
         inbox: TransferFrameInbox,
         transferID: TransferID,
         direction: TransferDirection,
-        cipher: ChunkCipher
+        cipher: ChunkCipher,
+        retainedOwnership: TransferIOResourceOwnership?
     ) -> Task<Void, Never> {
         Task {
             var sequence: UInt64 = 0
@@ -593,13 +650,23 @@ final class TransferFrameReader: @unchecked Sendable {
                         throw TransferProtocolError.replayOrOutOfOrder
                     }
                     sequence += 1
-                    guard await inbox.push(frame) else { return }
+                    guard await inbox.push(frame) else { break }
                 }
                 await inbox.finish(TransferProtocolError.channelEnded)
             } catch {
                 await inbox.finish(error)
             }
+            if let retainedOwnership {
+                await retainedOwnership.registry.operationReturned(retainedOwnership.token)
+            }
         }
+    }
+
+    private static func retainResourceOwnership() async -> TransferIOResourceOwnership? {
+        guard let ownership = TransferIOResourceContext.ownership,
+            await ownership.registry.retainOperation(ownership.token)
+        else { return nil }
+        return ownership
     }
 
     deinit { readerTask.cancel() }
@@ -759,6 +826,15 @@ private func prepareReceiverHandshake(
     timeout: Duration?
 ) async throws -> TransferCryptographicContext {
     let completion = ReceiverHandshakeCompletion()
+    let retainedOwnership: TransferIOResourceOwnership?
+    if let ownership = TransferIOResourceContext.ownership {
+        guard await ownership.registry.retainOperation(ownership.token) else {
+            throw TransferProtocolError.channelEnded
+        }
+        retainedOwnership = ownership
+    } else {
+        retainedOwnership = nil
+    }
     guard let operationToken = await ReceiverHandshakeOperationRegistry.shared.start({
         do {
             let challenge = TransferReceiverChallenge.fresh(for: transferID)
@@ -776,7 +852,15 @@ private func prepareReceiverHandshake(
         } catch {
             await completion.finish(.failed(error))
         }
-    }) else { throw TransferProtocolError.channelEnded }
+        if let retainedOwnership {
+            await retainedOwnership.registry.operationReturned(retainedOwnership.token)
+        }
+    }) else {
+        if let retainedOwnership {
+            await retainedOwnership.registry.operationReturned(retainedOwnership.token)
+        }
+        throw TransferProtocolError.channelEnded
+    }
     let watchdog = timeout.map { timeout in
         Task {
             do {

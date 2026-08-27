@@ -10,6 +10,19 @@ public enum TransferPhase: String, Codable, Sendable {
     case cancelled
 }
 
+/// Privacy-limited ownership of a durable history row. This is distinct from
+/// encrypted frame direction and contains no source or destination path.
+public enum TransferRecordDirection: String, Codable, Sendable {
+    case inbound
+    case outbound
+    case unknown
+}
+
+public enum TransferCancellationResult: Equatable, Sendable {
+    case requested
+    case tooLate
+}
+
 public struct TransferSnapshot: Codable, Equatable, Sendable {
     public let id: TransferID
     public let peer: DeviceID

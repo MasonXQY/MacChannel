@@ -23,6 +23,9 @@ public actor TransferCoordinator: TransferCoordinating {
         var runner: Task<Void, Never>?
         var runnerToken: UUID?
         var completedSession: Bool
+        var completionClaimed: Bool
+        var resourceToken: BoundedChannelResourceRegistry.Token?
+        var resourceHasChannel: Bool
         var channel: (any SecureChannel)?
     }
 
@@ -37,11 +40,13 @@ public actor TransferCoordinator: TransferCoordinating {
     private let persistenceRetryDelay: Duration
     private let cancellationWatchdogDelay: Duration
     private let connectionAttempts = ConnectionAttemptRegistry()
+    private let resources = BoundedChannelResourceRegistry.shared
     private var transfers: [TransferID: TransferTask] = [:]
     private var finishedSnapshots: [TransferSnapshot] = []
     private var pending: [TransferID] = []
     private var active: Set<TransferID> = []
     private var detachedRunners: [UUID: Task<Void, Never>] = [:]
+    private var schedulingWorker: Task<Void, Never>?
     private var subscribers: [UUID: AsyncStream<[TransferSnapshot]>.Continuation] = [:]
     private var shuttingDown = false
 
@@ -92,6 +97,7 @@ public actor TransferCoordinator: TransferCoordinating {
             transfer.packageCleanupWorker?.cancel()
         }
         for runner in detachedRunners.values { runner.cancel() }
+        schedulingWorker?.cancel()
         for subscriber in subscribers.values { subscriber.finish() }
         let attempts = connectionAttempts
         Task { await attempts.cancelAll() }
@@ -160,17 +166,19 @@ public actor TransferCoordinator: TransferCoordinating {
         scheduleTransfers()
     }
 
-    public func cancel(_ id: TransferID) async {
+    @discardableResult
+    public func cancel(_ id: TransferID) async -> TransferCancellationResult {
         guard let transfer = transfers[id], !isTerminal(transfer.desiredSnapshot.phase) else {
-            return
+            return .tooLate
         }
-        guard (try? claimTransition(id, to: .cancelling)) != nil else { return }
+        guard !transfer.completionClaimed else { return .tooLate }
+        guard (try? claimTransition(id, to: .cancelling)) != nil else { return .tooLate }
         await transfer.control.cancel()
         pending.removeAll { $0 == id }
         guard active.contains(id), let runnerToken = transfer.runnerToken else {
             _ = try? claimTransition(id, to: .cancelled)
             scheduleTransfers()
-            return
+            return .requested
         }
         transfer.runner?.cancel()
         Task { [weak self] in
@@ -178,6 +186,7 @@ public actor TransferCoordinator: TransferCoordinating {
             try? await Task.sleep(for: cancellationWatchdogDelay)
             await self.forceCancelIfStillRunning(id, runnerToken: runnerToken)
         }
+        return .requested
     }
 
     public func snapshots() -> AsyncStream<[TransferSnapshot]> {
@@ -197,7 +206,6 @@ public actor TransferCoordinator: TransferCoordinating {
     func shutdownForRestart() async {
         guard !shuttingDown else { return }
         shuttingDown = true
-        let channels = transfers.values.compactMap(\.channel)
         for transfer in transfers.values {
             transfer.runner?.cancel()
             transfer.persistenceWorker?.cancel()
@@ -206,7 +214,9 @@ public actor TransferCoordinator: TransferCoordinating {
         active.removeAll()
         pending.removeAll()
         await connectionAttempts.cancelAll()
-        for channel in channels { await channel.close() }
+        for (id, transfer) in transfers where transfer.channel != nil {
+            beginBoundedClose(for: id, channel: transfer.channel!)
+        }
     }
 
     func claimedPhase(for id: TransferID) -> TransferPhase? {
@@ -214,6 +224,13 @@ public actor TransferCoordinator: TransferCoordinating {
     }
 
     func activeTransferCount() -> Int { active.count }
+
+    func retainedResourceCount() async -> Int {
+        let counts = await resources.counts()
+        return counts.outbound
+    }
+
+    func detachedRunnerCount() -> Int { detachedRunners.count }
 
     private func makeTask(
         package: OutgoingTransferPackage,
@@ -235,6 +252,9 @@ public actor TransferCoordinator: TransferCoordinating {
             runner: nil,
             runnerToken: nil,
             completedSession: false,
+            completionClaimed: false,
+            resourceToken: nil,
+            resourceHasChannel: false,
             channel: nil
         )
     }
@@ -242,60 +262,76 @@ public actor TransferCoordinator: TransferCoordinating {
     private func run(_ id: TransferID, runnerToken: UUID) async {
         var attempt = 0
         transferLoop: while attempt < maximumConnectionAttempts {
-            var openedChannel: (any SecureChannel)?
+            var openedResource: (
+                channel: any SecureChannel,
+                token: BoundedChannelResourceRegistry.Token
+            )?
             do {
+                try await acquireResourceToken(for: id, runnerToken: runnerToken)
                 try Task.checkCancellation()
                 try await transitionRespectingPause(id, intendedPhase: .connecting)
+                try Task.checkCancellation()
                 try await waitForActiveControl(id)
+                try Task.checkCancellation()
                 guard let lightweight = transfers[id], lightweight.runnerToken == runnerToken else {
                     throw CancellationError()
+                }
+                guard let resourceToken = lightweight.resourceToken else {
+                    throw MacChannelError.transferFailed
                 }
                 let channel = try await connectionAttempts.connect(
                     connector: connector,
                     peer: lightweight.peer,
-                    transferID: id
+                    transferID: id,
+                    resourceOwnership: TransferIOResourceOwnership(
+                        registry: resources,
+                        token: resourceToken
+                    )
                 )
-                openedChannel = channel
+                // Runner-local ownership is authoritative across the actor
+                // handoff. A watchdog may clear the transfer entry while this
+                // continuation is resuming, but it cannot erase this cleanup.
+                openedResource = (channel, resourceToken)
+                transfers[id]?.resourceHasChannel = true
                 try Task.checkCancellation()
                 guard transfers[id]?.runnerToken == runnerToken else {
-                    await channel.close()
+                    await beginBoundedClose(channel, token: resourceToken)
+                    openedResource = nil
                     throw CancellationError()
                 }
                 transfers[id]?.channel = channel
 
-                // No PinnedSource exists before this point. A cancelled or stuck
-                // connector therefore owns only peer/transfer identifiers.
-                let manifest = try lightweight.package.openManifest()
-                let progress = CoordinatorProgressRecorder(entries: manifest.entries) {
-                    [weak self] completedBytes in
-                    await self?.recordProgress(completedBytes, for: id)
-                }
-                try await transitionRespectingPause(
-                    id,
-                    intendedPhase: .transferring,
-                    route: channel.route
+                try await performSend(
+                    id: id,
+                    package: lightweight.package,
+                    control: lightweight.control,
+                    channel: channel,
+                    resourceToken: resourceToken
                 )
-                _ = try await SendSession(
-                    manifest,
-                    recorder: progress,
-                    control: lightweight.control
-                ).run(on: channel)
-                transfers[id]?.completedSession = true
-                transfers[id]?.channel = nil
-                await channel.close()
-                try await transitionRespectingPause(id, intendedPhase: .verifying)
-                try await waitForActiveControl(id)
-                let completion = try claimCompletionIfStillVerifying(
+                // SendSession returns only after the receiver reports .complete,
+                // which means publication has succeeded. Claim both durable
+                // phases in this actor turn before close or any other await: from
+                // here cancellation is irreversibly too late.
+                let completions = try claimIrreversibleCompletion(
                     id,
                     runnerToken: runnerToken,
                     completedBytes: lightweight.totalBytes
                 )
-                try await completion.wait()
+                transfers[id]?.channel = nil
+                await beginBoundedClose(channel, token: resourceToken)
+                openedResource = nil
+                for completion in completions { try await completion.wait() }
                 break transferLoop
             } catch {
                 transfers[id]?.channel = nil
-                if let openedChannel { await openedChannel.close() }
+                if let openedResource {
+                    await beginBoundedClose(
+                        openedResource.channel,
+                        token: openedResource.token
+                    )
+                }
                 if shuttingDown { break transferLoop }
+                if transfers[id]?.completionClaimed == true { break transferLoop }
                 let phase = transfers[id]?.desiredSnapshot.phase
                 if phase == .cancelling
                     || (error as? TransferProtocolError) == .cancelled
@@ -313,29 +349,120 @@ public actor TransferCoordinator: TransferCoordinating {
                     _ = try? claimTransition(id, to: .failed)
                     break transferLoop
                 }
+                relinquishResourceForRetry(id)
             }
         }
         finishRun(id, runnerToken: runnerToken)
     }
 
     private func scheduleTransfers() {
-        guard !shuttingDown else { return }
+        guard !shuttingDown, schedulingWorker == nil else { return }
+        schedulingWorker = Task { [weak self] in
+            await self?.drainScheduling()
+        }
+    }
+
+    private func drainScheduling() async {
+        defer { schedulingWorker = nil }
         while active.count < Self.maximumConcurrentTransfers,
             let index = pending.firstIndex(where: { id in
                 guard let phase = transfers[id]?.desiredSnapshot.phase else { return false }
                 return phase != .paused && phase != .cancelling && !isTerminal(phase)
             })
         {
-            let id = pending.remove(at: index)
+            let candidateID = pending[index]
+            guard let resourceToken = await resources.reserve(.outbound, onReleased: {
+                [weak self] in
+                await self?.resourceCapacityReleased()
+            }) else { return }
+            guard let currentIndex = pending.firstIndex(of: candidateID) else {
+                await resources.finishWithoutClose(resourceToken)
+                continue
+            }
+            let id = pending.remove(at: currentIndex)
+            guard var transfer = transfers[id], !isTerminal(transfer.desiredSnapshot.phase),
+                transfer.desiredSnapshot.phase != .paused,
+                transfer.desiredSnapshot.phase != .cancelling
+            else {
+                await resources.finishWithoutClose(resourceToken)
+                continue
+            }
             active.insert(id)
             let runnerToken = UUID()
-            let runner = Task { [weak self] in
-                guard let self else { return }
+            let runner = Task { [weak self, resources] in
+                guard let self else {
+                    await resources.finishWithoutClose(resourceToken)
+                    return
+                }
                 await self.run(id, runnerToken: runnerToken)
             }
-            transfers[id]?.runner = runner
-            transfers[id]?.runnerToken = runnerToken
+            transfer.runner = runner
+            transfer.runnerToken = runnerToken
+            transfer.resourceToken = resourceToken
+            transfer.resourceHasChannel = false
+            transfers[id] = transfer
         }
+    }
+
+    private func resourceCapacityReleased() {
+        scheduleTransfers()
+    }
+
+    private func acquireResourceToken(
+        for id: TransferID,
+        runnerToken: UUID
+    ) async throws {
+        while transfers[id]?.resourceToken == nil {
+            try Task.checkCancellation()
+            guard transfers[id]?.runnerToken == runnerToken else { throw CancellationError() }
+            if let token = await resources.reserve(.outbound, onReleased: { [weak self] in
+                await self?.resourceCapacityReleased()
+            }) {
+                guard var transfer = transfers[id], transfer.runnerToken == runnerToken else {
+                    await resources.finishWithoutClose(token)
+                    throw CancellationError()
+                }
+                transfer.resourceToken = token
+                transfer.resourceHasChannel = false
+                transfers[id] = transfer
+                return
+            }
+            try await Task.sleep(for: persistenceRetryDelay)
+        }
+    }
+
+    private func beginBoundedClose(
+        for id: TransferID,
+        channel: any SecureChannel
+    ) {
+        guard let token = transfers[id]?.resourceToken else { return }
+        transfers[id]?.resourceHasChannel = true
+        let timeout = cancellationWatchdogDelay
+        Task { [resources] in
+            await resources.beginClose(channel, token: token, timeout: timeout)
+        }
+    }
+
+    private func beginBoundedClose(
+        _ channel: any SecureChannel,
+        token: BoundedChannelResourceRegistry.Token
+    ) async {
+        await resources.beginClose(
+            channel,
+            token: token,
+            timeout: cancellationWatchdogDelay
+        )
+    }
+
+    private func relinquishResourceForRetry(_ id: TransferID) {
+        guard let token = transfers[id]?.resourceToken else { return }
+        if transfers[id]?.resourceHasChannel == true {
+            Task { [resources] in await resources.runnerReturned(token) }
+        } else {
+            Task { [resources] in await resources.finishWithoutClose(token) }
+        }
+        transfers[id]?.resourceToken = nil
+        transfers[id]?.resourceHasChannel = false
     }
 
     private func finishRun(_ id: TransferID, runnerToken: UUID) {
@@ -345,6 +472,15 @@ public actor TransferCoordinator: TransferCoordinating {
         transfers[id]?.runnerToken = nil
         transfers[id]?.completedSession = false
         transfers[id]?.channel = nil
+        if let resourceToken = transfers[id]?.resourceToken {
+            if transfers[id]?.resourceHasChannel == true {
+                Task { await resources.runnerReturned(resourceToken) }
+            } else {
+                Task { await resources.finishWithoutClose(resourceToken) }
+            }
+            transfers[id]?.resourceToken = nil
+            transfers[id]?.resourceHasChannel = false
+        }
         archiveIfDurablyTerminal(id)
         scheduleTransfers()
     }
@@ -406,26 +542,55 @@ public actor TransferCoordinator: TransferCoordinating {
         return completion
     }
 
-    /// The phase check and completion claim are one actor-isolated operation.
-    /// A pause or cancellation that already claimed a newer epoch therefore
-    /// wins; the continuation that persisted verification cannot overwrite it.
-    private func claimCompletionIfStillVerifying(
+    private func performSend(
+        id: TransferID,
+        package: OutgoingTransferPackage,
+        control: TransferSessionControl,
+        channel: any SecureChannel,
+        resourceToken: BoundedChannelResourceRegistry.Token
+    ) async throws {
+        // The manifest and its pinned source descriptors are scoped entirely to
+        // the protocol session. No later close task can capture them.
+        let manifest = try package.openManifest()
+        let progress = CoordinatorProgressRecorder(entries: manifest.entries) {
+            [weak self] completedBytes in
+            await self?.recordProgress(completedBytes, for: id)
+        }
+        try await transitionRespectingPause(
+            id,
+            intendedPhase: .transferring,
+            route: channel.route
+        )
+        _ = try await SendSession(
+            manifest,
+            recorder: progress,
+            control: control,
+            resourceOwnership: TransferIOResourceOwnership(
+                registry: resources,
+                token: resourceToken
+            )
+        ).run(on: channel)
+    }
+
+    private func claimIrreversibleCompletion(
         _ id: TransferID,
         runnerToken: UUID,
         completedBytes: Int64
-    ) throws -> PersistenceCompletion {
-        guard let transfer = transfers[id], transfer.runnerToken == runnerToken else {
+    ) throws -> [PersistenceCompletion] {
+        guard var transfer = transfers[id], transfer.runnerToken == runnerToken else {
             throw CancellationError()
         }
-        guard transfer.desiredSnapshot.phase == .verifying else {
-            if transfer.desiredSnapshot.phase == .cancelling
-                || transfer.desiredSnapshot.phase == .cancelled
-            {
-                throw CancellationError()
-            }
-            throw MacChannelError.transferFailed
+        guard transfer.desiredSnapshot.phase != .cancelling,
+            !isTerminal(transfer.desiredSnapshot.phase)
+        else {
+            throw CancellationError()
         }
-        return try claimTransition(id, to: .completed, completedBytes: completedBytes)
+        transfer.completedSession = true
+        transfer.completionClaimed = true
+        transfers[id] = transfer
+        let verifying = try claimTransition(id, to: .verifying, completedBytes: completedBytes)
+        let completed = try claimTransition(id, to: .completed, completedBytes: completedBytes)
+        return [verifying, completed]
     }
 
     private func drainPersistence(for id: TransferID) async {
@@ -444,6 +609,10 @@ public actor TransferCoordinator: TransferCoordinating {
                 )
             } catch {
                 if Task.isCancelled || shuttingDown { return }
+                if (error as? TransferPersistenceError) == .conditionalConflict {
+                    if await reconcileConditionalConflict(id, intent: intent) { continue }
+                    return
+                }
                 let backoffSteps = 1 << min(consecutiveFailures, 4)
                 for _ in 0..<backoffSteps {
                     try? await Task.sleep(for: persistenceRetryDelay)
@@ -481,6 +650,184 @@ public actor TransferCoordinator: TransferCoordinating {
             }
             archiveIfDurablyTerminal(id)
         }
+    }
+
+    /// A conditional conflict means blind retry can never make progress. Adopt
+    /// an already-committed compatible row, or atomically quarantine the exact
+    /// outbound row as failed so the runner and its resource token can drain.
+    private func reconcileConditionalConflict(
+        _ id: TransferID,
+        intent: PersistenceIntent
+    ) async -> Bool {
+        do {
+            let existing = try await persistence.persistedTransfer(id: id)
+            let displayFilename = transfers[id]?.displayFilename ?? ""
+            var record: TransferHistoryRecord
+            if let existing {
+                guard existing.direction == .outbound,
+                    existing.peer == intent.snapshot.peer,
+                    existing.displayFilename == displayFilename,
+                    existing.aggregateSize == UInt64(intent.snapshot.totalBytes)
+                else { throw TransferPersistenceError.conditionalConflict }
+                record = existing
+            } else {
+                record = try await persistence.quarantineOutboundTransfer(
+                    intent.snapshot,
+                    displayFilename: displayFilename
+                )
+            }
+            let compatibleCommit =
+                record.completedBytes >= UInt64(intent.snapshot.completedBytes)
+                && (record.phase == intent.snapshot.phase
+                    ? record.route == intent.snapshot.route
+                    : isCompatibleNewerPhase(
+                        record.phase,
+                        than: intent.snapshot.phase
+                    ))
+            if !compatibleCommit && !isTerminal(record.phase) {
+                record = try await persistence.quarantineOutboundTransfer(
+                    intent.snapshot,
+                    displayFilename: displayFilename
+                )
+            }
+            guard compatibleCommit || isTerminal(record.phase) else {
+                throw TransferPersistenceError.conditionalConflict
+            }
+            await adoptPersistedRecord(record, for: id, intent: intent)
+            return true
+        } catch {
+            guard (error as? TransferPersistenceError) == .conditionalConflict else {
+                try? await Task.sleep(for: persistenceRetryDelay)
+                return true
+            }
+            // One last read handles a concurrent writer that completed while the
+            // quarantine transaction was racing. No conditional write is retried.
+            do {
+                if let record = try await persistence.persistedTransfer(id: id),
+                    record.direction == .outbound,
+                    record.peer == intent.snapshot.peer,
+                    record.displayFilename == transfers[id]?.displayFilename,
+                    record.aggregateSize == UInt64(intent.snapshot.totalBytes),
+                    isTerminal(record.phase)
+                {
+                    await adoptPersistedRecord(record, for: id, intent: intent)
+                    return true
+                }
+            } catch {
+                guard (error as? TransferPersistenceError) == .conditionalConflict else {
+                    try? await Task.sleep(for: persistenceRetryDelay)
+                    return true
+                }
+            }
+            await failClosedAfterConflict(id, intent: intent)
+            return false
+        }
+    }
+
+    private func adoptPersistedRecord(
+        _ record: TransferHistoryRecord,
+        for id: TransferID,
+        intent: PersistenceIntent
+    ) async {
+        guard var current = transfers[id],
+            current.persistenceQueue.first?.epoch == intent.epoch
+        else {
+            await intent.completion.resolve(.failure(MacChannelError.transferFailed))
+            return
+        }
+        let snapshot = TransferSnapshot(
+            id: record.id,
+            peer: record.peer,
+            phase: record.phase,
+            completedBytes: Int64(record.completedBytes),
+            totalBytes: Int64(record.aggregateSize),
+            route: record.route
+        )
+        if isTerminal(record.phase) {
+            let completions = current.persistenceQueue.map(\.completion)
+            current.persistenceQueue.removeAll()
+            current.desiredSnapshot = snapshot
+            current.durableSnapshot = snapshot
+            transfers[id] = current
+            for completion in completions { await completion.resolve(.success(())) }
+            terminateRunnerAfterDurableConflict(id)
+        } else {
+            current.persistenceQueue.removeFirst()
+            current.durableSnapshot = snapshot
+            transfers[id] = current
+            await intent.completion.resolve(.success(()))
+            publishSnapshots()
+        }
+    }
+
+    private func failClosedAfterConflict(_ id: TransferID, intent: PersistenceIntent) async {
+        guard var current = transfers[id] else { return }
+        let completions = current.persistenceQueue.map(\.completion)
+        for completion in completions {
+            await completion.resolve(.failure(TransferPersistenceError.conditionalConflict))
+        }
+        current.persistenceQueue.removeAll()
+        current.persistenceWorker = nil
+        transfers[id] = current
+        current.runner?.cancel()
+        terminateRunnerAfterDurableConflict(id)
+    }
+
+    private func isCompatibleNewerPhase(
+        _ persisted: TransferPhase,
+        than intended: TransferPhase
+    ) -> Bool {
+        switch intended {
+        case .preparing:
+            return persisted == .connecting
+        case .connecting:
+            return persisted == .transferring
+        case .transferring, .paused, .cancelling, .verifying, .completed, .failed,
+            .cancelled:
+            return false
+        }
+    }
+
+    private func terminateRunnerAfterDurableConflict(_ id: TransferID) {
+        pending.removeAll { $0 == id }
+        guard let transfer = transfers[id], let token = transfer.runnerToken else {
+            archiveIfDurablyTerminal(id)
+            scheduleTransfers()
+            return
+        }
+        transfer.runner?.cancel()
+        Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: cancellationWatchdogDelay)
+            await self.forceReleaseConflictedRunner(id, runnerToken: token)
+        }
+    }
+
+    private func forceReleaseConflictedRunner(_ id: TransferID, runnerToken: UUID) {
+        guard var current = transfers[id], current.runnerToken == runnerToken else { return }
+        if let channel = current.channel { beginBoundedClose(for: id, channel: channel) }
+        active.remove(id)
+        if let runner = current.runner {
+            detachedRunners[runnerToken] = runner
+            let resourceToken = current.resourceToken
+            let resourceHasChannel = current.resourceHasChannel
+            Task { [weak self] in
+                await runner.value
+                await self?.detachedRunnerFinished(
+                    runnerToken,
+                    resourceToken: resourceToken,
+                    resourceHasChannel: resourceHasChannel
+                )
+            }
+        }
+        current.runner = nil
+        current.runnerToken = nil
+        current.resourceToken = nil
+        current.resourceHasChannel = false
+        current.channel = nil
+        transfers[id] = current
+        archiveIfDurablyTerminal(id)
+        scheduleTransfers()
     }
 
     private func transitionRespectingPause(
@@ -606,6 +953,9 @@ public actor TransferCoordinator: TransferCoordinating {
             }
         }
         for record in history {
+            // ReceiveStore exclusively owns inbound reconciliation. Legacy rows
+            // migrate to unknown and are intentionally left untouched.
+            guard record.direction == .outbound else { continue }
             guard record.aggregateSize <= UInt64(Int64.max),
                 record.completedBytes <= UInt64(Int64.max)
             else { throw ReceiveStoreError.databaseFailure }
@@ -706,27 +1056,47 @@ public actor TransferCoordinator: TransferCoordinating {
         guard let transfer = transfers[id], transfer.runnerToken == runnerToken,
             transfer.desiredSnapshot.phase == .cancelling
         else { return }
-        if let channel = transfer.channel { await channel.close() }
+        if let channel = transfer.channel { beginBoundedClose(for: id, channel: channel) }
         _ = try? claimTransition(id, to: .cancelled)
         guard var current = transfers[id], current.runnerToken == runnerToken else { return }
         active.remove(id)
         if let runner = current.runner {
             detachedRunners[runnerToken] = runner
+            let resourceToken = current.resourceToken
+            let resourceHasChannel = current.resourceHasChannel
             Task { [weak self] in
                 await runner.value
-                await self?.detachedRunnerFinished(runnerToken)
+                await self?.detachedRunnerFinished(
+                    runnerToken,
+                    resourceToken: resourceToken,
+                    resourceHasChannel: resourceHasChannel
+                )
             }
         }
         current.runner = nil
         current.runnerToken = nil
         current.channel = nil
+        current.resourceToken = nil
+        current.resourceHasChannel = false
         transfers[id] = current
         archiveIfDurablyTerminal(id)
         scheduleTransfers()
     }
 
-    private func detachedRunnerFinished(_ token: UUID) {
+    private func detachedRunnerFinished(
+        _ token: UUID,
+        resourceToken: BoundedChannelResourceRegistry.Token?,
+        resourceHasChannel: Bool
+    ) {
+        if let resourceToken {
+            if resourceHasChannel {
+                Task { await resources.runnerReturned(resourceToken) }
+            } else {
+                Task { await resources.finishWithoutClose(resourceToken) }
+            }
+        }
         detachedRunners.removeValue(forKey: token)
+        scheduleTransfers()
     }
 }
 
@@ -801,14 +1171,18 @@ private actor ConnectionAttemptRegistry {
     func connect(
         connector: any PeerConnector,
         peer: DeviceID,
-        transferID: TransferID
+        transferID: TransferID,
+        resourceOwnership: TransferIOResourceOwnership
     ) async throws -> any SecureChannel {
         guard attempts.count < maximumRetainedAttempts else {
             throw MacChannelError.connectionFailed
         }
+        guard await resourceOwnership.registry.retainOperation(resourceOwnership.token) else {
+            throw MacChannelError.connectionFailed
+        }
         let token = UUID()
         let gate = ConnectionAttemptGate()
-        let task = Task { [weak self, connector, gate] in
+        let task = Task { [weak self, connector, gate, resourceOwnership] in
             do {
                 let channel: any SecureChannel
                 if let aware = connector as? any TransferAwarePeerConnector {
@@ -820,6 +1194,7 @@ private actor ConnectionAttemptRegistry {
             } catch {
                 _ = await gate.resolve(.failure(error))
             }
+            await resourceOwnership.registry.operationReturned(resourceOwnership.token)
             await self?.attemptFinished(token)
         }
         attempts[token] = Attempt(task: task, gate: gate)

@@ -1199,7 +1199,7 @@ final class ReceiveStoreTests: XCTestCase {
         XCTAssertEqual(try sqliteUserVersion(at: url), 0)
     }
 
-    func testMigrationUpgradesValidatedVersionOneSchemaAtomically() throws {
+    func testMigrationUpgradesValidatedVersionOneSchemaAtomically() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1234,14 +1234,25 @@ final class ReceiveStoreTests: XCTestCase {
                     PRIMARY KEY (transfer_id, entry_index, lower_bound)
                 ) STRICT;
                 CREATE INDEX transfers_phase_updated ON transfers(phase, updated_at);
+                INSERT INTO transfers (
+                    id, peer_id, display_filename, aggregate_size, completed_bytes,
+                    created_at, updated_at, route, phase
+                ) VALUES (
+                    '11111111-1111-1111-1111-111111111111',
+                    '22222222-2222-2222-2222-222222222222',
+                    'legacy.bin', 10, 2, 1, 1, 'lan', 'transferring'
+                );
                 PRAGMA user_version = 1;
                 """
         )
 
         let database = try TransferDatabase(url: url)
+        let history = try await database.history()
+        XCTAssertEqual(history.first?.direction, .unknown)
         withExtendedLifetime(database) {}
-        XCTAssertEqual(try sqliteUserVersion(at: url), 2)
+        XCTAssertEqual(try sqliteUserVersion(at: url), 3)
         XCTAssertTrue(try sqliteColumns(at: url).contains("preparation_fingerprint"))
+        XCTAssertTrue(try sqliteColumns(at: url).contains("direction"))
     }
 
     func testMigrationRejectsWrongLegacyTypesAndConstraintsWithoutAdvancingVersion() throws {

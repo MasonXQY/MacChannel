@@ -21,6 +21,10 @@ Status: implementation complete; final verification recorded below
   The receiver's hardened journal supplies the `ResumeMap`, verified chunks are
   not resent, and a route change updates the existing transfer instead of
   creating another task.
+- Once the receiver reports `.complete`, the sender synchronously claims the
+  irreversible verifying/completed epochs before channel close or any other
+  await. Cancellation after receiver publication returns `tooLate`; a blocked
+  or failed close cannot rewrite the send as cancelled.
 - Pause, resume, and cancel remain linearizable while connection or verification
   persistence is blocked. The cancellation watchdog releases the active slot
   even when a connector ignores cancellation, while late connector/runner work
@@ -28,23 +32,43 @@ Status: implementation complete; final verification recorded below
 - Snapshot streams use `bufferingNewest(8)`. Publication retains at most 200
   terminal snapshots plus the bounded live queue; complete history remains
   queryable in SQLite.
+- SQLite schema version 3 records an explicit inbound/outbound/unknown
+  direction without storing paths. Legacy rows migrate to `unknown` and are
+  left untouched; the coordinator restores only outbound rows, while
+  `ReceiveStore` exclusively reconciles inbound cancellation and staging.
+- A conditional persistence conflict is never blindly retried. The coordinator
+  re-reads and adopts a compatible committed phase or atomically quarantines
+  the exact outbound identity as failed, including a conflict before the
+  initial row exists. Compatible forward adoption is deliberately limited to
+  preparing-to-connecting and connecting-to-transferring; durable verification
+  cannot regress into a transfer/send path. The database quarantine operation
+  is an explicit async persistence witness, so wrappers and production dispatch
+  use the same typed reconciliation path.
 
 ## Restart-safe outgoing packages
 
 - Before a connector starts, selections are copied with descriptor-backed APFS
   copy-on-write clones into the private outgoing package at
   `Application Support/MacChannel/Outgoing/<TransferID>`. The package and
-  outgoing directory are owner-only (`0700`); immutable clone files are `0400`.
+  outgoing directory are owner-only (`0700`); the authentication key is `0600`
+  and immutable clone files are `0400`.
   A stuck connector captures only peer and transfer identifiers and therefore
   retains no manifest, pinned source, clone descriptor, or source file handle.
 - Metadata contains no original source path. It binds transfer ID, peer,
   display root, aggregate bytes, manifest fingerprint, and creation time, and is
   authenticated with a private local HMAC key. Package metadata and contents are
   revalidated before each send and after restart.
-- Clone files, metadata, authentication material, package directories, the
+- The outgoing/package directories are created atomically with `mkdir(0700)`.
+  The authentication key uses `openat(O_CREAT|O_EXCL, 0600)`, full fsync, and
+  exclusive atomic `renameatx_np(RENAME_EXCL)` publication without overwrite.
+  Recovery also recognizes and safely reclaims the exact same-inode two-link
+  state left by the earlier publication scheme. Clone files, metadata,
+  authentication material, package directories, the
   outgoing directory, and relevant directory entries are forced to stable
   storage before the preparing row is eligible for persistence. Startup also
-  reclaims strictly named interrupted `.creating` trees.
+  reclaims only strictly named, owner-only interrupted `.creating` trees and
+  incomplete key temporaries. It never accepts broad permissions or discards a
+  missing-key temporary while an eligible package may depend on it.
 - A restarted coordinator reopens active packages and resumes with the same
   `TransferID`; a paused transfer remains paused until explicit resume. Completed,
   cancelled, and failed transfers delete their package before their terminal
@@ -80,6 +104,16 @@ Status: implementation complete; final verification recorded below
   of 42 connections. Cancellation-insensitive handshake operations are tracked,
   reaped on exit, and capped at eight; the combined retained connection/work
   bound is therefore 50.
+- Channel-owning work additionally uses one process-wide resource registry with
+  a hard bound of four inbound, four outbound, and eight total. A token is held
+  until the protocol runner, connector/handshake, all send/frame operations,
+  and close operation actually return. A connector, handshake, send, frame
+  read, or close that ignores cancellation therefore stops admission at the
+  cap instead of growing detached tasks or pinned descriptors. Close
+  cancellation is time-bounded but never falsely releases its token. A
+  successful connector handoff carries runner-local channel/token ownership,
+  so a concurrent watchdog cannot erase cleanup before close is registered; a
+  stale no-channel observer cannot satisfy an already-started close.
 - A configurable watchdog (30 seconds by default) covers the receiver challenge
   send, key export, initial offer, and later inbound inactivity. Even a transport
   operation that ignores cancellation cannot retain an incoming slot. Silent
@@ -106,8 +140,12 @@ The implementation was driven by deterministic regressions for:
 - mixed file/folder selection, filesystem-equivalent duplicate names, one-peer
   delivery, no partial publication, and no dropped item;
 - cancellation-insensitive connectors under file-descriptor stress, idle silent
-  peers, stuck initial challenge/key setup, channel ownership, and bounded
-  terminal snapshot publication.
+  peers, stuck initial challenge/key setup, ordinary and terminal sends, frame
+  readers, closes, channel ownership, and bounded terminal snapshot publication;
+- pre-channel retry reservation release, exact legacy key-link crash recovery,
+  cleanup of all queued persistence waiters after a durable conflict, transient
+  conflict re-read recovery, irreversible verification regression rejection,
+  and late channel-handoff ownership.
 
 An independent code review identified a stale verification completion race,
 unbounded failed-package retention, incomplete pre-offer timeout coverage, a
@@ -118,12 +156,12 @@ reported no remaining Critical or Important findings.
 
 ## Verification
 
-- `swift test --filter TransferCoordinatorTests`: 36 tests, 0 failures.
+- `swift test --filter TransferCoordinatorTests`: 52 tests, 0 failures.
 - `swift test --filter ConnectionCoordinatorTests`: 14 tests, 0 failures.
 - `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
 - `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures.
 - `swift test --filter ReceiveStoreTests`: 64 tests, 0 failures.
-- `swift test`: 259 tests, 0 failures, 0 unexpected failures.
+- `swift test`: 275 tests, 0 failures, 0 unexpected failures.
 - `bash Scripts/build-app.sh`: pass.
 - `swift format lint --recursive --strict Sources Tests`: clean.
 - `git diff --check`: clean.

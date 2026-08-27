@@ -13,6 +13,7 @@ public struct SendSession: Sendable {
     private let manifest: TransferManifest
     private let recorder: (any TransferChunkRecording)?
     private let control: TransferSessionControl?
+    private let resourceOwnership: TransferIOResourceOwnership?
 
     public init(
         _ manifest: TransferManifest,
@@ -21,19 +22,30 @@ public struct SendSession: Sendable {
         self.manifest = manifest
         recorder = nil
         self.control = control
+        resourceOwnership = nil
     }
 
     init(
         _ manifest: TransferManifest,
         recorder: any TransferChunkRecording,
-        control: TransferSessionControl? = nil
+        control: TransferSessionControl? = nil,
+        resourceOwnership: TransferIOResourceOwnership? = nil
     ) {
         self.manifest = manifest
         self.recorder = recorder
         self.control = control
+        self.resourceOwnership = resourceOwnership
     }
 
     public func run(on channel: any SecureChannel) async throws -> TransferSendResult {
+        try await TransferIOResourceContext.$ownership.withValue(resourceOwnership) {
+            try await runWithResourceOwnership(on: channel)
+        }
+    }
+
+    private func runWithResourceOwnership(
+        on channel: any SecureChannel
+    ) async throws -> TransferSendResult {
         var outboundSequence: UInt64 = 0
         var terminationCrypto: TransferCryptographicContext?
         do {
@@ -51,7 +63,7 @@ public struct SendSession: Sendable {
                 transfer: manifest.id,
                 receiverChallenge: challenge.bytes
             )
-            let frameReader = TransferFrameReader(
+            let frameReader = await TransferFrameReader(
                 iterator: initial.iterator,
                 transferID: manifest.id,
                 direction: .receiverToSender,
@@ -548,6 +560,14 @@ func sendWireRespectingCancellation(
             }
         }
         sendTask.cancel()
+        if let ownership = TransferIOResourceContext.ownership,
+            await ownership.registry.retainOperation(ownership.token)
+        {
+            Task {
+                await sendTask.value
+                await ownership.registry.operationReturned(ownership.token)
+            }
+        }
         throw TransferProtocolError.cancelled
     }
 }
@@ -646,6 +666,14 @@ private func receiveInitialWire(
             return received
         }
         readTask.cancel()
+        if let ownership = TransferIOResourceContext.ownership,
+            await ownership.registry.retainOperation(ownership.token)
+        {
+            Task {
+                await readTask.value
+                await ownership.registry.operationReturned(ownership.token)
+            }
+        }
         throw TransferProtocolError.cancelled
     }
 }
@@ -726,6 +754,15 @@ func sendTerminalFrameBestEffort(
     }
     let outcome = await completion.wait()
     sendTask.cancel()
+    if case .timedOut = outcome,
+        let ownership = TransferIOResourceContext.ownership,
+        await ownership.registry.retainOperation(ownership.token)
+    {
+        Task {
+            await sendTask.value
+            await ownership.registry.operationReturned(ownership.token)
+        }
+    }
     // Let the bounded timer finish naturally. Cancelling a sleeping task after
     // the send wins can surface an otherwise irrelevant CancellationError to a
     // caller's task-local test/error machinery.

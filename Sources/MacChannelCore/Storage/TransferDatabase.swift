@@ -12,6 +12,7 @@ public struct TransferHistoryRecord: Equatable, Sendable {
     public let updatedAt: Date
     public let route: ConnectionRoute
     public let phase: TransferPhase
+    public let direction: TransferRecordDirection
 }
 
 /// The orchestration persistence seam. Production uses `TransferDatabase`;
@@ -25,11 +26,42 @@ public protocol TransferSnapshotPersistence: Sendable {
 
     func persistedHistory(limit: Int) async throws -> [TransferHistoryRecord]
     func persistedTransfer(id: TransferID) async throws -> TransferHistoryRecord?
+    func quarantineOutboundTransfer(
+        _ snapshot: TransferSnapshot,
+        displayFilename: String
+    ) async throws -> TransferHistoryRecord
 }
 
 public extension TransferSnapshotPersistence {
     func persistedTransfer(id: TransferID) async throws -> TransferHistoryRecord? {
         try await persistedHistory(limit: 10_000).first { $0.id == id }
+    }
+
+    func quarantineOutboundTransfer(
+        _ snapshot: TransferSnapshot,
+        displayFilename: String
+    ) async throws -> TransferHistoryRecord {
+        let existing = try await persistedTransfer(id: snapshot.id)
+        guard existing?.direction == .outbound || existing == nil else {
+            throw TransferPersistenceError.conditionalConflict
+        }
+        let failed = TransferSnapshot(
+            id: snapshot.id,
+            peer: snapshot.peer,
+            phase: .failed,
+            completedBytes: max(snapshot.completedBytes, Int64(existing?.completedBytes ?? 0)),
+            totalBytes: snapshot.totalBytes,
+            route: snapshot.route
+        )
+        try await persist(
+            failed,
+            displayFilename: displayFilename,
+            expectedPhase: existing?.phase
+        )
+        guard let quarantined = try await persistedTransfer(id: snapshot.id) else {
+            throw TransferPersistenceError.conditionalConflict
+        }
+        return quarantined
     }
 }
 
@@ -43,7 +75,7 @@ struct TransferPreparationRecord: Equatable, Sendable {
 }
 
 public actor TransferDatabase {
-    private static let schemaVersion: Int32 = 2
+    private static let schemaVersion: Int32 = 3
     nonisolated(unsafe) private var connection: OpaquePointer?
 
     public init(url: URL) throws {
@@ -173,6 +205,7 @@ public actor TransferDatabase {
                     UPDATE transfers
                     SET preparation_fingerprint = ?, updated_at = ?, route = ?
                     WHERE id = ?
+                      AND direction = 'inbound'
                       AND phase IN ('preparing', 'connecting', 'transferring', 'paused',
                                     'verifying', 'failed')
                     """
@@ -192,8 +225,8 @@ public actor TransferDatabase {
                     """
                     INSERT INTO transfers (
                         id, peer_id, display_filename, aggregate_size, completed_bytes,
-                        created_at, updated_at, route, phase, preparation_fingerprint
-                    ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                        created_at, updated_at, route, phase, preparation_fingerprint, direction
+                    ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'inbound')
                     """
                 )
                 defer { sqlite3_finalize(insert) }
@@ -259,6 +292,7 @@ public actor TransferDatabase {
                 UPDATE transfers
                 SET preparation_fingerprint = NULL, updated_at = ?, route = ?
                 WHERE id = ? AND preparation_fingerprint = ?
+                  AND direction = 'inbound'
                   AND phase IN ('preparing', 'connecting', 'transferring', 'paused',
                                 'verifying', 'failed')
                 """
@@ -285,6 +319,7 @@ public actor TransferDatabase {
             """
             UPDATE transfers SET updated_at = ?, route = ?, phase = ?
             WHERE id = ?
+              AND direction = 'inbound'
               AND phase IN ('preparing', 'connecting', 'transferring', 'paused',
                             'verifying', 'failed')
             """
@@ -303,6 +338,7 @@ public actor TransferDatabase {
     public func record(
         _ snapshot: TransferSnapshot,
         displayFilename: String,
+        direction: TransferRecordDirection = .inbound,
         at date: Date = Date()
     ) throws {
         guard snapshot.completedBytes >= 0,
@@ -313,7 +349,8 @@ public actor TransferDatabase {
         try transaction {
             if let existing = try validateExistingSnapshot(
                 snapshot,
-                displayFilename: displayFilename
+                displayFilename: displayFilename,
+                direction: direction
             ) {
                 guard isAllowedPhaseTransition(from: existing.phase, to: snapshot.phase) else {
                     throw ReceiveStoreError.databaseFailure
@@ -322,7 +359,7 @@ public actor TransferDatabase {
                     """
                     UPDATE transfers
                     SET completed_bytes = ?, updated_at = ?, route = ?, phase = ?
-                    WHERE id = ?
+                    WHERE id = ? AND direction = ?
                     """
                 )
                 defer { sqlite3_finalize(update) }
@@ -331,14 +368,15 @@ public actor TransferDatabase {
                 try bind(snapshot.route.rawValue, to: update, at: 3)
                 try bind(snapshot.phase.rawValue, to: update, at: 4)
                 try bind(snapshot.id.rawValue.uuidString.lowercased(), to: update, at: 5)
+                try bind(direction.rawValue, to: update, at: 6)
                 try stepDone(update)
             } else {
                 let insert = try statement(
                     """
                     INSERT INTO transfers (
                         id, peer_id, display_filename, aggregate_size, completed_bytes,
-                        created_at, updated_at, route, phase
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, route, phase, direction
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
                 )
                 defer { sqlite3_finalize(insert) }
@@ -351,6 +389,7 @@ public actor TransferDatabase {
                 try bind(date.timeIntervalSince1970, to: insert, at: 7)
                 try bind(snapshot.route.rawValue, to: insert, at: 8)
                 try bind(snapshot.phase.rawValue, to: insert, at: 9)
+                try bind(direction.rawValue, to: insert, at: 10)
                 try stepDone(insert)
             }
             if snapshot.phase == .completed || snapshot.phase == .cancelled {
@@ -378,7 +417,8 @@ public actor TransferDatabase {
         try transaction {
             let existing = try validateExistingSnapshot(
                 snapshot,
-                displayFilename: displayFilename
+                displayFilename: displayFilename,
+                direction: .outbound
             )
             if expectedPhase == nil {
                 guard existing == nil else {
@@ -388,8 +428,8 @@ public actor TransferDatabase {
                     """
                     INSERT INTO transfers (
                         id, peer_id, display_filename, aggregate_size, completed_bytes,
-                        created_at, updated_at, route, phase
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, route, phase, direction
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'outbound')
                     """
                 )
                 defer { sqlite3_finalize(insert) }
@@ -406,7 +446,10 @@ public actor TransferDatabase {
                 try stepDone(insert)
             } else {
                 guard let existing, existing.phase == expectedPhase,
-                    isAllowedPhaseTransition(from: existing.phase, to: snapshot.phase)
+                    isAllowedOutboundPhaseTransition(
+                        from: existing.phase,
+                        to: snapshot.phase
+                    )
                 else { throw TransferPersistenceError.conditionalConflict }
                 let update = try statement(
                     """
@@ -414,6 +457,7 @@ public actor TransferDatabase {
                     SET completed_bytes = MAX(completed_bytes, ?), updated_at = ?,
                         route = ?, phase = ?
                     WHERE id = ? AND phase = ?
+                      AND direction = 'outbound'
                     """
                 )
                 defer { sqlite3_finalize(update) }
@@ -445,7 +489,7 @@ public actor TransferDatabase {
         let query = try statement(
             """
             SELECT id, peer_id, display_filename, aggregate_size, completed_bytes,
-                   created_at, updated_at, route, phase
+                   created_at, updated_at, route, phase, direction
             FROM transfers
             WHERE id = ?
             """
@@ -460,6 +504,66 @@ public actor TransferDatabase {
             throw ReceiveStoreError.databaseFailure
         }
         return record
+    }
+
+    public func quarantineOutboundTransfer(
+        _ snapshot: TransferSnapshot,
+        displayFilename: String
+    ) async throws -> TransferHistoryRecord {
+        try transaction {
+            let existing = try validateExistingSnapshot(
+                snapshot,
+                displayFilename: displayFilename,
+                direction: .outbound
+            )
+            if let existing, existing.phase != .completed && existing.phase != .failed
+                && existing.phase != .cancelled {
+                let update = try statement(
+                    """
+                    UPDATE transfers
+                    SET completed_bytes = MAX(completed_bytes, ?), updated_at = ?,
+                        route = ?, phase = 'failed'
+                    WHERE id = ? AND direction = 'outbound'
+                      AND phase NOT IN ('completed', 'failed', 'cancelled')
+                    """
+                )
+                defer { sqlite3_finalize(update) }
+                try bind(snapshot.completedBytes, to: update, at: 1)
+                try bind(Date().timeIntervalSince1970, to: update, at: 2)
+                try bind(snapshot.route.rawValue, to: update, at: 3)
+                try bind(snapshot.id.rawValue.uuidString.lowercased(), to: update, at: 4)
+                try stepDone(update)
+                guard sqlite3_changes(try requiredConnection) == 1 else {
+                    throw TransferPersistenceError.conditionalConflict
+                }
+            } else if existing == nil {
+                let insert = try statement(
+                    """
+                    INSERT INTO transfers (
+                        id, peer_id, display_filename, aggregate_size, completed_bytes,
+                        created_at, updated_at, route, phase, direction
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', 'outbound')
+                    """
+                )
+                defer { sqlite3_finalize(insert) }
+                let now = Date().timeIntervalSince1970
+                try bind(snapshot.id.rawValue.uuidString.lowercased(), to: insert, at: 1)
+                try bind(snapshot.peer.rawValue.uuidString.lowercased(), to: insert, at: 2)
+                try bind(displayFilename, to: insert, at: 3)
+                try bind(snapshot.totalBytes, to: insert, at: 4)
+                try bind(snapshot.completedBytes, to: insert, at: 5)
+                try bind(now, to: insert, at: 6)
+                try bind(now, to: insert, at: 7)
+                try bind(snapshot.route.rawValue, to: insert, at: 8)
+                try stepDone(insert)
+            }
+            guard let record = try persistedTransfer(id: snapshot.id),
+                record.direction == .outbound,
+                (record.phase == .completed || record.phase == .failed
+                    || record.phase == .cancelled)
+            else { throw TransferPersistenceError.conditionalConflict }
+            return record
+        }
     }
 
     public func resumeMap(for transfer: TransferID) throws -> ResumeMap {
@@ -497,7 +601,9 @@ public actor TransferDatabase {
     }
 
     func phase(for transfer: TransferID) throws -> TransferPhase? {
-        let query = try statement("SELECT phase FROM transfers WHERE id = ?")
+        let query = try statement(
+            "SELECT phase FROM transfers WHERE id = ? AND direction = 'inbound'"
+        )
         defer { sqlite3_finalize(query) }
         try bind(transfer.rawValue.uuidString.lowercased(), to: query, at: 1)
         let first = sqlite3_step(query)
@@ -512,7 +618,7 @@ public actor TransferDatabase {
 
     func creationIntentExists(for transfer: TransferID) throws -> Bool {
         let query = try statement(
-            "SELECT preparation_fingerprint FROM transfers WHERE id = ?"
+            "SELECT preparation_fingerprint FROM transfers WHERE id = ? AND direction = 'inbound'"
         )
         defer { sqlite3_finalize(query) }
         try bind(transfer.rawValue.uuidString.lowercased(), to: query, at: 1)
@@ -528,6 +634,7 @@ public actor TransferDatabase {
 
     public func replaceVerifiedRanges(for transfer: TransferID, with map: ResumeMap) throws {
         try transaction {
+            try requireWritablePhase(transfer)
             let delete = try statement("DELETE FROM verified_ranges WHERE transfer_id = ?")
             defer { sqlite3_finalize(delete) }
             try bind(transfer.rawValue.uuidString.lowercased(), to: delete, at: 1)
@@ -599,7 +706,8 @@ public actor TransferDatabase {
         let update = try statement(
             """
             UPDATE transfers SET completed_bytes = ?, updated_at = ?
-            WHERE id = ? AND phase IN ('preparing', 'connecting', 'transferring', 'paused')
+            WHERE id = ? AND direction = 'inbound'
+              AND phase IN ('preparing', 'connecting', 'transferring', 'paused')
             """
         )
         defer { sqlite3_finalize(update) }
@@ -618,7 +726,7 @@ public actor TransferDatabase {
                 isAllowedPhaseTransition(from: oldPhase, to: phase)
             else { throw ReceiveStoreError.databaseFailure }
             let update = try statement(
-                "UPDATE transfers SET phase = ?, updated_at = ? WHERE id = ?"
+                "UPDATE transfers SET phase = ?, updated_at = ? WHERE id = ? AND direction = 'inbound'"
             )
             defer { sqlite3_finalize(update) }
             try bind(phase.rawValue, to: update, at: 1)
@@ -642,7 +750,7 @@ public actor TransferDatabase {
         let query = try statement(
             """
             SELECT id, peer_id, display_filename, aggregate_size, completed_bytes,
-                   created_at, updated_at, route, phase
+                   created_at, updated_at, route, phase, direction
             FROM transfers
             ORDER BY updated_at DESC
             LIMIT ?
@@ -667,7 +775,9 @@ public actor TransferDatabase {
             let routeText = textColumn(query, 7),
             let route = ConnectionRoute(rawValue: routeText),
             let phaseText = textColumn(query, 8),
-            let phase = TransferPhase(rawValue: phaseText)
+            let phase = TransferPhase(rawValue: phaseText),
+            let directionText = textColumn(query, 9),
+            let direction = TransferRecordDirection(rawValue: directionText)
         else { throw ReceiveStoreError.databaseFailure }
         let aggregate = sqlite3_column_int64(query, 3)
         let completed = sqlite3_column_int64(query, 4)
@@ -683,13 +793,14 @@ public actor TransferDatabase {
             createdAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 5)),
             updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(query, 6)),
             route: route,
-            phase: phase
+            phase: phase,
+            direction: direction
         )
     }
 
     func failedTransfers(updatedBefore date: Date) throws -> [TransferID] {
         let query = try statement(
-            "SELECT id FROM transfers WHERE phase = ? AND updated_at <= ? ORDER BY updated_at, id"
+            "SELECT id FROM transfers WHERE direction = 'inbound' AND phase = ? AND updated_at <= ? ORDER BY updated_at, id"
         )
         defer { sqlite3_finalize(query) }
         try bind(TransferPhase.failed.rawValue, to: query, at: 1)
@@ -708,7 +819,7 @@ public actor TransferDatabase {
     }
 
     func removeTransfer(_ transfer: TransferID) throws {
-        let delete = try statement("DELETE FROM transfers WHERE id = ?")
+        let delete = try statement("DELETE FROM transfers WHERE id = ? AND direction = 'inbound'")
         defer { sqlite3_finalize(delete) }
         try bind(transfer.rawValue.uuidString.lowercased(), to: delete, at: 1)
         try stepDone(delete)
@@ -730,22 +841,45 @@ public actor TransferDatabase {
         do {
             if version == 0 {
                 try execute(database, sql: createSchemaSQL)
-            } else if version == 1 {
-                try validateSchema(database, includesPreparationFingerprint: false)
+            } else if version < 3 {
+                if version == 1 {
+                    try validateSchema(
+                        database,
+                        includesPreparationFingerprint: false,
+                        includesDirection: false
+                    )
+                    try execute(
+                        database,
+                        sql: """
+                            ALTER TABLE transfers ADD COLUMN preparation_fingerprint BLOB
+                            CHECK (
+                                preparation_fingerprint IS NULL
+                                OR length(preparation_fingerprint) = 32
+                            )
+                            """
+                    )
+                } else if version == 2 {
+                    try validateSchema(
+                        database,
+                        includesPreparationFingerprint: true,
+                        includesDirection: false
+                    )
+                }
                 try execute(
                     database,
                     sql: """
-                        ALTER TABLE transfers ADD COLUMN preparation_fingerprint BLOB
-                        CHECK (
-                            preparation_fingerprint IS NULL
-                            OR length(preparation_fingerprint) = 32
-                        )
+                        ALTER TABLE transfers ADD COLUMN direction TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (direction IN ('inbound', 'outbound', 'unknown'))
                         """
                 )
             }
-            try validateSchema(database, includesPreparationFingerprint: true)
+            try validateSchema(
+                database,
+                includesPreparationFingerprint: true,
+                includesDirection: true
+            )
             if version < schemaVersion {
-                try execute(database, sql: "PRAGMA user_version = 2")
+                try execute(database, sql: "PRAGMA user_version = 3")
             }
             try execute(database, sql: "COMMIT")
         } catch {
@@ -768,7 +902,9 @@ public actor TransferDatabase {
             preparation_fingerprint BLOB CHECK (
                 preparation_fingerprint IS NULL
                 OR length(preparation_fingerprint) = 32
-            )
+            ),
+            direction TEXT NOT NULL DEFAULT 'unknown'
+                CHECK (direction IN ('inbound', 'outbound', 'unknown'))
         ) STRICT;
         CREATE TABLE IF NOT EXISTS entries (
             transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
@@ -792,6 +928,7 @@ public actor TransferDatabase {
         let name: String
         let type: String
         let notNull: Bool
+        let defaultValue: String?
         let primaryKeyPosition: Int32
     }
 
@@ -813,10 +950,31 @@ public actor TransferDatabase {
 
     private static func validateSchema(
         _ database: OpaquePointer,
-        includesPreparationFingerprint: Bool
+        includesPreparationFingerprint: Bool,
+        includesDirection: Bool
     ) throws {
         let transfersSQL: String
-        if includesPreparationFingerprint {
+        if includesPreparationFingerprint && includesDirection {
+            transfersSQL = """
+                CREATE TABLE transfers (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    peer_id TEXT NOT NULL,
+                    display_filename TEXT NOT NULL,
+                    aggregate_size INTEGER NOT NULL CHECK (aggregate_size >= 0),
+                    completed_bytes INTEGER NOT NULL CHECK (completed_bytes >= 0),
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    route TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    preparation_fingerprint BLOB CHECK (
+                        preparation_fingerprint IS NULL
+                        OR length(preparation_fingerprint) = 32
+                    ),
+                    direction TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (direction IN ('inbound', 'outbound', 'unknown'))
+                ) STRICT
+                """
+        } else if includesPreparationFingerprint {
             transfersSQL = """
                 CREATE TABLE transfers (
                     id TEXT PRIMARY KEY NOT NULL,
@@ -884,23 +1042,36 @@ public actor TransferDatabase {
         }
 
         var transferColumns = [
-            SchemaColumn(name: "id", type: "TEXT", notNull: true, primaryKeyPosition: 1),
-            SchemaColumn(name: "peer_id", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+            SchemaColumn(
+                name: "id", type: "TEXT", notNull: true, defaultValue: nil,
+                primaryKeyPosition: 1),
+            SchemaColumn(
+                name: "peer_id", type: "TEXT", notNull: true, defaultValue: nil,
+                primaryKeyPosition: 0),
             SchemaColumn(
                 name: "display_filename", type: "TEXT", notNull: true,
+                defaultValue: nil,
                 primaryKeyPosition: 0),
             SchemaColumn(
                 name: "aggregate_size", type: "INTEGER", notNull: true,
+                defaultValue: nil,
                 primaryKeyPosition: 0),
             SchemaColumn(
                 name: "completed_bytes", type: "INTEGER", notNull: true,
+                defaultValue: nil,
                 primaryKeyPosition: 0),
             SchemaColumn(
-                name: "created_at", type: "REAL", notNull: true, primaryKeyPosition: 0),
+                name: "created_at", type: "REAL", notNull: true, defaultValue: nil,
+                primaryKeyPosition: 0),
             SchemaColumn(
-                name: "updated_at", type: "REAL", notNull: true, primaryKeyPosition: 0),
-            SchemaColumn(name: "route", type: "TEXT", notNull: true, primaryKeyPosition: 0),
-            SchemaColumn(name: "phase", type: "TEXT", notNull: true, primaryKeyPosition: 0),
+                name: "updated_at", type: "REAL", notNull: true, defaultValue: nil,
+                primaryKeyPosition: 0),
+            SchemaColumn(
+                name: "route", type: "TEXT", notNull: true, defaultValue: nil,
+                primaryKeyPosition: 0),
+            SchemaColumn(
+                name: "phase", type: "TEXT", notNull: true, defaultValue: nil,
+                primaryKeyPosition: 0),
         ]
         if includesPreparationFingerprint {
             transferColumns.append(
@@ -908,6 +1079,18 @@ public actor TransferDatabase {
                     name: "preparation_fingerprint",
                     type: "BLOB",
                     notNull: false,
+                    defaultValue: nil,
+                    primaryKeyPosition: 0
+                )
+            )
+        }
+        if includesDirection {
+            transferColumns.append(
+                SchemaColumn(
+                    name: "direction",
+                    type: "TEXT",
+                    notNull: true,
+                    defaultValue: "'unknown'",
                     primaryKeyPosition: 0
                 )
             )
@@ -919,13 +1102,18 @@ public actor TransferDatabase {
             expected: [
                 SchemaColumn(
                     name: "transfer_id", type: "TEXT", notNull: true,
+                    defaultValue: nil,
                     primaryKeyPosition: 1),
                 SchemaColumn(
                     name: "entry_index", type: "INTEGER", notNull: true,
+                    defaultValue: nil,
                     primaryKeyPosition: 2),
-                SchemaColumn(name: "size", type: "INTEGER", notNull: true, primaryKeyPosition: 0),
+                SchemaColumn(
+                    name: "size", type: "INTEGER", notNull: true, defaultValue: nil,
+                    primaryKeyPosition: 0),
                 SchemaColumn(
                     name: "chunk_count", type: "INTEGER", notNull: true,
+                    defaultValue: nil,
                     primaryKeyPosition: 0),
             ]
         )
@@ -935,15 +1123,19 @@ public actor TransferDatabase {
             expected: [
                 SchemaColumn(
                     name: "transfer_id", type: "TEXT", notNull: true,
+                    defaultValue: nil,
                     primaryKeyPosition: 1),
                 SchemaColumn(
                     name: "entry_index", type: "INTEGER", notNull: true,
+                    defaultValue: nil,
                     primaryKeyPosition: 2),
                 SchemaColumn(
                     name: "lower_bound", type: "INTEGER", notNull: true,
+                    defaultValue: nil,
                     primaryKeyPosition: 3),
                 SchemaColumn(
                     name: "upper_bound", type: "INTEGER", notNull: true,
+                    defaultValue: nil,
                     primaryKeyPosition: 0),
             ]
         )
@@ -1033,14 +1225,15 @@ public actor TransferDatabase {
         var result = sqlite3_step(query)
         while result == SQLITE_ROW {
             guard let name = staticTextColumn(query, 1),
-                let type = staticTextColumn(query, 2),
-                sqlite3_column_type(query, 4) == SQLITE_NULL
+                let type = staticTextColumn(query, 2)
             else { throw ReceiveStoreError.databaseFailure }
+            let defaultValue = staticTextColumn(query, 4)
             columns.append(
                 SchemaColumn(
                     name: name,
                     type: type,
                     notNull: sqlite3_column_int(query, 3) == 1,
+                    defaultValue: defaultValue,
                     primaryKeyPosition: sqlite3_column_int(query, 5)
                 ))
             result = sqlite3_step(query)
@@ -1210,7 +1403,7 @@ public actor TransferDatabase {
         let transfer = try statement(
             """
             SELECT peer_id, display_filename, aggregate_size, phase,
-                   preparation_fingerprint
+                   preparation_fingerprint, direction
             FROM transfers WHERE id = ?
             """
         )
@@ -1223,7 +1416,8 @@ public actor TransferDatabase {
             textColumn(transfer, 1) == displayName,
             sqlite3_column_int64(transfer, 2) == Int64(aggregate),
             let phaseValue = textColumn(transfer, 3),
-            let phase = TransferPhase(rawValue: phaseValue)
+            let phase = TransferPhase(rawValue: phaseValue),
+            textColumn(transfer, 5) == TransferRecordDirection.inbound.rawValue
         else { throw ReceiveStoreError.invalidManifest }
 
         let preparationFingerprint: Data?
@@ -1270,11 +1464,12 @@ public actor TransferDatabase {
 
     private func validateExistingSnapshot(
         _ snapshot: TransferSnapshot,
-        displayFilename: String
+        displayFilename: String,
+        direction: TransferRecordDirection
     ) throws -> ExistingSnapshot? {
         let query = try statement(
             """
-            SELECT peer_id, display_filename, aggregate_size, phase, completed_bytes
+            SELECT peer_id, display_filename, aggregate_size, phase, completed_bytes, direction
             FROM transfers WHERE id = ?
             """
         )
@@ -1289,6 +1484,7 @@ public actor TransferDatabase {
             sqlite3_column_int64(query, 2) == snapshot.totalBytes,
             let phaseText = textColumn(query, 3),
             let phase = TransferPhase(rawValue: phaseText),
+            textColumn(query, 5) == direction.rawValue,
             completedBytes >= 0,
             sqlite3_step(query) == SQLITE_DONE
         else { throw ReceiveStoreError.invalidManifest }
@@ -1302,7 +1498,8 @@ public actor TransferDatabase {
         let query = try statement(
             """
             SELECT 1 FROM transfers
-            WHERE id = ? AND phase IN ('preparing', 'connecting', 'transferring', 'paused')
+            WHERE id = ? AND direction = 'inbound'
+              AND phase IN ('preparing', 'connecting', 'transferring', 'paused')
             """
         )
         defer { sqlite3_finalize(query) }
@@ -1322,6 +1519,25 @@ public actor TransferDatabase {
         case .cancelling:
             return newPhase == .cancelling || newPhase == .cancelled
         default:
+            return true
+        }
+    }
+
+    /// Outbound verification is irreversible because it is claimed only after
+    /// the receiver has published the transfer. Retry/restart transitions may
+    /// otherwise move among the pre-verification phases for reconnect/resume.
+    private func isAllowedOutboundPhaseTransition(
+        from oldPhase: TransferPhase,
+        to newPhase: TransferPhase
+    ) -> Bool {
+        switch oldPhase {
+        case .verifying:
+            return newPhase == .verifying || newPhase == .completed
+        case .completed, .failed, .cancelled:
+            return newPhase == oldPhase
+        case .cancelling:
+            return newPhase == .cancelling || newPhase == .cancelled
+        case .preparing, .connecting, .transferring, .paused:
             return true
         }
     }

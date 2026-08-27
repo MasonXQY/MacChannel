@@ -30,5 +30,6 @@ public protocol TransferCoordinating: Sendable {
     func send(items: [URL], to device: DeviceID) async throws -> TransferID
     func pause(_ id: TransferID) async
     func resume(_ id: TransferID) async throws
-    func cancel(_ id: TransferID) async
+    @discardableResult
+    func cancel(_ id: TransferID) async -> TransferCancellationResult
 }
