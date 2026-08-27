@@ -43,7 +43,7 @@ rm -f \
     "$dist_root/.MacChannel.dmg.new" \
     "$dist_root/.MacChannel.manifest.json.new"
 
-build_root="$(mktemp -d "$dist_root/.build.XXXXXX")"
+build_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-distribution.XXXXXX")"
 chmod 700 "$build_root"
 app_path="$build_root/MacChannel.app"
 stage_path="$build_root/stage"
