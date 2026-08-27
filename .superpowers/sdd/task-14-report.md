@@ -80,5 +80,5 @@ to its service image digests and Git commit.
 
 The immutable Task 14 privacy-finding revision is commit `764e280`; its audit
 document records the exact script content hashes and UTC evidence timestamp.
-The later runtime-evidence hardening revision is pinned by an append-only commit
-after its content commit; see the audit document's immutable-version section.
+The runtime-evidence hardening content revision is commit `5158d40`; this exact
+identifier is recorded by the subsequent append-only provenance commit.
