@@ -6,6 +6,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
         let code: String
         let expiresAt: Date
         let ephemeralKey: P256.KeyAgreement.PrivateKey
+        let challenge: Data
         var used: Bool
     }
 
@@ -41,6 +42,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
     private var joinInProgress = false
     private var confirmationInProgress = false
     private var commitInProgress = false
+    private var bilateralCompletionTasks: [PairingSessionID: Task<Void, Never>] = [:]
     private var state: PairingState = .idle
     private let stateContinuation: AsyncStream<PairingState>.Continuation
 
@@ -68,6 +70,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
     }
 
     deinit {
+        for task in bilateralCompletionTasks.values { task.cancel() }
         stateContinuation.finish()
     }
 
@@ -93,15 +96,17 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
         }
 
         let code = String(format: "%06d", Int.random(in: 0..<1_000_000))
-        let expiresAt = clock.now.addingTimeInterval(300)
+        let expiresAt = clock.now.addingTimeInterval(transport.codeLifetime)
         let ephemeralKey = P256.KeyAgreement.PrivateKey()
+        let challenge = Self.randomChallenge()
         let offer = PairingOffer(
             code: code,
             expiresAt: expiresAt,
             hostID: identity.id,
             hostIdentityPublicKey: identity.publicKey.rawRepresentation,
             hostEphemeralPublicKey: ephemeralKey.publicKey.rawRepresentation,
-            hostDisplayName: displayName
+            hostDisplayName: displayName,
+            challenge: challenge
         )
         do {
             try await transport.publish(offer, endpoint: self)
@@ -111,6 +116,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
                 code: code,
                 expiresAt: expiresAt,
                 ephemeralKey: ephemeralKey,
+                challenge: challenge,
                 used: false
             )
             transition(to: .displayingCode(expiresAt: expiresAt))
@@ -135,7 +141,9 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
     }
 
     public func join(code: String) async throws -> PairingJoinResult {
-        guard !joinInProgress, !codeCreationInProgress, !commitInProgress, pendingConfirmation == nil else {
+        guard !joinInProgress, !codeCreationInProgress, !commitInProgress,
+            pendingConfirmation == nil
+        else {
             throw PairingError.operationInProgress
         }
         joinInProgress = true
@@ -147,9 +155,11 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
                 id: offer.hostID,
                 rawRepresentation: offer.hostIdentityPublicKey
             )
-            guard let hostEphemeralKey = try? P256.KeyAgreement.PublicKey(
-                rawRepresentation: offer.hostEphemeralPublicKey
-            ) else {
+            guard
+                let hostEphemeralKey = try? P256.KeyAgreement.PublicKey(
+                    rawRepresentation: offer.hostEphemeralPublicKey
+                )
+            else {
                 throw PairingError.invalidHandshake
             }
             let joiningEphemeralKey = P256.KeyAgreement.PrivateKey()
@@ -188,12 +198,14 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
                 message: responseTranscript,
                 publicKey: hostIdentityKey
             )
-            guard PairingCryptography.isValidChannelTag(
-                response.channelTag,
-                label: "host-confirmation",
-                message: responseTranscript,
-                key: channelKey
-            ) else {
+            guard
+                PairingCryptography.isValidChannelTag(
+                    response.channelTag,
+                    label: "host-confirmation",
+                    message: responseTranscript,
+                    key: channelKey
+                )
+            else {
                 throw PairingError.invalidHandshake
             }
 
@@ -254,9 +266,11 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
                 id: request.joiningID,
                 rawRepresentation: request.joiningIdentityPublicKey
             )
-            guard let joiningEphemeralKey = try? P256.KeyAgreement.PublicKey(
-                rawRepresentation: request.joiningEphemeralPublicKey
-            ) else {
+            guard
+                let joiningEphemeralKey = try? P256.KeyAgreement.PublicKey(
+                    rawRepresentation: request.joiningEphemeralPublicKey
+                )
+            else {
                 throw PairingError.invalidHandshake
             }
             let offer = PairingOffer(
@@ -265,7 +279,8 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
                 hostID: identity.id,
                 hostIdentityPublicKey: identity.publicKey.rawRepresentation,
                 hostEphemeralPublicKey: session.ephemeralKey.publicKey.rawRepresentation,
-                hostDisplayName: displayName
+                hostDisplayName: displayName,
+                challenge: session.challenge
             )
             let transcript = try PairingCryptography.transcript(
                 offer: offer,
@@ -284,12 +299,14 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
                 remotePublicKey: joiningEphemeralKey,
                 transcript: transcript
             )
-            guard PairingCryptography.isValidChannelTag(
-                request.channelTag,
-                label: "join-confirmation",
-                message: transcript,
-                key: channelKey
-            ) else {
+            guard
+                PairingCryptography.isValidChannelTag(
+                    request.channelTag,
+                    label: "join-confirmation",
+                    message: transcript,
+                    key: channelKey
+                )
+            else {
                 throw PairingError.invalidHandshake
             }
 
@@ -343,7 +360,8 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
 
     @discardableResult
     public func confirmFingerprint(_ fingerprint: String) async throws -> SignedTrustRecord {
-        guard !confirmationInProgress, !codeCreationInProgress, !joinInProgress, !commitInProgress else {
+        guard !confirmationInProgress, !codeCreationInProgress, !joinInProgress, !commitInProgress
+        else {
             throw PairingError.operationInProgress
         }
         confirmationInProgress = true
@@ -395,18 +413,25 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
 
     public func cancelPendingPairing() async throws {
         guard !commitInProgress,
-              !confirmationInProgress,
-              !joinInProgress,
-              !codeCreationInProgress
+            !confirmationInProgress,
+            !joinInProgress,
+            !codeCreationInProgress
         else { throw PairingError.operationInProgress }
         guard let pending = pendingConfirmation else { return }
-        guard pending.issuedAuthorization == nil else {
+        let bilateral = transport as? any BilateralPairingTransport
+        guard pending.issuedAuthorization == nil || bilateral != nil else {
             throw PairingError.operationInProgress
         }
         commitInProgress = true
         defer { commitInProgress = false }
         clearPendingIfMatching(pending)
         transition(to: .idle)
+        if let task = bilateralCompletionTasks.removeValue(forKey: pending.sessionID) {
+            task.cancel()
+        }
+        if let bilateral {
+            await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
+        }
         if let reservation = pending.deliveryReservation {
             await transport.cancelAuthorizationDelivery(reservation)
         }
@@ -440,11 +465,19 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
             if let existing = pending.issuedAuthorization {
                 authorization = existing
             } else {
-                authorization = try await trustRepository.issueAuthorization(
-                    subject: pending.peer.id,
-                    subjectPublicKey: pending.peerIdentityPublicKey,
-                    timestamp: clock.now
-                )
+                if transport is any BilateralPairingTransport {
+                    authorization = try await trustRepository.prepareAuthorization(
+                        subject: pending.peer.id,
+                        subjectPublicKey: pending.peerIdentityPublicKey,
+                        timestamp: clock.now
+                    )
+                } else {
+                    authorization = try await trustRepository.issueAuthorization(
+                        subject: pending.peer.id,
+                        subjectPublicKey: pending.peerIdentityPublicKey,
+                        timestamp: clock.now
+                    )
+                }
                 guard pendingMatches(pending) else {
                     await transport.cancelAuthorizationDelivery(reservation)
                     throw PairingError.staleOperation
@@ -476,7 +509,26 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
             )
         )
         try await transport.deliverAuthorization(envelope, reservation: reservation)
-        guard pendingMatches(pending), !codeCreationInProgress else { throw PairingError.staleOperation }
+        guard pendingMatches(pending), !codeCreationInProgress else {
+            throw PairingError.staleOperation
+        }
+        if let bilateral = transport as? any BilateralPairingTransport {
+            if bilateralCompletionTasks[pending.sessionID] == nil {
+                let sessionID = pending.sessionID
+                bilateralCompletionTasks[sessionID] = Task { [weak self] in
+                    do {
+                        let peerEnvelope = try await bilateral.peerAuthorization(for: sessionID)
+                        await self?.completeBilateralHostPairing(
+                            pending: pending,
+                            envelope: peerEnvelope
+                        )
+                    } catch {
+                        await self?.failBilateralHostPairing(pending: pending, error: error)
+                    }
+                }
+            }
+            return authorization
+        }
         clearPendingIfMatching(pending)
         transition(to: .confirmed(pending.peer))
         return authorization
@@ -499,38 +551,138 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
             sessionID: pending.sessionID,
             authorization: envelope.authorization
         )
-        guard PairingCryptography.isValidChannelTag(
-            envelope.channelTag,
-            label: "authorization",
-            message: message,
-            key: pending.channelKey
-        ) else {
+        guard
+            PairingCryptography.isValidChannelTag(
+                envelope.channelTag,
+                label: "authorization",
+                message: message,
+                key: pending.channelKey
+            )
+        else {
             throw PairingError.invalidHandshake
         }
         try envelope.authorization.validated()
         guard envelope.authorization.action == .authorize,
-              envelope.authorization.issuer == pending.peer.id,
-              envelope.authorization.issuerPublicKey == pending.peerIdentityPublicKey,
-              envelope.authorization.subject == identity.id,
-              envelope.authorization.subjectPublicKey == identity.publicKey.rawRepresentation
+            envelope.authorization.issuer == pending.peer.id,
+            envelope.authorization.issuerPublicKey == pending.peerIdentityPublicKey,
+            envelope.authorization.subject == identity.id,
+            envelope.authorization.subjectPublicKey == identity.publicKey.rawRepresentation
         else {
             throw PairingError.invalidHandshake
         }
         guard pendingMatches(pending) else { throw PairingError.staleOperation }
         commitInProgress = true
         defer { commitInProgress = false }
-        try await trustRepository.bootstrapFromConfirmedPairing(envelope.authorization)
-        guard pendingMatches(pending) else { throw PairingError.staleOperation }
+        if let bilateral = transport as? any BilateralPairingTransport {
+            let reverseAuthorization: SignedTrustRecord
+            if let issued = pending.issuedAuthorization {
+                reverseAuthorization = issued
+            } else {
+                reverseAuthorization = try await trustRepository.prepareAuthorization(
+                    subject: pending.peer.id,
+                    subjectPublicKey: pending.peerIdentityPublicKey,
+                    timestamp: clock.now
+                )
+                guard pendingMatches(pending) else { throw PairingError.staleOperation }
+                var updated = pending
+                updated.issuedAuthorization = reverseAuthorization
+                pendingConfirmation = updated
+            }
+            let reverseMessage = try PairingCryptography.authorizationMessage(
+                transcript: pending.transcript,
+                sessionID: pending.sessionID,
+                authorization: reverseAuthorization
+            )
+            try await bilateral.deliverPeerAuthorization(
+                PairingAuthorizationEnvelope(
+                    sessionID: pending.sessionID,
+                    authorization: reverseAuthorization,
+                    channelTag: PairingCryptography.channelTag(
+                        label: "peer-authorization",
+                        message: reverseMessage,
+                        key: pending.channelKey
+                    )
+                )
+            )
+            guard pendingMatches(pending) else { throw PairingError.staleOperation }
+            try await trustRepository.commitBilateralPairing(
+                localAuthorization: reverseAuthorization,
+                peerAuthorization: envelope.authorization
+            )
+            guard pendingMatches(pending) else { throw PairingError.staleOperation }
+        } else {
+            try await trustRepository.bootstrapFromConfirmedPairing(envelope.authorization)
+            guard pendingMatches(pending) else { throw PairingError.staleOperation }
+        }
         clearPendingIfMatching(pending)
         transition(to: .confirmed(pending.peer))
         return envelope.authorization
     }
 
+    private func completeBilateralHostPairing(
+        pending: PendingConfirmation,
+        envelope: PairingAuthorizationEnvelope
+    ) async {
+        defer { bilateralCompletionTasks.removeValue(forKey: pending.sessionID) }
+        do {
+            guard pendingMatches(pending), envelope.sessionID == pending.sessionID else {
+                throw PairingError.staleOperation
+            }
+            let message = try PairingCryptography.authorizationMessage(
+                transcript: pending.transcript,
+                sessionID: pending.sessionID,
+                authorization: envelope.authorization
+            )
+            guard
+                PairingCryptography.isValidChannelTag(
+                    envelope.channelTag,
+                    label: "peer-authorization",
+                    message: message,
+                    key: pending.channelKey
+                )
+            else { throw PairingError.invalidHandshake }
+            try envelope.authorization.validated()
+            guard envelope.authorization.action == .authorize,
+                envelope.authorization.issuer == pending.peer.id,
+                envelope.authorization.issuerPublicKey == pending.peerIdentityPublicKey,
+                envelope.authorization.subject == identity.id,
+                envelope.authorization.subjectPublicKey == identity.publicKey.rawRepresentation
+            else { throw PairingError.invalidHandshake }
+            guard let localAuthorization = pending.issuedAuthorization else {
+                throw PairingError.invalidHandshake
+            }
+            try await trustRepository.commitBilateralPairing(
+                localAuthorization: localAuthorization,
+                peerAuthorization: envelope.authorization
+            )
+            guard pendingMatches(pending) else { throw PairingError.staleOperation }
+            guard let bilateral = transport as? any BilateralPairingTransport else {
+                throw PairingError.invalidHandshake
+            }
+            await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: true)
+            clearPendingIfMatching(pending)
+            transition(to: .confirmed(pending.peer))
+        } catch {
+            if let bilateral = transport as? any BilateralPairingTransport {
+                await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
+            }
+            if pendingMatches(pending) { transitionToFailure(error) }
+        }
+    }
+
+    private func failBilateralHostPairing(pending: PendingConfirmation, error: Error) async {
+        bilateralCompletionTasks.removeValue(forKey: pending.sessionID)
+        if let bilateral = transport as? any BilateralPairingTransport {
+            await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
+        }
+        if pendingMatches(pending) { transitionToFailure(error) }
+    }
+
     private func validatedSession(for code: String) throws -> HostedSession {
         guard code.count == 6,
-              code.allSatisfy({ $0.isASCII && $0.isNumber }),
-              let session = hostedSession,
-              session.code == code
+            code.allSatisfy({ $0.isASCII && $0.isNumber }),
+            let session = hostedSession,
+            session.code == code
         else {
             throw PairingError.invalidCode
         }
@@ -569,7 +721,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
         rawRepresentation: Data
     ) throws -> P256.Signing.PublicKey {
         guard DeviceIdentity.deviceID(for: rawRepresentation) == id,
-              let key = try? P256.Signing.PublicKey(rawRepresentation: rawRepresentation)
+            let key = try? P256.Signing.PublicKey(rawRepresentation: rawRepresentation)
         else {
             throw PairingError.invalidPeerIdentity
         }
@@ -592,10 +744,17 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
     }
 
     private func normalizedHandshakeError(_ error: Error) -> Error {
-        if error is PairingError || error is TrustStoreError || error is TrustRecordValidationError {
+        if error is PairingError || error is TrustStoreError
+            || error is TrustRecordValidationError
+        {
             return error
         }
         return PairingError.invalidHandshake
+    }
+
+    private static func randomChallenge() -> Data {
+        var generator = SystemRandomNumberGenerator()
+        return Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
     }
 }
 
@@ -618,11 +777,12 @@ private enum PairingCryptography {
             let joiningEphemeralPublicKey: String
             let joiningID: String
             let joiningIdentityPublicKey: String
+            let challenge: String
         }
         let milliseconds = offer.expiresAt.timeIntervalSince1970 * 1_000
         guard milliseconds.isFinite,
-              milliseconds > Double(Int64.min),
-              milliseconds < Double(Int64.max)
+            milliseconds > Double(Int64.min),
+            milliseconds < Double(Int64.max)
         else {
             throw PairingError.invalidHandshake
         }
@@ -636,7 +796,8 @@ private enum PairingCryptography {
             joiningDisplayName: joiningDisplayName,
             joiningEphemeralPublicKey: joiningEphemeralPublicKey.base64EncodedString(),
             joiningID: joiningID.rawValue.uuidString.lowercased(),
-            joiningIdentityPublicKey: joiningIdentityPublicKey.base64EncodedString()
+            joiningIdentityPublicKey: joiningIdentityPublicKey.base64EncodedString(),
+            challenge: offer.challenge.base64EncodedString()
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
@@ -676,10 +837,11 @@ private enum PairingCryptography {
     }
 
     static func channelTag(label: String, message: Data, key: SymmetricKey) -> Data {
-        Data(HMAC<SHA256>.authenticationCode(
-            for: Data(label.utf8) + message,
-            using: key
-        ))
+        Data(
+            HMAC<SHA256>.authenticationCode(
+                for: Data(label.utf8) + message,
+                using: key
+            ))
     }
 
     static func isValidChannelTag(
@@ -701,7 +863,7 @@ private enum PairingCryptography {
         publicKey: P256.Signing.PublicKey
     ) throws {
         guard let parsed = try? P256.Signing.ECDSASignature(derRepresentation: signature),
-              publicKey.isValidSignature(parsed, for: message)
+            publicKey.isValidSignature(parsed, for: message)
         else {
             throw PairingError.invalidHandshake
         }

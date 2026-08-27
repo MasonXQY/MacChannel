@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 
@@ -337,20 +338,36 @@ private final class NWListenerLifecycle: @unchecked Sendable {
     }
 }
 
-public final class NWMeshByteConnection: MeshByteConnection, @unchecked Sendable {
+public protocol MeshPairingSourceIdentifying: Sendable {
+    var meshPairingSourceKey: Data { get }
+}
+
+public final class NWMeshByteConnection: MeshByteConnection, MeshPairingSourceIdentifying,
+    @unchecked Sendable
+{
     private let connection: NWConnection
     private let queue = DispatchQueue(label: "com.mason.macchannel.mesh-connection")
     private let state = NWMeshConnectionState()
+    public let meshPairingSourceKey: Data
 
     public init(connection: NWConnection) {
         self.connection = connection
+        let source: String
+        switch connection.endpoint {
+        case .hostPort(let host, _):
+            source = String(describing: host)
+        default:
+            source = String(describing: connection.endpoint)
+        }
+        meshPairingSourceKey = Data(SHA256.hash(data: Data(source.utf8)))
         connection.stateUpdateHandler = { [state] newState in state.record(newState) }
         connection.start(queue: queue)
     }
 
     public func send(_ bytes: Data) async throws {
         guard state.isUsable() else { throw MeshWireError.connectionClosed }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             connection.send(
                 content: bytes,
                 completion: .contentProcessed { error in

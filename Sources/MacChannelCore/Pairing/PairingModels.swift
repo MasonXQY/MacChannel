@@ -111,6 +111,7 @@ public struct PairingOffer: Sendable {
     public let hostIdentityPublicKey: Data
     public let hostEphemeralPublicKey: Data
     public let hostDisplayName: String
+    public let challenge: Data
 
     public init(
         code: String,
@@ -118,7 +119,8 @@ public struct PairingOffer: Sendable {
         hostID: DeviceID,
         hostIdentityPublicKey: Data,
         hostEphemeralPublicKey: Data,
-        hostDisplayName: String
+        hostDisplayName: String,
+        challenge: Data = Data()
     ) {
         self.code = code
         self.expiresAt = expiresAt
@@ -126,6 +128,7 @@ public struct PairingOffer: Sendable {
         self.hostIdentityPublicKey = hostIdentityPublicKey
         self.hostEphemeralPublicKey = hostEphemeralPublicKey
         self.hostDisplayName = hostDisplayName
+        self.challenge = challenge
     }
 }
 

@@ -31,7 +31,7 @@ public actor RendezvousPairingTransport: PairingTransport {
     ) throws {
         let scheme = origin.scheme?.lowercased()
         guard origin.host != nil,
-              scheme == "https" || (allowInsecureForTesting && scheme == "http")
+            scheme == "https" || (allowInsecureForTesting && scheme == "http")
         else {
             throw AuthenticatedPresenceError.insecureOrigin
         }
@@ -51,7 +51,7 @@ public actor RendezvousPairingTransport: PairingTransport {
             await previous.value
         }
         guard hostTasks.count + hostReservations.count < Self.maximumHostTasks,
-              hostReservations.insert(offer.code).inserted
+            hostReservations.insert(offer.code).inserted
         else { throw PairingError.resourceExhausted }
         defer { hostReservations.remove(offer.code) }
         let encoded = try Self.encoder.encode(OfferWire(offer))
@@ -81,7 +81,9 @@ public actor RendezvousPairingTransport: PairingTransport {
         return try Self.decoder.decode(OfferWire.self, from: response.hostOffer).value
     }
 
-    public func submit(code: String, request joinRequest: PairingJoinRequest) async throws -> PairingJoinResponse {
+    public func submit(code: String, request joinRequest: PairingJoinRequest) async throws
+        -> PairingJoinResponse
+    {
         let encoded = try Self.encoder.encode(JoinRequestWire(joinRequest))
         let data = try await request(
             method: "POST",
@@ -90,7 +92,9 @@ public actor RendezvousPairingTransport: PairingTransport {
             expected: [200, 202]
         )
         let joined = try Self.decoder.decode(JoinedResponse.self, from: data)
-        guard let uuid = UUID(uuidString: joined.sessionID) else { throw PairingError.invalidHandshake }
+        guard let uuid = UUID(uuidString: joined.sessionID) else {
+            throw PairingError.invalidHandshake
+        }
         let serverSessionID = PairingSessionID(rawValue: uuid)
         let responseData = try await poll(
             path: "/v1/pairing/sessions/\(escaped(joined.sessionID))/response",
@@ -186,7 +190,8 @@ public actor RendezvousPairingTransport: PairingTransport {
             deadline: Date().addingTimeInterval(900)
         )
         let response = try Self.decoder.decode(AuthorizationResponse.self, from: data)
-        return try Self.decoder.decode(AuthorizationWire.self, from: response.authorizationEnvelope).value
+        return try Self.decoder.decode(AuthorizationWire.self, from: response.authorizationEnvelope)
+            .value
     }
 
     public func stop() async {
@@ -216,14 +221,18 @@ public actor RendezvousPairingTransport: PairingTransport {
                 guard let uuid = UUID(uuidString: joined.sessionID) else {
                     throw PairingError.invalidHandshake
                 }
-                let request = try Self.decoder.decode(JoinRequestWire.self, from: joined.joinRequest).value
+                let request = try Self.decoder.decode(
+                    JoinRequestWire.self, from: joined.joinRequest
+                ).value
                 let sessionID = PairingSessionID(rawValue: uuid)
                 let response: PairingJoinResponse
                 if let rendezvousEndpoint = endpoint as? any RendezvousPairingHostEndpoint {
                     response = try await rendezvousEndpoint.accept(request, sessionID: sessionID)
                 } else {
                     let accepted = try await endpoint.accept(request)
-                    guard accepted.sessionID == sessionID else { throw PairingError.invalidHandshake }
+                    guard accepted.sessionID == sessionID else {
+                        throw PairingError.invalidHandshake
+                    }
                     response = accepted
                 }
                 let encoded = try Self.encoder.encode(JoinResponseWire(response))
@@ -249,7 +258,8 @@ public actor RendezvousPairingTransport: PairingTransport {
     ) async throws -> Data {
         while !Task.isCancelled, Date() < deadline {
             do {
-                return try await request(method: "POST", path: path, payload: payload, expected: [200])
+                return try await request(
+                    method: "POST", path: path, payload: payload, expected: [200])
             } catch PairingError.authorizationPending {
                 try await Task.sleep(for: .milliseconds(300))
             }
@@ -272,7 +282,9 @@ public actor RendezvousPairingTransport: PairingTransport {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 15
         let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else { throw PairingError.invalidHandshake }
+        guard let response = response as? HTTPURLResponse else {
+            throw PairingError.invalidHandshake
+        }
         guard expected.contains(response.statusCode) else {
             throw Self.error(status: response.statusCode)
         }
@@ -339,19 +351,40 @@ public actor RendezvousPairingTransport: PairingTransport {
 }
 
 public protocol RendezvousPairingHostEndpoint: PairingHostEndpoint {
-    func accept(_ request: PairingJoinRequest, sessionID: PairingSessionID) async throws -> PairingJoinResponse
+    func accept(_ request: PairingJoinRequest, sessionID: PairingSessionID) async throws
+        -> PairingJoinResponse
 }
 
 private struct CodePayload: Codable { let code: String }
 private struct SessionPayload: Codable { let sessionID: String }
-private struct PublishPayload: Codable { let code: String; let hostOffer: Data }
+private struct PublishPayload: Codable {
+    let code: String
+    let hostOffer: Data
+}
 private struct OfferResponse: Codable { let hostOffer: Data }
-private struct JoinPayload: Codable { let code: String; let joinRequest: Data }
-private struct JoinedResponse: Codable { let sessionID: String; let handshakeExpiresAt: Int64? }
-private struct HostJoinResponse: Codable { let sessionID: String; let joinRequest: Data; let handshakeExpiresAt: Int64? }
+private struct JoinPayload: Codable {
+    let code: String
+    let joinRequest: Data
+}
+private struct JoinedResponse: Codable {
+    let sessionID: String
+    let handshakeExpiresAt: Int64?
+}
+private struct HostJoinResponse: Codable {
+    let sessionID: String
+    let joinRequest: Data
+    let handshakeExpiresAt: Int64?
+}
 private struct JoinResponsePayload: Codable { let joinResponse: Data }
-private struct CommitJoinResponse: Codable { let sessionID: String; let joinResponse: Data }
-private struct ReservationResponse: Codable { let id: String; let sessionID: String; let expiresAt: Int64 }
+private struct CommitJoinResponse: Codable {
+    let sessionID: String
+    let joinResponse: Data
+}
+private struct ReservationResponse: Codable {
+    let id: String
+    let sessionID: String
+    let expiresAt: Int64
+}
 private struct StatusResponse: Codable { let status: String }
 private struct AuthorizationResponse: Codable { let authorizationEnvelope: Data }
 
@@ -384,6 +417,7 @@ private struct OfferWire: Codable {
     let hostIdentityPublicKey: Data
     let hostEphemeralPublicKey: Data
     let hostDisplayName: String
+    let challenge: Data?
     init(_ value: PairingOffer) {
         code = value.code
         expiresAt = Int64(value.expiresAt.timeIntervalSince1970 * 1_000)
@@ -391,6 +425,7 @@ private struct OfferWire: Codable {
         hostIdentityPublicKey = value.hostIdentityPublicKey
         hostEphemeralPublicKey = value.hostEphemeralPublicKey
         hostDisplayName = value.hostDisplayName
+        challenge = value.challenge
     }
     var value: PairingOffer {
         PairingOffer(
@@ -399,7 +434,8 @@ private struct OfferWire: Codable {
             hostID: DeviceID(rawValue: hostID),
             hostIdentityPublicKey: hostIdentityPublicKey,
             hostEphemeralPublicKey: hostEphemeralPublicKey,
-            hostDisplayName: hostDisplayName
+            hostDisplayName: hostDisplayName,
+            challenge: challenge ?? Data()
         )
     }
 }

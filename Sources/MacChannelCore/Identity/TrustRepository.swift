@@ -123,6 +123,62 @@ public actor TrustRepository {
         return authorization
     }
 
+    /// Signs the local half of a bilateral pairing without exposing trust yet.
+    /// The record becomes visible only through `commitBilateralPairing`.
+    public func prepareAuthorization(
+        subject: DeviceID,
+        subjectPublicKey: Data,
+        timestamp: Date
+    ) throws -> SignedTrustRecord {
+        let candidate = store
+        let sequence = try candidate.nextIssuerSequence(for: ownerIdentity)
+        return try SignedTrustRecord.authorizing(
+            subject: subject,
+            subjectPublicKey: subjectPublicKey,
+            signedBy: ownerIdentity,
+            sequence: sequence,
+            timestamp: timestamp
+        )
+    }
+
+    /// Atomically publishes the two directionally correct records. A rejected
+    /// or interrupted confirmation leaves the prior trust snapshot untouched.
+    public func commitBilateralPairing(
+        localAuthorization: SignedTrustRecord,
+        peerAuthorization: SignedTrustRecord
+    ) throws {
+        if authenticationRecordsByPair[
+            RecordKey(issuer: localAuthorization.issuer, subject: localAuthorization.subject)
+        ]?.signature == localAuthorization.signature,
+            authenticationRecordsByPair[
+                RecordKey(issuer: peerAuthorization.issuer, subject: peerAuthorization.subject)
+            ]?.signature == peerAuthorization.signature
+        {
+            return
+        }
+        try localAuthorization.validated()
+        try peerAuthorization.validated()
+        guard localAuthorization.action == .authorize,
+            localAuthorization.issuer == ownerID,
+            localAuthorization.issuerPublicKey == ownerIdentity.publicKey.rawRepresentation,
+            peerAuthorization.action == .authorize,
+            peerAuthorization.subject == ownerID,
+            peerAuthorization.subjectPublicKey == ownerIdentity.publicKey.rawRepresentation,
+            localAuthorization.subject == peerAuthorization.issuer,
+            localAuthorization.subjectPublicKey == peerAuthorization.issuerPublicKey
+        else { throw TrustRepositoryError.invalidOwner }
+
+        var candidate = store
+        try candidate.bootstrapFromConfirmedPairing(peerAuthorization, localIdentity: ownerIdentity)
+        try candidate.authorize(localAuthorization)
+        let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        store = candidate
+        latestSnapshot = snapshot
+        recordAuthenticationProof(localAuthorization)
+        recordAuthenticationProof(peerAuthorization)
+        publishUpdate()
+    }
+
     public func bootstrapFromConfirmedPairing(_ record: SignedTrustRecord) throws {
         var candidate = store
         try candidate.bootstrapFromConfirmedPairing(record, localIdentity: ownerIdentity)
