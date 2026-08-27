@@ -125,18 +125,18 @@ codesign --remove-signature "$normalized_stage/MacChannel.app" >/dev/null 2>&1
 
 stage_listing="$build_root/stage.list"
 : >"$stage_listing"
-while IFS= read -r relative_path; do
-    full_path="$normalized_stage/$relative_path"
-    if [[ -L "$full_path" ]]; then
-        printf 'link\t%s\t%s\n' "$relative_path" "$(readlink "$full_path")" >>"$stage_listing"
-    elif [[ -f "$full_path" ]]; then
+while IFS= read -r relative_entry; do
+    full_entry="$normalized_stage/$relative_entry"
+    if [[ -L "$full_entry" ]]; then
+        printf 'link\t%s\t%s\n' "$relative_entry" "$(readlink "$full_entry")" >>"$stage_listing"
+    elif [[ -f "$full_entry" ]]; then
         printf 'file\t%s\t%s\t%s\t%s\n' \
-            "$relative_path" \
-            "$(stat -f %Lp "$full_path")" \
-            "$(stat -f %z "$full_path")" \
-            "$(shasum -a 256 "$full_path" | awk '{print $1}')" >>"$stage_listing"
-    elif [[ -d "$full_path" ]]; then
-        printf 'dir\t%s\t%s\n' "$relative_path" "$(stat -f %Lp "$full_path")" \
+            "$relative_entry" \
+            "$(stat -f %Lp "$full_entry")" \
+            "$(stat -f %z "$full_entry")" \
+            "$(shasum -a 256 "$full_entry" | awk '{print $1}')" >>"$stage_listing"
+    elif [[ -d "$full_entry" ]]; then
+        printf 'dir\t%s\t%s\n' "$relative_entry" "$(stat -f %Lp "$full_entry")" \
             >>"$stage_listing"
     fi
 done < <(cd "$normalized_stage" && find . -mindepth 1 -print | sed 's#^\./##' | LC_ALL=C sort)

@@ -927,7 +927,7 @@ func completedGenerationError(err error) error {
 	)
 }
 
-func fatal(message string) {
-	_, _ = fmt.Fprintln(os.Stderr, "stack-secrets:", message)
+func fatal(_ string) {
+	_, _ = fmt.Fprintln(os.Stderr, "stack-secrets: failed")
 	os.Exit(1)
 }

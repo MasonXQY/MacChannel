@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Network
 import Security
 
 @testable import MacChannelCore
@@ -105,6 +106,35 @@ struct RuntimeRestartEvidence: Equatable, Sendable {
     let directoryRebuiltFromDurableTrust: Bool
     let oldRuntimeRejectedUse: Bool
     let databaseWasClosedAndReopened: Bool
+}
+
+struct PersonalMeshRestartEvidence: Equatable, Sendable {
+    let identityBefore: DeviceID
+    let identityAfter: DeviceID
+    let identityKeyFingerprintBefore: String
+    let identityKeyFingerprintAfter: String
+    let secretStoreObjectChanged: Bool
+    let trustRepositoryObjectChanged: Bool
+    let candidateDirectoryObjectChanged: Bool
+    let connectorObjectChanged: Bool
+    let databaseWasClosedAndReopened: Bool
+    let trustLoadedFromDisk: Bool
+    let oldRuntimeRejectedUse: Bool
+}
+
+struct PersonalMeshResumeEvidence: Equatable, Sendable {
+    let acceptedBytes: Int64
+    let acceptedMapChunkCount: Int
+    let newConnectionWireBytes: Int64
+    let maximumPermittedWireBytes: Int64
+    let newConnectionCount: Int
+
+    var provesNoConfirmedPayloadWasRetransmitted: Bool {
+        acceptedBytes > 0
+            && acceptedMapChunkCount > 0
+            && newConnectionCount > 0
+            && newConnectionWireBytes <= maximumPermittedWireBytes
+    }
 }
 
 struct TransferFailureEvidence: Equatable, Sendable {
@@ -954,7 +984,7 @@ final class TwoClientHarness: @unchecked Sendable {
         guard let senderPhase else { throw TwoClientHarnessError.missingTransfer }
         let failure = await results.failure(for: transfer)
         let receiveError: ReceiveStoreError?
-        if case let .receiveStore(error) = failure {
+        if case .receiveStore(let error) = failure {
             receiveError = error
         } else {
             receiveError = nil
@@ -1762,4 +1792,915 @@ extension SHA256 {
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
+}
+
+final class PersonalMeshHarness: @unchecked Sendable {
+    let sender: HarnessSender
+    let receiverID: DeviceID
+    let senderID: DeviceID
+    let root: URL
+    let senderRoot: URL
+    let receiverRoot: URL
+    private(set) var senderDatabase: TransferDatabase
+    let receiverDatabase: TransferDatabase
+    let senderDownloadRoot: URL
+    let receiverDownloadRoot: URL
+    let thirdID: DeviceID?
+    let thirdDownloadRoot: URL?
+    let hasIndependentClientRootsAndDatabases: Bool
+
+    private var connector: PersonalMeshRecordingConnector
+    private let network: PersonalMeshLoopbackNetwork
+    private var senderTrust: TrustRepository
+    private var senderTrustStore: AuthenticatedTrustSnapshotStore<FileSecretStore>
+    private var senderSecretStore: FileSecretStore
+    private var senderIdentity: DeviceIdentity
+    private var coordinator: TransferCoordinator
+    private let incoming: IncomingTransferListener
+    private let source: MeshTransferConnectionSource
+    private var senderRegistry: MeshConnectionRegistry
+    private let receiverRegistry: MeshConnectionRegistry
+    private let results: PersonalMeshReceiveResults
+    private let cleanupState = PersonalMeshCleanupState()
+    private let thirdIncoming: IncomingTransferListener?
+    private let thirdSource: MeshTransferConnectionSource?
+    private let thirdRegistry: MeshConnectionRegistry?
+    private let thirdDatabase: TransferDatabase?
+    private let candidateValues: [DeviceID: MeshPeerCandidate]
+    private let routeValues: [String: TailscaleConnectionKind]
+    private var candidateDirectory: PersonalMeshCandidates
+    private var runtimeLease: PersonalMeshRuntimeLease
+    private let resumeRecorder: PersonalMeshResumeRecorder
+
+    init(
+        capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
+        maximumConnectionAttempts: Int = 3,
+        additionalOnlineClient: Bool = false
+    ) async throws {
+        root = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: FileManager.default.temporaryDirectory,
+            create: true
+        ).standardizedFileURL
+        senderRoot = root.appendingPathComponent("sender", isDirectory: true)
+        receiverRoot = root.appendingPathComponent("receiver", isDirectory: true)
+        senderDownloadRoot = senderRoot.appendingPathComponent("downloads", isDirectory: true)
+        receiverDownloadRoot = receiverRoot.appendingPathComponent("downloads", isDirectory: true)
+        for directory in [senderDownloadRoot, receiverDownloadRoot] {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+        }
+
+        let senderSecrets = try FileSecretStore(
+            root: senderRoot.appendingPathComponent("secrets", isDirectory: true)
+        )
+        let receiverSecrets = try FileSecretStore(
+            root: receiverRoot.appendingPathComponent("secrets", isDirectory: true)
+        )
+        let senderIdentity = try DeviceIdentity.loadOrCreate(keychain: senderSecrets)
+        let receiverIdentity = try DeviceIdentity.loadOrCreate(keychain: receiverSecrets)
+        self.senderIdentity = senderIdentity
+        senderSecretStore = senderSecrets
+        senderID = senderIdentity.id
+        receiverID = receiverIdentity.id
+
+        let senderTrustStore = AuthenticatedTrustSnapshotStore(
+            url: senderRoot.appendingPathComponent("trust.json"),
+            secrets: senderSecrets
+        )
+        let receiverTrustStore = AuthenticatedTrustSnapshotStore(
+            url: receiverRoot.appendingPathComponent("trust.json"),
+            secrets: receiverSecrets
+        )
+        let senderTrust = try await senderTrustStore.load(identity: senderIdentity)
+        let receiverTrust = try await receiverTrustStore.load(identity: receiverIdentity)
+        self.senderTrustStore = senderTrustStore
+        self.senderTrust = senderTrust
+        let senderAuthorization = try SignedTrustRecord.authorizing(
+            receiverIdentity,
+            signedBy: senderIdentity,
+            timestamp: Date(timeIntervalSince1970: 10_000)
+        )
+        let receiverAuthorization = try SignedTrustRecord.authorizing(
+            senderIdentity,
+            signedBy: receiverIdentity,
+            timestamp: Date(timeIntervalSince1970: 10_000)
+        )
+        try await senderTrust.commitBilateralPairing(
+            localAuthorization: senderAuthorization,
+            peerAuthorization: receiverAuthorization
+        )
+        try await receiverTrust.commitBilateralPairing(
+            localAuthorization: receiverAuthorization,
+            peerAuthorization: senderAuthorization
+        )
+
+        let thirdIdentity: DeviceIdentity?
+        let thirdTrust: TrustRepository?
+        let thirdRoot: URL?
+        if additionalOnlineClient {
+            let thirdClientRoot = root.appendingPathComponent("third", isDirectory: true)
+            let downloads = thirdClientRoot.appendingPathComponent("downloads", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: downloads,
+                withIntermediateDirectories: true
+            )
+            let secrets = try FileSecretStore(
+                root: thirdClientRoot.appendingPathComponent("secrets", isDirectory: true)
+            )
+            let identity = try DeviceIdentity.loadOrCreate(keychain: secrets)
+            let trust = try TrustRepository(
+                ownerIdentity: identity,
+                trustStore: TrustStore(owner: identity.id),
+                persistedGeneration: 0
+            )
+            let senderToThird = try await senderTrust.prepareAuthorization(
+                subject: identity.id,
+                subjectPublicKey: identity.publicKey.rawRepresentation,
+                timestamp: Date(timeIntervalSince1970: 10_001)
+            )
+            let thirdToSender = try await trust.prepareAuthorization(
+                subject: senderIdentity.id,
+                subjectPublicKey: senderIdentity.publicKey.rawRepresentation,
+                timestamp: Date(timeIntervalSince1970: 10_001)
+            )
+            try await senderTrust.commitBilateralPairing(
+                localAuthorization: senderToThird,
+                peerAuthorization: thirdToSender
+            )
+            try await trust.commitBilateralPairing(
+                localAuthorization: thirdToSender,
+                peerAuthorization: senderToThird
+            )
+            thirdIdentity = identity
+            thirdTrust = trust
+            thirdRoot = thirdClientRoot
+            thirdID = identity.id
+            thirdDownloadRoot = downloads
+        } else {
+            thirdIdentity = nil
+            thirdTrust = nil
+            thirdRoot = nil
+            thirdID = nil
+            thirdDownloadRoot = nil
+        }
+        try await senderTrustStore.persistLatest(from: senderTrust)
+        try await receiverTrustStore.persistLatest(from: receiverTrust)
+
+        let senderEndpoint = NWEndpoint.hostPort(host: "100.64.0.1", port: 51_338)
+        let receiverEndpoint = NWEndpoint.hostPort(host: "100.64.0.2", port: 51_338)
+        var candidateValues: [DeviceID: MeshPeerCandidate] = [
+            senderIdentity.id: MeshPeerCandidate(
+                nodeID: "sender-node",
+                endpoint: senderEndpoint,
+                probeNonce: Data(repeating: 1, count: 32),
+                deviceIDHash: MeshPeerDirectory.deviceIDHash(for: senderIdentity.id),
+                displayName: "Sender"
+            ),
+            receiverIdentity.id: MeshPeerCandidate(
+                nodeID: "receiver-node",
+                endpoint: receiverEndpoint,
+                probeNonce: Data(repeating: 2, count: 32),
+                deviceIDHash: MeshPeerDirectory.deviceIDHash(for: receiverIdentity.id),
+                displayName: "Receiver"
+            ),
+        ]
+        var routeValues: [String: TailscaleConnectionKind] = [
+            "sender-node": .direct,
+            "receiver-node": .direct,
+        ]
+        let thirdEndpoint = NWEndpoint.hostPort(host: "100.64.0.3", port: 51_338)
+        if let thirdIdentity {
+            candidateValues[thirdIdentity.id] = MeshPeerCandidate(
+                nodeID: "third-node",
+                endpoint: thirdEndpoint,
+                probeNonce: Data(repeating: 3, count: 32),
+                deviceIDHash: MeshPeerDirectory.deviceIDHash(for: thirdIdentity.id),
+                displayName: "Third"
+            )
+            routeValues["third-node"] = .direct
+        }
+        let candidates = PersonalMeshCandidates(candidateValues)
+        let routes = PersonalMeshRoutes(routeValues)
+        self.candidateValues = candidateValues
+        self.routeValues = routeValues
+        candidateDirectory = candidates
+        let listenerTransport = PersonalMeshListenerTransport()
+        let listener = MeshConnectionListener(transport: listenerTransport)
+        try await listener.start()
+        let thirdListenerTransport = additionalOnlineClient ? PersonalMeshListenerTransport() : nil
+        let thirdListener = thirdListenerTransport.map { MeshConnectionListener(transport: $0) }
+        if let thirdListener { try await thirdListener.start() }
+        var destinations = [
+            PersonalMeshLoopbackNetwork.key(receiverEndpoint): listenerTransport
+        ]
+        if let thirdListenerTransport {
+            destinations[PersonalMeshLoopbackNetwork.key(thirdEndpoint)] = thirdListenerTransport
+        }
+        let network = PersonalMeshLoopbackNetwork(
+            destinations: destinations
+        )
+        self.network = network
+        let runtimeLease = PersonalMeshRuntimeLease()
+        self.runtimeLease = runtimeLease
+        resumeRecorder = PersonalMeshResumeRecorder(network: network)
+        senderRegistry = MeshConnectionRegistry(trustRepository: senderTrust)
+        receiverRegistry = MeshConnectionRegistry(trustRepository: receiverTrust)
+        let productionConnector = MeshTransferConnector(
+            identity: senderIdentity,
+            trustRepository: senderTrust,
+            directory: candidates,
+            routes: routes,
+            opener: network,
+            registry: senderRegistry
+        )
+        connector = PersonalMeshRecordingConnector(
+            base: productionConnector,
+            network: network,
+            lease: runtimeLease
+        )
+        source = MeshTransferConnectionSource(
+            listener: listener,
+            identity: receiverIdentity,
+            trustRepository: receiverTrust,
+            directory: candidates,
+            routes: routes,
+            registry: receiverRegistry
+        )
+
+        senderDatabase = try TransferDatabase(
+            url: senderRoot.appendingPathComponent("history.sqlite")
+        )
+        receiverDatabase = try TransferDatabase(
+            url: receiverRoot.appendingPathComponent("history.sqlite")
+        )
+        coordinator = try await TransferCoordinator.restoring(
+            connector: connector,
+            database: senderDatabase,
+            outgoingDirectory: senderRoot.appendingPathComponent("outgoing", isDirectory: true),
+            maximumConnectionAttempts: maximumConnectionAttempts,
+            persistenceRetryDelay: .milliseconds(20),
+            resumeObserver: resumeRecorder
+        )
+        sender = HarnessSender(coordinator: coordinator)
+        results = PersonalMeshReceiveResults()
+        incoming = IncomingTransferListener(
+            source: source,
+            policy: ReceivePolicy(trustedSources: [senderIdentity.id]),
+            directories: DownloadDirectory(globalDirectory: receiverDownloadRoot),
+            database: receiverDatabase,
+            incomingDirectory: receiverRoot.appendingPathComponent("incoming", isDirectory: true),
+            capacity: capacity,
+            inactivityTimeout: .seconds(30),
+            onReceiveFinished: { [results] result in await results.record(result) },
+            onReceiveFailed: { [results] transferID, failure in
+                await results.record(failure, transferID: transferID)
+            }
+        )
+        await incoming.start()
+
+        if let thirdIdentity, let thirdTrust, let thirdRoot, let thirdListener {
+            let registry = MeshConnectionRegistry(trustRepository: thirdTrust)
+            let source = MeshTransferConnectionSource(
+                listener: thirdListener,
+                identity: thirdIdentity,
+                trustRepository: thirdTrust,
+                directory: candidates,
+                routes: routes,
+                registry: registry
+            )
+            let database = try TransferDatabase(
+                url: thirdRoot.appendingPathComponent("history.sqlite")
+            )
+            let incoming = IncomingTransferListener(
+                source: source,
+                policy: ReceivePolicy(trustedSources: [senderIdentity.id]),
+                directories: DownloadDirectory(
+                    globalDirectory: thirdRoot.appendingPathComponent(
+                        "downloads",
+                        isDirectory: true
+                    )
+                ),
+                database: database,
+                incomingDirectory: thirdRoot.appendingPathComponent("incoming", isDirectory: true),
+                inactivityTimeout: .seconds(30)
+            )
+            thirdRegistry = registry
+            thirdSource = source
+            thirdDatabase = database
+            thirdIncoming = incoming
+            await incoming.start()
+        } else {
+            thirdRegistry = nil
+            thirdSource = nil
+            thirdDatabase = nil
+            thirdIncoming = nil
+        }
+        hasIndependentClientRootsAndDatabases =
+            senderRoot != receiverRoot
+            && senderDatabase !== receiverDatabase
+            && senderIdentity.id != receiverIdentity.id
+        await Task.yield()
+    }
+
+    func makeDeterministicFile(
+        size: Int,
+        named name: String = "personal-mesh.bin"
+    ) throws -> URL {
+        guard size >= 0 else { throw TwoClientHarnessError.fileGenerationFailed }
+        let directory = senderDownloadRoot.appendingPathComponent("sources", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(name)
+        _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        var blockBytes: [UInt8] = []
+        blockBytes.reserveCapacity(64 * 1_024)
+        for index in 0..<(64 * 1_024) {
+            blockBytes.append(UInt8((index &* 31 &+ 17) % 251))
+        }
+        let block = Data(blockBytes)
+        var remaining = size
+        while remaining > 0 {
+            let count = min(remaining, block.count)
+            try handle.write(contentsOf: count == block.count ? block : Data(block.prefix(count)))
+            remaining -= count
+        }
+        try handle.synchronize()
+        return url
+    }
+
+    func receivedFile(named name: String) -> URL {
+        receiverDownloadRoot.appendingPathComponent(name)
+    }
+
+    func makeDeterministicDirectory(named name: String = "personal-folder") throws -> URL {
+        let directory =
+            senderDownloadRoot
+            .appendingPathComponent("sources", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+        let nested = directory.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        _ = try makeDeterministicFile(size: 512 * 1_024, named: "temporary-payload.bin")
+        let temporary =
+            senderDownloadRoot
+            .appendingPathComponent("sources", isDirectory: true)
+            .appendingPathComponent("temporary-payload.bin")
+        try FileManager.default.moveItem(
+            at: temporary,
+            to: nested.appendingPathComponent("payload.bin")
+        )
+        try Data("个人网络".utf8).write(to: directory.appendingPathComponent("说明.txt"))
+        return directory
+    }
+
+    func waitForCompletion(
+        _ transfer: TransferID,
+        timeout: Duration = .seconds(30)
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if let snapshot = await sender.snapshot(for: transfer) {
+                switch snapshot.phase {
+                case .completed:
+                    if await results.result(for: transfer) != nil { return }
+                case .failed, .cancelled:
+                    throw TwoClientHarnessError.transferFailed(transfer)
+                default:
+                    break
+                }
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw TwoClientHarnessError.timedOut(transfer)
+    }
+
+    func actualRoutes() async -> [ConnectionRoute] { await connector.routes() }
+
+    func waitForFailure(
+        _ transfer: TransferID,
+        timeout: Duration = .seconds(30)
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while ContinuousClock.now < deadline {
+            if let snapshot = await sender.snapshot(for: transfer) {
+                if snapshot.phase == .failed { return }
+                if snapshot.phase == .completed || snapshot.phase == .cancelled {
+                    throw TwoClientHarnessError.transferFailed(transfer)
+                }
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw TwoClientHarnessError.timedOut(transfer)
+    }
+
+    func receiveFailure(for transfer: TransferID) async -> IncomingTransferFailure? {
+        await results.failure(for: transfer)
+    }
+
+    func makeReceiverDirectoryUnwritable() throws {
+        guard chmod(receiverDownloadRoot.path, S_IRUSR | S_IXUSR) == 0 else {
+            throw TwoClientHarnessError.fileGenerationFailed
+        }
+    }
+
+    func restoreReceiverDirectoryPermissions() throws {
+        guard chmod(receiverDownloadRoot.path, S_IRWXU) == 0 else {
+            throw TwoClientHarnessError.fileGenerationFailed
+        }
+    }
+
+    func revokeReceiverFromSender() async throws {
+        _ = try await senderTrust.revoke(receiverID)
+    }
+
+    func tamperNextCiphertext() async { await network.tamperNextCiphertext() }
+    func tamperedCiphertextCount() async -> Int { await network.tamperedCiphertextCount() }
+
+    func thirdReceivedEntries() throws -> [String] {
+        guard let thirdDownloadRoot else { return [] }
+        return try FileManager.default.contentsOfDirectory(atPath: thirdDownloadRoot.path)
+            .filter { !$0.hasPrefix(".") }
+    }
+
+    func cutNetwork(afterBytes: Int64) async throws -> NetworkInterruptionEvidence {
+        guard let transfer = await sender.latestTransferID else {
+            throw TwoClientHarnessError.missingTransfer
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+        var senderOffset: UInt64 = 0
+        var receiverOffset: UInt64 = 0
+        while ContinuousClock.now < deadline {
+            senderOffset =
+                try await senderDatabase
+                .history(limit: 200)
+                .first(where: { $0.id == transfer })?.completedBytes ?? 0
+            receiverOffset =
+                try await receiverDatabase
+                .history(limit: 200)
+                .first(where: { $0.id == transfer })?.completedBytes ?? 0
+            if senderOffset >= UInt64(afterBytes), receiverOffset >= UInt64(afterBytes) { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        guard senderOffset >= UInt64(afterBytes), receiverOffset >= UInt64(afterBytes),
+            let connectionID = await network.latestConnectionID()
+        else { throw TwoClientHarnessError.interruptionDidNotOccur }
+        let connectionCount = await network.connectionCount()
+        let closed = await network.interrupt()
+        guard closed > 0 else { throw TwoClientHarnessError.interruptionDidNotOccur }
+        return NetworkInterruptionEvidence(
+            transferID: transfer,
+            senderDurableOffset: Int64(senderOffset),
+            receiverDurableOffset: Int64(receiverOffset),
+            closedChannelCount: closed,
+            connectionCount: connectionCount,
+            connectionInstanceID: connectionID
+        )
+    }
+
+    func restartSender() async throws -> PersonalMeshRestartEvidence {
+        let identityBefore = senderIdentity.id
+        let fingerprintBefore = Self.keyFingerprint(senderIdentity)
+        let oldSecretID = ObjectIdentifier(senderSecretStore)
+        let oldTrustID = ObjectIdentifier(senderTrust)
+        let oldDirectoryID = ObjectIdentifier(candidateDirectory)
+        let oldConnectorID = ObjectIdentifier(connector)
+        let oldConnector = connector
+
+        await runtimeLease.retire()
+        await coordinator.shutdownForRestart()
+        await senderRegistry.stop()
+        try await senderDatabase.close()
+
+        let reopenedSecrets = try FileSecretStore(
+            root: senderRoot.appendingPathComponent("secrets", isDirectory: true)
+        )
+        let reopenedIdentity = try DeviceIdentity.loadOrCreate(keychain: reopenedSecrets)
+        let reopenedTrustStore = AuthenticatedTrustSnapshotStore(
+            url: senderRoot.appendingPathComponent("trust.json"),
+            secrets: reopenedSecrets
+        )
+        let reopenedTrust = try await reopenedTrustStore.load(identity: reopenedIdentity)
+        let trustLoaded = await reopenedTrust.publicKey(for: receiverID) != nil
+        guard reopenedIdentity.id == identityBefore, trustLoaded else {
+            throw TwoClientHarnessError.restartUnsupported
+        }
+        let reopenedDirectory = PersonalMeshCandidates(candidateValues)
+        let reopenedRoutes = PersonalMeshRoutes(routeValues)
+        let reopenedRegistry = MeshConnectionRegistry(trustRepository: reopenedTrust)
+        let productionConnector = MeshTransferConnector(
+            identity: reopenedIdentity,
+            trustRepository: reopenedTrust,
+            directory: reopenedDirectory,
+            routes: reopenedRoutes,
+            opener: network,
+            registry: reopenedRegistry
+        )
+        let reopenedLease = PersonalMeshRuntimeLease()
+        let reopenedConnector = PersonalMeshRecordingConnector(
+            base: productionConnector,
+            network: network,
+            lease: reopenedLease
+        )
+        let reopenedDatabase = try TransferDatabase(
+            url: senderRoot.appendingPathComponent("history.sqlite")
+        )
+        await network.restore()
+        let restored = try await TransferCoordinator.restoring(
+            connector: reopenedConnector,
+            database: reopenedDatabase,
+            outgoingDirectory: senderRoot.appendingPathComponent("outgoing", isDirectory: true),
+            maximumConnectionAttempts: 8,
+            persistenceRetryDelay: .milliseconds(20),
+            resumeObserver: resumeRecorder
+        )
+
+        senderSecretStore = reopenedSecrets
+        senderIdentity = reopenedIdentity
+        senderTrustStore = reopenedTrustStore
+        senderTrust = reopenedTrust
+        candidateDirectory = reopenedDirectory
+        senderRegistry = reopenedRegistry
+        runtimeLease = reopenedLease
+        connector = reopenedConnector
+        senderDatabase = reopenedDatabase
+        coordinator = restored
+        await sender.install(restored)
+
+        let oldRuntimeRejectedUse: Bool
+        do {
+            try await oldConnector.requireActive()
+            oldRuntimeRejectedUse = false
+        } catch TwoClientHarnessError.runtimeRetired {
+            oldRuntimeRejectedUse = true
+        }
+        return PersonalMeshRestartEvidence(
+            identityBefore: identityBefore,
+            identityAfter: reopenedIdentity.id,
+            identityKeyFingerprintBefore: fingerprintBefore,
+            identityKeyFingerprintAfter: Self.keyFingerprint(reopenedIdentity),
+            secretStoreObjectChanged: oldSecretID != ObjectIdentifier(reopenedSecrets),
+            trustRepositoryObjectChanged: oldTrustID != ObjectIdentifier(reopenedTrust),
+            candidateDirectoryObjectChanged: oldDirectoryID != ObjectIdentifier(reopenedDirectory),
+            connectorObjectChanged: oldConnectorID != ObjectIdentifier(reopenedConnector),
+            databaseWasClosedAndReopened: true,
+            trustLoadedFromDisk: trustLoaded,
+            oldRuntimeRejectedUse: oldRuntimeRejectedUse
+        )
+    }
+
+    func resumeEvidence(
+        after interruption: NetworkInterruptionEvidence,
+        totalPayloadBytes: Int64
+    ) async throws -> PersonalMeshResumeEvidence {
+        let wire = await network.wireEvidence(afterConnectionCount: interruption.connectionCount)
+        let negotiations = await resumeRecorder.values(
+            transferID: interruption.transferID,
+            connectionIDs: Set(wire.map(\.id))
+        )
+        guard !wire.isEmpty, !negotiations.isEmpty else {
+            throw TwoClientHarnessError.interruptionDidNotOccur
+        }
+        let maximumChunk = Int64(TransferProtocolLimits.maximumChunkBytes)
+        let maximumFrame = Int64(TransferProtocolLimits.maximumWireFrameBytes)
+        var maximumWire: Int64 = 0
+        for item in wire {
+            guard let negotiation = negotiations.first(where: { $0.connectionID == item.id }) else {
+                maximumWire += maximumFrame * 2
+                continue
+            }
+            let accepted = Int64(negotiation.negotiation.acceptedBytes)
+            let remaining = max(0, totalPayloadBytes - accepted)
+            let chunks = (remaining + maximumChunk - 1) / maximumChunk
+            maximumWire += remaining + chunks * (84 + 33) + maximumFrame * 6
+        }
+        return PersonalMeshResumeEvidence(
+            acceptedBytes: Int64(negotiations.map(\.negotiation.acceptedBytes).min() ?? 0),
+            acceptedMapChunkCount: negotiations.map(\.negotiation.resumeMap.chunkCount).min() ?? 0,
+            newConnectionWireBytes: wire.reduce(0) { $0 + $1.bytes },
+            maximumPermittedWireBytes: maximumWire,
+            newConnectionCount: wire.count
+        )
+    }
+
+    private static func keyFingerprint(_ identity: DeviceIdentity) -> String {
+        SHA256.hash(data: identity.publicKey.rawRepresentation)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    func shutdownAndRemoveRoot() async throws {
+        guard await cleanupState.begin() else { return }
+        await incoming.stop()
+        await source.stop()
+        await thirdIncoming?.stop()
+        await thirdSource?.stop()
+        await coordinator.shutdownForRestart()
+        await senderRegistry.stop()
+        await receiverRegistry.stop()
+        await thirdRegistry?.stop()
+        try await senderDatabase.close()
+        try await receiverDatabase.close()
+        try await thirdDatabase?.close()
+        if FileManager.default.fileExists(atPath: root.path) {
+            try FileManager.default.removeItem(at: root)
+        }
+        guard !FileManager.default.fileExists(atPath: root.path) else {
+            throw TwoClientHarnessError.fileGenerationFailed
+        }
+    }
+}
+
+private actor PersonalMeshReceiveResults {
+    private var values: [TransferID: TransferReceiveResult] = [:]
+    private var failures: [TransferID: IncomingTransferFailure] = [:]
+
+    func record(_ result: TransferReceiveResult?) {
+        guard let result else { return }
+        values[result.transferID] = result
+    }
+
+    func record(_ failure: IncomingTransferFailure, transferID: TransferID) {
+        failures[transferID] = failure
+    }
+
+    func result(for transferID: TransferID) -> TransferReceiveResult? { values[transferID] }
+    func failure(for transferID: TransferID) -> IncomingTransferFailure? { failures[transferID] }
+}
+
+private actor PersonalMeshCleanupState {
+    private var started = false
+    func begin() -> Bool {
+        guard !started else { return false }
+        started = true
+        return true
+    }
+}
+
+private actor PersonalMeshRecordingConnector: TransferAwarePeerConnector {
+    private let base: MeshTransferConnector
+    private let network: PersonalMeshLoopbackNetwork
+    private let lease: PersonalMeshRuntimeLease
+    private var establishedRoutes: [ConnectionRoute] = []
+
+    init(
+        base: MeshTransferConnector,
+        network: PersonalMeshLoopbackNetwork,
+        lease: PersonalMeshRuntimeLease
+    ) {
+        self.base = base
+        self.network = network
+        self.lease = lease
+    }
+
+    func connect(to device: DeviceID) async throws -> any SecureChannel {
+        try await lease.requireActive()
+        let channel = try await base.connect(to: device)
+        await network.markLatestSecure()
+        establishedRoutes.append(channel.route)
+        return channel
+    }
+
+    func connect(to device: DeviceID, transferID: TransferID) async throws -> any SecureChannel {
+        try await lease.requireActive()
+        let channel = try await base.connect(to: device, transferID: transferID)
+        await network.markLatestSecure()
+        establishedRoutes.append(channel.route)
+        return channel
+    }
+
+    func routes() -> [ConnectionRoute] { establishedRoutes }
+    func requireActive() async throws { try await lease.requireActive() }
+}
+
+private actor PersonalMeshRuntimeLease {
+    private var active = true
+    func requireActive() throws {
+        guard active else { throw TwoClientHarnessError.runtimeRetired }
+    }
+    func retire() { active = false }
+}
+
+private actor PersonalMeshResumeRecorder: TransferResumeNegotiationObserving {
+    struct Entry: Sendable {
+        let connectionID: UUID
+        let negotiation: TransferResumeNegotiation
+    }
+
+    private let network: PersonalMeshLoopbackNetwork
+    private var entries: [Entry] = []
+
+    init(network: PersonalMeshLoopbackNetwork) { self.network = network }
+
+    func recordResumeNegotiation(_ value: TransferResumeNegotiation) async {
+        guard let connectionID = await network.latestConnectionID() else { return }
+        entries.append(Entry(connectionID: connectionID, negotiation: value))
+    }
+
+    func values(transferID: TransferID, connectionIDs: Set<UUID>) -> [Entry] {
+        entries.filter {
+            $0.negotiation.transferID == transferID && connectionIDs.contains($0.connectionID)
+        }
+    }
+}
+
+private actor PersonalMeshCandidates: MeshPeerCandidateProviding {
+    private let values: [DeviceID: MeshPeerCandidate]
+    init(_ values: [DeviceID: MeshPeerCandidate]) { self.values = values }
+    func candidate(for device: DeviceID) -> MeshPeerCandidate? { values[device] }
+}
+
+private actor PersonalMeshRoutes: MeshRouteEvidenceProviding {
+    private let values: [String: TailscaleConnectionKind]
+    init(_ values: [String: TailscaleConnectionKind]) { self.values = values }
+    func connectionKind(to nodeID: String) -> TailscaleConnectionKind { values[nodeID] ?? .unknown }
+}
+
+private actor PersonalMeshListenerTransport: MeshListenerTransport {
+    private var callback: (@Sendable (any MeshByteConnection) -> Void)?
+
+    func start(
+        binding: MeshListenerBinding,
+        onConnection: @escaping @Sendable (any MeshByteConnection) -> Void
+    ) {
+        callback = onConnection
+    }
+
+    func stop() { callback = nil }
+    func inject(_ connection: any MeshByteConnection) { callback?(connection) }
+}
+
+private actor PersonalMeshLoopbackNetwork: MeshTransferConnectionOpening {
+    struct WireEvidence: Sendable {
+        let id: UUID
+        let bytes: Int64
+    }
+
+    private let destinations: [String: PersonalMeshListenerTransport]
+    private var links: [UUID: PersonalMeshMemoryLink] = [:]
+    private var connectionOrder: [UUID] = []
+    private var secureConnections: Set<UUID> = []
+    private var shouldTamperNextCiphertext = false
+    private var ciphertextMutations = 0
+    private var bytesByConnection: [UUID: Int64] = [:]
+    private var online = true
+
+    init(destinations: [String: PersonalMeshListenerTransport]) {
+        self.destinations = destinations
+    }
+
+    static func key(_ endpoint: NWEndpoint) -> String { String(describing: endpoint) }
+
+    func open(endpoint: NWEndpoint) async throws -> any MeshByteConnection {
+        guard online else { throw MeshTransferConnectionError.unavailablePeer }
+        guard let destination = destinations[Self.key(endpoint)] else {
+            throw MeshTransferConnectionError.unavailablePeer
+        }
+        let identifier = UUID()
+        let link = PersonalMeshMemoryLink(identifier: identifier, network: self)
+        links[identifier] = link
+        connectionOrder.append(identifier)
+        bytesByConnection[identifier] = 0
+        let endpoints = await link.endpoints()
+        await destination.inject(endpoints.receiver)
+        return endpoints.sender
+    }
+
+    func markLatestSecure() {
+        guard let latest = connectionOrder.last else { return }
+        secureConnections.insert(latest)
+    }
+
+    func tamperNextCiphertext() { shouldTamperNextCiphertext = true }
+
+    func transform(_ data: Data, connection: UUID, senderSide: Bool) -> Data {
+        if senderSide { bytesByConnection[connection, default: 0] += Int64(data.count) }
+        guard senderSide,
+            secureConnections.contains(connection),
+            shouldTamperNextCiphertext,
+            !data.isEmpty
+        else { return data }
+        shouldTamperNextCiphertext = false
+        ciphertextMutations += 1
+        var mutated = data
+        mutated[mutated.index(before: mutated.endIndex)] ^= 0x01
+        return mutated
+    }
+
+    func tamperedCiphertextCount() -> Int { ciphertextMutations }
+
+    func latestConnectionID() -> UUID? { connectionOrder.last }
+    func connectionCount() -> Int { connectionOrder.count }
+
+    func interrupt() async -> Int {
+        online = false
+        let current = Array(links.values)
+        for link in current { await link.closeBoth() }
+        return current.count
+    }
+
+    func restore() { online = true }
+
+    func wireEvidence(afterConnectionCount count: Int) -> [WireEvidence] {
+        guard count >= 0, count <= connectionOrder.count else { return [] }
+        return connectionOrder.dropFirst(count).map {
+            WireEvidence(id: $0, bytes: bytesByConnection[$0] ?? 0)
+        }
+    }
+}
+
+private actor PersonalMeshMemoryLink {
+    private let identifier: UUID
+    private let network: PersonalMeshLoopbackNetwork
+    private var buffers: [Bool: Data] = [false: Data(), true: Data()]
+    private var waiters: [Bool: [PersonalMeshMemoryWaiter]] = [false: [], true: []]
+    private var closed: Set<Bool> = []
+
+    init(identifier: UUID, network: PersonalMeshLoopbackNetwork) {
+        self.identifier = identifier
+        self.network = network
+    }
+
+    func endpoints() -> (
+        sender: PersonalMeshMemoryConnection,
+        receiver: PersonalMeshMemoryConnection
+    ) {
+        (
+            PersonalMeshMemoryConnection(side: false, link: self),
+            PersonalMeshMemoryConnection(side: true, link: self)
+        )
+    }
+
+    func send(_ data: Data, side: Bool) async throws {
+        guard !closed.contains(side), !closed.contains(!side) else {
+            throw MeshWireError.connectionClosed
+        }
+        try await Task.sleep(for: .microseconds(250))
+        let data = await network.transform(data, connection: identifier, senderSide: !side)
+        let target = !side
+        buffers[target, default: Data()].append(data)
+        if let waiter = waiters[target]?.first {
+            waiters[target]?.removeFirst()
+            waiter.continuation.resume(returning: take(side: target, maximum: waiter.maximum)!)
+        }
+    }
+
+    func receive(side: Bool, maximum: Int) async throws -> Data {
+        if let bytes = take(side: side, maximum: maximum) { return bytes }
+        return try await withCheckedThrowingContinuation { continuation in
+            waiters[side, default: []].append(
+                PersonalMeshMemoryWaiter(maximum: maximum, continuation: continuation)
+            )
+        }
+    }
+
+    func close(side: Bool) {
+        guard closed.insert(side).inserted else { return }
+        for target in [false, true] {
+            let current = waiters[target, default: []]
+            waiters[target] = []
+            for waiter in current {
+                waiter.continuation.resume(throwing: MeshWireError.connectionClosed)
+            }
+        }
+    }
+
+    func closeBoth() {
+        close(side: false)
+        close(side: true)
+    }
+
+    private func take(side: Bool, maximum: Int) -> Data? {
+        guard !buffers[side, default: Data()].isEmpty else {
+            return closed.contains(side) || closed.contains(!side) ? Data() : nil
+        }
+        let count = min(maximum, buffers[side, default: Data()].count)
+        let bytes = Data(buffers[side, default: Data()].prefix(count))
+        buffers[side]?.removeFirst(count)
+        return bytes
+    }
+}
+
+private struct PersonalMeshMemoryWaiter {
+    let maximum: Int
+    let continuation: CheckedContinuation<Data, Error>
+}
+
+private final class PersonalMeshMemoryConnection: MeshByteConnection, @unchecked Sendable {
+    private let side: Bool
+    private let link: PersonalMeshMemoryLink
+
+    init(side: Bool, link: PersonalMeshMemoryLink) {
+        self.side = side
+        self.link = link
+    }
+
+    func send(_ bytes: Data) async throws { try await link.send(bytes, side: side) }
+    func receive(minimum: Int, maximum: Int) async throws -> Data {
+        try await link.receive(side: side, maximum: maximum)
+    }
+    func close() async { await link.close(side: side) }
 }

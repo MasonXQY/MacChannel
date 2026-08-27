@@ -6,9 +6,9 @@ if [[ $# -eq 0 ]]; then
   exit 2
 fi
 
-sensitive='(payload|file_?name|filename|file_?path|filepath|path|content|pairing_?code|private_?key|privatekey|secret|credential|password)'
+sensitive='(payload|file_?name|filename|file_?path|filepath|path|content|pairing_?code|private_?key|privatekey|secret|credential|password|tailscale_?ip|mesh_?ip|magicdns|host_?name|hostname|fingerprint|cli_?stdout|cli_?stderr|command_?stdout|command_?stderr)'
 swift_sink='(^|[^[:alnum:]_])(print|NSLog|os_log)[[:space:]]*\(|Logger\.[[:alnum:]_]+[[:space:]]*\('
-go_sink='(^|[^[:alnum:]_])(log\.(Print|Printf|Println|Fatal|Fatalf|Panic|Panicf)|fmt\.(Print|Printf|Println))[[:space:]]*\('
+go_sink='(^|[^[:alnum:]_])(log\.(Print|Printf|Println|Fatal|Fatalf|Panic|Panicf)|fmt\.(Print|Printf|Println|Fprint|Fprintf|Fprintln))[[:space:]]*\('
 shell_sink='^[[:space:]]*(echo|printf|logger)([[:space:]]|$)'
 found=false
 
@@ -22,7 +22,9 @@ for source_file in "$@"; do
     *.go)
       matches="$(rg -n -U -i --pcre2 "(${go_sink})(?s:.{0,160}?)(${sensitive})(?s:.{0,120}?)\\)" "${source_file}" || true)"
       matches="$(printf '%s\n' "${matches}" \
-        | rg -v '^[0-9]+:[[:space:]]*fmt\.Println\("stack-secrets: persistent material is ready"\)$' || true)"
+        | rg -v '^[0-9]+:[[:space:]]*fmt\.Println\("stack-secrets: persistent material is ready"\)$' \
+        | rg -v '^[0-9]+:[[:space:]]*_, _ = fmt\.Fprintln\(os\.Stderr, "(secret-launcher|stack-secrets): failed"\)$' \
+        || true)"
       ;;
     *.sh)
       matches="$(rg -n -i "(${shell_sink}).*(\\$\\{?${sensitive}|%[a-z].*${sensitive})" "${source_file}" || true)"

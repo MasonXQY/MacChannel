@@ -148,7 +148,7 @@ func prepareCopies(copies []copySpec, uid, gid int) error {
 	return nil
 }
 
-func fatal(message string) {
-	_, _ = fmt.Fprintln(os.Stderr, "secret-launcher:", message)
+func fatal(_ string) {
+	_, _ = fmt.Fprintln(os.Stderr, "secret-launcher: failed")
 	os.Exit(1)
 }
