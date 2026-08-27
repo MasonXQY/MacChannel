@@ -114,14 +114,15 @@ Status: implementation complete; final verification recorded below
   bypass policy, capacity checks, journal validation, collision handling,
   SQLite history, cleanup, or atomic publication.
 - Before asking any source for its stream or next channel, the listener reserves
-  one of four process-wide cleanup permits. A permit travels with its channel
-  through the two-active/two-queued listener capacity and is released only after
-  close actually returns. The WebRTC source has no second established-channel
-  buffer and permits at most eight authenticated acceptances in flight, for a
-  documented end-to-end connection bound of 12. At most four additional reader
-  tasks may wait for a permit, and those waiters own no channel or descriptor.
-  Cancellation-insensitive handshake operations are independently capped at
-  eight, so the combined retained connection/operation/waiter bound is 24.
+  one of 34 process-wide retained-channel permits. A permit travels with its
+  channel through the original two-active/32-queued listener capacity and is
+  released only after close actually returns. The WebRTC source has no second
+  established-channel buffer and permits at most eight authenticated
+  acceptances in flight, for a documented end-to-end connection bound of 42.
+  At most four additional reader tasks may wait for a permit, and those waiters
+  own no channel or descriptor. Cancellation-insensitive handshake operations
+  are independently capped at eight, so the combined retained
+  connection/operation/waiter bound is 54.
 - Channel-owning work additionally uses one process-wide resource registry with
   a hard bound of four inbound, four outbound, and eight total. A token is held
   until the protocol runner, connector/handshake, all send/frame operations,
@@ -135,9 +136,10 @@ Status: implementation complete; final verification recorded below
 - Channels rejected before a receive runner exists—including cancellation after
   source yield and before enqueue—retain the same pre-acquired process-wide
   cleanup permit. Admission waiters are shared and bounded across listener
-  instances but hold no channel: when four non-cooperative closes occupy the
-  cap, no fifth source is pulled. Every close uses the permit's same resource
-  token rather than creating a detached close task or channel backlog.
+  instances but hold no channel: when 34 non-cooperative closes occupy retained
+  admission, no 35th source is pulled. Close execution is a separate FIFO
+  executor: four closes run through bounded resource tokens while the remaining
+  30 channels stay in the same 34-permit retained-channel budget.
 - A configurable watchdog (30 seconds by default) covers the receiver challenge
   send, key export, initial offer, and later inbound inactivity. Even a transport
   operation that ignores cancellation cannot retain an incoming slot. Silent
@@ -171,8 +173,9 @@ The implementation was driven by deterministic regressions for:
   conflict re-read recovery, irreversible verification regression rejection,
   late channel-handoff ownership, process restart after the verifying commit
   with present/already-cleaned package states, concrete identity/direction
-  conflicts, a 100-listener cancelled lifecycle stress with only four sources
-  pulled, injected conflict-package deletion failure with in-process retry,
+  conflicts, a 100-listener cancelled lifecycle stress with only 34 sources
+  pulled, a two-active/32-queued burst and four-wide FIFO close drain, injected
+  conflict-package deletion failure with in-process retry,
   same-ID authoritative-row restart cleanup, and crash recovery from the durable
   conflict-cleanup quarantine.
 
@@ -185,16 +188,18 @@ permanent-mismatch, and cross-listener close-admission gaps documented above;
 all three were reproduced with concrete regressions before the final gate. The
 last review then exposed channel-bearing admission waiters and non-durable
 permanent-conflict cleanup; both were reproduced at their process/resource
-boundaries and replaced by pre-yield permits and durable cleanup intent.
+boundaries and replaced by pre-yield permits and durable cleanup intent. A final
+capacity audit restored the original two-active/32-queued receive contract by
+separating the 34 retained-channel permits from the four-wide close executor.
 
 ## Verification
 
-- `swift test --filter TransferCoordinatorTests`: 60 tests, 0 failures.
+- `swift test --filter TransferCoordinatorTests`: 62 tests, 0 failures.
 - `swift test --filter ConnectionCoordinatorTests`: 14 tests, 0 failures.
 - `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
 - `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures.
 - `swift test --filter ReceiveStoreTests`: 64 tests, 0 failures.
-- `swift test`: 283 tests, 0 failures, 0 unexpected failures.
+- `swift test`: 285 tests, 0 failures, 0 unexpected failures.
 - `bash Scripts/build-app.sh`: pass.
 - `swift format lint --recursive --strict Sources Tests`: clean.
 - `git diff --check`: clean.

@@ -20,29 +20,29 @@ public protocol IncomingTransferConnectionSource: Sendable {
     /// Implementations must use a bounded source stream and close every channel
     /// rejected by that stream. Production uses a zero-element handoff buffer.
     /// The listener requests the stream and each next element only after it has
-    /// reserved process-wide cleanup ownership.
+    /// reserved process-wide retained-channel ownership.
     func connections() async -> AsyncThrowingStream<IncomingTransferConnection, Error>
 }
 
 public enum IncomingTransferCapacity {
     public static let maximumActiveTransfers = 2
-    public static let maximumCleanupPermits = 4
-    public static let maximumQueuedConnections =
-        maximumCleanupPermits - maximumActiveTransfers
+    public static let maximumQueuedConnections = 32
     public static let maximumEstablishedConnections =
         maximumActiveTransfers + maximumQueuedConnections
+    public static let maximumAdmittedChannels = maximumEstablishedConnections
+    public static let maximumConcurrentCloseOperations = 4
 
     // WebRTC can additionally have eight authenticated acceptances in flight,
     // but retains no second established-channel queue before this listener. A
-    // cleanup admission is backpressured before the source is pulled.
+    // retained-channel admission is backpressured before the source is pulled.
     public static let maximumUpstreamAcceptances = 8
-    public static let maximumCloseAdmissionWaiters = 4
+    public static let maximumAdmissionWaiters = 4
     public static let maximumDetachedHandshakeOperations = 8
     public static let maximumEndToEndConnections =
         maximumEstablishedConnections + maximumUpstreamAcceptances
     public static let maximumRetainedConnectionsAndOperations =
         maximumEndToEndConnections + maximumDetachedHandshakeOperations
-        + maximumCloseAdmissionWaiters
+        + maximumAdmissionWaiters
 }
 
 /// Runs trusted inbound transfers through `ReceiveSession` and its hardened
@@ -56,6 +56,7 @@ public actor IncomingTransferListener {
     private struct ActiveReceive {
         let transferID: TransferID
         let channel: any SecureChannel
+        let permit: IncomingChannelCloseRegistry.Permit
         let resourceToken: BoundedChannelResourceRegistry.Token
         let task: Task<Void, Never>
     }
@@ -204,13 +205,29 @@ public actor IncomingTransferListener {
         while active.count < IncomingTransferCapacity.maximumActiveTransfers, !pending.isEmpty {
             let admitted = pending.removeFirst()
             let connection = admitted.connection
-            let resourceToken = admitted.permit.resourceToken
-            guard !stopped else {
+            let permit = admitted.permit
+            let resourceToken = await resources.reserveWhenAvailable(
+                .inbound,
+                onReleased: { [weak self, closeRegistry, permit] in
+                    await closeRegistry.activeResourceReleased(permit)
+                    await self?.resourceCapacityReleased()
+                }
+            )
+            guard let resourceToken else {
                 await closeRegistry.close(
                     connection.channel,
-                    permit: admitted.permit,
+                    permit: permit,
                     timeout: inactivityTimeout
                 )
+                continue
+            }
+            guard !stopped else {
+                await resources.beginClose(
+                    connection.channel,
+                    token: resourceToken,
+                    timeout: inactivityTimeout
+                )
+                await resources.runnerReturned(resourceToken)
                 continue
             }
             let token = UUID()
@@ -236,6 +253,7 @@ public actor IncomingTransferListener {
             active[token] = ActiveReceive(
                 transferID: connection.transferID,
                 channel: connection.channel,
+                permit: permit,
                 resourceToken: resourceToken,
                 task: task
             )
@@ -288,6 +306,10 @@ public actor IncomingTransferListener {
         await resources.runnerReturned(token)
     }
 
+    private func resourceCapacityReleased() {
+        schedule()
+    }
+
     private func closeRejected(_ admitted: AdmittedConnection) async {
         await closeRegistry.close(
             admitted.connection.channel,
@@ -300,6 +322,9 @@ public actor IncomingTransferListener {
         let counts = await resources.counts()
         return counts.inbound
     }
+
+    func activeReceiveCount() -> Int { active.count }
+    func queuedConnectionCount() -> Int { pending.count }
 
     private func sourceEnded() {
         readerTask = nil

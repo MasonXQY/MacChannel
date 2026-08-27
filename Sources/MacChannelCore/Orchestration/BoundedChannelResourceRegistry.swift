@@ -26,6 +26,7 @@ actor BoundedChannelResourceRegistry {
     static let shared = BoundedChannelResourceRegistry()
     static let maximumPerDirection = 4
     static let maximumTotal = 8
+    static let maximumWaitingReservations = IncomingTransferCapacity.maximumAdmittedChannels
 
     private struct Reservation {
         let direction: Direction
@@ -39,21 +40,57 @@ actor BoundedChannelResourceRegistry {
     }
 
     private var reservations: [UUID: Reservation] = [:]
+    private struct ReservationWaiter {
+        let direction: Direction
+        let onReleased: @Sendable () async -> Void
+        let continuation: CheckedContinuation<Token, Never>
+    }
+    private var reservationWaiters: [ReservationWaiter] = []
 
     func reserve(
         _ direction: Direction,
         onReleased: @escaping @Sendable () async -> Void
     ) -> Token? {
-        guard reservations.count < Self.maximumTotal,
-            reservations.values.lazy.filter({ $0.direction == direction }).count
-                < Self.maximumPerDirection
-        else { return nil }
+        makeReservation(direction, onReleased: onReleased)
+    }
+
+    /// Waits for the same hard resource bound without allocating an additional
+    /// channel slot. Incoming callers already own one of the process-wide
+    /// retained-channel permits, so this waiter collection is also bounded.
+    func reserveWhenAvailable(
+        _ direction: Direction,
+        onReleased: @escaping @Sendable () async -> Void
+    ) async -> Token? {
+        if let token = makeReservation(direction, onReleased: onReleased) { return token }
+        guard reservationWaiters.count < Self.maximumWaitingReservations else { return nil }
+        return await withCheckedContinuation { continuation in
+            reservationWaiters.append(
+                ReservationWaiter(
+                    direction: direction,
+                    onReleased: onReleased,
+                    continuation: continuation
+                )
+            )
+        }
+    }
+
+    private func makeReservation(
+        _ direction: Direction,
+        onReleased: @escaping @Sendable () async -> Void
+    ) -> Token? {
+        guard canReserve(direction) else { return nil }
         let token = Token(id: UUID())
         reservations[token.id] = Reservation(
             direction: direction,
             onReleased: onReleased
         )
         return token
+    }
+
+    private func canReserve(_ direction: Direction) -> Bool {
+        reservations.count < Self.maximumTotal
+            && reservations.values.lazy.filter({ $0.direction == direction }).count
+                < Self.maximumPerDirection
     }
 
     func beginClose(
@@ -141,49 +178,69 @@ actor BoundedChannelResourceRegistry {
             reservation.retainedOperations == 0
         else { return }
         reservations.removeValue(forKey: token.id)
+        resumeFirstFittingReservationWaiter()
         Task { await reservation.onReleased() }
+    }
+
+    private func resumeFirstFittingReservationWaiter() {
+        guard let index = reservationWaiters.firstIndex(where: { canReserve($0.direction) }) else {
+            return
+        }
+        let waiter = reservationWaiters.remove(at: index)
+        guard let token = makeReservation(waiter.direction, onReleased: waiter.onReleased) else {
+            assertionFailure("A fitting bounded-resource waiter lost its actor-isolated capacity")
+            reservationWaiters.insert(waiter, at: index)
+            return
+        }
+        waiter.continuation.resume(returning: token)
     }
 }
 
-/// Process-wide admission for inbound channels that must be closed before they
-/// ever acquired a receive-runner token. Listener lifecycles share this
-/// backpressure point, and only the global inbound resource cap can start close
-/// work. Readers reserve a token before pulling from their source, so admission
-/// waiters retain no yielded channel and no second close backlog exists.
+/// Process-wide retained-channel admission and bounded inbound-close execution.
+/// Readers reserve one of 34 permits before pulling from their source. The same
+/// permit follows the channel through receive, queue, and close, while at most
+/// four independent resource tokens execute protocol or close operations.
 actor IncomingChannelCloseRegistry {
-    struct Permit: Sendable {
-        let resourceToken: BoundedChannelResourceRegistry.Token
+    struct Permit: Hashable, Sendable {
+        fileprivate let id: UUID
     }
 
     static let shared = IncomingChannelCloseRegistry()
+    static let maximumAdmittedChannels = IncomingTransferCapacity.maximumAdmittedChannels
     static let maximumWaitingReaders = 4
 
     private let resources = BoundedChannelResourceRegistry.shared
     private struct Waiter {
-        let continuation: CheckedContinuation<Void, Never>
+        let continuation: CheckedContinuation<Permit, Never>
     }
+    private struct CloseRequest {
+        let channel: any SecureChannel
+        let permit: Permit
+        let timeout: Duration
+    }
+
+    private var admittedPermits: Set<Permit> = []
     private var admissionWaiters: [Waiter] = []
-    private var capacityGeneration: UInt64 = 0
+    private var closingPermits: Set<Permit> = []
+    private var activeClosePermits: Set<Permit> = []
+    private var closeQueue: [CloseRequest] = []
+    private var closeWorker: Task<Void, Never>?
 
     /// Reserves cleanup ownership before a source is asked for its next
-    /// channel. At most four readers may wait, and those waiters retain no
-    /// transport or file descriptor.
+    /// channel. At most 34 channels and four additional channel-free readers
+    /// may be retained process-wide.
     func acquire() async -> Permit? {
-        while true {
-            guard !Task.isCancelled else {
-                resumeNextWaiter()
-                return nil
-            }
-            let observedGeneration = capacityGeneration
-            if let token = await resources.reserve(.inbound, onReleased: {
-                await IncomingChannelCloseRegistry.shared.resourceCapacityReleased()
-            }) {
-                return Permit(resourceToken: token)
-            }
-            if observedGeneration != capacityGeneration { continue }
-            guard admissionWaiters.count < Self.maximumWaitingReaders else { return nil }
-            await waitForCapacity()
+        guard !Task.isCancelled else { return nil }
+        if admittedPermits.count < Self.maximumAdmittedChannels {
+            return makePermit()
         }
+        guard admissionWaiters.count < Self.maximumWaitingReaders else { return nil }
+        let permit = await waitForCapacity()
+        guard !Task.isCancelled else {
+            releasePermit(permit)
+            return nil
+        }
+        return permit
     }
 
     func close(
@@ -191,30 +248,86 @@ actor IncomingChannelCloseRegistry {
         permit: Permit,
         timeout: Duration
     ) async {
-        await resources.beginClose(channel, token: permit.resourceToken, timeout: timeout)
-        await resources.runnerReturned(permit.resourceToken)
+        guard admittedPermits.contains(permit), closingPermits.insert(permit).inserted else {
+            return
+        }
+        closeQueue.append(CloseRequest(channel: channel, permit: permit, timeout: timeout))
+        scheduleCloseWorker()
     }
 
-    func releaseUnused(_ permit: Permit) async {
-        await resources.finishWithoutClose(permit.resourceToken)
+    func releaseUnused(_ permit: Permit) {
+        guard !closingPermits.contains(permit) else { return }
+        releasePermit(permit)
     }
 
     func waitingReaderCount() -> Int { admissionWaiters.count }
+    func admittedChannelCount() -> Int { admittedPermits.count }
+    func queuedCloseCount() -> Int { closeQueue.count }
+    func activeCloseCount() -> Int { activeClosePermits.count }
 
-    private func waitForCapacity() async {
+    /// Completes ownership for a channel that used its resource token as an
+    /// active receive (including a direct stop-time close).
+    func activeResourceReleased(_ permit: Permit) {
+        guard admittedPermits.contains(permit), !closingPermits.contains(permit) else { return }
+        releasePermit(permit)
+        scheduleCloseWorker()
+    }
+
+    private func makePermit() -> Permit {
+        let permit = Permit(id: UUID())
+        admittedPermits.insert(permit)
+        return permit
+    }
+
+    private func waitForCapacity() async -> Permit {
         await withCheckedContinuation { continuation in
             admissionWaiters.append(Waiter(continuation: continuation))
         }
     }
 
-    private func resourceCapacityReleased() {
-        capacityGeneration &+= 1
-        resumeNextWaiter()
-    }
-
-    private func resumeNextWaiter() {
+    private func releasePermit(_ permit: Permit) {
+        guard admittedPermits.remove(permit) != nil else { return }
+        closingPermits.remove(permit)
+        activeClosePermits.remove(permit)
         guard !admissionWaiters.isEmpty else { return }
         let waiter = admissionWaiters.removeFirst()
-        waiter.continuation.resume()
+        waiter.continuation.resume(returning: makePermit())
+    }
+
+    private func scheduleCloseWorker() {
+        guard closeWorker == nil, !closeQueue.isEmpty else { return }
+        closeWorker = Task { await self.drainCloseQueue() }
+    }
+
+    private func drainCloseQueue() async {
+        defer { closeWorker = nil }
+        while let request = closeQueue.first {
+            guard let resourceToken = await resources.reserveWhenAvailable(
+                .inbound,
+                onReleased: {
+                    await IncomingChannelCloseRegistry.shared.closeResourceReleased(
+                        request.permit
+                    )
+                }
+            ) else { return }
+            guard closeQueue.first?.permit == request.permit else {
+                await resources.finishWithoutClose(resourceToken)
+                continue
+            }
+            closeQueue.removeFirst()
+            activeClosePermits.insert(request.permit)
+            await resources.beginClose(
+                request.channel,
+                token: resourceToken,
+                timeout: request.timeout
+            )
+            await resources.runnerReturned(resourceToken)
+        }
+    }
+
+    private func closeResourceReleased(_ permit: Permit) {
+        guard activeClosePermits.remove(permit) != nil else { return }
+        releasePermit(permit)
+        scheduleCloseWorker()
     }
 }

@@ -784,6 +784,116 @@ final class TransferCoordinatorTests: XCTestCase {
         }
     }
 
+    func testIncomingBurstRetainsTwoActiveAndThirtyTwoQueuedBeforeNextSourcePull()
+        async throws
+    {
+        XCTAssertEqual(IncomingTransferCapacity.maximumActiveTransfers, 2)
+        XCTAssertEqual(IncomingTransferCapacity.maximumQueuedConnections, 32)
+        XCTAssertEqual(IncomingTransferCapacity.maximumEstablishedConnections, 34)
+
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let sourceDevice = DeviceID(rawValue: UUID())
+        let destination = root.appendingPathComponent("downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let gate = CancellationInsensitiveFrameGate()
+        let source = PullCountingIncomingSource(total: 100) { _ in
+            IncomingTransferConnection(
+                source: sourceDevice,
+                transferID: TransferID(rawValue: UUID()),
+                channel: CancellationInsensitiveFramesChannel(gate: gate)
+            )
+        }
+        let listener = IncomingTransferListener(
+            source: source,
+            policy: ReceivePolicy(trustedSources: [sourceDevice]),
+            directories: DownloadDirectory(globalDirectory: destination),
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")),
+            incomingDirectory: root.appendingPathComponent("incoming"),
+            inactivityTimeout: .seconds(30)
+        )
+
+        await listener.start()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await source.pullCount() < IncomingTransferCapacity.maximumAdmittedChannels {
+            guard ContinuousClock.now < deadline else {
+                let pulls = await source.pullCount()
+                XCTFail("pulled=\(pulls)")
+                await gate.release()
+                await listener.stop()
+                return
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try await gate.waitUntilStarted(2)
+        try await Task.sleep(for: .milliseconds(100))
+        let pullsAtCapacity = await source.pullCount()
+        let activeReaders = await gate.startedCount()
+        let activeTransfers = await listener.activeReceiveCount()
+        let queuedConnections = await listener.queuedConnectionCount()
+        XCTAssertEqual(pullsAtCapacity, IncomingTransferCapacity.maximumAdmittedChannels)
+        XCTAssertEqual(activeReaders, 2)
+        XCTAssertEqual(activeTransfers, IncomingTransferCapacity.maximumActiveTransfers)
+        XCTAssertEqual(queuedConnections, IncomingTransferCapacity.maximumQueuedConnections)
+
+        await listener.stop()
+        await gate.release()
+        let cleanupDeadline = ContinuousClock.now + .seconds(5)
+        while await IncomingChannelCloseRegistry.shared.admittedChannelCount() != 0 {
+            guard ContinuousClock.now < cleanupDeadline else {
+                throw CoordinatorTestError.timedOut
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func testIncomingCloseExecutorDrainsAdmittedChannelsFIFOAtFourWide() async throws {
+        let registry = IncomingChannelCloseRegistry.shared
+        let gate = OrderedCloseGate()
+        var permits: [IncomingChannelCloseRegistry.Permit] = []
+        for index in 0..<IncomingTransferCapacity.maximumAdmittedChannels {
+            guard let permit = await registry.acquire() else {
+                return XCTFail("Missing admission permit \(index)")
+            }
+            permits.append(permit)
+            await registry.close(
+                OrderedNoncooperativeCloseChannel(index: index, gate: gate),
+                permit: permit,
+                timeout: .milliseconds(10)
+            )
+        }
+
+        let closeWidth = IncomingTransferCapacity.maximumConcurrentCloseOperations
+        let queuedCount = IncomingTransferCapacity.maximumAdmittedChannels - closeWidth
+        try await gate.waitUntilStarted(closeWidth)
+        let initial = await gate.startedIndices()
+        XCTAssertEqual(Set(initial), Set(0..<closeWidth))
+        let activeAtCap = await registry.activeCloseCount()
+        let queuedAtCap = await registry.queuedCloseCount()
+        let admittedAtCap = await registry.admittedChannelCount()
+        XCTAssertEqual(activeAtCap, IncomingTransferCapacity.maximumConcurrentCloseOperations)
+        XCTAssertEqual(queuedAtCap, queuedCount)
+        XCTAssertEqual(admittedAtCap, IncomingTransferCapacity.maximumAdmittedChannels)
+
+        for index in 0..<queuedCount {
+            await gate.release(index)
+            try await gate.waitUntilStarted(index + closeWidth + 1)
+            let started = await gate.startedIndices()
+            XCTAssertEqual(started.last, index + closeWidth)
+        }
+        for index in queuedCount..<IncomingTransferCapacity.maximumAdmittedChannels {
+            await gate.release(index)
+        }
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await registry.admittedChannelCount() != 0 {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let finalStarted = await gate.startedIndices()
+        XCTAssertEqual(finalStarted.count, IncomingTransferCapacity.maximumAdmittedChannels)
+    }
+
     func testIncomingCloseAdmissionIsSharedAcrossCancelledListenerLifecycles() async throws {
         let root = try makeCoordinatorTemporaryDirectory()
         defer { removeCoordinatorTemporaryDirectory(root) }
@@ -814,7 +924,9 @@ final class TransferCoordinatorTests: XCTestCase {
         }
 
         let requestDeadline = ContinuousClock.now + .seconds(5)
-        while await requestedSourceCount(lifecycles) < 4 {
+        while await requestedSourceCount(lifecycles)
+            < IncomingTransferCapacity.maximumAdmittedChannels
+        {
             guard ContinuousClock.now < requestDeadline else {
                 throw CoordinatorTestError.timedOut
             }
@@ -825,7 +937,7 @@ final class TransferCoordinatorTests: XCTestCase {
         XCTAssertEqual(waitersAtCap, IncomingChannelCloseRegistry.maximumWaitingReaders)
         XCTAssertEqual(
             IncomingTransferCapacity.maximumEstablishedConnections,
-            IncomingTransferCapacity.maximumCleanupPermits
+            IncomingTransferCapacity.maximumAdmittedChannels
         )
         for (listener, _) in lifecycles { await listener.stop() }
         for (_, source) in lifecycles { await source.releaseYield() }
@@ -836,19 +948,35 @@ final class TransferCoordinatorTests: XCTestCase {
         let createdAtCap = await createdSourceChannelCount(lifecycles)
         let startedAtCap = await gate.startedCount()
         let retainedAtCap = await BoundedChannelResourceRegistry.shared.counts()
-        XCTAssertEqual(requestedAtCap, BoundedChannelResourceRegistry.maximumPerDirection)
-        XCTAssertEqual(createdAtCap, BoundedChannelResourceRegistry.maximumPerDirection)
+        let admittedAtCap = await IncomingChannelCloseRegistry.shared.admittedChannelCount()
+        let activeClosesAtCap = await IncomingChannelCloseRegistry.shared.activeCloseCount()
+        let queuedClosesAtCap = await IncomingChannelCloseRegistry.shared.queuedCloseCount()
+        XCTAssertEqual(requestedAtCap, IncomingTransferCapacity.maximumAdmittedChannels)
+        XCTAssertEqual(createdAtCap, IncomingTransferCapacity.maximumAdmittedChannels)
         XCTAssertEqual(startedAtCap, BoundedChannelResourceRegistry.maximumPerDirection)
         XCTAssertEqual(retainedAtCap.inbound, BoundedChannelResourceRegistry.maximumPerDirection)
+        XCTAssertEqual(admittedAtCap, IncomingTransferCapacity.maximumAdmittedChannels)
+        XCTAssertEqual(
+            activeClosesAtCap,
+            IncomingTransferCapacity.maximumConcurrentCloseOperations
+        )
+        XCTAssertEqual(
+            queuedClosesAtCap,
+            IncomingTransferCapacity.maximumAdmittedChannels
+                - IncomingTransferCapacity.maximumConcurrentCloseOperations
+        )
 
         await gate.release()
         let deadline = ContinuousClock.now + .seconds(5)
         while true {
             let retained = await BoundedChannelResourceRegistry.shared.counts()
-            if retained.inbound == 0 { break }
+            let admitted = await IncomingChannelCloseRegistry.shared.admittedChannelCount()
+            if retained.inbound == 0, admitted == 0 { break }
             guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
             try await Task.sleep(for: .milliseconds(5))
         }
+        let allClosed = await gate.startedCount()
+        XCTAssertEqual(allClosed, IncomingTransferCapacity.maximumAdmittedChannels)
     }
 
     private func requestedSourceCount(
@@ -2802,6 +2930,32 @@ private actor SuspendedYieldIncomingSource: IncomingTransferConnectionSource {
     }
 }
 
+private actor PullCountingIncomingSource: IncomingTransferConnectionSource {
+    private let total: Int
+    private let makeConnection: @Sendable (Int) -> IncomingTransferConnection
+    private var pulls = 0
+
+    init(
+        total: Int,
+        makeConnection: @escaping @Sendable (Int) -> IncomingTransferConnection
+    ) {
+        self.total = total
+        self.makeConnection = makeConnection
+    }
+
+    func connections() -> AsyncThrowingStream<IncomingTransferConnection, Error> {
+        AsyncThrowingStream(unfolding: { await self.nextConnection() })
+    }
+
+    private func nextConnection() -> IncomingTransferConnection? {
+        guard pulls < total else { return nil }
+        defer { pulls += 1 }
+        return makeConnection(pulls)
+    }
+
+    func pullCount() -> Int { pulls }
+}
+
 private actor TransferIdentityRecordingAttempts: TransferAwareConnectionAttempting {
     private var transferIDs: [TransferID] = []
 
@@ -3693,6 +3847,58 @@ private actor NoncooperativeCloseChannel: SecureChannel {
     }
 
     func close() async { await gate.startAndWait() }
+}
+
+private actor OrderedCloseGate {
+    private var started: [Int] = []
+    private var released: Set<Int> = []
+    private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    func startAndWait(_ index: Int) async {
+        started.append(index)
+        guard !released.contains(index) else { return }
+        await withCheckedContinuation { continuation in
+            waiters[index] = continuation
+        }
+    }
+
+    func waitUntilStarted(_ count: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while started.count < count {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func startedIndices() -> [Int] { started }
+
+    func release(_ index: Int) {
+        released.insert(index)
+        waiters.removeValue(forKey: index)?.resume()
+    }
+}
+
+private actor OrderedNoncooperativeCloseChannel: SecureChannel {
+    nonisolated let route: ConnectionRoute = .lan
+    private let index: Int
+    private let gate: OrderedCloseGate
+
+    init(index: Int, gate: OrderedCloseGate) {
+        self.index = index
+        self.gate = gate
+    }
+
+    func send(_ frame: Data) async throws {}
+
+    nonisolated func frames() -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in continuation.finish() }
+    }
+
+    func exportKey(label: String, context: Data, length: Int) async throws -> Data {
+        Data(repeating: 9, count: length)
+    }
+
+    func close() async { await gate.startAndWait(index) }
 }
 
 private actor CancellationInsensitiveFramesChannel: SecureChannel {
