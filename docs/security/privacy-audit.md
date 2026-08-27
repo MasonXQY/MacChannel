@@ -2,12 +2,13 @@
 
 审计日期：2026-08-27
 被审计代码 commit：`cf75945`
-静态证据时间（UTC）：`2026-08-27T12:41:20Z`
+静态证据时间（UTC）：`2026-08-27T12:52:49Z`
 静态审计脚本 SHA-256：
 
-- `audit-privacy.sh`: `aa7a735b4f225ee162b6bd2206b057895fcc75e9e8bc44bc4b4beb7cc846ffbe`
+- `audit-privacy.sh`: `6bdc32e3884f6df086b0436f30c3c121f4d60393c1defba0ccd217e1a5472d9e`
 - `check-sensitive-logging.sh`: `09a7c7935f6733d84aca65f517c72c078c078a5bc5c5d0a7f54a869e72b11b02`
-- `test-privacy-audit.sh`: `7a86abbe6c8f250f5019ba3e728d1871b909bb3e7020183b29d8dd5e329cbfff`
+- `test-privacy-audit.sh`: `f2665537b47b549dfa0907f00382f12bee27b35d0be8df88003c1b0db5f492e6`
+- `scan-privacy-evidence.sh`: `c31107bce311e4d0c1abd306f4d46c207cc2a495cdbf211a70b37e672b36a273`
 
 审计文档 commit：见本文件末尾“不可变文档版本”；首次提交后单独追加，避免自引用哈希。
 总体状态：**PARTIAL / 运行中服务审计 BLOCKED**
@@ -55,9 +56,13 @@
 在 Docker 主机上运行 `bash Scripts/verify-e2e.sh` 后，使用同一唯一 fixture 执行
 PA-01 至 PA-06。任一敏感值命中均为发布阻断问题，不能通过脱敏 waiver 关闭。
 
-运行时 fixture 必须先真实发送，并保留 fixture 文件。证据目录必须包含
-`client.log`、`rendezvous.log`、`coturn.log`、`postgres.txt`、`metrics.txt`、
-`mounts.txt`、`expiry.txt` 和 `fixture.sha256`。然后运行：
+运行时 fixture 必须先真实发送。使用独立、随机、16 至 128 字符 ASCII canary；content
+canary 必须实际写入文件，filename/path canary 必须实际进入源名称/路径。证据不得把
+fixture 全文放入命令行。证据目录必须含签名 `manifest.json`、传输 `receipt.json`、
+canary 分类文件、源/目标回执、限定时间窗的 client/rendezvous/coturn 原始日志、
+PostgreSQL 查询前后 JSON、`docker compose ps`、原始 `docker inspect`/mount JSON 与
+metrics 快照。manifest 绑定 code commit、canary ID、TransferID、源/目标 SHA-256、
+起止 UTC、实际容器 ID 和日志捕获边界。
 
 ```sh
 bash Scripts/audit-privacy.sh \
@@ -65,9 +70,17 @@ bash Scripts/audit-privacy.sh \
   --fixture-file /实际发送的唯一fixture
 ```
 
-无参数运行只会输出 `STATIC PASS`，随后以状态 2 输出 `RUNTIME BLOCKED`；不会产生
-fixture PASS。只有显式 fixture hash receipt 匹配、五类输出均无 fixture 文件名和内容、
-mount 证据为零持久可写 TURN volume、过期 pairing 行为零时才输出 `RUNTIME PASS`。
+无参数运行只会输出 `STATIC PASS`，随后以状态 2 输出 `RUNTIME BLOCKED`。运行时校验
+还要求仓库固定、由独立审计方控制的 `Infrastructure/privacy-auditor-public-key.pem`，
+并验证 manifest 签名；当前没有该 key，因此任何自建 evidence 都不能得到 PASS。
+签名通过后，门禁会把 manifest 与 receipt、实际 fixture/destination hash、当前 live
+container ID、inspect/mount JSON、查询时间窗和过期行计数交叉核对。
+
+证据内容扫描为每类使用独立 canary：filename、path、content、pairing code、private key
+和 TURN username。扫描兼容二进制并删除换行后复查，可捕获跨行拆分 canary；单个原始
+输出上限 16 MiB。命中时只报告类别与脱敏相对证据文件名，使用 quiet search，绝不
+输出匹配行或 canary。配对码、TURN username 和尤其私钥必须来自真实受控采集；无法
+安全取得真实私钥时，该分类保持 NOT RUN/BLOCKED，不能用任意 token 自报 PASS。
 
 ## 数据最小化与保留
 

@@ -98,4 +98,6 @@
 
 - 本机缺少 Docker，完整服务栈与 forced TURN 尚未运行。
 - 没有两/三台实机验收证据。
-- 没有提供 Apple Developer ID 与公证凭据，因此签名、公证、staple 均为 NOT RUN。
+- 当前主机存在 Developer ID Application identity，但开发 bundler 未使用它，产物仅可能
+  带 SwiftPM ad-hoc 签名且资源封装无法通过 strict verify；同时没有 notarytool 凭据。
+  Release 签名、Gatekeeper、公证和 staple 均为 BLOCKED / NOT RUN。

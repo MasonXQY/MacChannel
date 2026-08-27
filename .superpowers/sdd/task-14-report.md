@@ -25,6 +25,14 @@ Docker, signing, or notarization evidence was invented.
 - `Scripts/test-privacy-audit.sh` proves the scanner rejects Go payload, Swift
   path, and shell private-key logging mutants while accepting a fixed-category
   error log.
+- Runtime evidence now requires a signed manifest chained to the code commit,
+  canary ID, TransferID, source/destination hashes, UTC capture window, live
+  container IDs, raw inspect/mount data, PostgreSQL before/after expiry queries,
+  and metrics. The independently controlled auditor public key is not provisioned,
+  so fabricated or self-signed evidence cannot produce PASS on this checkout.
+- Evidence mutants reject empty bundles; pairing-code, private-key and TURN-user
+  leaks; newline-split content canaries; binary leaks; and files over 16 MiB.
+  Failures never echo the canary value or matching line.
 - `docs/operations/deployment.md` covers DNS, TLS, PostgreSQL 17 migrations,
   TURN ports, secret rotation, health and capacity alerts, rate limits, retention,
   client signing/update, and service/client/database rollback.
@@ -72,3 +80,5 @@ to its service image digests and Git commit.
 
 The immutable Task 14 privacy-finding revision is commit `764e280`; its audit
 document records the exact script content hashes and UTC evidence timestamp.
+The later runtime-evidence hardening revision is pinned by an append-only commit
+after its content commit; see the audit document's immutable-version section.

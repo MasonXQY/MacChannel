@@ -66,7 +66,7 @@ if [[ "${mode}" == blocked ]]; then
   exit 2
 fi
 
-required_evidence=(client.log rendezvous.log coturn.log postgres.txt metrics.txt mounts.txt expiry.txt fixture.sha256)
+required_evidence=(manifest.json manifest.sig receipt.json canaries.env client.log rendezvous.log coturn.log postgres.json metrics.txt compose-ps.json inspect.json mounts.json postgres-before.json postgres-after.json destination.bin)
 [[ -f "${fixture_file}" ]] || { echo "privacy runtime audit FAIL: fixture file missing" >&2; exit 1; }
 [[ -d "${evidence_directory}" ]] || { echo "privacy runtime audit FAIL: evidence directory missing" >&2; exit 1; }
 for evidence_name in "${required_evidence[@]}"; do
@@ -75,25 +75,44 @@ for evidence_name in "${required_evidence[@]}"; do
     exit 1
   }
 done
-
-expected_fixture_hash="$(shasum -a 256 "${fixture_file}" | awk '{print $1}')"
-recorded_fixture_hash="$(awk 'NF {print $1; exit}' "${evidence_directory}/fixture.sha256")"
-[[ "${recorded_fixture_hash}" == "${expected_fixture_hash}" ]] || {
-  echo "privacy runtime audit FAIL: fixture receipt hash mismatch" >&2
-  exit 1
-}
-fixture_name="$(basename "${fixture_file}")"
-fixture_content="$(LC_ALL=C tr -d '\n' < "${fixture_file}")"
-[[ -n "${fixture_name}" && -n "${fixture_content}" ]] || {
-  echo "privacy runtime audit FAIL: fixture name/content must be non-empty" >&2
-  exit 1
-}
-for evidence_name in client.log rendezvous.log coturn.log postgres.txt metrics.txt; do
-  if rg -n -F -e "${fixture_name}" -e "${fixture_content}" "${evidence_directory}/${evidence_name}"; then
-    echo "privacy runtime audit FAIL: fixture leaked into ${evidence_name}" >&2
-    exit 1
-  fi
+for command_name in docker jq openssl; do
+  command -v "${command_name}" >/dev/null 2>&1 || {
+    echo "privacy RUNTIME BLOCKED: missing verifier ${command_name}" >&2
+    exit 2
+  }
 done
-rg -q '^coturn_persistent_writable_volumes=0$' "${evidence_directory}/mounts.txt"
-rg -q '^expired_pairing_rows=0$' "${evidence_directory}/expiry.txt"
-echo "privacy RUNTIME PASS: explicit fixture receipt and all required evidence scanned"
+pinned_auditor_key="Infrastructure/privacy-auditor-public-key.pem"
+[[ -f "${pinned_auditor_key}" ]] || {
+  echo "privacy RUNTIME BLOCKED: independently controlled auditor public key is not provisioned" >&2
+  exit 2
+}
+openssl dgst -sha256 -verify "${pinned_auditor_key}" \
+  -signature "${evidence_directory}/manifest.sig" "${evidence_directory}/manifest.json" >/dev/null || {
+  echo "privacy runtime audit FAIL: manifest signature invalid" >&2
+  exit 1
+}
+
+manifest="${evidence_directory}/manifest.json"
+receipt="${evidence_directory}/receipt.json"
+jq -e '.schemaVersion == 1 and (.codeCommit | test("^[0-9a-f]{40}$")) and (.transferID | test("^[0-9A-Fa-f-]{36}$")) and (.canaryID | test("^[A-Za-z0-9_-]{16,128}$")) and .startUTC < .endUTC and .sourceSHA256 == .destinationSHA256' "${manifest}" >/dev/null
+jq -e --slurpfile manifest "${manifest}" '.transferID == $manifest[0].transferID and .canaryID == $manifest[0].canaryID and .sourceSHA256 == $manifest[0].sourceSHA256 and .destinationSHA256 == $manifest[0].destinationSHA256 and .startUTC >= $manifest[0].startUTC and .endUTC <= $manifest[0].endUTC' "${receipt}" >/dev/null
+
+source_hash="$(shasum -a 256 "${fixture_file}" | awk '{print $1}')"
+destination_hash="$(shasum -a 256 "${evidence_directory}/destination.bin" | awk '{print $1}')"
+[[ "${source_hash}" == "${destination_hash}" ]] || { echo "privacy runtime audit FAIL: transfer hash mismatch" >&2; exit 1; }
+jq -e --arg source_hash "${source_hash}" '.sourceSHA256 == $source_hash and .destinationSHA256 == $source_hash' "${manifest}" >/dev/null
+
+manifest_commit="$(jq -r '.codeCommit' "${manifest}")"
+git cat-file -e "${manifest_commit}^{commit}" 2>/dev/null || { echo "privacy runtime audit FAIL: unknown code commit" >&2; exit 1; }
+
+while IFS= read -r container_id; do
+  [[ -n "${container_id}" ]] || continue
+  docker inspect "${container_id}" >/dev/null 2>&1 || { echo "privacy runtime audit FAIL: referenced container is not live" >&2; exit 1; }
+  jq -e --arg id "${container_id}" 'map(select(.Id == $id)) | length == 1' "${evidence_directory}/inspect.json" >/dev/null
+done < <(jq -r '.containerIDs[]' "${manifest}")
+jq -e '[.[] | select((.Name | contains("coturn")) and ([.Mounts[]? | select(.RW == true and .Type != "tmpfs")] | length > 0))] | length == 0' "${evidence_directory}/mounts.json" >/dev/null
+jq -e --slurpfile manifest "${manifest}" '.capturedUTC >= $manifest[0].startUTC and .capturedUTC <= $manifest[0].endUTC' "${evidence_directory}/postgres-before.json" >/dev/null
+jq -e --slurpfile manifest "${manifest}" '.capturedUTC >= $manifest[0].startUTC and .capturedUTC <= $manifest[0].endUTC and .expiredPairingRows == 0' "${evidence_directory}/postgres-after.json" >/dev/null
+
+Scripts/scan-privacy-evidence.sh "${evidence_directory}" "${evidence_directory}/canaries.env" >/dev/null
+echo "privacy RUNTIME PASS: signed manifest and raw live evidence cross-validated"
