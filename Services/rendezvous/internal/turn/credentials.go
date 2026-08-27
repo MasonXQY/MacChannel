@@ -3,6 +3,7 @@ package turn
 import (
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"strconv"
 	"strings"
@@ -20,11 +21,18 @@ type Credential struct {
 	ExpiresAt  time.Time `json:"expiresAt"`
 }
 
-// Mint follows coturn's TURN REST convention: expiry:deviceID is authenticated
-// with HMAC-SHA1 and encoded using padded RFC 4648 base64.
+// Mint follows coturn's TURN REST convention while replacing the device ID
+// with a secret-derived, per-expiry opaque handle. Even a coturn authentication
+// error therefore cannot disclose the stable device identity.
 func Mint(deviceID string, now time.Time, secret []byte) Credential {
-	expiresAt := now.Add(CredentialLifetime)
-	username := strconv.FormatInt(expiresAt.Unix(), 10) + ":" + strings.ToLower(strings.TrimSpace(deviceID))
+	expirySeconds := now.Unix() + int64(CredentialLifetime/time.Second)
+	expiresAt := time.Unix(expirySeconds, 0).In(now.Location())
+	expiryText := strconv.FormatInt(expirySeconds, 10)
+	normalizedDeviceID := strings.ToLower(strings.TrimSpace(deviceID))
+	handleMAC := hmac.New(sha256.New, secret)
+	_, _ = handleMAC.Write([]byte("turn-handle-v1\x00" + normalizedDeviceID + "\x00" + expiryText))
+	handle := base64.RawURLEncoding.EncodeToString(handleMAC.Sum(nil))
+	username := expiryText + ":" + handle
 	mac := hmac.New(sha1.New, secret)
 	_, _ = mac.Write([]byte(username))
 	return Credential{

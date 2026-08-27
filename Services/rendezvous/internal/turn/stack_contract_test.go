@@ -1,8 +1,12 @@
 package turn
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -11,11 +15,13 @@ func TestLocalStackPinsServicesAndProtectsSecrets(t *testing.T) {
 	root := repositoryRoot(t)
 	compose := readContractFile(t, filepath.Join(root, "Infrastructure", "docker-compose.yml"))
 	for _, required := range []string{
-		"postgres:17.11-alpine3.24", "coturn/coturn:4.17.2-r0-alpine",
+		"postgres:17.11-alpine3.24@sha256:", "dockerfile: Infrastructure/coturn/Dockerfile",
 		"dockerfile: Infrastructure/rendezvous/Dockerfile", "condition: service_healthy",
 		"POSTGRES_PASSWORD_FILE", "TURN_SHARED_SECRET_FILE", "read_only: true", "cap_drop:",
+		"cap_add:", "DAC_OVERRIDE", "SETUID", "SETGID", "CHOWN",
 		"8080:8080", "8443:8443", "3478:3478/udp", "3478:3478/tcp", "5349:5349/tcp",
-		"healthcheck:", "postgres_password:", "turn_shared_secret:",
+		"49160-49200:49160-49200/udp", "healthcheck:", "postgres_password:",
+		"TURN_EXTERNAL_IP", "MACCHANNEL_SECRET_ROOT", "/run/macchannel:size=1m",
 	} {
 		if !strings.Contains(compose, required) {
 			t.Errorf("docker-compose.yml missing %q", required)
@@ -26,27 +32,116 @@ func TestLocalStackPinsServicesAndProtectsSecrets(t *testing.T) {
 			t.Errorf("docker-compose.yml exposes or overrides %q", forbidden)
 		}
 	}
+
+	for _, relative := range []string{"Infrastructure/rendezvous/Dockerfile", "Infrastructure/coturn/Dockerfile"} {
+		dockerfile := readContractFile(t, filepath.Join(root, relative))
+		for _, line := range strings.Split(dockerfile, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "FROM ") && !regexp.MustCompile(`@sha256:[0-9a-f]{64}(?:\s|$)`).MatchString(line) {
+				t.Errorf("%s has unpinned base image: %s", relative, line)
+			}
+		}
+		if strings.Contains(dockerfile, "apk add") {
+			t.Errorf("%s mutates a pinned image with an unpinned package repository", relative)
+		}
+	}
 }
 
-func TestCoturnConfigIsHardenedForShortLivedRelay(t *testing.T) {
+func TestContainerEntrypointsUseValidJSONAndDropToExpectedRuntimeUID(t *testing.T) {
+	root := repositoryRoot(t)
+	for relative, uid := range map[string]string{
+		"Infrastructure/rendezvous/Dockerfile": "65532",
+		"Infrastructure/coturn/Dockerfile":     "65534",
+	} {
+		dockerfile := readContractFile(t, filepath.Join(root, relative))
+		var entrypoint []string
+		for _, line := range strings.Split(dockerfile, "\n") {
+			if strings.HasPrefix(line, "ENTRYPOINT ") {
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "ENTRYPOINT ")), &entrypoint); err != nil {
+					t.Fatalf("%s ENTRYPOINT is not valid JSON: %v", relative, err)
+				}
+			}
+		}
+		if len(entrypoint) < 8 || entrypoint[0] != "/usr/local/bin/secret-launcher" {
+			t.Fatalf("%s entrypoint = %v", relative, entrypoint)
+		}
+		if !containsAdjacent(entrypoint, "--uid", uid) || !containsAdjacent(entrypoint, "--gid", uid) {
+			t.Errorf("%s does not drop to runtime uid/gid %s", relative, uid)
+		}
+	}
+}
+
+func TestCoturnConfigIsHardenedAndNeverLogsCredentialUsernames(t *testing.T) {
 	root := repositoryRoot(t)
 	config := readContractFile(t, filepath.Join(root, "Infrastructure", "coturn", "turnserver.conf"))
 	for _, required := range []string{
 		"fingerprint", "use-auth-secret", "stale-nonce=600", "no-multicast-peers", "no-cli",
 		"denied-peer-ip=127.0.0.0-127.255.255.255", "denied-peer-ip=::1",
-		"cert=/run/secrets/localhost_cert", "pkey=/run/secrets/localhost_key",
+		"cert=/run/coturn/secrets/localhost.pem", "pkey=/run/coturn/secrets/localhost-key.pem",
 		"tls-listening-port=5349", "prometheus", "prometheus-port=9641",
 		"user-quota=8", "total-quota=256", "max-bps=104857600", "bps-capacity=1073741824",
 		"max-allocate-lifetime=600", "min-port=49160", "max-port=49200",
-		"log-file=stdout", "log-min-level=error", "no-software-attribute",
+		"log-file=/dev/null", "no-stdout-log", "cipher-list=HIGH:!aNULL:!MD5:!3DES",
+		"no-software-attribute",
 	} {
 		if !activeConfigLine(config, required) {
 			t.Errorf("turnserver.conf missing active %q", required)
 		}
 	}
-	for _, forbidden := range []string{"static-auth-secret=", "allow-loopback-peers", "prometheus-username-labels", "verbose"} {
+	for _, forbidden := range []string{
+		"static-auth-secret=", "allow-loopback-peers", "prometheus-username-labels", "verbose",
+		"log-file=stdout", "tls-cipher-list=",
+	} {
 		if activeConfigLine(config, forbidden) {
 			t.Errorf("turnserver.conf must not enable %q", forbidden)
+		}
+	}
+
+	launcher := readContractFile(t, filepath.Join(root, "Infrastructure", "coturn", "start-coturn.sh"))
+	for _, required := range []string{"external-ip=", "TURN_EXTERNAL_IP", "hostname -i", "/run/coturn/secrets/turn-shared-secret"} {
+		if !strings.Contains(launcher, required) {
+			t.Errorf("coturn launcher missing %q", required)
+		}
+	}
+}
+
+func TestDockerBuildContextExcludesPrivateAndGeneratedData(t *testing.T) {
+	ignore := readContractFile(t, filepath.Join(repositoryRoot(t), ".dockerignore"))
+	for _, required := range []string{
+		".git", ".build", ".swiftpm", "DerivedData", ".superpowers",
+		"**/.local-secrets", "**/*.pem", "**/*.key", "**/*.p12", "**/*.sqlite", "**/*.db",
+	} {
+		if !activeConfigLine(ignore, required) {
+			t.Errorf(".dockerignore missing %q", required)
+		}
+	}
+}
+
+func TestPinnedImagePolicyHasAnAutomatedRegistryCheck(t *testing.T) {
+	root := repositoryRoot(t)
+	verifier := readContractFile(t, filepath.Join(root, "Scripts", "verify-image-digests.sh"))
+	pattern := regexp.MustCompile(`([a-z0-9./-]+):([^@\s]+)@(sha256:[0-9a-f]{64})`)
+	references := make(map[string]bool)
+	for _, relative := range []string{
+		"Infrastructure/docker-compose.yml",
+		"Infrastructure/rendezvous/Dockerfile",
+		"Infrastructure/coturn/Dockerfile",
+	} {
+		contents := readContractFile(t, filepath.Join(root, relative))
+		for _, match := range pattern.FindAllStringSubmatch(contents, -1) {
+			repository := match[1]
+			if !strings.Contains(repository, "/") {
+				repository = "library/" + repository
+			}
+			references[repository+"|"+match[2]+"|"+match[3]] = true
+		}
+	}
+	if len(references) != 4 {
+		t.Fatalf("pinned image set = %v", references)
+	}
+	for reference := range references {
+		if !strings.Contains(verifier, `"`+reference+`"`) {
+			t.Errorf("digest verifier does not exactly match build reference %q", reference)
 		}
 	}
 }
@@ -62,13 +157,69 @@ func TestLocalStackMatchesPackagedSecureRendezvousDefault(t *testing.T) {
 		t.Fatal("local stack does not serve the packaged wss://localhost:8443 endpoint")
 	}
 	runner := readContractFile(t, filepath.Join(root, "Scripts", "run-local-stack.sh"))
-	for _, required := range []string{"subjectAltName", "DNS:localhost", "IP:127.0.0.1", "security add-trusted-cert", "openssl verify", "docker compose", "turnutils_uclient"} {
+	for _, required := range []string{
+		"subjectAltName", "DNS:localhost", "IP:127.0.0.1", "security add-trusted-cert",
+		"security delete-certificate", "openssl verify", "docker compose", "cmd/turn-probe",
+		"--turn-external-ip", "XOR-RELAYED-ADDRESS", "logs coturn",
+	} {
 		if !strings.Contains(runner, required) {
-			t.Errorf("run-local-stack.sh missing TLS compatibility step %q", required)
+			t.Errorf("run-local-stack.sh missing TLS/relay/rollback step %q", required)
 		}
 	}
 	if strings.Contains(runner, "MACCHANNEL_RENDEZVOUS_URL") {
 		t.Fatal("runner masks the packaged production URL with an environment override")
+	}
+}
+
+func TestRunnerRollsBackTrustAndComposeAfterPostStartFailure(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("runner installs trust only on macOS")
+	}
+	root := repositoryRoot(t)
+	temporary := t.TempDir()
+	bin := filepath.Join(temporary, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	events := filepath.Join(temporary, "events")
+	writeExecutable(t, filepath.Join(bin, "docker"), `#!/bin/sh
+set -eu
+case "$*" in
+  "compose version") exit 0 ;;
+  *" up "*) printf '%s\n' docker-up >> "$TEST_EVENTS"; exit 0 ;;
+  *" down "*) printf '%s\n' docker-down >> "$TEST_EVENTS"; exit 0 ;;
+  *" exec "*) exit 0 ;;
+  *) exit 0 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "security"), `#!/bin/sh
+set -eu
+case "$*" in
+  "default-keychain -d user") echo '"/tmp/test.keychain-db"' ;;
+  *verify-cert*) exit 1 ;;
+  *add-trusted-cert*) printf '%s\n' trust-add >> "$TEST_EVENTS" ;;
+  *delete-certificate*) printf '%s\n' trust-delete >> "$TEST_EVENTS" ;;
+  *) exit 0 ;;
+esac
+`)
+	writeExecutable(t, filepath.Join(bin, "curl"), "#!/bin/sh\nexit 23\n")
+
+	command := exec.Command("bash", filepath.Join(root, "Scripts", "run-local-stack.sh"), "--turn-external-ip", "192.0.2.44")
+	command.Env = append(os.Environ(),
+		"PATH="+bin+":"+os.Getenv("PATH"),
+		"TEST_EVENTS="+events,
+		"MACCHANNEL_LOCAL_STATE_ROOT="+filepath.Join(temporary, "state"),
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("runner unexpectedly succeeded: %s", output)
+	}
+	eventData, readError := os.ReadFile(events)
+	if readError != nil {
+		t.Fatalf("read rollback events: %v; runner: %s", readError, output)
+	}
+	if got := strings.Fields(string(eventData)); strings.Join(got, ",") != "trust-add,docker-up,docker-down,trust-delete" {
+		t.Fatalf("rollback events = %v; runner: %s", got, output)
 	}
 }
 
@@ -98,4 +249,20 @@ func readContractFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func writeExecutable(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func containsAdjacent(values []string, first, second string) bool {
+	for index := 0; index+1 < len(values); index++ {
+		if values[index] == first && values[index+1] == second {
+			return true
+		}
+	}
+	return false
 }

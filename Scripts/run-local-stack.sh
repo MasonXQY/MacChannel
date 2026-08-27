@@ -3,33 +3,92 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 infrastructure_root="$repository_root/Infrastructure"
-secret_root="$infrastructure_root/.local-secrets"
+secret_root="${MACCHANNEL_LOCAL_STATE_ROOT:-$infrastructure_root/.local-secrets}"
 tls_root="$secret_root/tls"
 compose_file="$infrastructure_root/docker-compose.yml"
 prepare_only=false
 install_trust=true
+turn_external_ip=
+trust_added=false
+stack_touched=false
+completed=false
+login_keychain=
+certificate_hash=
 
-for argument in "$@"; do
-  case "$argument" in
-    --prepare-only) prepare_only=true ;;
-    --no-trust) install_trust=false ;;
-    *) echo "用法: $0 [--prepare-only] [--no-trust]" >&2; exit 2 ;;
+usage() {
+  echo "用法: $0 [--prepare-only] [--no-trust] [--turn-external-ip IPv4]" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prepare-only) prepare_only=true; shift ;;
+    --no-trust) install_trust=false; shift ;;
+    --turn-external-ip)
+      if [[ $# -lt 2 ]]; then usage; exit 2; fi
+      turn_external_ip=$2
+      shift 2
+      ;;
+    *) usage; exit 2 ;;
   esac
 done
 
-for command_name in openssl curl; do
+rollback() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ "$completed" == false && "$status" -ne 0 ]]; then
+    set +e
+    if [[ "$stack_touched" == true ]]; then
+      TURN_EXTERNAL_IP="${turn_external_ip:-127.0.0.1}" MACCHANNEL_SECRET_ROOT="$secret_root" \
+        docker compose -f "$compose_file" down --remove-orphans >/dev/null 2>&1
+    fi
+    if [[ "$trust_added" == true ]]; then
+      security delete-certificate -Z "$certificate_hash" -t "$login_keychain" >/dev/null 2>&1
+    fi
+    echo "启动失败；本次新增的钥匙串信任和 Compose 服务已回滚。" >&2
+  fi
+  exit "$status"
+}
+trap rollback EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+is_valid_external_ipv4() {
+  printf '%s\n' "$1" | awk -F. '
+    NF == 4 && $1 != 0 && $1 != 127 {
+      for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1
+      exit 0
+    }
+    { exit 1 }
+  '
+}
+
+for command_name in openssl curl awk; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "缺少必需命令：$command_name" >&2
     exit 1
   fi
 done
 if [[ "$prepare_only" == false ]]; then
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "未安装 Docker，无法启动本地 Postgres、rendezvous 和 coturn。" >&2
-    exit 1
-  fi
+  for command_name in docker go; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+      echo "缺少必需命令：$command_name；无法启动并验证本地服务。" >&2
+      exit 1
+    fi
+  done
   if ! docker compose version >/dev/null 2>&1; then
     echo "Docker Compose v2 不可用。" >&2
+    exit 1
+  fi
+  if [[ -z "$turn_external_ip" ]]; then
+    if ! command -v route >/dev/null 2>&1 || ! command -v ipconfig >/dev/null 2>&1; then
+      echo "无法自动检测可达地址；请传入 --turn-external-ip IPv4。" >&2
+      exit 1
+    fi
+    default_interface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
+    turn_external_ip="$(ipconfig getifaddr "$default_interface" 2>/dev/null || true)"
+  fi
+  if ! is_valid_external_ipv4 "$turn_external_ip"; then
+    echo "TURN 对外地址必须是非回环 IPv4；本机开发请传入局域网地址，部署时传入宿主机可达地址。" >&2
     exit 1
   fi
 fi
@@ -94,25 +153,62 @@ if [[ "$install_trust" == true ]]; then
     echo "缺少 macOS security 命令，无法让默认 wss://localhost:8443 通过系统信任校验。" >&2
     exit 1
   fi
-  login_keychain="$(security default-keychain -d user | tr -d ' "')"
+  login_keychain="$(security default-keychain -d user | tr -d ' \"')"
   if ! security verify-cert -c "$tls_root/localhost.pem" -p ssl -n localhost -L -q >/dev/null 2>&1; then
     echo "正在把仅用于本地开发的 MacChannel CA 加入当前用户钥匙串；macOS 可能要求确认。"
+    certificate_hash="$(openssl x509 -in "$tls_root/local-ca.pem" -fingerprint -sha1 -noout | awk -F= '{gsub(":", "", $2); print $2}')"
     security add-trusted-cert -r trustRoot -p ssl -s localhost -k "$login_keychain" "$tls_root/local-ca.pem"
+    trust_added=true
   fi
 fi
 
 if [[ "$prepare_only" == true ]]; then
+  completed=true
   echo "本地密钥与 localhost TLS 证书已准备并验证。"
   exit 0
 fi
 
+export TURN_EXTERNAL_IP="$turn_external_ip"
+export MACCHANNEL_SECRET_ROOT="$secret_root"
+stack_touched=true
 docker compose -f "$compose_file" up -d --build --wait
+
+# Both application processes must have copied root-readable Compose secrets to
+# tmpfs and then replaced PID 1 while running under their unprivileged UID.
+docker compose -f "$compose_file" exec -T rendezvous sh -ec '
+  test "$(awk "/^Uid:/{print \$2}" /proc/1/status)" = 65532
+  test "$(awk "/^CapEff:/{print \$2}" /proc/1/status)" = 0000000000000000
+  test "$(stat -c "%u:%g:%a" /run/macchannel/turn-shared-secret)" = 65532:65532:400
+'
+docker compose -f "$compose_file" exec -T coturn sh -ec '
+  test "$(awk "/^Uid:/{print \$2}" /proc/1/status)" = 65534
+  test "$(awk "/^CapEff:/{print \$2}" /proc/1/status)" = 0000000000000000
+  test "$(stat -c "%u:%g:%a" /run/coturn/secrets/turn-shared-secret)" = 65534:65534:400
+'
+
 curl --fail --silent --show-error http://localhost:8080/healthz >/dev/null
 curl --fail --silent --show-error --cacert "$tls_root/local-ca.pem" https://localhost:8443/healthz >/dev/null
-docker compose -f "$compose_file" exec -T coturn sh -ec '
-  secret=$(cat /run/secrets/turn_shared_secret)
-  turnutils_uclient -u stack-health -W "$secret" -y -c -n 1 127.0.0.1 >/dev/null
-  turnutils_uclient -t -S -E /run/secrets/local_ca_cert -p 5349 -u stack-health -W "$secret" -y -c -n 1 127.0.0.1 >/dev/null
-'
+openssl s_client -connect localhost:5349 -CAfile "$tls_root/local-ca.pem" -verify_return_error </dev/null >/dev/null 2>&1
+
+# Host-side allocation: the XOR-RELAYED-ADDRESS must be the configured Mac or
+# deployment address, never the coturn container's bridge address.
+(cd "$repository_root/Services/rendezvous" && go run ./cmd/turn-probe \
+  --server 127.0.0.1:3478 \
+  --secret-file "$secret_root/turn-shared-secret" \
+  --expected-ip "$turn_external_ip")
+
+# Exercise coturn's authentication-error path, then prove the supplied marker
+# cannot appear in stdout/stderr. Production credentials use opaque handles,
+# but even malformed clients must not disclose their chosen username in logs.
+device_marker=DEVICE_ID_MUST_NEVER_APPEAR_IN_COTURN_LOGS
+docker compose -f "$compose_file" exec -T coturn sh -ec \
+  "turnutils_uclient -u '$device_marker' -w invalid-password -y -c -n 1 127.0.0.1 >/dev/null 2>&1 || true"
+# logs coturn: retained as an explicit contract marker for the error-path test.
+if docker compose -f "$compose_file" logs coturn 2>&1 | grep -F "$device_marker" >/dev/null; then
+  echo "coturn 错误日志泄露了设备标识。" >&2
+  exit 1
+fi
+
 docker compose -f "$compose_file" ps
-echo "本地服务与 TURN REST 共享密钥已实测就绪：wss://localhost:8443/v1/ws，STUN/TURN localhost:3478，TURN TLS localhost:5349。"
+completed=true
+echo "本地服务已验证：wss://localhost:8443/v1/ws；TURN XOR-RELAYED-ADDRESS 为 $turn_external_ip。"

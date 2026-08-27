@@ -2,10 +2,11 @@ name: macchannel-local
 
 services:
   postgres:
-    image: postgres:17.11-alpine3.24
+    image: postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     environment:
       POSTGRES_DB: macchannel
       POSTGRES_USER: macchannel
+      # The official entrypoint reads this while PID 1 is root, then drops to postgres.
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     secrets:
       - postgres_password
@@ -34,13 +35,13 @@ services:
       POSTGRES_PORT: "5432"
       POSTGRES_DB: macchannel
       POSTGRES_USER: macchannel
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_PASSWORD_FILE: /run/macchannel/postgres-password
       POSTGRES_SSLMODE: disable
       RENDEZVOUS_ADDR: ":8080"
       RENDEZVOUS_TLS_ADDR: ":8443"
-      RENDEZVOUS_TLS_CERT_FILE: /run/secrets/localhost_cert
-      RENDEZVOUS_TLS_KEY_FILE: /run/secrets/localhost_key
-      TURN_SHARED_SECRET_FILE: /run/secrets/turn_shared_secret
+      RENDEZVOUS_TLS_CERT_FILE: /run/macchannel/localhost.pem
+      RENDEZVOUS_TLS_KEY_FILE: /run/macchannel/localhost-key.pem
+      TURN_SHARED_SECRET_FILE: /run/macchannel/turn-shared-secret
       TURN_URLS: stun:localhost:3478,turn:localhost:3478?transport=udp,turn:localhost:3478?transport=tcp,turns:localhost:5349?transport=tcp
       MACCHANNEL_ALLOWED_WS_ORIGINS: https://localhost:8443
     secrets:
@@ -54,8 +55,16 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
+      - /run/macchannel:size=1m,uid=0,gid=0,mode=0700
     cap_drop:
       - ALL
+    cap_add:
+      # PID 1 needs only enough privilege to read the 0600 bind secrets, copy,
+      # chown, and drop identity. Linux clears these when setuid(65532) succeeds.
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -67,16 +76,15 @@ services:
     restart: unless-stopped
 
   coturn:
-    image: coturn/coturn:4.17.2-r0-alpine
-    entrypoint: ["/usr/local/bin/start-coturn.sh"]
+    build:
+      context: ..
+      dockerfile: Infrastructure/coturn/Dockerfile
+    environment:
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:?Run Scripts/run-local-stack.sh or set TURN_EXTERNAL_IP}
     secrets:
       - turn_shared_secret
       - localhost_cert
       - localhost_key
-      - local_ca_cert
-    volumes:
-      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
-      - ./coturn/start-coturn.sh:/usr/local/bin/start-coturn.sh:ro
     ports:
       - "3478:3478/udp"
       - "3478:3478/tcp"
@@ -91,6 +99,11 @@ services:
       - /tmp:size=4m,mode=1777
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -106,12 +119,10 @@ volumes:
 
 secrets:
   postgres_password:
-    file: ./.local-secrets/postgres-password
+    file: ${MACCHANNEL_SECRET_ROOT:?Run Scripts/run-local-stack.sh}/postgres-password
   turn_shared_secret:
-    file: ./.local-secrets/turn-shared-secret
+    file: ${MACCHANNEL_SECRET_ROOT:?Run Scripts/run-local-stack.sh}/turn-shared-secret
   localhost_cert:
-    file: ./.local-secrets/tls/localhost.pem
+    file: ${MACCHANNEL_SECRET_ROOT:?Run Scripts/run-local-stack.sh}/tls/localhost.pem
   localhost_key:
-    file: ./.local-secrets/tls/localhost-key.pem
-  local_ca_cert:
-    file: ./.local-secrets/tls/local-ca.pem
+    file: ${MACCHANNEL_SECRET_ROOT:?Run Scripts/run-local-stack.sh}/tls/localhost-key.pem

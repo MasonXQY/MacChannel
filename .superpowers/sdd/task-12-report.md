@@ -1,112 +1,127 @@
-# Task 12 report: coturn credentials and local service stack
+# Task 12 report: authenticated TURN REST and local relay stack
 
 Date: 2026-08-27
-Status: implementation complete; container execution is explicitly blocked on this machine because Docker is not installed
+
+Status: implementation and all host-executable verification complete; container execution remains explicitly blocked because Docker is not installed on this Mac
 
 ## Delivered behavior
 
-- `GET /v1/turn-credentials` accepts the existing signed HTTP envelope with the
-  exact payload `{ "type": "turn-credentials-v1" }`. A valid self-signature is
-  not enough: the presented public key must belong to a device in a completed,
-  non-revoked trust relationship. Missing authentication returns 401, an
-  unpaired or revoked identity returns 403, malformed intent returns 400, and a
-  missing relay configuration fails closed with 503.
-- TURN REST credentials use coturn's `expiry:deviceID` username and padded
-  base64 HMAC-SHA1 password. `expiresAt` is exactly ten minutes after minting,
-  and the response contains the configured STUN, UDP/TCP TURN, and TLS TURN
-  URLs. Tests independently recompute the HMAC and reject username, credential,
-  and shared-secret tampering.
-- The rendezvous process reads the TURN secret from a bounded mounted file,
-  validates a minimum 32-byte secret and strict STUN/TURN URLs, and copies the
-  secret before injecting it into the router. PostgreSQL can likewise be
-  configured from a password file without placing its password in Compose
-  environment values. Direct deployment URLs remain supported, while partial
-  file-based configuration fails closed.
-- Rendezvous serves the same authenticated router on hardened HTTP and TLS
-  listeners. The Task 11 packaged default `wss://localhost:8443/v1/ws` is
-  matched by the local stack without a runtime URL override. Both listeners are
-  prebound before serving, TLS requires TLS 1.2 or newer, setup failure closes
-  earlier listeners, and signal/error shutdown closes both servers before the
-  database cleanup returns.
-- Docker Compose pins PostgreSQL 17.11 and coturn 4.17.2, builds a static
-  non-root rendezvous image, runs all five existing migrations, gates
-  rendezvous on PostgreSQL health, publishes HTTP/TLS/STUN/TURN/metrics and a
-  bounded relay port range, and gives coturn no persistent writable volume.
-  Database password, TURN secret, TLS certificate, and TLS private key are
-  Docker secrets rather than literal Compose values.
-- coturn enables fingerprints, TURN REST shared-secret authentication, a
-  ten-minute stale nonce and allocation maximum, TLS, Prometheus without
-  username labels, per-user/global allocation quotas, per-session/global
-  bandwidth caps, a 41-port relay range, and stdout error-only logs. CLI, DTLS,
-  loopback peers, multicast peers, version disclosure, and TCP relay endpoints
-  are disabled; the shared secret is appended only to an ephemeral runtime
-  configuration.
-- `Scripts/run-local-stack.sh` creates strong local secrets and a localhost CA
-  plus server certificate, validates the chain, hostname, and private-key
-  match, and installs the CA as a localhost-only SSL trust root in the current
-  user's macOS keychain. It then builds with Compose, waits for health, checks
-  both HTTP and system-compatible HTTPS endpoints, and runs authenticated UDP
-  and TLS coturn allocations with the mounted shared secret. `--prepare-only`
-  and `--no-trust` allow non-mutating certificate preparation in CI. Docker is
-  checked before any default trust-store mutation.
+- `GET /v1/turn-credentials` accepts the existing canonical signed HTTP
+  envelope and the exact intent `{ "type": "turn-credentials-v1" }`. The
+  presented identity must be part of a completed, non-revoked trust edge; a
+  self-signed but unpaired device is denied. Authentication, authorization,
+  intent, and missing relay configuration have distinct fail-closed responses.
+- TURN credentials expire on one exact integer Unix second ten minutes after
+  minting. The username is `expiry:opaqueHandle`, where `opaqueHandle` is a
+  base64url HMAC-SHA256 over the normalized device identity and expiry under
+  the TURN secret. The stable device ID therefore never enters coturn's
+  protocol or logs. The coturn-compatible password remains padded base64
+  HMAC-SHA1 over that opaque username.
+- The rendezvous service reads the database password, TURN secret, and TLS
+  material only from files. The Compose source directory remains `0700` and
+  private files remain `0600` on the host. A small launcher begins as container
+  root, opens the bind-mounted secrets without following symlinks, rejects
+  non-regular/empty/oversized inputs, copies them to a private tmpfs as the
+  runtime UID with mode `0400`, clears supplementary groups, then setgid/setuid
+  and `exec`s the service. Restart-safe replacement never follows a stale
+  destination symlink. rendezvous runs as UID 65532 and coturn as UID 65534;
+  the runner checks that PID 1 has zero effective capabilities after the drop.
+  PostgreSQL's official entrypoint uses its supported `_FILE` flow: it reads
+  the secret while root and then drops to postgres.
+- coturn is configured with `external-ip=<host-or-deploy-ip>/<bridge-ip>`.
+  `Scripts/run-local-stack.sh` detects a non-loopback Mac LAN IPv4 or accepts
+  an explicit `--turn-external-ip` for deployment. The relay UDP port range is
+  published by Compose. A dependency-free host-side TURN client performs the
+  complete 401 challenge, long-term MESSAGE-INTEGRITY Allocate exchange,
+  parses `XOR-RELAYED-ADDRESS`, and rejects a container or otherwise unexpected
+  address.
+- coturn uses fingerprints, TURN REST authentication, ten-minute credentials,
+  bounded nonces/allocations, quotas, bandwidth caps, a 41-port relay range,
+  TLS, and the valid `cipher-list` option. CLI, DTLS, TCP relay endpoints,
+  multicast/loopback peers, username-labelled metrics, and software disclosure
+  are disabled. Both stdout logging and file logging are disabled
+  (`no-stdout-log`, `log-file=/dev/null`) so even a malicious client's username
+  cannot be emitted. The runner deliberately triggers an invalid-auth path and
+  scans Compose logs for a device marker.
+- The packaged default remains `wss://localhost:8443/v1/ws`; no environment
+  override masks it. The runner validates HTTP, CA-validated HTTPS, TURN TLS,
+  unprivileged runtime state, a real host-side TURN allocation, and the error
+  log path. Any failure after trust or Compose mutation stops the Compose stack
+  and removes only the CA trust added by that invocation. An executable
+  failure-injection test verifies the order: trust add, Compose up, Compose
+  down, trust delete.
+- PostgreSQL, Go builder, Alpine runtime, and coturn images are pinned by
+  immutable manifest-list digests as well as readable tags. The verification
+  script queries Docker Registry v2 and checks that every documented tag still
+  resolves to the reviewed digest. The root `.dockerignore` excludes Git data,
+  Swift build products, SDD reports, local secrets, private keys/certificates,
+  and database files from both image build contexts. No Dockerfile performs a
+  mutable package-manager install.
+- `Infrastructure/README.md` is the clean-checkout Chinese entry point. It
+  explains the default command, explicit deployment address, trust behavior,
+  secret ownership model, digest check, and rollback contract.
 
-## TDD evidence
+## TDD and review regressions
 
-- The first credential test failed to compile with `undefined: Mint` and
-  `undefined: Verify`; the minimum HMAC-SHA1 implementation then made expiry,
-  wire compatibility, normalization, and tamper tests green.
-- TURN endpoint tests first failed on missing `TURNSharedSecret` and `TURNURLs`
-  router configuration. The implementation then made unauthenticated,
-  untrusted, trusted, malformed, and revoked-device cases green, including an
-  independent verification of the returned credential with coturn's secret.
-- Final adversarial review reproduced a self-signed self-authorization receiving
-  credentials with HTTP 200. A regression test now requires a distinct active
-  peer in the established adjacency and rejects that relay-amplification path
-  with 403.
-- Service configuration tests first failed on missing database-file, TURN-file,
-  strict URL, and TLS listener composition functions. The file readers,
-  validators, URL construction, and all-or-nothing listener configuration were
-  then added.
-- Stack contract tests first failed because Docker Compose, coturn, Dockerfile,
-  and runner files did not exist. They now lock pinned images, secret mounts,
-  health dependencies, read-only/capability boundaries, coturn hardening, the
-  exact packaged WSS endpoint, certificate SANs, and absence of a production URL
-  override.
-- Final listener lifecycle tests cover cancellation and prove that invalid TLS
-  material cannot leak an already-bound plaintext listener.
+- Credential tests first exposed the old `expiry:deviceID` username and
+  subsecond API expiry. They now independently derive the opaque handle and
+  coturn HMAC, assert absence of the device ID, and require the JSON expiry and
+  username prefix to describe the same integer second.
+- Secret-launcher tests first failed to compile, then exercised real filesystem
+  modes and ownership, symlink source rejection, size bounds, stale symlink
+  replacement, and a second start over persistent tmpfs state.
+- Stack review tests first failed on the old root-inaccessible mounts, bridge
+  address, stdout log, invalid cipher option, absent build-context policy, and
+  missing rollback. They now cover both pinned Dockerfiles, exact tmpfs/runtime
+  paths, minimum bootstrap capabilities, host-side relay probe, no-log policy,
+  clean-checkout docs, and the registry verifier.
+- The runner rollback test uses isolated generated secrets plus fake Docker,
+  keychain, and failed HTTP commands. It performs the real certificate creation
+  path, reaches a simulated successful Compose start, then proves the post-start
+  failure reverses Compose and newly added trust in order.
+- The TURN probe has a live UDP fake-server test: it receives an unauthenticated
+  Allocate, returns a 401 realm/nonce challenge, checks the authenticated
+  long-term request, and returns an encoded host relay address which the client
+  must parse. Malformed/missing `XOR-RELAYED-ADDRESS` is rejected.
 
-## Verification
+## Verification evidence
 
-- `go test -race ./... -count=1`: pass for every Go package.
+- `go test -race ./... -count=1`: pass for every rendezvous package, including
+  credential, launcher, relay-probe, stack-contract, and rollback tests.
 - `go vet ./...`: pass.
-- PostgreSQL-backed `TEST_DATABASE_URL=... go test -race ./internal/httpapi
-  -count=1`: pass against a temporary local database with migrations 001-005.
-- Live local rendezvous probe: pass after all migrations; both
-  `http://localhost:8080/healthz` and CA-validated
-  `https://localhost:8443/healthz` returned `{"status":"ok"}`; OpenSSL hostname
-  validation returned code 0 and the rendezvous log scan found no secret,
-  password, or credential fields.
-- Linux container-target builds: pass for static amd64 and arm64 rendezvous
-  binaries.
-- `swift test`: 376 tests, 0 failures, 1 expected skip for the separately run
-  Go-hosted integration test. The packaged no-environment
-  `wss://localhost:8443/v1/ws` runtime test passes.
+- Linux static builds for `cmd/server`, `cmd/secret-launcher`, and
+  `cmd/turn-probe`: pass for amd64 and arm64.
+- PostgreSQL-backed
+  `TEST_DATABASE_URL=postgres://mason@127.0.0.1:55432/macchannel?sslmode=disable go test -race ./internal/httpapi -count=1`:
+  pass against the existing temporary PostgreSQL 16.15 database after the five
+  migrations; the temporary server was stopped cleanly afterward.
+- `Scripts/verify-image-digests.sh`: pass for PostgreSQL 17.11, Go 1.25.14,
+  Alpine 3.23.5, and coturn 4.17.2 manifest-list digests.
+- Isolated `Scripts/run-local-stack.sh --prepare-only --no-trust`: pass;
+  generated state directory was `0700`, database/TURN secrets and private keys
+  were `0600`, and public CA material was `0644`. The temporary state was moved
+  to Trash after inspection.
+- `bash -n` for both Bash scripts, `sh -n` for the coturn launcher, Ruby YAML
+  structural parsing, and `git diff --check`: pass.
+- `swift test --skip-build`: 376 tests, 0 failures, 1 expected skip for the
+  separately exercised Go-hosted interop wrapper.
+- `swift build`: pass.
 - `swift format lint --recursive --strict App Sources Tests`: clean.
-- `bash -n Scripts/run-local-stack.sh` and
-  `sh -n Infrastructure/coturn/start-coturn.sh`: pass.
-- Compose YAML structural parse and `git diff --check`: pass.
+- `bash Scripts/test-app-launch.sh`: pass for both the explicit smoke shell and
+  the real packaged production bootstrap/offline path; no app process remained.
 
 ## Environment limitation
 
-- Docker is not installed: `docker version` returned
-  `zsh: command not found: docker`, and the finished runner exits 1 with
-  `未安装 Docker，无法启动本地 Postgres、rendezvous 和 coturn。`. Therefore the
-  requested Compose image build, PostgreSQL 17 container health, coturn process
-  health, and real container TURN allocations could not be executed here.
-- The non-container database available on this Mac is PostgreSQL 16.15, so it
-  was used only for migration/rendezvous integration evidence. The Compose file
-  pins PostgreSQL 17.11, but that exact container remains unexecuted until a
-  Docker-capable host runs `Scripts/run-local-stack.sh`.
-- The CA preparation probe used `--no-trust`; no keychain trust was changed by
-  this verification run. The default runner contains and validates the per-user
-  trust path needed by the packaged WSS URL.
+- `docker version` fails with `command not found: docker`. Therefore this
+  report does **not** claim a Compose build, PostgreSQL 17 container health,
+  coturn process startup, host-to-published-port relay allocation, or coturn
+  error-log scan was executed on this Mac.
+- The missing-container paths are represented by executable contracts rather
+  than hidden or skipped assertions: the launcher manipulates real filesystem
+  ownership, the probe completes a real UDP TURN authentication exchange, the
+  rollback runner reaches a simulated post-start failure, image tags are
+  checked against the live registry, and Linux binaries build for both target
+  architectures. The final deployment gate remains running
+  `Scripts/run-local-stack.sh` on a Docker-capable macOS host.
+- Verification used isolated state and a fake `security` command for the
+  rollback test. It did not modify the real user keychain.
