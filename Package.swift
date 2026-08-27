@@ -33,5 +33,10 @@ let package = Package(
             name: "MacChannelCoreTests",
             dependencies: ["MacChannelCore", "MacChannelAppKit"]
         ),
+        .testTarget(
+            name: "MacChannelIntegrationTests",
+            dependencies: ["MacChannelCore"],
+            path: "Tests/Integration"
+        ),
     ]
 )
