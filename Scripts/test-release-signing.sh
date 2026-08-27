@@ -41,6 +41,14 @@ test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/
 test "$(plutil -extract CFBundleVersion raw -o - "$app_path/Contents/Info.plist")" = \
     "$build_number"
 
+app_architectures="$(lipo -archs "$app_path/Contents/MacOS/MacChannelApp")"
+for required_architecture in arm64 x86_64; do
+    if [[ " $app_architectures " != *" $required_architecture "* ]]; then
+        echo "signed app is missing required architecture: $required_architecture" >&2
+        exit 1
+    fi
+done
+
 if find "$app_path" -name CodeResources -o -name _CodeSignature | grep -q .; then
     :
 else

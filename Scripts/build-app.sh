@@ -23,7 +23,13 @@ if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-swift build -c "$build_configuration"
+if [[ "$build_configuration" == release ]]; then
+    build_arguments=(-c release --arch arm64 --arch x86_64)
+else
+    build_arguments=(-c debug)
+fi
+swift build "${build_arguments[@]}"
+product_path="$(swift build "${build_arguments[@]}" --show-bin-path)"
 
 app_path="${MACCHANNEL_APP_OUTPUT:-.build/MacChannel.app}"
 case "$app_path" in
@@ -51,12 +57,15 @@ fi
 
 contents_path="$working_app/Contents"
 mkdir -p "$contents_path/MacOS" "$contents_path/Resources"
-cp -X ".build/$build_configuration/MacChannelApp" "$contents_path/MacOS/MacChannelApp"
-cp -X -R ".build/$build_configuration/WebRTC.framework" "$contents_path/MacOS/WebRTC.framework"
+cp -X "$product_path/MacChannelApp" "$contents_path/MacOS/MacChannelApp"
+cp -X -R "$product_path/WebRTC.framework" "$contents_path/MacOS/WebRTC.framework"
+if [[ "$build_configuration" == release ]]; then
+    install_name_tool -add_rpath @executable_path "$contents_path/MacOS/MacChannelApp"
+fi
 if [[ -n "$codesign_identity" ]]; then
-    cp -X -R ".build/$build_configuration/MacChannel_MacChannelAppKit.bundle" "$contents_path/Resources/MacChannel_MacChannelAppKit.bundle"
+    cp -X -R "$product_path/MacChannel_MacChannelAppKit.bundle" "$contents_path/Resources/MacChannel_MacChannelAppKit.bundle"
 else
-    cp -X -R ".build/$build_configuration/MacChannel_MacChannelAppKit.bundle" "$working_app/MacChannel_MacChannelAppKit.bundle"
+    cp -X -R "$product_path/MacChannel_MacChannelAppKit.bundle" "$working_app/MacChannel_MacChannelAppKit.bundle"
 fi
 
 cat > "$contents_path/Info.plist" <<PLIST
