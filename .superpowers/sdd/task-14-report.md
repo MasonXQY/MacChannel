@@ -77,4 +77,6 @@ to its service image digests and Git commit.
 The immutable Task 14 privacy-finding revision is commit `764e280`; its audit
 document records the exact script content hashes and UTC evidence timestamp.
 Historical runtime-verifier revisions `5158d40` and `0ba4bb2` are superseded by
-the final fail-closed convergence commit pinned in the audit document.
+the final fail-closed convergence commit
+`f506df56866dcb6dc518cd6153006a66aa2a49ae`, pinned in the audit document by a
+subsequent append-only provenance commit.

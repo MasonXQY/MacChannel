@@ -85,3 +85,6 @@ PA-01 至 PA-06。任一敏感值命中均为发布阻断问题，不能通过�
 路径。该历史提交不得用作验收门禁。
 
 `0ba4bb2` 增加未来 producer schema；最终收敛提交把它明确标记为 NOT IMPLEMENTED。
+
+删除未受信运行时 PASS 路径、删除旧 evidence scanner，并以状态 2 固定运行时门禁的不可变
+内容提交为 `f506df56866dcb6dc518cd6153006a66aa2a49ae`。本行由后续仅追加提交记录。
