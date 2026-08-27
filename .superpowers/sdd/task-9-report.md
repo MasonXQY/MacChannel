@@ -18,8 +18,14 @@ Status: implementation complete; final verification recorded below
   required phase is durable; no nonterminal transfer is left runnerless because
   a write failed. Concrete peer/name/size and direction mismatches are typed
   permanent conflicts: they fail after one write, preserve the authoritative
-  SQLite row, remove the newly created private package, and retain no logical
-  transfer slot.
+  SQLite row, and retain no logical transfer slot. The exact authenticated
+  package is atomically moved to a private, descriptor-revalidated cleanup
+  quarantine, and an owner-only fsynced cleanup-intent tombstone is published,
+  before deletion. Each rename, marker, and deletion boundary uses APFS
+  `F_FULLFSYNC` with the established `fsync` fallback. Cleanup failure remains
+  bounded and retries in process; the durable quarantine, tombstone, or a
+  still-normal conflicting package is recognized on every restart without
+  mutating the authoritative row.
 - Send sessions reuse the same `TransferID` across LAN/internet/relay reconnects.
   The receiver's hardened journal supplies the `ResumeMap`, verified chunks are
   not resent, and a route change updates the existing transfer instead of
@@ -107,13 +113,15 @@ Status: implementation complete; final verification recorded below
   existing encrypted `ReceiveSession` and hardened `ReceiveStore`; it does not
   bypass policy, capacity checks, journal validation, collision handling,
   SQLite history, cleanup, or atomic publication.
-- The listener owns at most two active and 32 queued established channels. The
-  WebRTC source has no second established-channel buffer and permits at most
-  eight authenticated acceptances in flight. Its zero-buffer reader can retain
-  one rejected channel while shared close admission is backpressured, for a
-  documented end-to-end bound of 43 connections. Cancellation-insensitive
-  handshake operations are tracked, reaped on exit, and capped at eight; the
-  combined retained connection/work bound is therefore 51.
+- Before asking any source for its stream or next channel, the listener reserves
+  one of four process-wide cleanup permits. A permit travels with its channel
+  through the two-active/two-queued listener capacity and is released only after
+  close actually returns. The WebRTC source has no second established-channel
+  buffer and permits at most eight authenticated acceptances in flight, for a
+  documented end-to-end connection bound of 12. At most four additional reader
+  tasks may wait for a permit, and those waiters own no channel or descriptor.
+  Cancellation-insensitive handshake operations are independently capped at
+  eight, so the combined retained connection/operation/waiter bound is 24.
 - Channel-owning work additionally uses one process-wide resource registry with
   a hard bound of four inbound, four outbound, and eight total. A token is held
   until the protocol runner, connector/handshake, all send/frame operations,
@@ -125,11 +133,11 @@ Status: implementation complete; final verification recorded below
   so a concurrent watchdog cannot erase cleanup before close is registered; a
   stale no-channel observer cannot satisfy an already-started close.
 - Channels rejected before a receive runner exists—including cancellation after
-  source yield and before enqueue—enter one process-wide close-admission
-  registry shared by every listener instance. It allocates no second channel
-  backlog: the yielding reader or lifecycle caller backpressures at the global
-  inbound cap, and every close begins only after reserving the same resource
-  token used by active receives.
+  source yield and before enqueue—retain the same pre-acquired process-wide
+  cleanup permit. Admission waiters are shared and bounded across listener
+  instances but hold no channel: when four non-cooperative closes occupy the
+  cap, no fifth source is pulled. Every close uses the permit's same resource
+  token rather than creating a detached close task or channel backlog.
 - A configurable watchdog (30 seconds by default) covers the receiver challenge
   send, key export, initial offer, and later inbound inactivity. Even a transport
   operation that ignores cancellation cannot retain an incoming slot. Silent
@@ -163,7 +171,10 @@ The implementation was driven by deterministic regressions for:
   conflict re-read recovery, irreversible verification regression rejection,
   late channel-handoff ownership, process restart after the verifying commit
   with present/already-cleaned package states, concrete identity/direction
-  conflicts, and repeated cancelled-listener close lifecycles across instances.
+  conflicts, a 100-listener cancelled lifecycle stress with only four sources
+  pulled, injected conflict-package deletion failure with in-process retry,
+  same-ID authoritative-row restart cleanup, and crash recovery from the durable
+  conflict-cleanup quarantine.
 
 An independent code review identified a stale verification completion race,
 unbounded failed-package retention, incomplete pre-offer timeout coverage, a
@@ -171,16 +182,19 @@ yield/cancel channel-close edge, missing power-loss synchronization, and leaked
 interrupted build trees. Each finding was reproduced or covered by a focused
 regression and corrected. A later review found the restart-verification,
 permanent-mismatch, and cross-listener close-admission gaps documented above;
-all three were reproduced with concrete regressions before the final gate.
+all three were reproduced with concrete regressions before the final gate. The
+last review then exposed channel-bearing admission waiters and non-durable
+permanent-conflict cleanup; both were reproduced at their process/resource
+boundaries and replaced by pre-yield permits and durable cleanup intent.
 
 ## Verification
 
-- `swift test --filter TransferCoordinatorTests`: 57 tests, 0 failures.
+- `swift test --filter TransferCoordinatorTests`: 60 tests, 0 failures.
 - `swift test --filter ConnectionCoordinatorTests`: 14 tests, 0 failures.
 - `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
 - `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures.
 - `swift test --filter ReceiveStoreTests`: 64 tests, 0 failures.
-- `swift test`: 280 tests, 0 failures, 0 unexpected failures.
+- `swift test`: 283 tests, 0 failures, 0 unexpected failures.
 - `bash Scripts/build-app.sh`: pass.
 - `swift format lint --recursive --strict Sources Tests`: clean.
 - `git diff --check`: clean.

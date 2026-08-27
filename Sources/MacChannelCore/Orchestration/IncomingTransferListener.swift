@@ -18,34 +18,41 @@ public struct IncomingTransferConnection: Sendable {
 
 public protocol IncomingTransferConnectionSource: Sendable {
     /// Implementations must use a bounded source stream and close every channel
-    /// rejected by that stream. Production uses a zero-element handoff buffer;
-    /// the listener itself owns the 34 established-channel capacity below.
+    /// rejected by that stream. Production uses a zero-element handoff buffer.
+    /// The listener requests the stream and each next element only after it has
+    /// reserved process-wide cleanup ownership.
     func connections() async -> AsyncThrowingStream<IncomingTransferConnection, Error>
 }
 
 public enum IncomingTransferCapacity {
     public static let maximumActiveTransfers = 2
-    public static let maximumQueuedConnections = 32
+    public static let maximumCleanupPermits = 4
+    public static let maximumQueuedConnections =
+        maximumCleanupPermits - maximumActiveTransfers
     public static let maximumEstablishedConnections =
         maximumActiveTransfers + maximumQueuedConnections
 
     // WebRTC can additionally have eight authenticated acceptances in flight,
     // but retains no second established-channel queue before this listener. A
-    // zero-buffer source reader can hold one rejected channel while shared
-    // close admission is backpressured at the process-wide resource cap.
+    // cleanup admission is backpressured before the source is pulled.
     public static let maximumUpstreamAcceptances = 8
-    public static let maximumBackpressuredCloseAdmissions = 1
+    public static let maximumCloseAdmissionWaiters = 4
     public static let maximumDetachedHandshakeOperations = 8
     public static let maximumEndToEndConnections =
         maximumEstablishedConnections + maximumUpstreamAcceptances
-        + maximumBackpressuredCloseAdmissions
     public static let maximumRetainedConnectionsAndOperations =
         maximumEndToEndConnections + maximumDetachedHandshakeOperations
+        + maximumCloseAdmissionWaiters
 }
 
 /// Runs trusted inbound transfers through `ReceiveSession` and its hardened
 /// `ReceiveStore` configuration. The listener owns no alternate staging path.
 public actor IncomingTransferListener {
+    private struct AdmittedConnection: Sendable {
+        let connection: IncomingTransferConnection
+        let permit: IncomingChannelCloseRegistry.Permit
+    }
+
     private struct ActiveReceive {
         let transferID: TransferID
         let channel: any SecureChannel
@@ -64,7 +71,7 @@ public actor IncomingTransferListener {
     private let closeRegistry = IncomingChannelCloseRegistry.shared
 
     private var readerTask: Task<Void, Never>?
-    private var pending: [IncomingTransferConnection] = []
+    private var pending: [AdmittedConnection] = []
     private var active: [UUID: ActiveReceive] = [:]
     private var activeTransferIDs: Set<TransferID> = []
     private var schedulingWorker: Task<Void, Never>?
@@ -98,13 +105,42 @@ public actor IncomingTransferListener {
         guard !stopped, readerTask == nil else { return }
         readerTask = Task { [weak self, source, closeRegistry, timeout = inactivityTimeout] in
             do {
+                guard let initialPermit = await closeRegistry.acquire() else {
+                    await self?.sourceEnded()
+                    return
+                }
+                guard !Task.isCancelled else {
+                    await closeRegistry.releaseUnused(initialPermit)
+                    return
+                }
                 let connections = await source.connections()
-                for try await connection in connections {
+                var iterator = connections.makeAsyncIterator()
+                var permit: IncomingChannelCloseRegistry.Permit? = initialPermit
+                while let currentPermit = permit {
+                    let connection: IncomingTransferConnection?
+                    do {
+                        connection = try await iterator.next()
+                    } catch {
+                        await closeRegistry.releaseUnused(currentPermit)
+                        throw error
+                    }
+                    guard let connection else {
+                        await closeRegistry.releaseUnused(currentPermit)
+                        break
+                    }
                     guard !Task.isCancelled, let self else {
-                        await closeRegistry.submit(connection.channel, timeout: timeout)
+                        await closeRegistry.close(
+                            connection.channel,
+                            permit: currentPermit,
+                            timeout: timeout
+                        )
                         return
                     }
-                    await self.enqueue(connection)
+                    await self.enqueue(
+                        AdmittedConnection(connection: connection, permit: currentPermit)
+                    )
+                    guard !Task.isCancelled else { return }
+                    permit = await closeRegistry.acquire()
                 }
             } catch {
                 await self?.sourceEnded()
@@ -131,23 +167,28 @@ public actor IncomingTransferListener {
             )
         }
         for connection in queued {
-            await closeRegistry.submit(connection.channel, timeout: inactivityTimeout)
+            await closeRegistry.close(
+                connection.connection.channel,
+                permit: connection.permit,
+                timeout: inactivityTimeout
+            )
         }
     }
 
-    private func enqueue(_ connection: IncomingTransferConnection) async {
+    private func enqueue(_ admitted: AdmittedConnection) async {
+        let connection = admitted.connection
         guard !stopped,
             !activeTransferIDs.contains(connection.transferID),
-            !pending.contains(where: { $0.transferID == connection.transferID })
+            !pending.contains(where: { $0.connection.transferID == connection.transferID })
         else {
-            await closeRejected(connection.channel)
+            await closeRejected(admitted)
             return
         }
         guard pending.count < IncomingTransferCapacity.maximumQueuedConnections else {
-            await closeRejected(connection.channel)
+            await closeRejected(admitted)
             return
         }
-        pending.append(connection)
+        pending.append(admitted)
         schedule()
     }
 
@@ -161,22 +202,15 @@ public actor IncomingTransferListener {
     private func drainSchedule() async {
         defer { schedulingWorker = nil }
         while active.count < IncomingTransferCapacity.maximumActiveTransfers, !pending.isEmpty {
-            guard let resourceToken = await resources.reserve(.inbound, onReleased: {
-                [weak self] in
-                await self?.resourceCapacityReleased()
-            }) else { return }
-            guard !pending.isEmpty else {
-                await resources.finishWithoutClose(resourceToken)
-                continue
-            }
-            let connection = pending.removeFirst()
+            let admitted = pending.removeFirst()
+            let connection = admitted.connection
+            let resourceToken = admitted.permit.resourceToken
             guard !stopped else {
-                await resources.beginClose(
+                await closeRegistry.close(
                     connection.channel,
-                    token: resourceToken,
+                    permit: admitted.permit,
                     timeout: inactivityTimeout
                 )
-                await resources.runnerReturned(resourceToken)
                 continue
             }
             let token = UUID()
@@ -254,12 +288,12 @@ public actor IncomingTransferListener {
         await resources.runnerReturned(token)
     }
 
-    private func resourceCapacityReleased() {
-        schedule()
-    }
-
-    private func closeRejected(_ channel: any SecureChannel) async {
-        await closeRegistry.submit(channel, timeout: inactivityTimeout)
+    private func closeRejected(_ admitted: AdmittedConnection) async {
+        await closeRegistry.close(
+            admitted.connection.channel,
+            permit: admitted.permit,
+            timeout: inactivityTimeout
+        )
     }
 
     func retainedResourceCount() async -> Int {

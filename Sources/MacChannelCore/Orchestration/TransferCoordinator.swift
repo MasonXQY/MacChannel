@@ -29,6 +29,11 @@ public actor TransferCoordinator: TransferCoordinating {
         var channel: (any SecureChannel)?
     }
 
+    private struct ConflictPackageCleanup {
+        let package: OutgoingTransferPackage
+        var worker: Task<Void, Never>?
+    }
+
     private static let maximumConcurrentTransfers = 2
     private static let maximumQueuedTransfers = 200
     private static let maximumPublishedTerminalSnapshots = 200
@@ -46,6 +51,7 @@ public actor TransferCoordinator: TransferCoordinating {
     private var pending: [TransferID] = []
     private var active: Set<TransferID> = []
     private var detachedRunners: [UUID: Task<Void, Never>] = [:]
+    private var conflictPackageCleanups: [TransferID: ConflictPackageCleanup] = [:]
     private var schedulingWorker: Task<Void, Never>?
     private var subscribers: [UUID: AsyncStream<[TransferSnapshot]>.Continuation] = [:]
     private var shuttingDown = false
@@ -97,6 +103,7 @@ public actor TransferCoordinator: TransferCoordinating {
             transfer.packageCleanupWorker?.cancel()
         }
         for runner in detachedRunners.values { runner.cancel() }
+        for cleanup in conflictPackageCleanups.values { cleanup.worker?.cancel() }
         schedulingWorker?.cancel()
         for subscriber in subscribers.values { subscriber.finish() }
         let attempts = connectionAttempts
@@ -105,7 +112,9 @@ public actor TransferCoordinator: TransferCoordinating {
 
     public func send(items: [URL], to device: DeviceID) async throws -> TransferID {
         guard !shuttingDown else { throw MacChannelError.transferFailed }
-        guard transfers.count < Self.maximumQueuedTransfers + Self.maximumConcurrentTransfers else {
+        guard transfers.count + conflictPackageCleanups.count
+            < Self.maximumQueuedTransfers + Self.maximumConcurrentTransfers
+        else {
             throw MacChannelError.invalidConfiguration("The outbound transfer queue is full.")
         }
         let package = try OutgoingTransferPackage.create(
@@ -211,6 +220,7 @@ public actor TransferCoordinator: TransferCoordinating {
             transfer.persistenceWorker?.cancel()
             transfer.packageCleanupWorker?.cancel()
         }
+        for cleanup in conflictPackageCleanups.values { cleanup.worker?.cancel() }
         active.removeAll()
         pending.removeAll()
         await connectionAttempts.cancelAll()
@@ -784,9 +794,35 @@ public actor TransferCoordinator: TransferCoordinating {
             }
         }
         transfers.removeValue(forKey: id)
-        try? current.package.remove()
+        conflictPackageCleanups[id] = ConflictPackageCleanup(
+            package: current.package,
+            worker: nil
+        )
+        retryConflictPackageCleanup(id)
         for completion in completions { await completion.resolve(.failure(error)) }
         scheduleTransfers()
+    }
+
+    private func retryConflictPackageCleanup(_ id: TransferID) {
+        guard let cleanup = conflictPackageCleanups[id], cleanup.worker == nil else { return }
+        do {
+            try cleanup.package.removeAfterPersistenceConflict()
+            conflictPackageCleanups.removeValue(forKey: id)
+        } catch {
+            let retryDelay = persistenceRetryDelay
+            let worker = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: retryDelay)
+                } catch { return }
+                await self?.conflictPackageCleanupTimerFired(id)
+            }
+            conflictPackageCleanups[id]?.worker = worker
+        }
+    }
+
+    private func conflictPackageCleanupTimerFired(_ id: TransferID) {
+        conflictPackageCleanups[id]?.worker = nil
+        retryConflictPackageCleanup(id)
     }
 
     private func isPermanentPersistenceConflict(_ error: Error) -> Bool {
@@ -1051,7 +1087,9 @@ public actor TransferCoordinator: TransferCoordinating {
     }
 
     private func restoreHistory() async throws {
-        let packages = try OutgoingTransferPackage.loadAll(from: outgoingDirectory)
+        let recovery = try OutgoingTransferPackage.recoverAll(from: outgoingDirectory)
+        let packages = recovery.packages
+        let completedConflictCleanupIDs = recovery.completedConflictCleanupIDs
         var packageByID = Dictionary(uniqueKeysWithValues: packages.map { ($0.id, $0) })
         var history = try await persistence.persistedHistory(limit: 10_000)
         var historyIDs = Set(history.map(\.id))
@@ -1096,6 +1134,13 @@ public actor TransferCoordinator: TransferCoordinating {
                 )
                 continue
             }
+            if completedConflictCleanupIDs.contains(record.id) {
+                if let package = packageByID.removeValue(forKey: record.id) {
+                    try package.removeAfterPersistenceConflict()
+                }
+                if isTerminal(record.phase) { appendRestoredTerminal(snapshot) }
+                continue
+            }
             guard let package = packageByID.removeValue(forKey: record.id) else {
                 if isTerminal(record.phase) {
                     appendRestoredTerminal(snapshot)
@@ -1120,7 +1165,11 @@ public actor TransferCoordinator: TransferCoordinating {
             guard package.peer == record.peer,
                 package.displayFilename == record.displayFilename,
                 package.totalBytes == Int64(record.aggregateSize)
-            else { throw TransferProtocolError.sourceChanged }
+            else {
+                try package.removeAfterPersistenceConflict()
+                if isTerminal(record.phase) { appendRestoredTerminal(snapshot) }
+                continue
+            }
             if isTerminal(record.phase) {
                 try package.remove()
                 appendRestoredTerminal(snapshot)

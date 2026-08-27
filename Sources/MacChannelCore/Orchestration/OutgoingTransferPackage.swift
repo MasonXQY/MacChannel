@@ -6,6 +6,11 @@ import Foundation
 /// package owns APFS copy-on-write clones but never retains open descriptors;
 /// descriptors are opened only after a transport connection succeeds.
 struct OutgoingTransferPackage: Sendable {
+    struct Recovery: Sendable {
+        let packages: [OutgoingTransferPackage]
+        let completedConflictCleanupIDs: Set<TransferID>
+    }
+
     struct Metadata: Codable, Equatable, Sendable {
         let version: Int
         let transferID: String
@@ -173,6 +178,10 @@ struct OutgoingTransferPackage: Sendable {
     }
 
     static func loadAll(from outgoingDirectory: URL) throws -> [OutgoingTransferPackage] {
+        try recoverAll(from: outgoingDirectory).packages
+    }
+
+    static func recoverAll(from outgoingDirectory: URL) throws -> Recovery {
         let outgoing = outgoingDirectory.standardizedFileURL
         try preparePrivateDirectory(outgoing)
         try reclaimAuthenticationKeyTemps(in: outgoing)
@@ -182,6 +191,7 @@ struct OutgoingTransferPackage: Sendable {
             options: []
         )
         var packages: [URL] = []
+        var completedConflictCleanupIDs: Set<TransferID> = []
         var removedTemporary = false
         for child in children {
             if isCreatingDirectoryName(child.lastPathComponent) {
@@ -189,12 +199,23 @@ struct OutgoingTransferPackage: Sendable {
                 try makeTreeRemovable(child)
                 try FileManager.default.removeItem(at: child)
                 removedTemporary = true
+            } else if let id = conflictCleanupID(child.lastPathComponent) {
+                try publishConflictCleanupMarker(id: id, outgoing: outgoing)
+                try securelyRemoveCleanupDirectory(child, from: outgoing)
+                completedConflictCleanupIDs.insert(id)
+                removedTemporary = true
+            } else if let id = conflictCleanupMarkerID(child.lastPathComponent) {
+                try validateConflictCleanupMarker(child, in: outgoing)
+                completedConflictCleanupIDs.insert(id)
             } else if !child.lastPathComponent.hasPrefix(".") {
                 packages.append(child)
             }
         }
         if removedTemporary { try synchronize(outgoing, isDirectory: true) }
-        return try packages.sorted { $0.lastPathComponent < $1.lastPathComponent }.map(load)
+        return Recovery(
+            packages: try packages.sorted { $0.lastPathComponent < $1.lastPathComponent }.map(load),
+            completedConflictCleanupIDs: completedConflictCleanupIDs
+        )
     }
 
     static func load(_ directory: URL) throws -> OutgoingTransferPackage {
@@ -257,6 +278,78 @@ struct OutgoingTransferPackage: Sendable {
             throw TransferProtocolError.unsupportedSource
         }
         try Self.synchronize(outgoing, isDirectory: true)
+    }
+
+    /// Atomically records that this authenticated package conflicts with the
+    /// authoritative SQLite identity before deleting any bytes. A crash or
+    /// deletion failure leaves a strictly named private quarantine that startup
+    /// can finish without ever treating it as a runnable package.
+    func removeAfterPersistenceConflict(
+        afterQuarantine: (() throws -> Void)? = nil
+    ) throws {
+        let outgoing = directory.deletingLastPathComponent()
+        let parent = Darwin.open(
+            outgoing.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard parent >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(parent) }
+        let name = directory.lastPathComponent
+        var named = stat()
+        if fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) != 0 {
+            guard errno == ENOENT else { throw TransferProtocolError.unsupportedSource }
+            try Self.removeExistingConflictCleanup(
+                id: id,
+                outgoing: outgoing,
+                parent: parent
+            )
+            return
+        }
+        guard named.st_mode & S_IFMT == S_IFDIR,
+            named.st_uid == geteuid(),
+            named.st_mode & 0o777 == S_IRWXU
+        else { throw TransferProtocolError.unsupportedSource }
+        let original = Darwin.openat(
+            parent,
+            name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard original >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(original) }
+        var opened = stat()
+        guard fstat(original, &opened) == 0,
+            opened.st_dev == named.st_dev,
+            opened.st_ino == named.st_ino
+        else { throw TransferProtocolError.unsupportedSource }
+        let cleanupName =
+            ".\(id.rawValue.uuidString.lowercased()).cleanup.\(UUID().uuidString.lowercased())"
+        guard renameatx_np(
+            parent,
+            name,
+            parent,
+            cleanupName,
+            UInt32(RENAME_EXCL)
+        ) == 0 else { throw TransferProtocolError.unsupportedSource }
+        try Self.synchronizeDescriptor(parent)
+        let moved = Darwin.openat(
+            parent,
+            cleanupName,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard moved >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(moved) }
+        var movedStatus = stat()
+        guard fstat(moved, &movedStatus) == 0,
+            movedStatus.st_dev == opened.st_dev,
+            movedStatus.st_ino == opened.st_ino
+        else { throw TransferProtocolError.unsupportedSource }
+        try Self.publishConflictCleanupMarker(id: id, parent: parent)
+        try afterQuarantine?()
+        try Self.securelyRemoveCleanupDirectory(
+            name: cleanupName,
+            parent: parent,
+            expected: movedStatus
+        )
     }
 
     private func rootURL() throws -> URL {
@@ -393,10 +486,10 @@ struct OutgoingTransferPackage: Sendable {
                 }
                 return true
             }
-            guard wrote,
-                fchmod(descriptor, S_IRUSR | S_IWUSR) == 0,
-                fcntl(descriptor, F_FULLFSYNC) == 0 || Darwin.fsync(descriptor) == 0
-            else { throw TransferProtocolError.unsupportedSource }
+            guard wrote, fchmod(descriptor, S_IRUSR | S_IWUSR) == 0 else {
+                throw TransferProtocolError.unsupportedSource
+            }
+            try synchronizeDescriptor(descriptor)
             let renameResult = Darwin.renameatx_np(
                 directoryDescriptor,
                 temporaryName,
@@ -513,6 +606,225 @@ struct OutgoingTransferPackage: Sendable {
             && UUID(uuidString: String(components[2])) != nil
     }
 
+    private static func conflictCleanupID(_ name: String) -> TransferID? {
+        let components = name.split(separator: ".", omittingEmptySubsequences: true)
+        guard name.hasPrefix("."), components.count == 3, components[1] == "cleanup",
+            let transferUUID = UUID(uuidString: String(components[0])),
+            let cleanupUUID = UUID(uuidString: String(components[2])),
+            String(components[0]) == transferUUID.uuidString.lowercased(),
+            String(components[2]) == cleanupUUID.uuidString.lowercased()
+        else { return nil }
+        return TransferID(rawValue: transferUUID)
+    }
+
+    private static func conflictCleanupMarkerID(_ name: String) -> TransferID? {
+        let suffix = ".cleanup-intent"
+        guard name.hasPrefix("."), name.hasSuffix(suffix) else { return nil }
+        let start = name.index(after: name.startIndex)
+        let end = name.index(name.endIndex, offsetBy: -suffix.count)
+        let identifier = String(name[start..<end])
+        guard let uuid = UUID(uuidString: identifier),
+            identifier == uuid.uuidString.lowercased()
+        else { return nil }
+        return TransferID(rawValue: uuid)
+    }
+
+    private static func conflictCleanupMarkerName(_ id: TransferID) -> String {
+        ".\(id.rawValue.uuidString.lowercased()).cleanup-intent"
+    }
+
+    private static func publishConflictCleanupMarker(id: TransferID, outgoing: URL) throws {
+        let parent = Darwin.open(
+            outgoing.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard parent >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(parent) }
+        try publishConflictCleanupMarker(id: id, parent: parent)
+    }
+
+    private static func publishConflictCleanupMarker(id: TransferID, parent: Int32) throws {
+        let name = conflictCleanupMarkerName(id)
+        var existing = stat()
+        if fstatat(parent, name, &existing, AT_SYMLINK_NOFOLLOW) == 0 {
+            try validateConflictCleanupMarker(existing)
+            return
+        }
+        guard errno == ENOENT else { throw TransferProtocolError.unsupportedSource }
+        let descriptor = Darwin.openat(
+            parent,
+            name,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR
+        )
+        guard descriptor >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(descriptor) }
+        var created = stat()
+        guard fstat(descriptor, &created) == 0 else {
+            throw TransferProtocolError.unsupportedSource
+        }
+        try validateConflictCleanupMarker(created)
+        try synchronizeDescriptor(descriptor)
+        try synchronizeDescriptor(parent)
+    }
+
+    private static func validateConflictCleanupMarker(_ marker: URL, in outgoing: URL) throws {
+        guard marker.deletingLastPathComponent().standardizedFileURL
+            == outgoing.standardizedFileURL,
+            conflictCleanupMarkerID(marker.lastPathComponent) != nil
+        else { throw TransferProtocolError.unsupportedSource }
+        var status = stat()
+        guard lstat(marker.path, &status) == 0 else {
+            throw TransferProtocolError.unsupportedSource
+        }
+        try validateConflictCleanupMarker(status)
+    }
+
+    private static func validateConflictCleanupMarker(_ status: stat) throws {
+        guard status.st_mode & S_IFMT == S_IFREG,
+            status.st_uid == geteuid(),
+            status.st_mode & 0o777 == S_IRUSR | S_IWUSR,
+            status.st_size == 0,
+            status.st_nlink == 1
+        else { throw TransferProtocolError.unsupportedSource }
+    }
+
+    private static func removeExistingConflictCleanup(
+        id: TransferID,
+        outgoing: URL,
+        parent: Int32
+    ) throws {
+        try publishConflictCleanupMarker(id: id, parent: parent)
+        let matching = try FileManager.default.contentsOfDirectory(
+            at: outgoing,
+            includingPropertiesForKeys: nil,
+            options: []
+        ).filter { conflictCleanupID($0.lastPathComponent) == id }
+        guard matching.count <= 1 else { throw TransferProtocolError.unsupportedSource }
+        guard let cleanup = matching.first else { return }
+        try securelyRemoveCleanupDirectory(name: cleanup.lastPathComponent, parent: parent)
+    }
+
+    private static func securelyRemoveCleanupDirectory(
+        _ cleanup: URL,
+        from outgoing: URL
+    ) throws {
+        guard cleanup.deletingLastPathComponent().standardizedFileURL
+            == outgoing.standardizedFileURL,
+            conflictCleanupID(cleanup.lastPathComponent) != nil
+        else { throw TransferProtocolError.unsupportedSource }
+        let parent = Darwin.open(
+            outgoing.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard parent >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(parent) }
+        try securelyRemoveCleanupDirectory(name: cleanup.lastPathComponent, parent: parent)
+    }
+
+    private static func securelyRemoveCleanupDirectory(
+        name: String,
+        parent: Int32,
+        expected: stat? = nil
+    ) throws {
+        guard conflictCleanupID(name) != nil else {
+            throw TransferProtocolError.unsupportedSource
+        }
+        var named = stat()
+        guard fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            named.st_mode & S_IFMT == S_IFDIR,
+            named.st_uid == geteuid(),
+            named.st_mode & 0o777 == S_IRWXU,
+            expected.map({ $0.st_dev == named.st_dev && $0.st_ino == named.st_ino }) ?? true
+        else { throw TransferProtocolError.unsupportedSource }
+        let descriptor = Darwin.openat(
+            parent,
+            name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard descriptor >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(descriptor) }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0,
+            opened.st_dev == named.st_dev,
+            opened.st_ino == named.st_ino
+        else { throw TransferProtocolError.unsupportedSource }
+        try securelyRemoveContents(descriptor)
+        var current = stat()
+        guard fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+            current.st_mode & S_IFMT == S_IFDIR,
+            current.st_dev == opened.st_dev,
+            current.st_ino == opened.st_ino,
+            unlinkat(parent, name, AT_REMOVEDIR) == 0
+        else { throw TransferProtocolError.unsupportedSource }
+        try synchronizeDescriptor(parent)
+    }
+
+    private static func securelyRemoveContents(_ descriptor: Int32) throws {
+        guard fchmod(descriptor, S_IRWXU) == 0 else {
+            throw TransferProtocolError.unsupportedSource
+        }
+        let independent = Darwin.openat(
+            descriptor,
+            ".",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard independent >= 0, let directory = fdopendir(independent) else {
+            if independent >= 0 { Darwin.close(independent) }
+            throw TransferProtocolError.unsupportedSource
+        }
+        var names: [String] = []
+        errno = 0
+        while let entry = readdir(directory) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                    String(cString: $0)
+                }
+            }
+            if name != ".", name != ".." { names.append(name) }
+        }
+        let readError = errno
+        guard closedir(directory) == 0, readError == 0 else {
+            throw TransferProtocolError.unsupportedSource
+        }
+        for name in names {
+            var childStatus = stat()
+            guard fstatat(descriptor, name, &childStatus, AT_SYMLINK_NOFOLLOW) == 0,
+                childStatus.st_uid == geteuid(),
+                childStatus.st_mode & 0o077 == 0
+            else { throw TransferProtocolError.unsupportedSource }
+            switch childStatus.st_mode & S_IFMT {
+            case S_IFDIR:
+                let child = Darwin.openat(
+                    descriptor,
+                    name,
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                )
+                guard child >= 0 else { throw TransferProtocolError.unsupportedSource }
+                do {
+                    try securelyRemoveContents(child)
+                    Darwin.close(child)
+                } catch {
+                    Darwin.close(child)
+                    throw error
+                }
+                var current = stat()
+                guard fstatat(descriptor, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                    current.st_dev == childStatus.st_dev,
+                    current.st_ino == childStatus.st_ino,
+                    unlinkat(descriptor, name, AT_REMOVEDIR) == 0
+                else { throw TransferProtocolError.unsupportedSource }
+            case S_IFREG:
+                guard unlinkat(descriptor, name, 0) == 0 else {
+                    throw TransferProtocolError.unsupportedSource
+                }
+            default:
+                throw TransferProtocolError.unsupportedSource
+            }
+        }
+        try synchronizeDescriptor(descriptor)
+    }
+
     private static func reclaimAuthenticationKeyTemps(in outgoing: URL) throws {
         let children = try FileManager.default.contentsOfDirectory(
             at: outgoing,
@@ -593,6 +905,13 @@ struct OutgoingTransferPackage: Sendable {
         let descriptor = Darwin.open(url.path, flags)
         guard descriptor >= 0 else { throw TransferProtocolError.unsupportedSource }
         defer { Darwin.close(descriptor) }
+        try synchronizeDescriptor(descriptor)
+    }
+
+    /// APFS durability requires flushing through the device cache. `fsync` is
+    /// retained only as the documented fallback for filesystems that do not
+    /// support `F_FULLFSYNC`.
+    private static func synchronizeDescriptor(_ descriptor: Int32) throws {
         if fcntl(descriptor, F_FULLFSYNC) != 0, Darwin.fsync(descriptor) != 0 {
             throw TransferProtocolError.unsupportedSource
         }
