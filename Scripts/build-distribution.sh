@@ -102,11 +102,12 @@ inject_failure app-verified
 
 mkdir -p "$stage_path"
 chmod 755 "$stage_path"
-ditto "$app_path" "$stage_path/MacChannel.app"
+ditto --noextattr --noqtn "$app_path" "$stage_path/MacChannel.app"
 ln -s /Applications "$stage_path/Applications"
 sed -e "s/__VERSION__/$version/g" -e "s/__BUILD__/$build_number/g" \
     Distribution/README.txt >"$stage_path/README.txt"
 chmod 644 "$stage_path/README.txt"
+xattr -cr "$stage_path"
 
 source_epoch="$(git show -s --format=%ct HEAD)"
 timestamp="$(date -r "$source_epoch" +%Y%m%d%H%M.%S)"
@@ -115,7 +116,7 @@ while IFS= read -r stage_entry; do
 done < <(find "$stage_path" -depth -print | LC_ALL=C sort)
 
 normalized_stage="$build_root/normalized-stage"
-ditto "$stage_path" "$normalized_stage"
+ditto --noextattr --noqtn "$stage_path" "$normalized_stage"
 codesign --remove-signature \
     "$normalized_stage/MacChannel.app/Contents/MacOS/WebRTC.framework" >/dev/null 2>&1
 codesign --remove-signature \
