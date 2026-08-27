@@ -26,6 +26,7 @@ func TestLocalStackPinsServicesAndProtectsSecrets(t *testing.T) {
 		"8080:8080", "8443:8443", "3478:3478/udp", "3478:3478/tcp", "5349:5349/tcp",
 		"49160-49200:49160-49200/udp", "healthcheck:", "stack_secrets:",
 		"TURN_EXTERNAL_IP:-host.docker.internal", "/run/macchannel:size=1m",
+		"TURN_URLS: stun:stun.cloudflare.com:3478,turn:${TURN_EXTERNAL_IP:-127.0.0.1}:3478",
 	} {
 		if !strings.Contains(compose, required) {
 			t.Errorf("docker-compose.yml missing %q", required)
@@ -98,6 +99,18 @@ func TestVerifyE2EWithoutDockerExitsCleanlyWithNoTemporaryLogs(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "缺少 docker") || strings.Contains(string(output), "unbound variable") {
 		t.Fatalf("missing-Docker output is not clean: %s", output)
+	}
+}
+
+func TestVerifyE2EUsesPinnedLocalCAWithoutMutatingLoginKeychain(t *testing.T) {
+	root := repositoryRoot(t)
+	verifier := readContractFile(t, filepath.Join(root, "Scripts", "verify-e2e.sh"))
+	if strings.Contains(verifier, "security add-trusted-cert") ||
+		strings.Contains(verifier, "security delete-certificate") {
+		t.Fatal("verify-e2e must not mutate or wait on the user's login keychain")
+	}
+	if !strings.Contains(verifier, "MACCHANNEL_E2E_CA_FILE") {
+		t.Fatal("verify-e2e does not pass the generated CA to the integration clients")
 	}
 }
 
@@ -361,6 +374,7 @@ func TestLocalStackMatchesPackagedSecureRendezvousDefault(t *testing.T) {
 		"subjectAltName", "DNS:localhost", "IP:127.0.0.1", "security add-trusted-cert",
 		"security delete-certificate", "openssl verify", "docker compose", "cmd/turn-probe",
 		"--turn-external-ip", "XOR-RELAYED-ADDRESS", "--min-port 49160", "--max-port 49200", "logs coturn",
+		"docker context show", "colima list --json", "turn_probe_host",
 	} {
 		if !strings.Contains(runner, required) {
 			t.Errorf("run-local-stack.sh missing TLS/relay/rollback step %q", required)

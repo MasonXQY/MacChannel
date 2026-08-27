@@ -5,10 +5,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 compose_file="${repository_root}/Infrastructure/docker-compose.yml"
 local_only=false
 stack_started=false
-trust_added=false
 state_root=
-login_keychain=
-certificate_hash=
 temporary_files=()
 
 if [[ ${#} -gt 1 ]]; then
@@ -29,9 +26,6 @@ cleanup() {
   set +e
   if [[ "${stack_started}" == true ]]; then
     docker compose -f "${compose_file}" down --remove-orphans >/dev/null 2>&1
-  fi
-  if [[ "${trust_added}" == true && -n "${certificate_hash}" && -n "${login_keychain}" ]]; then
-    security delete-certificate -Z "${certificate_hash}" -t "${login_keychain}" >/dev/null 2>&1
   fi
   local temporary_file
   if ((${#temporary_files[@]} > 0)); then
@@ -75,7 +69,7 @@ if [[ "${local_only}" == true ]]; then
   exit 0
 fi
 
-for command_name in docker go swift security openssl; do
+for command_name in docker go swift openssl; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     echo "E2E BLOCKED：缺少 ${command_name}；真实 rendezvous/STUN/TURN 测试未运行。" >&2
     exit 2
@@ -96,13 +90,6 @@ fi
 stack_started=true
 
 local_ca="${state_root}/tls/local-ca.pem"
-localhost_certificate="${state_root}/tls/localhost.pem"
-if ! security verify-cert -c "${localhost_certificate}" -p ssl -n localhost -L -q >/dev/null 2>&1; then
-  login_keychain="$(security default-keychain -d user | tr -d ' \"')"
-  certificate_hash="$(openssl x509 -in "${local_ca}" -fingerprint -sha1 -noout | awk -F= '{gsub(":", "", $2); print $2}')"
-  security add-trusted-cert -r trustRoot -p ssl -s localhost -k "${login_keychain}" "${local_ca}"
-  trust_added=true
-fi
 
 (
   cd "${repository_root}"
@@ -120,6 +107,7 @@ temporary_files+=("${e2e_output}")
   cd "${repository_root}"
   MACCHANNEL_E2E_STACK=1 \
     MACCHANNEL_E2E_STACK_ORIGIN=https://localhost:8443 \
+    MACCHANNEL_E2E_CA_FILE="${local_ca}" \
     swift test --no-parallel --filter TransferIntegrationTests
 ) | tee "${e2e_output}"
 

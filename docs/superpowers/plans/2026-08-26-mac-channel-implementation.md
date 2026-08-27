@@ -686,7 +686,7 @@ git commit -m "feat: add device fan and transfer controls"
 
 **Interfaces:**
 - Consumes: authenticated device identity.
-- Produces: `GET /v1/turn-credentials` returning URLs, username, credential, and expiry; local Postgres, rendezvous, STUN, and TURN endpoints.
+- Produces: `POST /v1/turn-credentials` returning URLs, username, credential, and expiry; local Postgres, rendezvous, STUN, and TURN endpoints.
 
 - [ ] **Step 1: Write short-lived credential tests**
 

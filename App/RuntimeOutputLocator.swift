@@ -5,6 +5,7 @@ import MacChannelCore
 actor RuntimeOutputLocator {
     private let url: URL
     private var paths: [UUID: String]
+    private var revision: UInt64 = 0
 
     init(url: URL) throws {
         self.url = url
@@ -20,25 +21,32 @@ actor RuntimeOutputLocator {
 
     func record(_ result: TransferReceiveResult) throws {
         guard let output = result.receivedURLs.first?.standardizedFileURL,
-              output.isFileURL,
-              output.path.hasPrefix("/")
+            output.isFileURL,
+            output.path.hasPrefix("/")
         else { return }
         var candidate = paths
         candidate[result.transferID.rawValue] = output.path
         try persist(candidate)
         paths = candidate
+        revision &+= 1
     }
 
     func outputURL(for transfer: TransferID) -> URL? {
         paths[transfer.rawValue].map(URL.init(fileURLWithPath:))
     }
 
-    func retain(_ transferIDs: Set<TransferID>) throws {
+    func retentionRevision() -> UInt64 {
+        revision
+    }
+
+    func retain(_ transferIDs: Set<TransferID>, ifUnchangedSince expectedRevision: UInt64) throws {
+        guard revision == expectedRevision else { return }
         let retained = Set(transferIDs.map(\.rawValue))
         let candidate = paths.filter { retained.contains($0.key) }
         guard candidate.count != paths.count else { return }
         try persist(candidate)
         paths = candidate
+        revision &+= 1
     }
 
     private func persist(_ candidate: [UUID: String]) throws {

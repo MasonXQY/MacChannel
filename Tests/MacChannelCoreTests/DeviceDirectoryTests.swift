@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import XCTest
+
 @testable import MacChannelCore
 
 final class DeviceDirectoryTests: XCTestCase {
@@ -114,48 +115,98 @@ final class DeviceDirectoryTests: XCTestCase {
 
     func testAuthenticatedPresenceSessionSignsServerChallenge() async throws {
         let identity = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        let trustRepository = try TrustRepository(
+            ownerIdentity: identity,
+            trustStore: TrustStore(owner: identity.id),
+            persistedGeneration: 0
+        )
+        _ = try await trustRepository.issueAuthorization(
+            subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
         let socket = MemoryPresenceSocket(incoming: [
-            try frame(["type": "challenge", "nonce": Data(repeating: 7, count: 32).base64EncodedString(), "expiresAt": 9_999_999_999_999]),
-            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 7, count: 32).base64EncodedString(),
+                "expiresAt": 9_999_999_999_999,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]
+            ),
         ])
         let client = PresenceClient(directory: DeviceDirectory(trust: .allowing(identity.id)))
-        let session = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: socket, client: client)
+        let session = try AuthenticatedPresenceSession(
+            identity: identity,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: client,
+            trustRepository: trustRepository
+        )
 
         try await session.connect()
         let authentication = try await socket.sentFrame()
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: authentication) as? [String: Any])
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: authentication) as? [String: Any])
+        let trustRecords = try XCTUnwrap(object["trustRecords"] as? [[String: Any]])
+        XCTAssertEqual(trustRecords.count, 1)
+        XCTAssertEqual(
+            (trustRecords.first?["subject"] as? [String: Any])?["rawValue"] as? String,
+            peer.id.rawValue.uuidString
+        )
         let envelope = try XCTUnwrap(object["envelope"] as? [String: Any])
-        XCTAssertEqual(envelope["deviceID"] as? String, identity.id.rawValue.uuidString.lowercased())
-        XCTAssertEqual(envelope["nonce"] as? String, Data(repeating: 7, count: 32).base64EncodedString())
+        XCTAssertEqual(
+            envelope["deviceID"] as? String, identity.id.rawValue.uuidString.lowercased())
+        XCTAssertEqual(
+            envelope["nonce"] as? String, Data(repeating: 7, count: 32).base64EncodedString())
         let canonical = WebSocketCanonical(
             deviceID: try XCTUnwrap(envelope["deviceID"] as? String),
             nonce: try XCTUnwrap(envelope["nonce"] as? String),
             payload: try XCTUnwrap(envelope["payload"] as? String),
             publicKey: try XCTUnwrap(envelope["publicKey"] as? String),
-            epochMilliseconds: try XCTUnwrap((envelope["epochMilliseconds"] as? NSNumber)?.int64Value)
+            epochMilliseconds: try XCTUnwrap(
+                (envelope["epochMilliseconds"] as? NSNumber)?.int64Value)
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let signature = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(envelope["signature"] as? String)))
-        XCTAssertTrue(try identity.publicKey.isValidSignature(.init(derRepresentation: signature), for: encoder.encode(canonical)))
+        let signature = try XCTUnwrap(
+            Data(base64Encoded: try XCTUnwrap(envelope["signature"] as? String)))
+        XCTAssertTrue(
+            try identity.publicKey.isValidSignature(
+                .init(derRepresentation: signature), for: encoder.encode(canonical)))
         await session.stop()
     }
 
     func testAuthenticatedPresenceSessionRejectsWrongChallengeAndInvalidFrames() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let client = PresenceClient(directory: DeviceDirectory(trust: .allowing(identity.id)))
-        let badChallengeSocket = MemoryPresenceSocket(incoming: [try frame(["type": "challenge", "nonce": Data(repeating: 7, count: 31).base64EncodedString(), "expiresAt": 1])])
-        let badChallenge = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: badChallengeSocket, client: client)
+        let badChallengeSocket = MemoryPresenceSocket(incoming: [
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 7, count: 31).base64EncodedString(),
+                "expiresAt": 1,
+            ])
+        ])
+        let badChallenge = try AuthenticatedPresenceSession(
+            identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: badChallengeSocket, client: client)
         await XCTAssertThrowsErrorAsync(try await badChallenge.connect()) { error in
             XCTAssertEqual(error as? AuthenticatedPresenceError, .invalidChallenge)
         }
 
         let invalidFrameSocket = MemoryPresenceSocket(incoming: [
-            try frame(["type": "challenge", "nonce": Data(repeating: 7, count: 32).base64EncodedString(), "expiresAt": 1]),
-            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
-            try frame(["type": "presence", "deviceID": identity.id.rawValue.uuidString.lowercased(), "availability": "lan"]),
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 7, count: 32).base64EncodedString(),
+                "expiresAt": 1,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]
+            ),
+            try frame([
+                "type": "presence", "deviceID": identity.id.rawValue.uuidString.lowercased(),
+                "availability": "lan",
+            ]),
         ])
-        let invalidFrame = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: invalidFrameSocket, client: client)
+        let invalidFrame = try AuthenticatedPresenceSession(
+            identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: invalidFrameSocket, client: client)
         try await invalidFrame.connect()
         await XCTAssertThrowsErrorAsync(try await invalidFrame.run()) { error in
             XCTAssertEqual(error as? AuthenticatedPresenceError, .invalidFrame)
@@ -167,13 +218,26 @@ final class DeviceDirectoryTests: XCTestCase {
         let identity = try DeviceIdentity.ephemeral()
         let peer = DeviceID(rawValue: UUID())
         let socket = MemoryPresenceSocket(incoming: [
-            try frame(["type": "challenge", "nonce": Data(repeating: 8, count: 32).base64EncodedString(), "expiresAt": 1]),
-            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
-            try frame(["type": "signal", "from": peer.rawValue.uuidString.lowercased(), "payload": Data("offer".utf8).base64EncodedString()]),
-            try frame(["type": "presence", "deviceID": peer.rawValue.uuidString.lowercased(), "availability": "internet"]),
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 8, count: 32).base64EncodedString(),
+                "expiresAt": 1,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]
+            ),
+            try frame([
+                "type": "signal", "from": peer.rawValue.uuidString.lowercased(),
+                "payload": Data("offer".utf8).base64EncodedString(),
+            ]),
+            try frame([
+                "type": "presence", "deviceID": peer.rawValue.uuidString.lowercased(),
+                "availability": "internet",
+            ]),
         ])
         let directory = DeviceDirectory(trust: .allowing(peer, identity.id))
-        let session = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: socket, client: PresenceClient(directory: directory))
+        let session = try AuthenticatedPresenceSession(
+            identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: PresenceClient(directory: directory))
         let signals = await session.signalFrames()
         let presences = await session.presenceEvents()
         var signalIterator = signals.makeAsyncIterator()
@@ -193,8 +257,12 @@ final class DeviceDirectoryTests: XCTestCase {
         let identity = try DeviceIdentity.ephemeral()
         let peer = DeviceID(rawValue: UUID())
         let socket = MemoryPresenceSocket(incoming: [
-            try frame(["type": "challenge", "nonce": Data(repeating: 10, count: 32).base64EncodedString(), "expiresAt": 1]),
-            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 10, count: 32).base64EncodedString(),
+                "expiresAt": 1,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]
+            ),
         ])
         let session = try AuthenticatedPresenceSession(
             identity: identity,
@@ -210,7 +278,8 @@ final class DeviceDirectoryTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: sent[1]) as? [String: Any])
         XCTAssertEqual(object["type"] as? String, "signal")
         XCTAssertEqual(object["to"] as? String, peer.rawValue.uuidString.lowercased())
-        XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(object["payload"] as? String)), Data("offer".utf8))
+        XCTAssertEqual(
+            Data(base64Encoded: try XCTUnwrap(object["payload"] as? String)), Data("offer".utf8))
         await session.stop()
     }
 
@@ -218,8 +287,12 @@ final class DeviceDirectoryTests: XCTestCase {
         let identity = try DeviceIdentity.ephemeral()
         let peer = DeviceID(rawValue: UUID())
         var incoming = [
-            try frame(["type": "challenge", "nonce": Data(repeating: 11, count: 32).base64EncodedString(), "expiresAt": 1]),
-            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 11, count: 32).base64EncodedString(),
+                "expiresAt": 1,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]
+            ),
         ]
         incoming += try (0..<40).map { index in
             try frame([
@@ -250,8 +323,12 @@ final class DeviceDirectoryTests: XCTestCase {
         let peer = DeviceID(rawValue: UUID())
         let maximumPayload = Data(repeating: 0x5a, count: 64 * 1024)
         let socket = MemoryPresenceSocket(incoming: [
-            try frame(["type": "challenge", "nonce": Data(repeating: 12, count: 32).base64EncodedString(), "expiresAt": 1]),
-            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 12, count: 32).base64EncodedString(),
+                "expiresAt": 1,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]
+            ),
             try frame([
                 "type": "signal",
                 "from": peer.rawValue.uuidString.lowercased(),
@@ -278,12 +355,20 @@ final class DeviceDirectoryTests: XCTestCase {
         let identity = try DeviceIdentity.ephemeral()
         let peer = DeviceID(rawValue: UUID())
         let terminalSocket = MemoryPresenceSocket(incoming: [
-            try frame(["type": "challenge", "nonce": Data(repeating: 9, count: 32).base64EncodedString(), "expiresAt": 1]),
-            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 9, count: 32).base64EncodedString(),
+                "expiresAt": 1,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]
+            ),
         ])
-        let terminal = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: terminalSocket, client: PresenceClient(directory: DeviceDirectory(trust: .allowing(peer))))
+        let terminal = try AuthenticatedPresenceSession(
+            identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: terminalSocket,
+            client: PresenceClient(directory: DeviceDirectory(trust: .allowing(peer))))
         let terminalStreams = (
-            await terminal.presenceEvents(), await terminal.signalFrames(), await terminal.trustResults(),
+            await terminal.presenceEvents(), await terminal.signalFrames(),
+            await terminal.trustResults(),
             await terminal.protocolErrors(), await terminal.verifiedTrustRecords()
         )
         var presence = terminalStreams.0.makeAsyncIterator()
@@ -304,9 +389,13 @@ final class DeviceDirectoryTests: XCTestCase {
         XCTAssertNil(completedErrors)
         XCTAssertNil(completedRecords)
 
-        let stopped = try AuthenticatedPresenceSession(identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!, socket: MemoryPresenceSocket(incoming: []), client: PresenceClient(directory: DeviceDirectory(trust: .allowing(peer))))
+        let stopped = try AuthenticatedPresenceSession(
+            identity: identity, origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: MemoryPresenceSocket(incoming: []),
+            client: PresenceClient(directory: DeviceDirectory(trust: .allowing(peer))))
         let stoppedStreams = (
-            await stopped.presenceEvents(), await stopped.signalFrames(), await stopped.trustResults(),
+            await stopped.presenceEvents(), await stopped.signalFrames(),
+            await stopped.trustResults(),
             await stopped.protocolErrors(), await stopped.verifiedTrustRecords()
         )
         var stoppedPresence = stoppedStreams.0.makeAsyncIterator()
@@ -432,8 +521,10 @@ final class DeviceDirectoryTests: XCTestCase {
         let peer = DeviceID(rawValue: UUID())
         let clock = ManualDirectoryClock()
         let directory = DeviceDirectory(trust: .allowing(peer), now: { clock.now })
-        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing(peer), renewalInterval: 0.1)
-        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
+        let browser = BonjourPeerBrowser(
+            directory: directory, trust: .allowing(peer), renewalInterval: 0.1)
+        let endpoint = NWEndpoint.service(
+            name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
         let record = BonjourPeerBrowser.txtRecord(for: peer)
 
         browser.start()
@@ -466,8 +557,11 @@ final class DeviceDirectoryTests: XCTestCase {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))
         let gate = BonjourApplyGate()
-        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing(peer), renewalInterval: 5, beforeDirectoryApply: { await gate.block() })
-        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
+        let browser = BonjourPeerBrowser(
+            directory: directory, trust: .allowing(peer), renewalInterval: 5,
+            beforeDirectoryApply: { await gate.block() })
+        let endpoint = NWEndpoint.service(
+            name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
 
         browser.start()
         browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: peer))
@@ -485,7 +579,8 @@ final class DeviceDirectoryTests: XCTestCase {
     func testDirectoryEndSessionPurgesEarlierApplyAndRejectsLaterApply() async {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))
-        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
+        let endpoint = NWEndpoint.service(
+            name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
         let token = await directory.beginLANDiscoverySession()
         await directory.applyLAN(peer, endpoint: endpoint, token: token)
         let activeEndpoint = await directory.endpoint(for: peer)
@@ -500,8 +595,11 @@ final class DeviceDirectoryTests: XCTestCase {
 
     func testBonjourObserveTrustAndStopRemainQueueSafeUnderConcurrency() async throws {
         let owner = try DeviceIdentity.ephemeral()
-        let repository = try TrustRepository(ownerIdentity: owner, trustStore: TrustStore(owner: owner.id), persistedGeneration: 0)
-        let browser = BonjourPeerBrowser(directory: DeviceDirectory(trust: TrustStore(owner: owner.id)), trust: .allowing(owner.id))
+        let repository = try TrustRepository(
+            ownerIdentity: owner, trustStore: TrustStore(owner: owner.id), persistedGeneration: 0)
+        let browser = BonjourPeerBrowser(
+            directory: DeviceDirectory(trust: TrustStore(owner: owner.id)),
+            trust: .allowing(owner.id))
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<40 {
                 group.addTask { browser.observeTrust(repository) }
@@ -531,7 +629,8 @@ final class DeviceDirectoryTests: XCTestCase {
             trust.device(matchingBonjourHash: BonjourPeerBrowser.deviceIDHash(for: trusted)),
             trusted
         )
-        XCTAssertNil(trust.device(matchingBonjourHash: BonjourPeerBrowser.deviceIDHash(for: untrusted)))
+        XCTAssertNil(
+            trust.device(matchingBonjourHash: BonjourPeerBrowser.deviceIDHash(for: untrusted)))
     }
 
     func testBonjourServiceAdvertisementUsesOnlyThePrivacyLimitedRecord() {
@@ -551,7 +650,8 @@ final class DeviceDirectoryTests: XCTestCase {
         }
 
         XCTAssertEqual(advertiser.service.name, BonjourPeerBrowser.deviceIDHash(for: id))
-        XCTAssertEqual(advertiser.service.txtRecordObject?.dictionary, BonjourPeerBrowser.txtRecord(for: id))
+        XCTAssertEqual(
+            advertiser.service.txtRecordObject?.dictionary, BonjourPeerBrowser.txtRecord(for: id))
     }
 }
 
@@ -614,8 +714,10 @@ private func XCTAssertThrowsErrorAsync<T>(
     _ expression: @autoclosure () async throws -> T,
     _ handler: (Error) -> Void
 ) async {
-    do { _ = try await expression(); XCTFail("Expected error") }
-    catch { handler(error) }
+    do {
+        _ = try await expression()
+        XCTFail("Expected error")
+    } catch { handler(error) }
 }
 
 private final class ManualDirectoryClock: @unchecked Sendable {

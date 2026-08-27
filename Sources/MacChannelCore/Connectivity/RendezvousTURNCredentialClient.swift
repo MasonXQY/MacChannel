@@ -59,11 +59,15 @@ public struct RendezvousTURNCredentials: Equatable, Sendable {
         }
         return ICEConfiguration(
             stunURLs: stun,
-            turnServers: turn.isEmpty ? [] : [TURNServer(
-                urls: turn,
-                username: username,
-                credential: credential
-            )]
+            turnServers: turn.isEmpty
+                ? []
+                : [
+                    TURNServer(
+                        urls: turn,
+                        username: username,
+                        credential: credential
+                    )
+                ]
         )
     }
 
@@ -103,7 +107,7 @@ public struct RendezvousTURNCredentialClient: Sendable {
     ) throws {
         let scheme = origin.scheme?.lowercased()
         guard origin.host != nil,
-              scheme == "https" || (allowInsecureForTesting && scheme == "http")
+            scheme == "https" || (allowInsecureForTesting && scheme == "http")
         else { throw RendezvousTURNClientError.insecureOrigin }
         self.identity = identity
         self.origin = origin
@@ -146,22 +150,20 @@ public struct RendezvousTURNCredentialClient: Sendable {
             throw RendezvousTURNClientError.invalidResponse
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = "POST"
         request.httpBody = try JSONEncoder.sorted.encode(envelope)
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var data = Data()
+        let data: Data
         let response: URLResponse
         do {
-            let (bytes, receivedResponse) = try await session.bytes(for: request)
-            response = receivedResponse
-            data.reserveCapacity(4_096)
-            for try await byte in bytes {
-                guard data.count < 65_536 else {
-                    throw RendezvousTURNClientError.invalidResponse
-                }
-                data.append(byte)
-            }
+            (data, response) = try await BoundedURLSessionRequest(
+                maximumBytes: 65_536,
+                upstreamDelegate: session.delegate
+            ).perform(
+                configuration: session.configuration,
+                request: request
+            )
         } catch let error as RendezvousTURNClientError {
             throw error
         } catch {
@@ -201,33 +203,34 @@ public struct RendezvousTURNCredentialClient: Sendable {
         }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let expiry = formatter.date(from: decoded.expiresAt)
+        let expiry =
+            formatter.date(from: decoded.expiresAt)
             ?? ISO8601DateFormatter().date(from: decoded.expiresAt)
         let schemes = decoded.urls.compactMap { $0.split(separator: ":", maxSplits: 1).first }
             .map { $0.lowercased() }
         guard (1...8).contains(decoded.urls.count),
-              Set(decoded.urls).count == decoded.urls.count,
-              decoded.urls.allSatisfy(Self.isStrictICEURL),
-              !decoded.username.isEmpty,
-              decoded.username.utf8.count <= 256,
-              decoded.username.unicodeScalars.allSatisfy({
+            Set(decoded.urls).count == decoded.urls.count,
+            decoded.urls.allSatisfy(Self.isStrictICEURL),
+            !decoded.username.isEmpty,
+            decoded.username.utf8.count <= 256,
+            decoded.username.unicodeScalars.allSatisfy({
                 !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0)
-              }),
-              !decoded.credential.isEmpty,
-              decoded.credential.utf8.count <= 512,
-              decoded.credential.unicodeScalars.allSatisfy({
+            }),
+            !decoded.credential.isEmpty,
+            decoded.credential.utf8.count <= 512,
+            decoded.credential.unicodeScalars.allSatisfy({
                 !CharacterSet.controlCharacters.contains($0)
-              }),
-              decoded.expiresAt.utf8.count <= 64,
-              let expiry,
-              expiry > requestDate,
-              expiry.timeIntervalSince(requestDate) <= 600,
-              schemes.contains(where: { $0 == "turn" || $0 == "turns" }),
-              schemes.allSatisfy({ ["stun", "stuns", "turn", "turns"].contains($0) }),
-              let separator = decoded.username.firstIndex(of: ":"),
-              let usernameExpiry = Int64(decoded.username[..<separator]),
-              usernameExpiry == Int64(expiry.timeIntervalSince1970),
-              decoded.username.index(after: separator) < decoded.username.endIndex
+            }),
+            decoded.expiresAt.utf8.count <= 64,
+            let expiry,
+            expiry > requestDate,
+            expiry.timeIntervalSince(requestDate) <= 600,
+            schemes.contains(where: { $0 == "turn" || $0 == "turns" }),
+            schemes.allSatisfy({ ["stun", "stuns", "turn", "turns"].contains($0) }),
+            let separator = decoded.username.firstIndex(of: ":"),
+            let usernameExpiry = Int64(decoded.username[..<separator]),
+            usernameExpiry == Int64(expiry.timeIntervalSince1970),
+            decoded.username.index(after: separator) < decoded.username.endIndex
         else { throw RendezvousTURNClientError.invalidResponse }
         return RendezvousTURNCredentials(
             urls: decoded.urls,
@@ -239,12 +242,12 @@ public struct RendezvousTURNCredentialClient: Sendable {
 
     private static func isStrictICEURL(_ value: String) -> Bool {
         guard !value.isEmpty,
-              value.utf8.count <= 2_048,
-              value.unicodeScalars.allSatisfy({
+            value.utf8.count <= 2_048,
+            value.unicodeScalars.allSatisfy({
                 $0.isASCII && !$0.properties.isWhitespace
                     && !CharacterSet.controlCharacters.contains($0)
-              }),
-              let schemeEnd = value.firstIndex(of: ":")
+            }),
+            let schemeEnd = value.firstIndex(of: ":")
         else { return false }
         let scheme = value[..<schemeEnd].lowercased()
         guard ["stun", "stuns", "turn", "turns"].contains(scheme) else { return false }
@@ -272,9 +275,9 @@ public struct RendezvousTURNCredentialClient: Sendable {
         let portText: Substring
         if value.first == "[" {
             guard let closing = value.firstIndex(of: "]"),
-                  closing > value.startIndex,
-                  value.index(after: closing) < value.endIndex,
-                  value[value.index(after: closing)] == ":"
+                closing > value.startIndex,
+                value.index(after: closing) < value.endIndex,
+                value[value.index(after: closing)] == ":"
             else { return false }
             host = value[value.index(after: value.startIndex)..<closing]
             portText = value[value.index(closing, offsetBy: 2)...]
@@ -283,25 +286,177 @@ public struct RendezvousTURNCredentialClient: Sendable {
             guard parsed == 1 else { return false }
         } else {
             guard let separator = value.lastIndex(of: ":"),
-                  separator > value.startIndex,
-                  value.index(after: separator) < value.endIndex
+                separator > value.startIndex,
+                value.index(after: separator) < value.endIndex
             else { return false }
             host = value[..<separator]
             portText = value[value.index(after: separator)...]
             guard !host.contains(":"),
-                  host.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-") }),
-                  host.first != ".",
-                  host.last != ".",
-                  host.utf8.count <= 253,
-                  host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy({ label in
-                      (1...63).contains(label.utf8.count)
-                          && label.first.map({ $0.isLetter || $0.isNumber }) == true
-                          && label.last.map({ $0.isLetter || $0.isNumber }) == true
-                  })
+                host.allSatisfy({
+                    $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-")
+                }),
+                host.first != ".",
+                host.last != ".",
+                host.utf8.count <= 253,
+                host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy({ label in
+                    (1...63).contains(label.utf8.count)
+                        && label.first.map({ $0.isLetter || $0.isNumber }) == true
+                        && label.last.map({ $0.isLetter || $0.isNumber }) == true
+                })
             else { return false }
         }
         guard let port = UInt16(portText), port > 0 else { return false }
         return true
+    }
+}
+
+private final class BoundedURLSessionRequest: NSObject, URLSessionDataDelegate, @unchecked Sendable
+{
+    private let maximumBytes: Int
+    private let upstreamDelegate: (any URLSessionDelegate)?
+    private let lock = NSLock()
+    private var body = Data()
+    private var response: URLResponse?
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+    private var finished = false
+
+    init(maximumBytes: Int, upstreamDelegate: (any URLSessionDelegate)?) {
+        self.maximumBytes = maximumBytes
+        self.upstreamDelegate = upstreamDelegate
+    }
+
+    func perform(
+        configuration: URLSessionConfiguration,
+        request: URLRequest
+    ) async throws -> (Data, URLResponse) {
+        let delegateQueue = OperationQueue()
+        delegateQueue.maxConcurrentOperationCount = 1
+        let session = URLSession(
+            configuration: configuration,
+            delegate: self,
+            delegateQueue: delegateQueue
+        )
+        let task = session.dataTask(with: request)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                self.continuation = continuation
+                lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        if response.expectedContentLength > Int64(maximumBytes) {
+            finish(.failure(RendezvousTURNClientError.invalidResponse), session: session)
+            completionHandler(.cancel)
+            return
+        }
+        lock.lock()
+        self.response = response
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        let wouldOverflow = data.count > maximumBytes || body.count > maximumBytes - data.count
+        if !wouldOverflow { body.append(data) }
+        lock.unlock()
+        if wouldOverflow {
+            dataTask.cancel()
+            finish(.failure(RendezvousTURNClientError.invalidResponse), session: session)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: (any Error)?
+    ) {
+        if let error {
+            finish(.failure(error), session: session)
+            return
+        }
+        lock.lock()
+        let response = self.response
+        let body = self.body
+        lock.unlock()
+        guard let response else {
+            finish(.failure(RendezvousTURNClientError.invalidResponse), session: session)
+            return
+        }
+        finish(.success((body, response)), session: session)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?)
+            ->
+            Void
+    ) {
+        if let upstreamDelegate,
+            upstreamDelegate.responds(
+                to: #selector(URLSessionDelegate.urlSession(_:didReceive:completionHandler:)))
+        {
+            upstreamDelegate.urlSession?(
+                session,
+                didReceive: challenge,
+                completionHandler: completionHandler
+            )
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?)
+            ->
+            Void
+    ) {
+        if let upstream = upstreamDelegate as? any URLSessionTaskDelegate,
+            upstream.responds(
+                to: #selector(
+                    URLSessionTaskDelegate.urlSession(_:task:didReceive:completionHandler:)))
+        {
+            upstream.urlSession?(
+                session,
+                task: task,
+                didReceive: challenge,
+                completionHandler: completionHandler
+            )
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    private func finish(
+        _ result: Result<(Data, URLResponse), Error>,
+        session: URLSession
+    ) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        session.invalidateAndCancel()
+        continuation?.resume(with: result)
     }
 }
 
@@ -339,7 +494,7 @@ public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
         }
         let requestDate = now()
         if let cached,
-           cached.isUsable(at: requestDate.addingTimeInterval(minimumRemainingLifetime))
+            cached.isUsable(at: requestDate.addingTimeInterval(minimumRemainingLifetime))
         {
             return combined(with: cached, for: route)
         }
@@ -365,9 +520,11 @@ public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
                 Task { await self.cancel(waiter: waiter, generation: generation) }
             }
             try Task.checkCancellation()
-            guard credentials.isUsable(
-                at: now().addingTimeInterval(minimumRemainingLifetime)
-            ) else {
+            guard
+                credentials.isUsable(
+                    at: now().addingTimeInterval(minimumRemainingLifetime)
+                )
+            else {
                 finish(waiter: waiter, generation: generation)
                 throw RendezvousTURNClientError.invalidResponse
             }
@@ -406,8 +563,8 @@ public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
     }
 }
 
-private extension JSONEncoder {
-    static var sorted: JSONEncoder {
+extension JSONEncoder {
+    fileprivate static var sorted: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return encoder

@@ -9,6 +9,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/secret-
 FROM coturn/coturn:4.17.2-r0-alpine@sha256:771a95d04cb97bbc5bfc672e5fdf455591c7d2b2a15f02bb9ceda3e27561695f
 
 USER 0:0
+# The upstream binary carries cap_net_bind_service. MacChannel uses only
+# unprivileged ports, and no-new-privileges correctly rejects executing a file
+# that would acquire a capability outside the container bounding set. A plain
+# copy deliberately drops that file capability.
+RUN cp /usr/bin/turnserver /usr/local/bin/turnserver-unprivileged \
+    && chmod 0755 /usr/local/bin/turnserver-unprivileged
 COPY --from=launcher-build /out/secret-launcher /usr/local/bin/secret-launcher
 COPY Infrastructure/coturn/start-coturn.sh /usr/local/bin/start-coturn.sh
 COPY Infrastructure/coturn/turnserver.conf /etc/coturn/turnserver.conf

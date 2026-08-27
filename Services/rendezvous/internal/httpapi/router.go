@@ -182,7 +182,7 @@ func NewRouter(config Config) http.Handler {
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/cancel", router.cancelAuthorization)
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/retrieve", router.retrieveAuthorization)
 	mux.HandleFunc("GET /v1/ws", router.webSocket)
-	mux.HandleFunc("GET /v1/turn-credentials", router.turnCredentials)
+	mux.HandleFunc("POST /v1/turn-credentials", router.turnCredentials)
 	return securityHeaders(mux)
 }
 

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import XCTest
+
 @testable import MacChannelCore
 
 final class IdentityTests: XCTestCase {
@@ -40,9 +41,49 @@ final class IdentityTests: XCTestCase {
         )
         let reopenedRepository = try await reopenedStore.load(identity: identity)
         let reopenedPeerKey = await reopenedRepository.publicKey(for: peer.id)
+        let authenticationRecords = await reopenedRepository.authenticationRecords()
 
         XCTAssertNotEqual(ObjectIdentifier(firstRepository), ObjectIdentifier(reopenedRepository))
         XCTAssertEqual(reopenedPeerKey, peer.publicKey.rawRepresentation)
+        XCTAssertEqual(authenticationRecords.count, 1)
+        XCTAssertEqual(authenticationRecords.first?.subject, peer.id)
+    }
+
+    func testAuthenticatedTrustSnapshotStoreRejectsStaleAuthorizationForRevokedPeer() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("trust.json")
+        let secrets = MemorySecretStore()
+        let identity = try DeviceIdentity.loadOrCreate(keychain: secrets)
+        let peer = try DeviceIdentity.ephemeral()
+        let store = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
+        let repository = try await store.load(identity: identity)
+        let staleAuthorization = try await repository.issueAuthorization(
+            subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+        _ = try await repository.revoke(peer.id)
+        try await store.persistLatest(from: repository)
+
+        var persisted = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        persisted["authenticationRecords"] = [
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(staleAuthorization))
+        ]
+        try JSONSerialization.data(withJSONObject: persisted, options: [.sortedKeys])
+            .write(to: url, options: .atomic)
+
+        let reopened = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
+        do {
+            _ = try await reopened.load(identity: identity)
+            XCTFail("A revoked snapshot must not accept an older signed authorization proof")
+        } catch {
+            XCTAssertEqual(error as? TrustRepositoryError, .invalidOwner)
+        }
     }
 
     func testRevokedDeviceIsNoLongerTrusted() throws {
@@ -201,7 +242,9 @@ final class IdentityTests: XCTestCase {
 
         _ = try DeviceIdentity.loadOrCreate(keychain: keychain)
 
-        XCTAssertEqual(keychain.requestedPolicies, [KeychainStore.identityPolicy, KeychainStore.identityPolicy])
+        XCTAssertEqual(
+            keychain.requestedPolicies,
+            [KeychainStore.identityPolicy, KeychainStore.identityPolicy])
     }
 
     func testAuthorizationRejectsInvalidSignature() throws {
@@ -287,9 +330,13 @@ final class IdentityTests: XCTestCase {
         let owner = try DeviceIdentity.ephemeral()
         var store = TrustStore(owner: owner.id)
         let snapshot = try store.snapshot(signedBy: owner)
-        let revokedOwner = try snapshotByReplacing(snapshot, key: "revokedDevices", with: [[
-            "rawValue": owner.id.rawValue.uuidString,
-        ]])
+        let revokedOwner = try snapshotByReplacing(
+            snapshot, key: "revokedDevices",
+            with: [
+                [
+                    "rawValue": owner.id.rawValue.uuidString
+                ]
+            ])
 
         XCTAssertThrowsError(
             try TrustStore(snapshot: revokedOwner, expectedOwner: owner, minimumGeneration: 0)

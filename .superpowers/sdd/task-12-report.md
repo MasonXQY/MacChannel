@@ -2,11 +2,11 @@
 
 Date: 2026-08-27
 
-Status: implementation and all host-executable verification complete; container execution is explicitly blocked because Docker is not installed on this Mac
+Status: implementation and container verification complete on the local Colima Docker runtime
 
 ## Delivered behavior
 
-- `GET /v1/turn-credentials` requires the canonical signed HTTP envelope, the
+- `POST /v1/turn-credentials` requires the canonical signed HTTP envelope, the
   exact TURN intent, and an identity in a completed non-revoked trust edge.
   Self-signed but unpaired devices remain denied.
 - Credentials expire on one exact integer Unix second ten minutes after minting.
@@ -186,19 +186,22 @@ Status: implementation and all host-executable verification complete; container 
 - `Scripts/verify-image-digests.sh`: pass for all four unique image references.
 - macOS Bash 3.2 syntax, coturn POSIX shell syntax, Compose YAML structural
   parse, strict Swift format, and `git diff --check`: pass.
-- `swift test`: 376 tests, 0 failures, 1 expected Go-wrapper skip.
+- Current repository `swift test --no-parallel`: 413 tests, 0 failures, 3
+  expected environment skips.
 - `swift build`: pass.
 - `bash Scripts/test-app-launch.sh`: pass for explicit smoke and real packaged
   production/offline bootstrap; no app process remained.
 
-## Environment limitation
+## Container verification addendum
 
-- `docker version` returns `command not found: docker`. This report therefore
-  does **not** claim that Compose images, PostgreSQL 17 health, coturn startup,
-  host-to-published-port allocation, or the coturn error-log scan ran here.
-- Docker-free executable substitutes are not hidden skips: real filesystem and
-  X.509 generation/validation, live UDP TURN challenge/auth, Bash 3.2 fault
-  injection, live registry digest checks, semantic Compose contracts, and both
-  Linux architecture builds run in CI/tests. The final container gate remains
-  the documented clean-checkout command on a Docker-capable macOS host.
-- Verification did not alter the real user keychain. Task 13 was not started.
+- Colima supplied Docker Engine 29.7.2 and Compose 5.5.0 on this Mac. The stack
+  built from the repository and reached healthy state with PostgreSQL 17,
+  rendezvous HTTP/TLS, and coturn running as configured.
+- The host-native TURN Allocate probe completed the 401 challenge and
+  authenticated allocation, returning the configured Colima-reachable address
+  `192.168.64.3` and a relay port inside `49160...49200`.
+- Container regressions prove the secret launcher can traverse and copy the
+  root-owned generation without retaining privilege, and coturn executes a
+  copied unprivileged binary without the upstream image's file capability.
+- Verification used the generated CA only inside the integration URLSession;
+  it did not alter the user's login keychain.

@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+
 @testable import MacChannelAppKit
 @testable import MacChannelCore
 
@@ -7,11 +8,13 @@ final class AppRuntimeTests: XCTestCase {
     func testLaunchModeUsesProductionUnlessShellIsExplicit() {
         XCTAssertEqual(AppLaunchMode.resolve(arguments: [], environment: [:]), .production)
         XCTAssertEqual(
-            AppLaunchMode.resolve(arguments: ["MacChannelApp", "--smoke-test", "/tmp/marker"], environment: [:]),
+            AppLaunchMode.resolve(
+                arguments: ["MacChannelApp", "--smoke-test", "/tmp/marker"], environment: [:]),
             .localShell
         )
         XCTAssertEqual(
-            AppLaunchMode.resolve(arguments: [], environment: ["MACCHANNEL_RUNTIME": "local-shell"]),
+            AppLaunchMode.resolve(
+                arguments: [], environment: ["MACCHANNEL_RUNTIME": "local-shell"]),
             .localShell
         )
         XCTAssertEqual(
@@ -37,7 +40,8 @@ final class AppRuntimeTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(configuration.rendezvousWebSocketURL?.absoluteString, "wss://example.test/v1/ws")
+        XCTAssertEqual(
+            configuration.rendezvousWebSocketURL?.absoluteString, "wss://example.test/v1/ws")
         XCTAssertEqual(configuration.rendezvousHTTPOrigin?.absoluteString, "https://example.test")
         XCTAssertEqual(
             try configuration.endpoints(persistedURL: "wss://persisted.test/v1/ws")
@@ -66,10 +70,14 @@ final class AppRuntimeTests: XCTestCase {
 
     func testRendezvousURLValidationRejectsCredentialsAndNormalizesHTTPSOrWSS() throws {
         XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("http://localhost:8443"))
-        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("wss://user:secret@localhost:8443/v1/ws"))
-        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("wss://localhost:8443/v1/ws?token=secret"))
-        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("wss://localhost:8443/v1/ws#fragment"))
-        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("wss://localhost:8443/another-path"))
+        XCTAssertThrowsError(
+            try RendezvousEndpointConfiguration.parse("wss://user:secret@localhost:8443/v1/ws"))
+        XCTAssertThrowsError(
+            try RendezvousEndpointConfiguration.parse("wss://localhost:8443/v1/ws?token=secret"))
+        XCTAssertThrowsError(
+            try RendezvousEndpointConfiguration.parse("wss://localhost:8443/v1/ws#fragment"))
+        XCTAssertThrowsError(
+            try RendezvousEndpointConfiguration.parse("wss://localhost:8443/another-path"))
 
         let https = try RendezvousEndpointConfiguration.parse("https://relay.example:8443")
         XCTAssertEqual(https.webSocketURL.absoluteString, "wss://relay.example:8443/v1/ws")
@@ -115,10 +123,12 @@ final class AppRuntimeTests: XCTestCase {
         await host.bootstrap()
         await host.shutdown()
 
-        XCTAssertEqual(states, [
-            .loading,
-            .offline("安全中继未配置；局域网发现和本地设置仍可使用。"),
-        ])
+        XCTAssertEqual(
+            states,
+            [
+                .loading,
+                .offline("安全中继未配置；局域网发现和本地设置仍可使用。"),
+            ])
         XCTAssertEqual(runtime.shutdownCount, 1)
         XCTAssertEqual(host.status, .offline("安全中继未配置；局域网发现和本地设置仍可使用。"))
     }
@@ -129,7 +139,8 @@ final class AppRuntimeTests: XCTestCase {
             builder: RuntimeBuilderStub(result: .failure(RuntimeTestError.failed))
         )
         var receivedContainer = false
-        host.onChange = { _, container in receivedContainer = receivedContainer || container != nil }
+        host.onChange = { _, container in receivedContainer = receivedContainer || container != nil
+        }
 
         await host.bootstrap()
 
@@ -255,6 +266,25 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(reloadedItem.outputURL, actualOutput)
     }
 
+    func testStaleHistoryRetentionCannotDeleteNewerInboundOutput() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let transfer = TransferID(rawValue: UUID())
+        let locator = try RuntimeOutputLocator(
+            url: root.appendingPathComponent("received-outputs.json"))
+        let staleRevision = await locator.retentionRevision()
+        let actualOutput = root.appendingPathComponent("Downloads/newer.pdf")
+
+        try await locator.record(
+            TransferReceiveResult(transferID: transfer, receivedURLs: [actualOutput])
+        )
+        try await locator.retain([], ifUnchangedSince: staleRevision)
+
+        let retained = await locator.outputURL(for: transfer)
+        XCTAssertEqual(retained, actualOutput)
+    }
+
     func testRendezvousURLPersistsInRuntimeSettings() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -270,7 +300,9 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testProductionRevokeReportsCommittedWarningAfterTrustMutationPersistenceFailure() async throws {
+    func testProductionRevokeReportsCommittedWarningAfterTrustMutationPersistenceFailure()
+        async throws
+    {
         let fixture = try makeTrustedRuntimeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let service = ProductionDeviceSettingsService(
@@ -289,7 +321,9 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testProductionPairingCombinesAuthorizationAndPersistenceWarningsAfterTrustCommit() async throws {
+    func testProductionPairingCombinesAuthorizationAndPersistenceWarningsAfterTrustCommit()
+        async throws
+    {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -356,7 +390,8 @@ final class AppRuntimeTests: XCTestCase {
             url: root.appendingPathComponent("settings.json"),
             trustedDevices: [peer.id]
         )
-        return TrustedRuntimeFixture(root: root, peer: peer, repository: repository, settings: settings)
+        return TrustedRuntimeFixture(
+            root: root, peer: peer, repository: repository, settings: settings)
     }
 }
 

@@ -1,6 +1,8 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Security
+
 @testable import MacChannelCore
 
 enum IntegrationRoutePolicy: Sendable {
@@ -41,6 +43,7 @@ struct HarnessTimeoutProfile: Equatable, Sendable {
 enum TwoClientHarnessError: Error, Equatable {
     case stackConfigurationRequired
     case transferFailed(TransferID)
+    case connectionFailed([String])
     case timedOut(TransferID)
     case missingTransfer
     case fileGenerationFailed
@@ -164,12 +167,14 @@ final class TwoClientHarness: @unchecked Sendable {
         let timeoutProfile = HarnessTimeoutProfile.profile(for: routePolicy)
         self.timeoutProfile = timeoutProfile
 
-        let root = try root ?? FileManager.default.url(
-            for: .itemReplacementDirectory,
-            in: .userDomainMask,
-            appropriateFor: FileManager.default.temporaryDirectory,
-            create: true
-        )
+        let root =
+            try root
+            ?? FileManager.default.url(
+                for: .itemReplacementDirectory,
+                in: .userDomainMask,
+                appropriateFor: FileManager.default.temporaryDirectory,
+                create: true
+            )
         self.root = root.standardizedFileURL
         let senderRoot = self.root.appendingPathComponent("sender", isDirectory: true)
         let receiverRoot = self.root.appendingPathComponent("receiver", isDirectory: true)
@@ -180,7 +185,8 @@ final class TwoClientHarness: @unchecked Sendable {
         // Production storage creates its private staging roots with mode 0700;
         // pre-creating them through FileManager would violate that contract.
         for directory in [senderDownloadRoot, receiverDownloadRoot] {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
         }
 
         let senderSecrets = try FileSecretStore(
@@ -222,10 +228,10 @@ final class TwoClientHarness: @unchecked Sendable {
             )
         } else {
             guard ProcessInfo.processInfo.environment["MACCHANNEL_E2E_STACK"] == "1",
-                  let origin = URL(
+                let origin = URL(
                     string: ProcessInfo.processInfo.environment["MACCHANNEL_E2E_STACK_ORIGIN"]
                         ?? "https://localhost:8443"
-                  )
+                )
             else { throw TwoClientHarnessError.stackConfigurationRequired }
             try await Self.pairThroughStack(
                 senderIdentity: senderIdentity,
@@ -260,30 +266,38 @@ final class TwoClientHarness: @unchecked Sendable {
         let senderProvider: any ICEConfigurationProviding
         let receiverProvider: any ICEConfigurationProviding
         if let stackOrigin {
-            let senderFetcher = RecordingTURNCredentialFetcher(base: try RendezvousTURNCredentialClient(
-                identity: senderIdentity,
-                origin: stackOrigin,
-                session: URLSession(configuration: .ephemeral)
-            ))
-            let receiverFetcher = RecordingTURNCredentialFetcher(base: try RendezvousTURNCredentialClient(
-                identity: receiverIdentity,
-                origin: stackOrigin,
-                session: URLSession(configuration: .ephemeral)
-            ))
+            let senderFetcher = RecordingTURNCredentialFetcher(
+                base: try RendezvousTURNCredentialClient(
+                    identity: senderIdentity,
+                    origin: stackOrigin,
+                    session: try Self.stackSession()
+                ))
+            let receiverFetcher = RecordingTURNCredentialFetcher(
+                base: try RendezvousTURNCredentialClient(
+                    identity: receiverIdentity,
+                    origin: stackOrigin,
+                    session: try Self.stackSession()
+                ))
             guard let webSocketURL = Self.webSocketURL(from: stackOrigin) else {
                 throw TwoClientHarnessError.stackConfigurationRequired
             }
             let senderPresence = try AuthenticatedPresenceSession(
                 identity: senderIdentity,
                 origin: webSocketURL,
-                socket: try URLSessionPresenceWebSocket(origin: webSocketURL),
+                socket: try URLSessionPresenceWebSocket(
+                    origin: webSocketURL,
+                    session: try Self.stackSession()
+                ),
                 client: PresenceClient(directory: senderDirectory),
                 trustRepository: senderTrust
             )
             let receiverPresence = try AuthenticatedPresenceSession(
                 identity: receiverIdentity,
                 origin: webSocketURL,
-                socket: try URLSessionPresenceWebSocket(origin: webSocketURL),
+                socket: try URLSessionPresenceWebSocket(
+                    origin: webSocketURL,
+                    session: try Self.stackSession()
+                ),
                 client: PresenceClient(directory: receiverDirectory),
                 trustRepository: receiverTrust
             )
@@ -529,8 +543,10 @@ final class TwoClientHarness: @unchecked Sendable {
         named name: String = "deterministic.bin"
     ) throws -> URL {
         guard size >= 0 else { throw TwoClientHarnessError.fileGenerationFailed }
-        let sourceDirectory = senderDownloadRoot.appendingPathComponent("sources", isDirectory: true)
-        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        let sourceDirectory = senderDownloadRoot.appendingPathComponent(
+            "sources", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sourceDirectory, withIntermediateDirectories: true)
         let url = sourceDirectory.appendingPathComponent(name)
         _ = FileManager.default.createFile(atPath: url.path, contents: nil)
         let handle = try FileHandle(forWritingTo: url)
@@ -552,7 +568,8 @@ final class TwoClientHarness: @unchecked Sendable {
     }
 
     func makeDeterministicDirectory(named name: String = "folder") throws -> URL {
-        let directory = senderDownloadRoot
+        let directory =
+            senderDownloadRoot
             .appendingPathComponent("sources", isDirectory: true)
             .appendingPathComponent(name, isDirectory: true)
         let nested = directory.appendingPathComponent("nested", isDirectory: true)
@@ -576,6 +593,8 @@ final class TwoClientHarness: @unchecked Sendable {
                         try await Task.sleep(for: .milliseconds(10))
                     }
                 case .failed, .cancelled:
+                    let failures = await connectionControl.attemptFailures
+                    if !failures.isEmpty { throw TwoClientHarnessError.connectionFailed(failures) }
                     throw TwoClientHarnessError.transferFailed(transfer)
                 default:
                     break
@@ -616,8 +635,10 @@ final class TwoClientHarness: @unchecked Sendable {
             receiverOffset = receiverRecord?.completedBytes ?? 0
             if senderOffset >= UInt64(afterBytes), receiverOffset >= UInt64(afterBytes) { break }
             if let phase = senderRecord?.phase,
-               phase == .failed || phase == .completed || phase == .cancelled
+                phase == .failed || phase == .completed || phase == .cancelled
             {
+                let failures = await connectionControl.attemptFailures
+                if !failures.isEmpty { throw TwoClientHarnessError.connectionFailed(failures) }
                 throw TwoClientHarnessError.interruptionDidNotOccur
             }
             try await Task.sleep(for: .milliseconds(5))
@@ -657,15 +678,15 @@ final class TwoClientHarness: @unchecked Sendable {
             let record = try await senderDatabase.history(limit: 200)
                 .first(where: { $0.id == interruption.transferID })
             if count > interruption.connectionCount,
-               let connectionID,
-               connectionID != interruption.connectionInstanceID,
-               let negotiation = await resumeRecorder.value(
-                   transferID: interruption.transferID,
-                   connectionID: connectionID
-               ),
-               negotiation.acceptedBytes <= UInt64(Int64.max),
-               Int64(negotiation.acceptedBytes) >= interruption.receiverDurableOffset,
-               bytes > 0
+                let connectionID,
+                connectionID != interruption.connectionInstanceID,
+                let negotiation = await resumeRecorder.value(
+                    transferID: interruption.transferID,
+                    connectionID: connectionID
+                ),
+                negotiation.acceptedBytes <= UInt64(Int64.max),
+                Int64(negotiation.acceptedBytes) >= interruption.receiverDurableOffset,
+                bytes > 0
             {
                 return NetworkResumeEvidence(
                     connectionCount: count,
@@ -818,7 +839,8 @@ final class TwoClientHarness: @unchecked Sendable {
         )
         await reopenedDirectory.observeTrust(reopenedTrust)
         await reopenedDirectory.apply(.lan(receiverID, host: "127.0.0.1", port: 9_001))
-        let directoryRebuiltFromDurableTrust = await reopenedDirectory.endpoint(for: receiverID) != nil
+        let directoryRebuiltFromDurableTrust =
+            await reopenedDirectory.endpoint(for: receiverID) != nil
         guard directoryRebuiltFromDurableTrust else {
             throw TwoClientHarnessError.restartUnsupported
         }
@@ -932,7 +954,11 @@ final class TwoClientHarness: @unchecked Sendable {
         guard let senderPhase else { throw TwoClientHarnessError.missingTransfer }
         let failure = await results.failure(for: transfer)
         let receiveError: ReceiveStoreError?
-        if case let .receiveStore(error) = failure { receiveError = error } else { receiveError = nil }
+        if case let .receiveStore(error) = failure {
+            receiveError = error
+        } else {
+            receiveError = nil
+        }
         let incoming = root.appendingPathComponent("receiver/incoming", isDirectory: true)
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: incoming.path)) ?? []
         return TransferFailureEvidence(
@@ -973,6 +999,7 @@ final class TwoClientHarness: @unchecked Sendable {
             }
             do {
                 if FileManager.default.fileExists(atPath: root.path) {
+                    try makeTreeRemovable()
                     try FileManager.default.removeItem(at: root)
                 }
             } catch {
@@ -983,6 +1010,37 @@ final class TwoClientHarness: @unchecked Sendable {
             }
         }
         if let firstError { throw firstError }
+    }
+
+    private func makeTreeRemovable() throws {
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsPackageDescendants]
+            )
+        else { throw TwoClientHarnessError.fileGenerationFailed }
+        for case let url as URL in enumerator {
+            var information = stat()
+            guard lstat(url.path, &information) == 0 else {
+                throw TwoClientHarnessError.fileGenerationFailed
+            }
+            switch information.st_mode & S_IFMT {
+            case S_IFDIR:
+                guard chmod(url.path, S_IRWXU) == 0 else {
+                    throw TwoClientHarnessError.fileGenerationFailed
+                }
+            case S_IFREG:
+                guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else {
+                    throw TwoClientHarnessError.fileGenerationFailed
+                }
+            default:
+                break
+            }
+        }
+        guard chmod(root.path, S_IRWXU) == 0 else {
+            throw TwoClientHarnessError.fileGenerationFailed
+        }
     }
 
     private func writeDeterministicFile(at url: URL, size: Int) throws {
@@ -1010,12 +1068,12 @@ final class TwoClientHarness: @unchecked Sendable {
         let senderTransport = try RendezvousPairingTransport(
             identity: senderIdentity,
             origin: origin,
-            session: URLSession(configuration: .ephemeral)
+            session: try stackSession()
         )
         let receiverTransport = try RendezvousPairingTransport(
             identity: receiverIdentity,
             origin: origin,
-            session: URLSession(configuration: .ephemeral)
+            session: try stackSession()
         )
         do {
             let host = try PairingCoordinator(
@@ -1053,10 +1111,77 @@ final class TwoClientHarness: @unchecked Sendable {
         return components.url
     }
 
+    private static func stackSession() throws -> URLSession {
+        guard let path = ProcessInfo.processInfo.environment["MACCHANNEL_E2E_CA_FILE"],
+            !path.isEmpty
+        else { throw TwoClientHarnessError.stackConfigurationRequired }
+        let delegate = try PinnedLocalCASessionDelegate(certificateURL: URL(fileURLWithPath: path))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
+
     private static func keyFingerprint(_ identity: DeviceIdentity) -> String {
         SHA256.hash(data: identity.publicKey.rawRepresentation)
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+}
+
+private final class PinnedLocalCASessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked
+    Sendable
+{
+    private let certificate: SecCertificate
+
+    init(certificateURL: URL) throws {
+        let pem = try String(contentsOf: certificateURL, encoding: .utf8)
+        let beginMarker = "-----BEGIN CERTIFICATE-----"
+        let endMarker = "-----END CERTIFICATE-----"
+        guard let begin = pem.range(of: beginMarker),
+            let end = pem.range(of: endMarker, range: begin.upperBound..<pem.endIndex),
+            pem[end.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw TwoClientHarnessError.stackConfigurationRequired }
+        let encoded = pem[begin.upperBound..<end.lowerBound].filter { !$0.isWhitespace }
+        guard let data = Data(base64Encoded: String(encoded)),
+            let certificate = SecCertificateCreateWithData(nil, data as CFData)
+        else {
+            throw TwoClientHarnessError.stackConfigurationRequired
+        }
+        self.certificate = certificate
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        respond(to: challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        respond(to: challenge, completionHandler: completionHandler)
+    }
+
+    private func respond(
+        to challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard
+            challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+            let trust = challenge.protectionSpace.serverTrust,
+            SecTrustSetAnchorCertificates(trust, [certificate] as CFArray) == errSecSuccess,
+            SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
+            SecTrustEvaluateWithError(trust, nil)
+        else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 }
 
@@ -1201,11 +1326,17 @@ private actor HarnessRouteAttempts: TransferAwareConnectionAttempting {
         try await control.waitUntilOnline()
         await control.recordAttempt(route)
         guard route == policy.route else { throw ConnectionAttemptError.routeUnavailable }
-        let channel = try await attempts.connect(
-            to: device,
-            route: route,
-            transferID: transferID
-        )
+        let channel: any SecureChannel
+        do {
+            channel = try await attempts.connect(
+                to: device,
+                route: route,
+                transferID: transferID
+            )
+        } catch {
+            await control.recordFailure(route: route, error: error)
+            throw error
+        }
         let identifier = UUID()
         let wrapped = HarnessSecureChannel(
             identifier: identifier,
@@ -1229,6 +1360,7 @@ private actor HarnessConnectionControl {
     private var bytesByConnection: [UUID: Int64] = [:]
     private(set) var attemptedRoutes: [ConnectionRoute] = []
     private(set) var actualRoutes: [ConnectionRoute] = []
+    private(set) var attemptFailures: [String] = []
 
     func waitUntilOnline() async throws {
         while !online {
@@ -1239,6 +1371,10 @@ private actor HarnessConnectionControl {
 
     func recordAttempt(_ route: ConnectionRoute) {
         attemptedRoutes.append(route)
+    }
+
+    func recordFailure(route: ConnectionRoute, error: any Error) {
+        attemptFailures.append("\(route): \(String(describing: error))")
     }
 
     func register(
@@ -1309,7 +1445,6 @@ private actor HarnessResumeNegotiationRecorder: TransferResumeNegotiationObservi
             $0.value.transferID == transferID && connectionIDs.contains($0.connectionID)
         }
     }
-
 
     func value(transferID: TransferID, connectionID: UUID) -> TransferResumeNegotiation? {
         recorded.last {
@@ -1489,8 +1624,8 @@ private final class StackPresenceLifecycle: @unchecked Sendable {
     }
 }
 
-private extension Optional {
-    func unwrap() throws -> Wrapped {
+extension Optional {
+    fileprivate func unwrap() throws -> Wrapped {
         guard let value = self else {
             throw TwoClientHarnessError.stackConfigurationRequired
         }
@@ -1614,9 +1749,16 @@ extension SHA256 {
         defer { try? handle.close() }
         var hasher = SHA256()
         while true {
-            let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
-            guard !data.isEmpty else { break }
-            hasher.update(data: data)
+            var reachedEnd = false
+            try autoreleasepool {
+                let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
+                if data.isEmpty {
+                    reachedEnd = true
+                } else {
+                    hasher.update(data: data)
+                }
+            }
+            if reachedEnd { break }
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }

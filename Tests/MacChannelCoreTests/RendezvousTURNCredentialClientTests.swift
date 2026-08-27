@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import XCTest
+
 @testable import MacChannelCore
 
 final class RendezvousTURNCredentialClientTests: XCTestCase {
@@ -10,8 +11,8 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
         let protocolType = TURNClientURLProtocol.self
         protocolType.reset()
         protocolType.response = """
-        {"credential":"secret","expiresAt":"2027-01-15T08:10:00Z","urls":["stun:localhost:3478","turn:localhost:3478?transport=udp","turns:localhost:5349?transport=tcp"],"username":"1800000600:opaque-handle"}
-        """.data(using: .utf8)!
+            {"credential":"secret","expiresAt":"2027-01-15T08:10:00Z","urls":["stun:localhost:3478","turn:localhost:3478?transport=udp","turns:localhost:5349?transport=tcp"],"username":"1800000600:opaque-handle"}
+            """.data(using: .utf8)!
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [protocolType]
         let session = URLSession(configuration: configuration)
@@ -27,7 +28,7 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
 
         let request = try XCTUnwrap(protocolType.lastRequest)
         XCTAssertEqual(request.url?.path, "/v1/turn-credentials")
-        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(request.httpMethod, "POST")
         let envelope = try JSONDecoder().decode(
             RendezvousSignedEnvelope.self,
             from: try XCTUnwrap(protocolType.lastBody)
@@ -44,14 +45,16 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
         XCTAssertEqual(credentials.iceConfiguration.stunURLs, ["stun:localhost:3478"])
         XCTAssertEqual(
             credentials.iceConfiguration.turnServers,
-            [TURNServer(
-                urls: [
-                    "turn:localhost:3478?transport=udp",
-                    "turns:localhost:5349?transport=tcp",
-                ],
-                username: "1800000600:opaque-handle",
-                credential: "secret"
-            )]
+            [
+                TURNServer(
+                    urls: [
+                        "turn:localhost:3478?transport=udp",
+                        "turns:localhost:5349?transport=tcp",
+                    ],
+                    username: "1800000600:opaque-handle",
+                    credential: "secret"
+                )
+            ]
         )
         XCTAssertTrue(credentials.isUsable(at: now))
     }
@@ -61,8 +64,8 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         TURNClientURLProtocol.reset()
         TURNClientURLProtocol.response = """
-        {"credential":"secret","expiresAt":"2027-01-15T08:11:01Z","urls":["turn:localhost:3478?transport=udp"],"username":"1800000661:opaque"}
-        """.data(using: .utf8)!
+            {"credential":"secret","expiresAt":"2027-01-15T08:11:01Z","urls":["turn:localhost:3478?transport=udp"],"username":"1800000661:opaque"}
+            """.data(using: .utf8)!
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TURNClientURLProtocol.self]
         let client = try RendezvousTURNCredentialClient(
@@ -230,12 +233,13 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
     }
 
     private func response(urls: [String], username: String, credential: String) -> Data {
-        try! JSONSerialization.data(withJSONObject: [
-            "urls": urls,
-            "username": username,
-            "credential": credential,
-            "expiresAt": "2027-01-15T08:10:00Z",
-        ], options: [.sortedKeys])
+        try! JSONSerialization.data(
+            withJSONObject: [
+                "urls": urls,
+                "username": username,
+                "credential": credential,
+                "expiresAt": "2027-01-15T08:10:00Z",
+            ], options: [.sortedKeys])
     }
 }
 
@@ -263,18 +267,20 @@ private final class TURNClientURLProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         Self.lastRequest = request
-        Self.lastBody = request.httpBody ?? request.httpBodyStream.flatMap { stream in
-            stream.open()
-            defer { stream.close() }
-            var body = Data()
-            var buffer = [UInt8](repeating: 0, count: 4096)
-            while stream.hasBytesAvailable {
-                let count = stream.read(&buffer, maxLength: buffer.count)
-                guard count > 0 else { break }
-                body.append(contentsOf: buffer.prefix(count))
+        Self.lastBody =
+            request.httpBody
+            ?? request.httpBodyStream.flatMap { stream in
+                stream.open()
+                defer { stream.close() }
+                var body = Data()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    guard count > 0 else { break }
+                    body.append(contentsOf: buffer.prefix(count))
+                }
+                return body
             }
-            return body
-        }
         let response: URLResponse
         if let statusCode = Self.statusCode {
             response = HTTPURLResponse(

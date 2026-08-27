@@ -42,7 +42,9 @@
 
 ## 尚未执行的运行时审计
 
-本机没有 Docker，因此以下项目均为 **BLOCKED / NOT RUN**：
+本机现已具备 Colima Docker，并完成 PostgreSQL 17、rendezvous 与 coturn 的功能验证；
+但可信运行时 evidence producer/verifier 仍为 **NOT IMPLEMENTED**，因此以下隐私项目均保持
+**BLOCKED / NOT RUN**：
 
 | ID | 运行时检查 | 必须收集的证据 | 状态 |
 | --- | --- | --- | --- |

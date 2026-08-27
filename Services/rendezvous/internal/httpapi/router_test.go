@@ -361,7 +361,7 @@ func TestTURNCredentialsRequireEstablishedAuthenticatedDevice(t *testing.T) {
 	api := newTestAPIWithRegistry(t, registry)
 	payload := map[string]string{"type": "turn-credentials-v1"}
 
-	unsigned, err := http.Get(api.server.URL + "/v1/turn-credentials")
+	unsigned, err := http.Post(api.server.URL+"/v1/turn-credentials", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestTURNCredentialsRequireEstablishedAuthenticatedDevice(t *testing.T) {
 		t.Fatalf("unauthenticated status = %d, want 401", unsigned.StatusCode)
 	}
 
-	untrusted := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, payload), nil)
+	untrusted := api.doEnvelope(t, http.MethodPost, "/v1/turn-credentials", api.signedRequest(t, payload), nil)
 	defer untrusted.Body.Close()
 	if untrusted.StatusCode != http.StatusForbidden {
 		t.Fatalf("untrusted status = %d, body = %s", untrusted.StatusCode, readBody(untrusted.Body))
@@ -385,7 +385,7 @@ func TestTURNCredentialsRequireEstablishedAuthenticatedDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	response := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, payload), nil)
+	response := api.doEnvelope(t, http.MethodPost, "/v1/turn-credentials", api.signedRequest(t, payload), nil)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("trusted status = %d, body = %s", response.StatusCode, readBody(response.Body))
@@ -424,7 +424,7 @@ func TestTURNCredentialsRejectRevokedAndMalformedRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wrongPayload := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "something-else"}), nil)
+	wrongPayload := api.doEnvelope(t, http.MethodPost, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "something-else"}), nil)
 	wrongPayload.Body.Close()
 	if wrongPayload.StatusCode != http.StatusBadRequest {
 		t.Fatalf("wrong-payload status = %d", wrongPayload.StatusCode)
@@ -434,7 +434,7 @@ func TestTURNCredentialsRejectRevokedAndMalformedRequests(t *testing.T) {
 	if err := registry.AuthenticateDevice(api.identity.id, api.identity.publicKey, []auth.SignedTrustRecord{revocation}); err != nil {
 		t.Fatal(err)
 	}
-	revoked := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "turn-credentials-v1"}), nil)
+	revoked := api.doEnvelope(t, http.MethodPost, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "turn-credentials-v1"}), nil)
 	defer revoked.Body.Close()
 	if revoked.StatusCode != http.StatusForbidden {
 		t.Fatalf("revoked status = %d, body = %s", revoked.StatusCode, readBody(revoked.Body))
@@ -448,7 +448,7 @@ func TestTURNCredentialsRejectSelfAuthorization(t *testing.T) {
 	if err := registry.AuthenticateDevice(api.identity.id, api.identity.publicKey, []auth.SignedTrustRecord{selfAuthorization}); err != nil {
 		t.Fatal(err)
 	}
-	response := api.doEnvelope(t, http.MethodGet, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "turn-credentials-v1"}), nil)
+	response := api.doEnvelope(t, http.MethodPost, "/v1/turn-credentials", api.signedRequest(t, map[string]string{"type": "turn-credentials-v1"}), nil)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("self-authorized status = %d, body = %s", response.StatusCode, readBody(response.Body))

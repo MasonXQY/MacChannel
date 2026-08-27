@@ -28,23 +28,26 @@ struct ProductionRuntimeConfiguration {
         )
         let launchTestMarker: String? = arguments.firstIndex(of: "--production-launch-test")
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
-        let directory = launchTestMarker.map {
-            URL(fileURLWithPath: $0).appendingPathExtension("runtime")
-        } ?? applicationSupport.appendingPathComponent("MacChannel", isDirectory: true)
-        let identityPolicy = launchTestMarker.map { marker in
-            let suffix = URL(fileURLWithPath: marker).lastPathComponent
-                .filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }
-            return KeychainPolicy(
-                service: "com.mason.macchannel.identity.launch-test.\(suffix)",
-                accessibility: .afterFirstUnlockThisDeviceOnly,
-                synchronizable: false
-            )
-        } ?? KeychainStore.identityPolicy
-        let resource = Bundle.module.url(
-            forResource: "RuntimeConfig",
-            withExtension: "json",
-            subdirectory: "Resources"
-        ) ?? Bundle.module.url(forResource: "RuntimeConfig", withExtension: "json")
+        let directory =
+            launchTestMarker.map {
+                URL(fileURLWithPath: $0).appendingPathExtension("runtime")
+            } ?? applicationSupport.appendingPathComponent("MacChannel", isDirectory: true)
+        let identityPolicy =
+            launchTestMarker.map { marker in
+                let suffix = URL(fileURLWithPath: marker).lastPathComponent
+                    .filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }
+                return KeychainPolicy(
+                    service: "com.mason.macchannel.identity.launch-test.\(suffix)",
+                    accessibility: .afterFirstUnlockThisDeviceOnly,
+                    synchronizable: false
+                )
+            } ?? KeychainStore.identityPolicy
+        let resource =
+            Bundle.module.url(
+                forResource: "RuntimeConfig",
+                withExtension: "json",
+                subdirectory: "Resources"
+            ) ?? Bundle.module.url(forResource: "RuntimeConfig", withExtension: "json")
         guard let resource else { throw ProductionRuntimeError.missingRuntimeConfiguration }
         struct RuntimeConfigWire: Decodable { let rendezvousURL: String }
         let packaged = try JSONDecoder().decode(
@@ -53,7 +56,8 @@ struct ProductionRuntimeConfiguration {
         ).rendezvousURL
         let environmentURL = environment["MACCHANNEL_RENDEZVOUS_URL"]
         let endpoints = try RendezvousEndpointConfiguration.parse(environmentURL ?? packaged)
-        let stunURLs = environment["MACCHANNEL_STUN_URLS"]?
+        let stunURLs =
+            environment["MACCHANNEL_STUN_URLS"]?
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty } ?? []
@@ -73,7 +77,8 @@ struct ProductionRuntimeConfiguration {
 
     func endpoints(persistedURL: String) throws -> RendezvousEndpointConfiguration {
         try RendezvousEndpointConfiguration.parse(
-            environmentRendezvousURL ?? (persistedURL.isEmpty ? packagedRendezvousURL : persistedURL)
+            environmentRendezvousURL
+                ?? (persistedURL.isEmpty ? packagedRendezvousURL : persistedURL)
         )
     }
 }
@@ -97,15 +102,15 @@ struct RendezvousEndpointConfiguration: Equatable {
     static func parse(_ value: String) throws -> RendezvousEndpointConfiguration {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard var components = URLComponents(string: trimmed),
-              let scheme = components.scheme?.lowercased(),
-              scheme == "https" || scheme == "wss",
-              let host = components.host,
-              !host.isEmpty,
-              components.user == nil,
-              components.password == nil,
-              components.query == nil,
-              components.fragment == nil,
-              components.path.isEmpty || components.path == "/" || components.path == "/v1/ws"
+            let scheme = components.scheme?.lowercased(),
+            scheme == "https" || scheme == "wss",
+            let host = components.host,
+            !host.isEmpty,
+            components.user == nil,
+            components.password == nil,
+            components.query == nil,
+            components.fragment == nil,
+            components.path.isEmpty || components.path == "/" || components.path == "/v1/ws"
         else { throw ProductionRuntimeError.insecureRendezvousURL }
         components.scheme = "wss"
         components.path = "/v1/ws"
@@ -592,7 +597,9 @@ actor RuntimeSettingsStore {
 
     func rename(_ id: DeviceID, to name: String) throws {
         try mutate { candidate in
-            guard candidate.devices[id.rawValue] != nil else { throw SettingsStoreError.unknownDevice }
+            guard candidate.devices[id.rawValue] != nil else {
+                throw SettingsStoreError.unknownDevice
+            }
             candidate.devices[id.rawValue]?.displayName = name
         }
     }
@@ -603,7 +610,9 @@ actor RuntimeSettingsStore {
 
     func updatePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) throws {
         try mutate { candidate in
-            guard candidate.devices[id.rawValue] != nil else { throw SettingsStoreError.unknownDevice }
+            guard candidate.devices[id.rawValue] != nil else {
+                throw SettingsStoreError.unknownDevice
+            }
             candidate.devices[id.rawValue]?.autoAccept = autoAccept
             candidate.devices[id.rawValue]?.maximumBytes = maximumBytes
         }
@@ -620,7 +629,9 @@ actor RuntimeSettingsStore {
 
     func updateDirectory(_ directory: URL?, for id: DeviceID) throws {
         try mutate { candidate in
-            guard candidate.devices[id.rawValue] != nil else { throw SettingsStoreError.unknownDevice }
+            guard candidate.devices[id.rawValue] != nil else {
+                throw SettingsStoreError.unknownDevice
+            }
             candidate.devices[id.rawValue]?.directoryPath = directory?.standardizedFileURL.path
         }
     }
@@ -642,9 +653,10 @@ actor RuntimeSettingsStore {
     func downloadDirectory() -> DownloadDirectory {
         DownloadDirectory(
             globalDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:)),
-            perSource: Dictionary(uniqueKeysWithValues: wire.devices.compactMap { id, value in
-                value.directoryPath.map { (DeviceID(rawValue: id), URL(fileURLWithPath: $0)) }
-            })
+            perSource: Dictionary(
+                uniqueKeysWithValues: wire.devices.compactMap { id, value in
+                    value.directoryPath.map { (DeviceID(rawValue: id), URL(fileURLWithPath: $0)) }
+                })
         )
     }
 
@@ -682,7 +694,9 @@ actor RuntimeSettingsStore {
                     maximumBytes: value.maximumBytes,
                     directory: value.directoryPath.map(URL.init(fileURLWithPath:))
                 )
-            }.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+            }.sorted {
+                $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+            }
         )
     }
 
@@ -709,7 +723,9 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
         self.trustStore = trustStore
     }
 
-    func rename(_ id: DeviceID, to displayName: String) async throws { try await store.rename(id, to: displayName) }
+    func rename(_ id: DeviceID, to displayName: String) async throws {
+        try await store.rename(id, to: displayName)
+    }
     func revoke(_ id: DeviceID) async throws -> SurfaceActionResult {
         _ = try await trustRepository.revoke(id)
         var hadPersistenceFailure = false
@@ -784,7 +800,9 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     }
 
     func createCode() async throws -> String { try await coordinator.createCode() }
-    func join(code: String) async throws -> PairingJoinResult { try await coordinator.join(code: code) }
+    func join(code: String) async throws -> PairingJoinResult {
+        try await coordinator.join(code: code)
+    }
     func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
         let pendingPeer = await coordinator.pendingPeerSummary()
         var warnings: [String] = []
@@ -792,7 +810,7 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
             try await coordinator.confirmForSurface(fingerprint)
         } catch {
             guard let pendingPeer,
-                  await trustRepository.isTrusted(pendingPeer.id)
+                await trustRepository.isTrusted(pendingPeer.id)
             else { throw error }
             warnings.append("本机信任已建立，但对端授权确认未完成；请在设置中撤销后重新配对。")
         }
@@ -802,7 +820,7 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
             warnings.append("设备信任已建立，但本地信任记录未保存；请检查存储权限后重启确认。")
         }
         if let device = pendingPeer,
-           await trustRepository.isTrusted(device.id)
+            await trustRepository.isTrusted(device.id)
         {
             do {
                 try await settings.recordPaired(device)
@@ -870,12 +888,16 @@ private actor IncomingRuntimeController {
         let snapshot = await settings.current()
         let policy = ReceivePolicy(
             trustedSources: trust.trustedDeviceIDs.subtracting([ownerID]),
-            perDevice: Dictionary(uniqueKeysWithValues: snapshot.devices.map {
-                ($0.id, DeviceReceivePolicy(
-                    autoAccept: $0.autoAccept,
-                    maximumBytes: SettingsSizeLimit.bytes(megabytes: $0.maximumMegabytes)
-                ))
-            })
+            perDevice: Dictionary(
+                uniqueKeysWithValues: snapshot.devices.map {
+                    (
+                        $0.id,
+                        DeviceReceivePolicy(
+                            autoAccept: $0.autoAccept,
+                            maximumBytes: SettingsSizeLimit.bytes(megabytes: $0.maximumMegabytes)
+                        )
+                    )
+                })
         )
         return IncomingTransferListener(
             source: source,
@@ -958,40 +980,50 @@ actor RuntimeHistorySource {
     }
 
     private func items() async -> [TransferSurfaceItem] {
-        guard let records = try? await database.persistedHistory(limit: AppSurfaceController.historyLimit) else {
+        let outputRevision = await outputLocator.retentionRevision()
+        guard
+            let records = try? await database.persistedHistory(
+                limit: AppSurfaceController.historyLimit)
+        else {
             return []
         }
         let settingsSnapshot = await settings.current()
-        let names = Dictionary(uniqueKeysWithValues: settingsSnapshot.devices.map { ($0.id, $0.displayName) })
+        let names = Dictionary(
+            uniqueKeysWithValues: settingsSnapshot.devices.map { ($0.id, $0.displayName) })
         do {
-            try await outputLocator.retain(Set(records.map(\.id)))
+            try await outputLocator.retain(
+                Set(records.map(\.id)),
+                ifUnchangedSince: outputRevision
+            )
         } catch {
             // Retention failure does not hide otherwise valid history.
         }
         var items: [TransferSurfaceItem] = []
         items.reserveCapacity(records.count)
         for record in records {
-            let outputURL: URL? = if record.direction == .inbound && record.phase == .completed {
-                await outputLocator.outputURL(for: record.id)
-            } else {
-                nil
-            }
-            items.append(TransferSurfaceItem(
-                snapshot: TransferSnapshot(
-                    id: record.id,
-                    peer: record.peer,
-                    phase: record.phase,
-                    completedBytes: Int64(clamping: record.completedBytes),
-                    totalBytes: Int64(clamping: record.aggregateSize),
-                    route: record.route
-                ),
-                peerName: names[record.peer] ?? "未知设备",
-                displayName: record.displayFilename,
-                bytesPerSecond: nil,
-                estimatedTimeRemaining: nil,
-                outputURL: outputURL,
-                updatedAt: record.updatedAt
-            ))
+            let outputURL: URL? =
+                if record.direction == .inbound && record.phase == .completed {
+                    await outputLocator.outputURL(for: record.id)
+                } else {
+                    nil
+                }
+            items.append(
+                TransferSurfaceItem(
+                    snapshot: TransferSnapshot(
+                        id: record.id,
+                        peer: record.peer,
+                        phase: record.phase,
+                        completedBytes: Int64(clamping: record.completedBytes),
+                        totalBytes: Int64(clamping: record.aggregateSize),
+                        route: record.route
+                    ),
+                    peerName: names[record.peer] ?? "未知设备",
+                    displayName: record.displayFilename,
+                    bytesPerSecond: nil,
+                    estimatedTimeRemaining: nil,
+                    outputURL: outputURL,
+                    updatedAt: record.updatedAt
+                ))
         }
         return items
     }

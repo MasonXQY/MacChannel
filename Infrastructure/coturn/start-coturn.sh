@@ -42,4 +42,4 @@ fi
 umask 077
 cp /etc/coturn/turnserver.conf "$runtime_config"
 printf '\nstatic-auth-secret=%s\nexternal-ip=%s/%s\n' "$secret" "$external_ip" "$container_ip" >> "$runtime_config"
-exec turnserver -c "$runtime_config"
+exec /usr/local/bin/turnserver-unprivileged -c "$runtime_config"

@@ -7,7 +7,7 @@
 The repository now contains a strict real-Mac checklist, a privacy audit,
 production deployment/rollback instructions, and non-technical installation and
 usage guidance. Every real-device result defaults to `NOT RUN`; no physical-Mac,
-Docker, signing, or notarization evidence was invented.
+runtime-privacy, or notarization evidence was invented.
 
 ## Completed on this host
 
@@ -38,9 +38,10 @@ Docker, signing, or notarization evidence was invented.
 
 ## External blockers
 
-- Docker is absent: live PostgreSQL 17, HTTPS/WSS rendezvous, STUN/TURN, service
-  log/metrics scans, pairing-row expiry observation, and the 1 GiB forced-relay
-  test are `BLOCKED`.
+- The local Colima stack now proves PostgreSQL 17, HTTPS/WSS rendezvous,
+  authenticated TURN REST, coturn allocation, and the 1 GiB forced-relay resume
+  path. The trusted runtime privacy producer/verifier, service log/metrics
+  evidence, and pairing-row expiry bundle remain `BLOCKED / NOT IMPLEMENTED`.
 - At least two physical Macs plus a third-device pairing case are not available
   in this automated host session. RM-01 through RM-12 remain `NOT RUN`.
 - The installed Developer ID Application identity now produces a release app
@@ -59,7 +60,7 @@ Docker, signing, or notarization evidence was invented.
   and signed menu-bar smoke launch all passed.
 - `bash Scripts/test-build-app-contract.sh`: PASS; a signing failure publishes no
   app-shaped output and removes its private signing workspace.
-- `swift test --no-parallel`: 411 tests, 0 failures, 3 expected environment skips.
+- `swift test --no-parallel`: 413 tests, 0 failures, 3 expected environment skips.
 - `go test -race ./... -count=1` and `go vet ./...`: PASS.
 - `bash Scripts/verify-e2e.sh --local-only`: 18 integration tests, 0 failures,
   2 Docker-gated skips; direct-LAN SHA-256 values matched.
@@ -67,8 +68,11 @@ Docker, signing, or notarization evidence was invented.
   schema and coturn persistence/logging contracts. Default mode exits 2 with
   runtime explicitly BLOCKED; no random marker or runtime fixture PASS is claimed.
 - Bash syntax, strict Swift format lint, and `git diff --check`: PASS.
-- Default `bash Scripts/verify-e2e.sh`: expected exit 2 with explicit missing-
-  Docker message; no relay or resume PASS was claimed.
+- Focused real-stack 1 GiB relay: PASS in 95.528 seconds; forced `.relay`,
+  authenticated resume, equal source/destination SHA-256, and 91,684,864-byte
+  peak RSS growth.
+- Full default `bash Scripts/verify-e2e.sh` remains blocked by direct Internet
+  ICE in this single-host NAT hairpin topology; it does not print full E2E PASS.
 
 ## Completion boundary
 
@@ -77,9 +81,9 @@ privacy checks PA-01 through PA-06 have zero unresolved findings, a signed and
 notarized identical commit passes RM-01 through RM-12, and the evidence is tied
 to its service image digests and Git commit.
 
-The immutable Task 14 privacy-finding revision is commit `764e280`; its audit
-document records the exact script content hashes and UTC evidence timestamp.
-Historical runtime-verifier revisions `5158d40` and `0ba4bb2` are superseded by
-the final fail-closed convergence commit
+Commit `764e280` is only the superseded early static-audit baseline; it does not
+contain the final script set or listed hashes. Historical runtime-verifier
+revisions `5158d40` and `0ba4bb2` are superseded by the immutable final
+fail-closed content revision
 `f506df56866dcb6dc518cd6153006a66aa2a49ae`, pinned in the audit document by a
 subsequent append-only provenance commit.

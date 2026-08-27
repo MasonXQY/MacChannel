@@ -14,6 +14,12 @@ public protocol TrustSnapshotPersisting: Sendable {
 public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
     TrustSnapshotPersisting
 {
+    private struct PersistedState: Codable {
+        let version: Int
+        let snapshot: TrustStoreSnapshot
+        let authenticationRecords: [SignedTrustRecord]
+    }
+
     private static var generationAccount: String { "trust-snapshot-generation" }
 
     private let url: URL
@@ -33,10 +39,17 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
     public func load(identity: DeviceIdentity) throws -> TrustRepository {
         let generation = try storedGeneration()
         if FileManager.default.fileExists(atPath: url.path) {
-            let snapshot = try JSONDecoder().decode(
-                TrustStoreSnapshot.self,
-                from: Data(contentsOf: url)
-            )
+            let data = try Data(contentsOf: url)
+            let decoded = try? JSONDecoder().decode(PersistedState.self, from: data)
+            let snapshot =
+                try decoded?.snapshot
+                ?? JSONDecoder().decode(
+                    TrustStoreSnapshot.self,
+                    from: data
+                )
+            guard decoded == nil || decoded?.version == 1 else {
+                throw AuthenticatedTrustSnapshotStoreError.invalidGeneration
+            }
             let store = try TrustStore(
                 snapshot: snapshot,
                 expectedOwner: identity,
@@ -48,7 +61,8 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
             return try TrustRepository(
                 ownerIdentity: identity,
                 trustStore: store,
-                persistedGeneration: snapshot.generation
+                persistedGeneration: snapshot.generation,
+                authenticationRecords: decoded?.authenticationRecords ?? []
             )
         }
         guard generation == 0 else {
@@ -63,7 +77,12 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
 
     public func persistLatest(from repository: TrustRepository) async throws {
         guard let snapshot = try? await repository.latestSignedSnapshot() else { return }
-        let data = try JSONEncoder().encode(snapshot)
+        let state = PersistedState(
+            version: 1,
+            snapshot: snapshot,
+            authenticationRecords: await repository.authenticationRecords()
+        )
+        let data = try JSONEncoder().encode(state)
         try data.write(to: url, options: .atomic)
         guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else {
             throw AuthenticatedTrustSnapshotStoreError.invalidGeneration
@@ -81,9 +100,10 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
     }
 
     private func storeGeneration(_ generation: UInt64) throws {
-        let data = Data((0..<8).reversed().map { shift in
-            UInt8(truncatingIfNeeded: generation >> UInt64(shift * 8))
-        })
+        let data = Data(
+            (0..<8).reversed().map { shift in
+                UInt8(truncatingIfNeeded: generation >> UInt64(shift * 8))
+            })
         try secrets.store(data, for: Self.generationAccount, policy: policy)
     }
 }

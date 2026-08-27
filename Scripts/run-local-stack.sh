@@ -11,6 +11,7 @@ export COMPOSE_PROJECT_NAME=macchannel-local
 prepare_only=false
 install_trust=true
 turn_external_ip=
+turn_probe_host="${MACCHANNEL_TURN_PROBE_HOST:-}"
 trust_added=false
 stack_touched=false
 stack_secret_volume_owned=false
@@ -232,6 +233,16 @@ if [[ "${prepare_only}" == false ]]; then
     echo "Docker Compose v2 不可用。" >&2
     exit 1
   fi
+  if [[ -z "${turn_probe_host}" ]] && command -v colima >/dev/null 2>&1 && \
+    [[ "$(docker context show 2>/dev/null || true)" == colima ]]; then
+    colima_address="$(colima list --json 2>/dev/null | sed -n 's/.*"address":"\([^"]*\)".*/\1/p' | head -n 1)"
+    if is_valid_external_ipv4 "${colima_address}"; then
+      turn_probe_host="${colima_address}"
+      if [[ -z "${turn_external_ip}" ]]; then
+        turn_external_ip="${colima_address}"
+      fi
+    fi
+  fi
   if [[ -z "${turn_external_ip}" ]]; then
     if ! command -v route >/dev/null 2>&1 || ! command -v ipconfig >/dev/null 2>&1; then
       echo "无法自动检测可达地址；请传入 --turn-external-ip IPv4。" >&2
@@ -243,6 +254,9 @@ if [[ "${prepare_only}" == false ]]; then
   if ! is_valid_external_ipv4 "${turn_external_ip}"; then
     echo "TURN 对外地址必须是非回环 IPv4；本机开发请传入局域网地址，部署时传入宿主机可达地址。" >&2
     exit 1
+  fi
+  if [[ -z "${turn_probe_host}" ]]; then
+    turn_probe_host=127.0.0.1
   fi
 fi
 
@@ -301,7 +315,7 @@ openssl s_client -connect localhost:5349 -CAfile "${tls_root}/local-ca.pem" -ver
 # Host-side allocation: both the address and one-to-one published relay port
 # must match the Compose contract. Task 13 adds the full peer data-plane probe.
 (cd "${repository_root}/Services/rendezvous" && go run ./cmd/turn-probe \
-  --server 127.0.0.1:3478 \
+  --server "${turn_probe_host}:3478" \
   --secret-file "${secret_root}/turn-shared-secret" \
   --expected-ip "${turn_external_ip}" \
   --min-port 49160 \

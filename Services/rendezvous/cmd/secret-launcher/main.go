@@ -66,11 +66,39 @@ func main() {
 
 func prepareCopies(copies []copySpec, uid, gid int) error {
 	seenDestinations := make(map[string]bool, len(copies))
+	seenParents := make(map[string]bool, len(copies))
+	parents := make([]string, 0, len(copies))
 	for _, item := range copies {
 		if seenDestinations[item.destination] {
 			return fmt.Errorf("duplicate runtime destination %q", item.destination)
 		}
 		seenDestinations[item.destination] = true
+		parent := filepath.Dir(item.destination)
+		if seenParents[parent] {
+			continue
+		}
+		seenParents[parent] = true
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			return fmt.Errorf("create runtime directory: %w", err)
+		}
+		parentInfo, err := os.Lstat(parent)
+		if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("runtime parent %q must be a real directory", parent)
+		}
+		// Reclaim a tmpfs directory left by an earlier service process before
+		// changing its mode. The bootstrap has CAP_CHOWN but intentionally not
+		// CAP_FOWNER, so ownership must be root while chmod runs.
+		if os.Geteuid() == 0 {
+			if err := os.Chown(parent, 0, 0); err != nil {
+				return fmt.Errorf("reclaim runtime directory: %w", err)
+			}
+		}
+		if err := os.Chmod(parent, 0o700); err != nil {
+			return fmt.Errorf("protect runtime directory: %w", err)
+		}
+		parents = append(parents, parent)
+	}
+	for _, item := range copies {
 		sourceDescriptor, err := syscall.Open(item.source, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
 			return fmt.Errorf("open source %q: %w", item.source, err)
@@ -84,24 +112,6 @@ func prepareCopies(copies []copySpec, uid, gid int) error {
 		if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximumCopiedFileSize {
 			source.Close()
 			return fmt.Errorf("source %q must be a non-empty regular file no larger than 64 KiB", item.source)
-		}
-		parent := filepath.Dir(item.destination)
-		if err := os.MkdirAll(parent, 0o700); err != nil {
-			source.Close()
-			return fmt.Errorf("create runtime directory: %w", err)
-		}
-		parentInfo, err := os.Lstat(parent)
-		if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
-			source.Close()
-			return fmt.Errorf("runtime parent %q must be a real directory", parent)
-		}
-		if err := os.Chown(parent, uid, gid); err != nil {
-			source.Close()
-			return fmt.Errorf("own runtime directory: %w", err)
-		}
-		if err := os.Chmod(parent, 0o700); err != nil {
-			source.Close()
-			return fmt.Errorf("protect runtime directory: %w", err)
 		}
 		// A Docker process restart preserves tmpfs. Unlink the exact prior entry
 		// so a valid restart works while never following a service-created link.
@@ -121,13 +131,18 @@ func prepareCopies(copies []copySpec, uid, gid int) error {
 			_ = os.Remove(item.destination)
 			return errors.New("copy runtime secret")
 		}
+		if err := os.Chmod(item.destination, 0o400); err != nil {
+			_ = os.Remove(item.destination)
+			return fmt.Errorf("protect runtime copy: %w", err)
+		}
 		if err := os.Chown(item.destination, uid, gid); err != nil {
 			_ = os.Remove(item.destination)
 			return fmt.Errorf("own runtime copy: %w", err)
 		}
-		if err := os.Chmod(item.destination, 0o400); err != nil {
-			_ = os.Remove(item.destination)
-			return fmt.Errorf("protect runtime copy: %w", err)
+	}
+	for _, parent := range parents {
+		if err := os.Chown(parent, uid, gid); err != nil {
+			return fmt.Errorf("own runtime directory: %w", err)
 		}
 	}
 	return nil

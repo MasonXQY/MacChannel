@@ -35,14 +35,19 @@ public final class URLSessionPresenceWebSocket: PresenceWebSocket, @unchecked Se
     private let session: URLSession
     private let task: URLSessionWebSocketTask
 
-    public init(origin: URL) throws {
+    public init(origin: URL, session suppliedSession: URLSession? = nil) throws {
         guard origin.scheme?.lowercased() == "wss", origin.host != nil else {
             throw AuthenticatedPresenceError.insecureOrigin
         }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        session = URLSession(configuration: configuration)
-        task = session.webSocketTask(with: origin, protocols: [AuthenticatedPresenceSession.subprotocol])
+        if let suppliedSession {
+            session = suppliedSession
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            session = URLSession(configuration: configuration)
+        }
+        task = session.webSocketTask(
+            with: origin, protocols: [AuthenticatedPresenceSession.subprotocol])
         task.resume()
     }
 
@@ -72,7 +77,10 @@ public actor PresenceClient {
     private var onlineDevices: Set<DeviceID> = []
     private var heartbeatTask: Task<Void, Never>?
 
-    public init(directory: DeviceDirectory, heartbeatInterval: TimeInterval = PresenceClient.heartbeatInterval) {
+    public init(
+        directory: DeviceDirectory,
+        heartbeatInterval: TimeInterval = PresenceClient.heartbeatInterval
+    ) {
         self.directory = directory
         self.heartbeatInterval = heartbeatInterval
     }
@@ -148,7 +156,11 @@ public actor AuthenticatedPresenceSession {
     private let trustRecordContinuation: AsyncStream<SignedTrustRecord>.Continuation
     private var streamsFinished = false
 
-    public init(identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket, client: PresenceClient, trustRepository: TrustRepository? = nil) throws {
+    public init(
+        identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket,
+        client: PresenceClient,
+        trustRepository: TrustRepository? = nil
+    ) throws {
         try self.init(
             identity: identity,
             origin: origin,
@@ -159,28 +171,46 @@ public actor AuthenticatedPresenceSession {
         )
     }
 
-    init(identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket, client: PresenceClient, trustRepository: TrustRepository? = nil, allowInsecureForTesting: Bool) throws {
+    init(
+        identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket,
+        client: PresenceClient,
+        trustRepository: TrustRepository? = nil, allowInsecureForTesting: Bool
+    ) throws {
         let scheme = origin.scheme?.lowercased()
         guard origin.host != nil,
-              scheme == "wss" || (allowInsecureForTesting && scheme == "ws")
+            scheme == "wss" || (allowInsecureForTesting && scheme == "ws")
         else { throw AuthenticatedPresenceError.insecureOrigin }
-        self.identity = identity; self.origin = origin; self.socket = socket; self.client = client; self.trustRepository = trustRepository
+        self.identity = identity
+        self.origin = origin
+        self.socket = socket
+        self.client = client
+        self.trustRepository = trustRepository
         var presenceContinuation: AsyncStream<RendezvousPresenceEvent>.Continuation!
-        presenceStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { presenceContinuation = $0 }
+        presenceStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) {
+            presenceContinuation = $0
+        }
         self.presenceContinuation = presenceContinuation
         var signalContinuation: AsyncStream<RendezvousSignalFrame>.Continuation!
         // Bound memory while preserving realistic ICE candidate bursts. A
         // larger burst fails the session instead of silently dropping a route.
-        signalStream = AsyncStream(bufferingPolicy: .bufferingOldest(256)) { signalContinuation = $0 }
+        signalStream = AsyncStream(bufferingPolicy: .bufferingOldest(256)) {
+            signalContinuation = $0
+        }
         self.signalContinuation = signalContinuation
         var trustResultContinuation: AsyncStream<RendezvousTrustResult>.Continuation!
-        trustResultStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { trustResultContinuation = $0 }
+        trustResultStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) {
+            trustResultContinuation = $0
+        }
         self.trustResultContinuation = trustResultContinuation
         var protocolErrorContinuation: AsyncStream<RendezvousProtocolError>.Continuation!
-        protocolErrorStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { protocolErrorContinuation = $0 }
+        protocolErrorStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) {
+            protocolErrorContinuation = $0
+        }
         self.protocolErrorContinuation = protocolErrorContinuation
         var trustRecordContinuation: AsyncStream<SignedTrustRecord>.Continuation!
-        trustRecordStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { trustRecordContinuation = $0 }
+        trustRecordStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) {
+            trustRecordContinuation = $0
+        }
         self.trustRecordContinuation = trustRecordContinuation
     }
 
@@ -205,7 +235,8 @@ public actor AuthenticatedPresenceSession {
             "payload": payload.base64EncodedString(),
         ]
         do {
-            try await socket.send(JSONSerialization.data(withJSONObject: frame, options: [.sortedKeys]))
+            try await socket.send(
+                JSONSerialization.data(withJSONObject: frame, options: [.sortedKeys]))
         } catch let error as AuthenticatedPresenceError {
             throw error
         } catch {
@@ -216,10 +247,21 @@ public actor AuthenticatedPresenceSession {
     public func connect() async throws {
         await client.disconnect()
         let challenge = try decodeChallenge(try await receiveFrame())
-        let auth = try makeAuthentication(challenge: challenge)
+        let trustRecords =
+            if let trustRepository {
+                await trustRepository.authenticationRecords()
+            } else {
+                [SignedTrustRecord]()
+            }
+        let auth = try makeAuthentication(challenge: challenge, trustRecords: trustRecords)
+        guard auth.count <= Self.maximumFrameBytes else {
+            throw AuthenticatedPresenceError.frameTooLarge
+        }
         try await socket.send(auth)
         let confirmation = try decodeFrame(try await receiveFrame())
-        guard confirmation.type == "auth-ok", confirmation.deviceID == identity.id.rawValue.uuidString.lowercased() else {
+        guard confirmation.type == "auth-ok",
+            confirmation.deviceID == identity.id.rawValue.uuidString.lowercased()
+        else {
             throw AuthenticatedPresenceError.authenticationRejected
         }
         running = true
@@ -228,7 +270,9 @@ public actor AuthenticatedPresenceSession {
 
     public func run() async throws {
         guard running else { throw AuthenticatedPresenceError.authenticationRejected }
-        guard !readerActive else { throw AuthenticatedPresenceError.transport("reader_already_active") }
+        guard !readerActive else {
+            throw AuthenticatedPresenceError.transport("reader_already_active")
+        }
         readerActive = true
         defer {
             readerActive = false
@@ -240,22 +284,30 @@ public actor AuthenticatedPresenceSession {
                 switch frame.type {
                 case "presence":
                     guard let deviceID = frame.deviceID, let availability = frame.availability,
-                          let uuid = UUID(uuidString: deviceID), availability == "internet" || availability == "offline"
+                        let uuid = UUID(uuidString: deviceID),
+                        availability == "internet" || availability == "offline"
                     else { throw AuthenticatedPresenceError.invalidFrame }
-                    let event = RendezvousPresenceEvent.availability(device: DeviceID(rawValue: uuid), isOnline: availability == "internet")
+                    let event = RendezvousPresenceEvent.availability(
+                        device: DeviceID(rawValue: uuid), isOnline: availability == "internet")
                     await client.receiveAuthenticated(event)
                     presenceContinuation.yield(event)
                 case "trust-record":
-                    guard let trustRepository, let record = frame.record else { throw AuthenticatedPresenceError.invalidFrame }
+                    guard let trustRepository, let record = frame.record else {
+                        throw AuthenticatedPresenceError.invalidFrame
+                    }
                     let signedRecord = try decodeTrustRecord(record)
                     try await trustRepository.ingest(signedRecord)
                     trustRecordContinuation.yield(signedRecord)
                 case "signal":
-                    guard let from = frame.from, let uuid = UUID(uuidString: from), let payload = frame.payload else { throw AuthenticatedPresenceError.invalidFrame }
+                    guard let from = frame.from, let uuid = UUID(uuidString: from),
+                        let payload = frame.payload
+                    else { throw AuthenticatedPresenceError.invalidFrame }
                     guard payload.count <= Self.maximumSignalPayloadBytes else {
                         throw AuthenticatedPresenceError.frameTooLarge
                     }
-                    switch signalContinuation.yield(RendezvousSignalFrame(from: DeviceID(rawValue: uuid), payload: payload)) {
+                    switch signalContinuation.yield(
+                        RendezvousSignalFrame(from: DeviceID(rawValue: uuid), payload: payload))
+                    {
                     case .enqueued:
                         break
                     case .dropped, .terminated:
@@ -264,12 +316,16 @@ public actor AuthenticatedPresenceSession {
                         throw AuthenticatedPresenceError.transport("signal_buffer_overflow")
                     }
                 case "signal-error":
-                    guard let code = frame.code else { throw AuthenticatedPresenceError.invalidFrame }
+                    guard let code = frame.code else {
+                        throw AuthenticatedPresenceError.invalidFrame
+                    }
                     protocolErrorContinuation.yield(RendezvousProtocolError(code: code))
                 case "trust-ok": trustResultContinuation.yield(.accepted)
                 case "trust-error": trustResultContinuation.yield(.rejected)
                 case "protocol-error":
-                    guard let code = frame.code else { throw AuthenticatedPresenceError.invalidFrame }
+                    guard let code = frame.code else {
+                        throw AuthenticatedPresenceError.invalidFrame
+                    }
                     protocolErrorContinuation.yield(RendezvousProtocolError(code: code))
                 default:
                     throw AuthenticatedPresenceError.invalidFrame
@@ -302,13 +358,19 @@ public actor AuthenticatedPresenceSession {
     private func receiveFrame() async throws -> Data {
         do {
             let data = try await socket.receive()
-            guard data.count <= Self.maximumFrameBytes else { throw AuthenticatedPresenceError.frameTooLarge }
+            guard data.count <= Self.maximumFrameBytes else {
+                throw AuthenticatedPresenceError.frameTooLarge
+            }
             return data
-        } catch let error as AuthenticatedPresenceError { throw error }
-        catch { throw AuthenticatedPresenceError.transport("receive_failed") }
+        } catch let error as AuthenticatedPresenceError { throw error } catch {
+            throw AuthenticatedPresenceError.transport("receive_failed")
+        }
     }
 
-    private func makeAuthentication(challenge: Challenge) throws -> Data {
+    private func makeAuthentication(
+        challenge: Challenge,
+        trustRecords: [SignedTrustRecord]
+    ) throws -> Data {
         let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
         let publicKey = identity.publicKey.rawRepresentation
         let unsigned = RendezvousSignedEnvelope(
@@ -327,48 +389,82 @@ public actor AuthenticatedPresenceSession {
             epochMilliseconds: unsigned.epochMilliseconds,
             signature: try identity.sign(unsigned.canonicalPayload()).derRepresentation
         )
-        struct Authentication: Encodable { let envelope: RendezvousSignedEnvelope }
+        struct Authentication: Encodable {
+            let envelope: RendezvousSignedEnvelope
+            let trustRecords: [SignedTrustRecord]
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(Authentication(envelope: envelope))
+        return try encoder.encode(Authentication(envelope: envelope, trustRecords: trustRecords))
     }
 
     private struct Challenge { let nonce: Data }
-    private struct Frame { let type: String; let deviceID: String?; let availability: String?; let record: [String: Any]?; let from: String?; let payload: Data?; let code: String? }
+    private struct Frame {
+        let type: String
+        let deviceID: String?
+        let availability: String?
+        let record: [String: Any]?
+        let from: String?
+        let payload: Data?
+        let code: String?
+    }
 
     private func decodeChallenge(_ data: Data) throws -> Challenge {
         let object = try strictObject(data, keys: ["type", "nonce", "expiresAt"])
         guard object["type"] as? String == "challenge", let encoded = object["nonce"] as? String,
-              let nonce = Data(base64Encoded: encoded), nonce.count == 32, object["expiresAt"] is NSNumber
+            let nonce = Data(base64Encoded: encoded), nonce.count == 32,
+            object["expiresAt"] is NSNumber
         else { throw AuthenticatedPresenceError.invalidChallenge }
         return Challenge(nonce: nonce)
     }
 
     private func decodeFrame(_ data: Data) throws -> Frame {
-        let object = try strictObject(data, keys: ["type", "deviceID", "availability", "code", "from", "payload", "record"])
-        guard let type = object["type"] as? String else { throw AuthenticatedPresenceError.invalidFrame }
+        let object = try strictObject(
+            data, keys: ["type", "deviceID", "availability", "code", "from", "payload", "record"])
+        guard let type = object["type"] as? String else {
+            throw AuthenticatedPresenceError.invalidFrame
+        }
         let payload = (object["payload"] as? String).flatMap { Data(base64Encoded: $0) }
-        return Frame(type: type, deviceID: object["deviceID"] as? String, availability: object["availability"] as? String, record: object["record"] as? [String: Any], from: object["from"] as? String, payload: payload, code: object["code"] as? String)
+        return Frame(
+            type: type, deviceID: object["deviceID"] as? String,
+            availability: object["availability"] as? String,
+            record: object["record"] as? [String: Any],
+            from: object["from"] as? String, payload: payload, code: object["code"] as? String)
     }
 
     private func strictObject(_ data: Data, keys: Set<String>) throws -> [String: Any] {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).isSubset(of: keys)
+            Set(object.keys).isSubset(of: keys)
         else { throw AuthenticatedPresenceError.invalidFrame }
         return object
     }
 
     private func decodeTrustRecord(_ object: [String: Any]) throws -> SignedTrustRecord {
-        let required: Set<String> = ["action", "epochMilliseconds", "issuer", "issuerPublicKey", "issuerSequence", "subject", "subjectPublicKey", "signature"]
+        let required: Set<String> = [
+            "action", "epochMilliseconds", "issuer", "issuerPublicKey", "issuerSequence", "subject",
+            "subjectPublicKey", "signature",
+        ]
         guard Set(object.keys) == required,
-              let data = try? JSONSerialization.data(withJSONObject: object),
-              let record = try? JSONDecoder().decode(TrustRecordWire.self, from: data),
-              let issuer = UUID(uuidString: record.issuer), let subject = UUID(uuidString: record.subject)
+            let data = try? JSONSerialization.data(withJSONObject: object),
+            let record = try? JSONDecoder().decode(TrustRecordWire.self, from: data),
+            let issuer = UUID(uuidString: record.issuer),
+            let subject = UUID(uuidString: record.subject)
         else { throw AuthenticatedPresenceError.invalidFrame }
-        return SignedTrustRecord(issuer: DeviceID(rawValue: issuer), issuerPublicKey: record.issuerPublicKey, subject: DeviceID(rawValue: subject), subjectPublicKey: record.subjectPublicKey, action: record.action, issuerSequence: record.issuerSequence, epochMilliseconds: record.epochMilliseconds, signature: record.signature)
+        return SignedTrustRecord(
+            issuer: DeviceID(rawValue: issuer), issuerPublicKey: record.issuerPublicKey,
+            subject: DeviceID(rawValue: subject), subjectPublicKey: record.subjectPublicKey,
+            action: record.action, issuerSequence: record.issuerSequence,
+            epochMilliseconds: record.epochMilliseconds, signature: record.signature)
     }
 
     private struct TrustRecordWire: Decodable {
-        let action: TrustAction; let epochMilliseconds: Int64; let issuer: String; let issuerPublicKey: Data; let issuerSequence: UInt64; let subject: String; let subjectPublicKey: Data; let signature: Data
+        let action: TrustAction
+        let epochMilliseconds: Int64
+        let issuer: String
+        let issuerPublicKey: Data
+        let issuerSequence: UInt64
+        let subject: String
+        let subjectPublicKey: Data
+        let signature: Data
     }
 }

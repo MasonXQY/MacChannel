@@ -10,17 +10,24 @@ public enum TrustRepositoryError: Error, Equatable, Sendable {
 /// the durable snapshot, so issuer sequences and trusted peers cannot be lost
 /// when a coordinator is replaced.
 public actor TrustRepository {
+    private struct RecordKey: Hashable {
+        let issuer: DeviceID
+        let subject: DeviceID
+    }
+
     public nonisolated let ownerID: DeviceID
 
     private let ownerIdentity: DeviceIdentity
     private var store: TrustStore
     private var latestSnapshot: TrustStoreSnapshot?
+    private var authenticationRecordsByPair: [RecordKey: SignedTrustRecord]
     private var updateSubscribers: [UUID: AsyncStream<TrustStore>.Continuation] = [:]
 
     public init(
         ownerIdentity: DeviceIdentity,
         trustStore: TrustStore,
-        persistedGeneration: UInt64
+        persistedGeneration: UInt64,
+        authenticationRecords: [SignedTrustRecord] = []
     ) throws {
         guard trustStore.isOwned(by: ownerIdentity) else {
             throw TrustRepositoryError.invalidOwner
@@ -31,6 +38,25 @@ public actor TrustRepository {
         self.ownerID = ownerIdentity.id
         self.ownerIdentity = ownerIdentity
         self.store = trustStore
+        var records: [RecordKey: SignedTrustRecord] = [:]
+        for record in authenticationRecords {
+            try record.validated()
+            guard
+                Self.isAuthenticationRecord(
+                    record,
+                    consistentWith: trustStore,
+                    ownerIdentity: ownerIdentity
+                )
+            else {
+                throw TrustRepositoryError.invalidOwner
+            }
+            let key = RecordKey(issuer: record.issuer, subject: record.subject)
+            if let current = records[key], current.issuerSequence >= record.issuerSequence {
+                continue
+            }
+            records[key] = record
+        }
+        authenticationRecordsByPair = records
     }
 
     public func isTrusted(_ device: DeviceID) -> Bool {
@@ -47,6 +73,15 @@ public actor TrustRepository {
 
     public func currentTrustStore() -> TrustStore {
         store
+    }
+
+    public func authenticationRecords() -> [SignedTrustRecord] {
+        authenticationRecordsByPair.values.sorted {
+            if $0.issuerSequence != $1.issuerSequence {
+                return $0.issuerSequence < $1.issuerSequence
+            }
+            return $0.issuer.rawValue.uuidString < $1.issuer.rawValue.uuidString
+        }
     }
 
     /// Verified state changes only. Consumers receive the current store first,
@@ -83,6 +118,7 @@ public actor TrustRepository {
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
         store = candidate
         latestSnapshot = snapshot
+        recordAuthenticationProof(authorization)
         publishUpdate()
         return authorization
     }
@@ -93,6 +129,7 @@ public actor TrustRepository {
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
         store = candidate
         latestSnapshot = snapshot
+        recordAuthenticationProof(record)
         publishUpdate()
     }
 
@@ -103,6 +140,7 @@ public actor TrustRepository {
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
         store = candidate
         latestSnapshot = snapshot
+        recordAuthenticationProof(record)
         publishUpdate()
         return record
     }
@@ -115,7 +153,42 @@ public actor TrustRepository {
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
         store = candidate
         latestSnapshot = snapshot
+        recordAuthenticationProof(record)
         publishUpdate()
+    }
+
+    private func recordAuthenticationProof(_ record: SignedTrustRecord) {
+        if record.action == .revoke, record.issuer == ownerID {
+            authenticationRecordsByPair = authenticationRecordsByPair.filter { key, _ in
+                key.issuer != record.subject && key.subject != record.subject
+            }
+        }
+        authenticationRecordsByPair[
+            RecordKey(issuer: record.issuer, subject: record.subject)
+        ] = record
+    }
+
+    private static func isAuthenticationRecord(
+        _ record: SignedTrustRecord,
+        consistentWith store: TrustStore,
+        ownerIdentity: DeviceIdentity
+    ) -> Bool {
+        let owner = ownerIdentity.id
+        let ownerKey = ownerIdentity.publicKey.rawRepresentation
+        if record.issuer == owner, record.subject != owner {
+            guard record.issuerPublicKey == ownerKey else { return false }
+            switch record.action {
+            case .authorize:
+                return store.trustedPublicKey(for: record.subject) == record.subjectPublicKey
+            case .revoke:
+                return !store.isTrusted(record.subject)
+            }
+        }
+        if record.subject == owner, record.issuer != owner, record.action == .authorize {
+            return record.subjectPublicKey == ownerKey
+                && store.trustedPublicKey(for: record.issuer) == record.issuerPublicKey
+        }
+        return false
     }
 
     public func latestSignedSnapshot() throws -> TrustStoreSnapshot {

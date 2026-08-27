@@ -86,8 +86,8 @@ Review fixes also followed RED-first boundaries:
 | Revoked peer | PASS: trust revocation prevents an authenticated WebRTC channel |
 | Sender process lifecycle restart | PASS: active WebRTC channel closed; the entire old runtime aggregate is retired; secret store, identity, trust repository, directory, ICE provider, signaling, SQLite handle, and coordinator are rebuilt; durable trust and the same TransferID/identity key are restored from disk; old aggregate use is rejected |
 | One target among three online clients | PASS: only selected receiver publishes; third client download root remains empty |
-| Internet ICE | BLOCKED: requires the Docker STUN/rendezvous stack |
-| Forced TURN and 1 GiB resume | BLOCKED: requires real coturn allocation and relay data plane |
+| Internet ICE | BLOCKED: real rendezvous and public STUN ran, but two clients behind this single-host NAT could not complete a reflexive-candidate hairpin connection; two-Mac Internet acceptance remains required |
+| Forced TURN and 1 GiB resume | PASS: real HTTPS/WSS rendezvous, authenticated TURN REST, coturn relay-only WebRTC, forced disconnect, authenticated resume map, matching SHA-256, and 91,684,864-byte peak RSS growth |
 
 The 1 GiB test creates the source with a reusable 1 MiB buffer and requires a
 working RSS sampler. It waits for both sender and receiver durable offsets to
@@ -97,8 +97,9 @@ and cumulative wire bytes across all new connections that fit within the
 remaining payload plus bounded protocol overhead. It reconnects the same
 TransferID, hashes source and destination in 1 MiB chunks, and requires peak RSS
 growth below 256 MiB. Any missing interruption, resume negotiation, transport,
-or RSS evidence fails the gate. This test is deliberately not reported as
-passed on a host without Docker.
+or RSS evidence fails the gate. The focused real-stack run passed in 95.528
+seconds. Source and destination SHA-256 were both
+`102bca71040977130e0a87f2e980dce728e34840a1cf5b5a3bc33f0e4f96902a`.
 
 ## TURN REST production adapter
 
@@ -123,21 +124,18 @@ LAN → Internet → relay coordinator policy.
 `Scripts/verify-e2e.sh` has two explicit modes:
 
 - Default: requires Docker Compose, starts and verifies the Task 12 stack,
-  installs the generated local CA only for the test lifetime, runs Swift unit
+  injects the generated local CA only into the integration URLSession, runs Swift unit
   tests, Go race/vet, and serial integration tests, requires the
   `direct-lan PASS`, `relay PASS`, and `resume PASS` evidence lines, then removes
-  the stack and only the trust it added through an exit trap.
+  the stack through an exit trap without mutating the login keychain.
 - `--local-only`: runs the Docker-independent direct and failure matrix. The two
   stack tests remain visible XCTest skips and the script says that Internet/TURN
   did not run.
 
-The default command on this host returns status 2 with:
-
-```text
-E2E BLOCKED：缺少 docker；真实 rendezvous/STUN/TURN 测试未运行。
-```
-
-This is a required external gate, not a relay PASS.
+The complete default command still cannot print full PASS because direct
+Internet ICE times out in the single-host NAT hairpin topology. The relay test
+is separately proven above; the direct Internet row remains an external
+two-Mac gate.
 
 ## Verification results
 
@@ -146,7 +144,7 @@ This is a required external gate, not a relay PASS.
 - Local integration focus: 18 tests, 0 failures, 2 Docker-gated skips.
 - `bash Scripts/verify-e2e.sh --local-only`: PASS, including matching direct LAN
   SHA-256 values.
-- `swift test --no-parallel`: 411 tests, 0 failures, 3 expected skips (the
+- `swift test --no-parallel`: 413 tests, 0 failures, 3 expected skips (the
   existing Go httptest wrapper plus Internet ICE and 1 GiB forced TURN).
 - `go test -race ./... -count=1`: PASS for all rendezvous packages.
 - `go vet ./...`: PASS.
@@ -155,18 +153,18 @@ This is a required external gate, not a relay PASS.
 - `bash -n Scripts/verify-e2e.sh Scripts/run-local-stack.sh`: PASS.
 - `swift format lint --strict --recursive Sources Tests App`: PASS.
 - `git diff --check`: PASS.
-- Default `bash Scripts/verify-e2e.sh`: expected status 2 with the explicit
-  Docker-blocked message and no secondary Bash error or leaked temporary log.
+- Focused real-stack forced relay: 1 test passed in 95.528 seconds with matching
+  SHA-256 and peak RSS growth below 256 MiB.
 
-## Environment limitation and remaining external gate
+## Remaining external gate
 
-`docker` is not installed on this machine. Therefore this report does not claim
-that PostgreSQL 17, live rendezvous HTTPS/WSS, Internet ICE, authenticated
-coturn relay traffic, the 1 GiB forced-relay resume, or its peak-memory assertion
-ran here. A Docker-capable macOS host must run:
+The local Colima stack proves PostgreSQL 17, live rendezvous HTTPS/WSS,
+authenticated TURN REST, coturn relay traffic, and the 1 GiB resume/data-plane
+path. It cannot prove direct Internet connectivity between distinct NATs. Two
+physical Macs on separate networks must run:
 
 ```bash
 bash Scripts/verify-e2e.sh
 ```
 
-Task 14 was not started.
+Task 14 remains partial.
