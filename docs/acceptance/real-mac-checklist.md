@@ -31,23 +31,23 @@ loopback、单元测试或 Docker 内部流量替代。失败必须重开对应�
 
 ## 验收矩阵
 
-每行的“结果”只能填写 `PASS`、`FAIL` 或 `NOT RUN`。观察连接方式只能填写
-`局域网直连`、`互联网直连`、`加密中继` 或 `不适用`。
+每行的“结果”只能填写 `PASS`、`FAIL` 或 `NOT RUN`。未执行时观察连接方式必须为
+`NOT RUN`；执行后只能填写 `局域网直连`、`互联网直连`、`加密中继` 或 `不适用`。
 
 | ID | 场景 | 日期 | 设备 / macOS / 型号 | 网络与故障注入 | Git commit | 观察连接方式 | 源 SHA-256 | 目标 SHA-256 | 耗时 | 中断点 | 恢复字节偏移 | 最终下载路径（脱敏） | 结果 | 证据文件 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| RM-01 | 三设备配对：A 配 B，再加入 C；三方指纹人工核对 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | NOT RUN |
+| RM-01 | 三设备配对：A 配 B，再加入 C；三方指纹人工核对 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | NOT RUN |
 | RM-02 | Finder 拖到菜单栏；显示“准备发送”；设备扇悬停并松手 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
-| RM-03 | 同一 LAN 发送单文件 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 局域网直连 | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
-| RM-04 | 同一 LAN 发送含空目录、Unicode 名称的文件夹 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 局域网直连 | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
-| RM-05 | 两个不同外部网络，ICE 互联网直连 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 互联网直连 | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
-| RM-06 | 阻断直连后强制 TURN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 加密中继 | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-03 | 同一 LAN 发送单文件 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-04 | 同一 LAN 发送含空目录、Unicode 名称的文件夹 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-05 | 两个不同外部网络，ICE 互联网直连 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-06 | 阻断直连后强制 TURN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
 | RM-07 | 传输中断网并恢复，复用同一 TransferID | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN |
 | RM-08 | 1 GiB 文件：内存、速度、完整性和最终落盘 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN |
 | RM-09 | 全局与来源设备自定义下载目录 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
 | RM-10 | 同名文件连续发送，产生编号且不覆盖 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
 | RM-11 | 接收磁盘空间不足，预检失败且无最终文件 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
-| RM-12 | 撤销 B 后，B 无法建立新连接；A/C 状态收敛 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | NOT RUN |
+| RM-12 | 撤销 B 后，B 无法建立新连接；A/C 状态收敛 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | NOT RUN |
 
 ## 每行执行要求
 

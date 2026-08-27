@@ -17,9 +17,14 @@ Docker, signing, or notarization evidence was invented.
 - `docs/security/privacy-audit.md` records the repository privacy contract,
   static schema/log/mount evidence, retention boundaries, and the exact runtime
   checks still blocked.
-- `Scripts/audit-privacy.sh` performs a fail-closed tracked-source fixture scan,
-  forbidden server-column scan, production logging-call scan, and coturn mount/
-  logging contract checks without claiming a transfer occurred.
+- `Scripts/audit-privacy.sh --static-only` checks forbidden server columns,
+  sensitive Swift/Go/shell logging, and coturn mount/logging contracts. Default
+  mode exits 2 after `STATIC PASS` with `RUNTIME BLOCKED`; runtime PASS requires
+  an explicit transferred fixture plus client, rendezvous, coturn, PostgreSQL,
+  metrics, mount, and expiry evidence.
+- `Scripts/test-privacy-audit.sh` proves the scanner rejects Go payload, Swift
+  path, and shell private-key logging mutants while accepting a fixed-category
+  error log.
 - `docs/operations/deployment.md` covers DNS, TLS, PostgreSQL 17 migrations,
   TURN ports, secret rotation, health and capacity alerts, rate limits, retention,
   client signing/update, and service/client/database rollback.
@@ -34,8 +39,9 @@ Docker, signing, or notarization evidence was invented.
   test are `BLOCKED`.
 - At least two physical Macs plus a third-device pairing case are not available
   in this automated host session. RM-01 through RM-12 remain `NOT RUN`.
-- A Developer ID Application identity is installed, but the current development
-  bundler does not produce a strict-verifying signed resource envelope:
+- A Developer ID Application identity is installed, but `build-app.sh` does not
+  use it; SwiftPM outputs may carry ad-hoc signatures and the assembled
+  development bundle does not produce a strict-verifying resource envelope:
   `codesign --verify --deep --strict` reported that resources required by the
   signature are absent. `notarytool` also reported that credentials are missing.
   Release signing, Gatekeeper assessment, notarization, and staple validation
@@ -50,8 +56,9 @@ Docker, signing, or notarization evidence was invented.
 - `go test -race ./... -count=1` and `go vet ./...`: PASS.
 - `bash Scripts/verify-e2e.sh --local-only`: 18 integration tests, 0 failures,
   2 Docker-gated skips; direct-LAN SHA-256 values matched.
-- `bash Scripts/audit-privacy.sh`: PASS for the repository fixture/log/schema/
-  coturn-mount contract; runtime service scan explicitly `NOT RUN`.
+- `bash Scripts/audit-privacy.sh --static-only`: STATIC PASS for log mutants,
+  schema and coturn persistence/logging contracts. Default mode exits 2 with
+  runtime explicitly BLOCKED; no random marker or runtime fixture PASS is claimed.
 - Bash syntax, strict Swift format lint, and `git diff --check`: PASS.
 - Default `bash Scripts/verify-e2e.sh`: expected exit 2 with explicit missing-
   Docker message; no relay or resume PASS was claimed.

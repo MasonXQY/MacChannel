@@ -1,7 +1,15 @@
 # Mac 通道隐私审计
 
 审计日期：2026-08-27
-审计 commit：`cf75945` 加本文件所在提交前工作树
+被审计代码 commit：`cf75945`
+静态证据时间（UTC）：`2026-08-27T12:41:20Z`
+静态审计脚本 SHA-256：
+
+- `audit-privacy.sh`: `aa7a735b4f225ee162b6bd2206b057895fcc75e9e8bc44bc4b4beb7cc846ffbe`
+- `check-sensitive-logging.sh`: `09a7c7935f6733d84aca65f517c72c078c078a5bc5c5d0a7f54a869e72b11b02`
+- `test-privacy-audit.sh`: `7a86abbe6c8f250f5019ba3e728d1871b909bb3e7020183b29d8dd5e329cbfff`
+
+审计文档 commit：见本文件末尾“不可变文档版本”；首次提交后单独追加，避免自引用哈希。
 总体状态：**PARTIAL / 运行中服务审计 BLOCKED**
 
 ## 隐私合同
@@ -17,17 +25,19 @@
 
 | 检查 | 方法 | 结果 | 边界 |
 | --- | --- | --- | --- |
-| 仓库敏感日志扫描 | `bash Scripts/audit-privacy.sh` | PASS | 静态源码/配置，不等于运行时日志 |
+| 仓库敏感日志扫描 | `bash Scripts/audit-privacy.sh --static-only` | STATIC PASS | 静态源码/配置，不等于运行时日志 |
 | 数据库 schema 列检查 | 扫描 `Services/migrations/*.sql` | PASS | 未发现 filename、filepath、content、private_key 或 transfer_history 列 |
-| TURN 文件持久化 | 检查 Compose 的 coturn 服务与配置 | PASS | coturn 只有只读 secret 输入和 tmpfs；无可写持久 volume；stdout 日志，用户名隐藏 |
+| TURN 文件持久化 | 检查 Compose 的 coturn 服务与配置 | PASS | coturn 只有只读 secret 输入和 tmpfs；无可写持久 volume；配置将日志丢弃到 `/dev/null` 并禁用 stdout/用户名日志 |
 | 客户端日志调用 | 扫描生产 Swift 源码的 `print`、`NSLog`、Logger/OSLog | PASS | 未发现把路径、文件名、内容、配对码或私钥写入日志的生产调用 |
 | 服务日志调用 | 扫描生产 Go 源码 | PASS | 日志只记录启动/关闭、固定错误类别；未记录请求体、信令 payload、配对码或凭据 |
 | 私钥上传面 | 检查身份 API 与网络信封 | PASS | 网络使用公钥和签名；`DeviceIdentity` 不暴露私钥字节 |
 | 配对存储期限合同 | schema expiry 索引与 Go 过期/清理测试 | PASS | 静态合同和自动化测试证据；未在本机 PostgreSQL 17 运行观察 |
 
-`Scripts/audit-privacy.sh` 使用一个运行时生成、不会写入仓库的唯一 fixture 标记，
-检查 tracked 服务/配置/迁移文件不含该标记，并执行禁止字段、生产日志调用和 TURN
-mount 合同检查。它是 fail-closed 的仓库审计，不声称发生了真实文件传输。
+静态脚本检查禁止的服务端持久化字段、生产 Swift/Go/shell 日志 sink 与敏感变量组合、
+以及 TURN mount/日志合同。`Scripts/test-privacy-audit.sh` 注入三个源码 mutant；至少
+`log.Printf("payload=%s", payload)`、Swift 路径插值和 shell 私钥变量输出必须被拒绝。
+固定、无敏感参数的状态类别日志使用精确 allowlist，避免把 `stack-secrets` 这样的固定
+组件名误报为 secret 值。该扫描不是完整语法分析器，也不声称覆盖运行时动态生成日志。
 
 ## 尚未执行的运行时审计
 
@@ -45,6 +55,20 @@ mount 合同检查。它是 fail-closed 的仓库审计，不声称发生了真�
 在 Docker 主机上运行 `bash Scripts/verify-e2e.sh` 后，使用同一唯一 fixture 执行
 PA-01 至 PA-06。任一敏感值命中均为发布阻断问题，不能通过脱敏 waiver 关闭。
 
+运行时 fixture 必须先真实发送，并保留 fixture 文件。证据目录必须包含
+`client.log`、`rendezvous.log`、`coturn.log`、`postgres.txt`、`metrics.txt`、
+`mounts.txt`、`expiry.txt` 和 `fixture.sha256`。然后运行：
+
+```sh
+bash Scripts/audit-privacy.sh \
+  --runtime-evidence /受控证据目录 \
+  --fixture-file /实际发送的唯一fixture
+```
+
+无参数运行只会输出 `STATIC PASS`，随后以状态 2 输出 `RUNTIME BLOCKED`；不会产生
+fixture PASS。只有显式 fixture hash receipt 匹配、五类输出均无 fixture 文件名和内容、
+mount 证据为零持久可写 TURN volume、过期 pairing 行为零时才输出 `RUNTIME PASS`。
+
 ## 数据最小化与保留
 
 - 配对会话、挑战、重放 nonce 和失败计数都有明确 expiry 字段与索引；服务清理器负责删除。
@@ -58,3 +82,7 @@ PA-01 至 PA-06。任一敏感值命中均为发布阻断问题，不能通过�
 
 仓库静态隐私边界在本机检查范围内未发现未解决问题。由于 PA-01 至 PA-06 未运行，
 隐私审计不能标记为完成，也不能据此批准生产发布。
+
+## 不可变文档版本
+
+Task 14 finding 修订提交后追加；当前为 `PENDING`。
