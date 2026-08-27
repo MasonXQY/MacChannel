@@ -65,8 +65,8 @@ public enum StatusItemPhase: Equatable, Sendable {
         case .ready:
             return StatusItemPresentation(
                 symbolName: "checkmark.circle",
-                title: "Ready",
-                accessibilityValue: "Ready to choose a device",
+                title: "准备发送",
+                accessibilityValue: "准备发送，可选择接收设备",
                 progress: nil
             )
         case let .transferring(progress):

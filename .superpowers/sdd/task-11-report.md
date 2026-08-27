@@ -53,6 +53,8 @@ Status: implementation complete; final verification recorded below
   restore focus to the status item, use native keyboard semantics, and disable
   motion when the system requests it. Pairing, settings, and transfer failures
   are both visible and posted once as high-priority VoiceOver announcements.
+  The blue ready state is visibly labeled `准备发送`, and VoiceOver announces
+  `准备发送，可选择接收设备` from the same presentation value.
 
 ## Architecture and integration
 

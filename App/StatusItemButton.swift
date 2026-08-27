@@ -148,7 +148,7 @@ extension StatusItemPhase {
         case .idle:
             "空闲"
         case .ready:
-            "可选择接收设备"
+            presentation.accessibilityValue
         case .transferring:
             "正在传输，\(presentation.title)"
         }

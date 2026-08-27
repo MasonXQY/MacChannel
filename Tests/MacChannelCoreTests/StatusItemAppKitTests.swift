@@ -15,8 +15,9 @@ final class StatusItemAppKitTests: XCTestCase {
         XCTAssertEqual(button.focusRingType, .default)
 
         button.phase = .ready
-        XCTAssertEqual(button.title, "Ready")
-        XCTAssertEqual(button.accessibilityValue() as? String, "可选择接收设备")
+        XCTAssertEqual(button.title, "准备发送")
+        XCTAssertEqual(button.accessibilityValue() as? String, "准备发送，可选择接收设备")
+        XCTAssertEqual(button.contentTintColor, .controlAccentColor)
 
         button.phase = .transferring(progress: 0.42)
         XCTAssertEqual(button.title, "42%")

@@ -106,10 +106,10 @@ final class DropIntentTests: XCTestCase {
 
     func testStatusItemPresentationIsTextualAndAccessibleForEveryPhase() {
         XCTAssertEqual(StatusItemPhase.idle.presentation.accessibilityValue, "Idle")
-        XCTAssertEqual(StatusItemPhase.ready.presentation.title, "Ready")
+        XCTAssertEqual(StatusItemPhase.ready.presentation.title, "准备发送")
         XCTAssertEqual(
             StatusItemPhase.ready.presentation.accessibilityValue,
-            "Ready to choose a device"
+            "准备发送，可选择接收设备"
         )
 
         let transfer = StatusItemPhase.transferring(progress: 0.42).presentation
