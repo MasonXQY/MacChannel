@@ -47,6 +47,32 @@ bash Scripts/build-distribution.sh
 Apple 公证、装订票据并执行 Gatekeeper 检查；未设置时清单会明确标为
 `internalSignedNotNotarized`。
 
+## 在两台 Mac 上安装
+
+1. 两台 Mac 都安装 [Tailscale for macOS](https://tailscale.com/download/mac)，登录同一个
+   Personal tailnet，并确认 Tailscale 显示已连接。
+2. 把同一份 `MacChannel.dmg` 和 `MacChannel.manifest.json` 复制到每台 Mac。不要只复制 app，
+   清单用于核对提交、Team ID 和 SHA-256。
+3. 在每台 Mac 的项目目录运行：
+
+```sh
+bash Scripts/install-personal-mesh.sh \
+  --dmg /path/to/MacChannel.dmg \
+  --manifest /path/to/MacChannel.manifest.json
+```
+
+安装器会验证 Developer ID、Tailscale 登录状态和 51337 Serve 冲突，保留已有 Application
+Support、钥匙串身份、信任、设置和历史，再把应用放入“应用程序”。内部未公证版本若首次被
+macOS 阻止，只在 Finder 中右键 MacChannel 并选择一次“打开”；不要关闭 Gatekeeper 或 SIP。
+
+4. 打开两端 MacChannel，在设置中选择“个人网络（推荐）”，点击“启用个人网络通道”。
+5. 一端选择“添加 Mac”显示六位码；另一端选择发现的设备并输入六位码。双方逐字核对安全
+   指纹并确认。
+6. 从 Finder 把文件或文件夹拖到菜单栏图标，再放到目标 Mac 图标上。
+
+真机验收步骤和脱敏记录格式见
+[个人网络真机验收表](docs/acceptance/personal-mesh-real-mac.md)。
+
 ## 第一次配对
 
 1. 两台 Mac 都登录 Tailscale。在 MacChannel 设置里选择“个人网络（推荐）”，点击
