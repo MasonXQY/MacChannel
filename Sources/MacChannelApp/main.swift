@@ -1,6 +1,9 @@
-import MacChannelCore
+import MacChannelAppKit
 
 @main
 struct MacChannelApp {
-    static func main() {}
+    @MainActor
+    static func main() {
+        MacChannelApplication.run()
+    }
 }

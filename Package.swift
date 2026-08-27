@@ -19,13 +19,18 @@ let package = Package(
                 .product(name: "WebRTC", package: "WebRTC"),
             ]
         ),
+        .target(
+            name: "MacChannelAppKit",
+            dependencies: ["MacChannelCore"],
+            path: "App"
+        ),
         .executableTarget(
             name: "MacChannelApp",
-            dependencies: ["MacChannelCore"]
+            dependencies: ["MacChannelCore", "MacChannelAppKit"]
         ),
         .testTarget(
             name: "MacChannelCoreTests",
-            dependencies: ["MacChannelCore"]
+            dependencies: ["MacChannelCore", "MacChannelAppKit"]
         ),
     ]
 )
