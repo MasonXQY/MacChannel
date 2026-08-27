@@ -5,6 +5,26 @@ import Foundation
 import XCTest
 
 final class TransferIntegrationTests: XCTestCase {
+    func testConstructionRollbackRunsEveryActionAndReportsFailure() async {
+        let cleanup = HarnessConstructionCleanup()
+        let events = CleanupEventRecorder()
+        cleanup.push { await events.append("first") }
+        cleanup.push {
+            await events.append("failing")
+            throw TwoClientHarnessError.fileGenerationFailed
+        }
+        cleanup.push { await events.append("last") }
+
+        do {
+            try await cleanup.run()
+            XCTFail("Expected rollback failure")
+        } catch {
+            XCTAssertEqual(error as? TwoClientHarnessError, .fileGenerationFailed)
+        }
+        let recordedEvents = await events.values
+        XCTAssertEqual(recordedEvents, ["last", "failing", "first"])
+    }
+
     func testInitializationFailureCleansResourcesAndRemovesRoot() async throws {
         let root = try FileManager.default.url(
             for: .itemReplacementDirectory,
@@ -13,7 +33,11 @@ final class TransferIntegrationTests: XCTestCase {
             create: true
         )
         let cleanup = HarnessConstructionCleanup()
-        cleanup.push { try? FileManager.default.removeItem(at: root) }
+        cleanup.push {
+            if FileManager.default.fileExists(atPath: root.path) {
+                try FileManager.default.removeItem(at: root)
+            }
+        }
 
         do {
             _ = try await TwoClientHarness(
@@ -24,7 +48,7 @@ final class TransferIntegrationTests: XCTestCase {
             )
             XCTFail("Expected injected construction failure")
         } catch {
-            await cleanup.run()
+            try await cleanup.run()
         }
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
@@ -40,6 +64,54 @@ final class TransferIntegrationTests: XCTestCase {
             XCTFail("Unavailable RSS sampling must not produce passing evidence")
         } catch {
             XCTAssertEqual(error as? MemorySamplingError, .unavailable)
+        }
+    }
+
+    func testResumeEvidenceRejectsAFromZeroRetransmissionMutant() {
+        let evidence = ResumeTransmissionEvidence(
+            acceptedBytes: 268_435_456,
+            acceptedMapChunkCount: 4_100,
+            newConnectionWireBytes: 1_073_741_824,
+            maximumPermittedWireBytes: 805_306_368,
+            newConnectionCount: 1
+        )
+
+        XCTAssertFalse(evidence.provesNoConfirmedPayloadWasRetransmitted)
+    }
+
+    func testStackLoadTimeoutsAllowSustainedStreamingButRemainBounded() {
+        let profile = HarnessTimeoutProfile.stack
+
+        XCTAssertEqual(profile.connection, .seconds(30))
+        XCTAssertEqual(profile.inactivity, .seconds(60))
+        XCTAssertEqual(profile.interruption, .seconds(180))
+    }
+
+    func testRepeatedParallelLANTransfersRemainStable() async throws {
+        let harness = try await makeHarness(routePolicy: .lanOnly)
+        var transfers: [(TransferID, URL)] = []
+        for index in 0..<6 {
+            let source = try harness.makeDeterministicFile(
+                size: 2 * 1024 * 1024,
+                named: "parallel-\(index).bin"
+            )
+            let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
+            transfers.append((transfer, source))
+        }
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for (transfer, _) in transfers {
+                group.addTask {
+                    try await harness.waitForCompletion(transfer, timeout: .seconds(90))
+                }
+            }
+            try await group.waitForAll()
+        }
+        for (_, source) in transfers {
+            try assertMatchingHashes(
+                source,
+                harness.receivedFile(named: source.lastPathComponent)
+            )
         }
     }
 
@@ -187,8 +259,42 @@ final class TransferIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(routes.count, 2)
         XCTAssertEqual(restart.transferID, transfer)
         XCTAssertEqual(restart.identityBefore, restart.identityAfter)
+        XCTAssertEqual(restart.identityKeyFingerprintBefore, restart.identityKeyFingerprintAfter)
         XCTAssertNotEqual(restart.runtimeGenerationBefore, restart.runtimeGenerationAfter)
+        XCTAssertTrue(restart.secretStoreObjectChanged)
+        XCTAssertTrue(restart.trustRepositoryObjectChanged)
+        XCTAssertTrue(restart.deviceDirectoryObjectChanged)
+        XCTAssertTrue(restart.iceProviderObjectChanged)
+        XCTAssertTrue(restart.trustLoadedFromDisk)
+        XCTAssertTrue(restart.directoryRebuiltFromDurableTrust)
+        XCTAssertTrue(restart.oldRuntimeRejectedUse)
         XCTAssertTrue(restart.databaseWasClosedAndReopened)
+    }
+
+    func testLANResumeUsesNegotiatedDurableMapWithoutResendingConfirmedPayload() async throws {
+        let harness = try await makeHarness(routePolicy: .lanOnly)
+        let totalBytes = 64 * 1024 * 1024
+        let source = try harness.makeDeterministicFile(
+            size: totalBytes,
+            named: "resume-evidence.bin"
+        )
+        let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
+
+        let interruption = try await harness.cutNetwork(afterBytes: 8 * 1024 * 1024)
+        await harness.restoreNetwork()
+        _ = try await harness.waitForResume(after: interruption, timeout: .seconds(60))
+        try await harness.waitForCompletion(transfer, timeout: .seconds(120))
+        let transmission = try await harness.resumeTransmissionEvidence(
+            after: interruption,
+            totalPayloadBytes: Int64(totalBytes)
+        )
+
+        XCTAssertGreaterThanOrEqual(
+            transmission.acceptedBytes,
+            interruption.receiverDurableOffset
+        )
+        XCTAssertTrue(transmission.provesNoConfirmedPayloadWasRetransmitted)
+        try assertMatchingHashes(source, harness.receivedFile(named: source.lastPathComponent))
     }
 
     func testSelectingOneTargetAmongThreeOnlineDevicesPublishesOnlyThere() async throws {
@@ -252,6 +358,10 @@ final class TransferIntegrationTests: XCTestCase {
             1_073_741_824 - interruption.receiverDurableOffset
         )
         try await harness.waitForCompletion(transfer, timeout: .seconds(900))
+        let transmission = try await harness.resumeTransmissionEvidence(
+            after: interruption,
+            totalPayloadBytes: 1_073_741_824
+        )
 
         let destination = harness.receivedFile(named: source.lastPathComponent)
         let sourceHash = try SHA256.hash(file: source)
@@ -263,6 +373,9 @@ final class TransferIntegrationTests: XCTestCase {
         XCTAssertEqual(routes.last, .relay)
         let attempts = await harness.attemptedRoutes()
         XCTAssertEqual(Array(attempts.prefix(3)), [.lan, .directInternet, .relay])
+        XCTAssertGreaterThanOrEqual(transmission.acceptedBytes, 268_435_456)
+        XCTAssertGreaterThan(transmission.acceptedMapChunkCount, 0)
+        XCTAssertTrue(transmission.provesNoConfirmedPayloadWasRetransmitted)
         XCTAssertLessThan(memory.peakBytes - memory.baselineBytes, 256 * 1024 * 1024)
         XCTAssertTrue(evidence.usedAuthenticatedCredentials)
         XCTAssertTrue(evidence.usernameIsOpaque)
@@ -316,7 +429,11 @@ final class TransferIntegrationTests: XCTestCase {
             create: true
         )
         let constructionCleanup = HarnessConstructionCleanup()
-        constructionCleanup.push { try? FileManager.default.removeItem(at: root) }
+        constructionCleanup.push {
+            if FileManager.default.fileExists(atPath: root.path) {
+                try FileManager.default.removeItem(at: root)
+            }
+        }
         do {
             let harness = try await TwoClientHarness(
                 routePolicy: routePolicy,
@@ -327,10 +444,13 @@ final class TransferIntegrationTests: XCTestCase {
                 constructionCleanup: constructionCleanup
             )
             constructionCleanup.disarm()
-            addTeardownBlock { await harness.shutdownAndRemoveRoot() }
+            addTeardownBlock {
+                try await harness.shutdownAndRemoveRoot()
+                XCTAssertFalse(FileManager.default.fileExists(atPath: harness.root.path))
+            }
             return harness
         } catch {
-            await constructionCleanup.run()
+            try await constructionCleanup.run()
             throw error
         }
     }
@@ -432,4 +552,10 @@ private final class SequenceRSSReader: @unchecked Sendable {
     func next() -> UInt64? {
         lock.withLock { values.isEmpty ? nil : values.removeFirst() }
     }
+}
+
+private actor CleanupEventRecorder {
+    private(set) var values: [String] = []
+
+    func append(_ value: String) { values.append(value) }
 }

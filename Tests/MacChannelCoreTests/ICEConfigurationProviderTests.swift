@@ -162,6 +162,28 @@ final class ICEConfigurationProviderTests: XCTestCase {
         XCTAssertTrue(observedCancellation)
     }
 
+    func testNearExpiryCredentialRefreshesBeforeConnectionSafetyMargin() async throws {
+        let clock = LockedTURNClock(Date(timeIntervalSince1970: 1_800_000_000))
+        let fetcher = SequenceTURNCredentialFetcher([
+            Self.credentials(expiry: 1_800_000_600, handle: "first"),
+            Self.credentials(expiry: 1_800_001_200, handle: "refreshed"),
+        ])
+        let provider = RefreshingICEConfigurationProvider(
+            base: ICEConfiguration(stunURLs: [], turnServers: []),
+            fetcher: fetcher,
+            now: { clock.value },
+            minimumRemainingLifetime: 30
+        )
+        _ = try await provider.configuration(for: .relay)
+        clock.value = Date(timeIntervalSince1970: 1_800_000_571)
+
+        let refreshed = try await provider.configuration(for: .relay)
+
+        XCTAssertEqual(refreshed.turnServers.first?.username, "1800001200:refreshed")
+        let fetchCount = await fetcher.fetchCount
+        XCTAssertEqual(fetchCount, 2)
+    }
+
     private static func credentials(expiry: TimeInterval, handle: String) -> RendezvousTURNCredentials {
         RendezvousTURNCredentials(
             urls: ["turn:turn.test:3478?transport=udp"],

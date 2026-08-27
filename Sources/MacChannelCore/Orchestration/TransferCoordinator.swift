@@ -44,6 +44,7 @@ public actor TransferCoordinator: TransferCoordinating {
     private let maximumConnectionAttempts: Int
     private let persistenceRetryDelay: Duration
     private let cancellationWatchdogDelay: Duration
+    private let resumeObserver: (any TransferResumeNegotiationObserving)?
     private let connectionAttempts = ConnectionAttemptRegistry()
     private let resources = BoundedChannelResourceRegistry.shared
     private var transfers: [TransferID: TransferTask] = [:]
@@ -62,7 +63,8 @@ public actor TransferCoordinator: TransferCoordinating {
         outgoingDirectory: URL? = nil,
         maximumConnectionAttempts: Int = 3,
         persistenceRetryDelay: Duration = .milliseconds(100),
-        cancellationWatchdogDelay: Duration = .seconds(1)
+        cancellationWatchdogDelay: Duration = .seconds(1),
+        resumeObserver: (any TransferResumeNegotiationObserving)? = nil
     ) {
         self.connector = connector
         persistence = database
@@ -71,6 +73,7 @@ public actor TransferCoordinator: TransferCoordinating {
         self.maximumConnectionAttempts = max(1, maximumConnectionAttempts)
         self.persistenceRetryDelay = max(.milliseconds(1), persistenceRetryDelay)
         self.cancellationWatchdogDelay = max(.milliseconds(1), cancellationWatchdogDelay)
+        self.resumeObserver = resumeObserver
     }
 
     /// Reopens private immutable outgoing packages and resumes every runnable
@@ -82,7 +85,8 @@ public actor TransferCoordinator: TransferCoordinating {
         outgoingDirectory: URL? = nil,
         maximumConnectionAttempts: Int = 3,
         persistenceRetryDelay: Duration = .milliseconds(100),
-        cancellationWatchdogDelay: Duration = .seconds(1)
+        cancellationWatchdogDelay: Duration = .seconds(1),
+        resumeObserver: (any TransferResumeNegotiationObserving)? = nil
     ) async throws -> TransferCoordinator {
         let coordinator = TransferCoordinator(
             connector: connector,
@@ -90,7 +94,8 @@ public actor TransferCoordinator: TransferCoordinating {
             outgoingDirectory: outgoingDirectory,
             maximumConnectionAttempts: maximumConnectionAttempts,
             persistenceRetryDelay: persistenceRetryDelay,
-            cancellationWatchdogDelay: cancellationWatchdogDelay
+            cancellationWatchdogDelay: cancellationWatchdogDelay,
+            resumeObserver: resumeObserver
         )
         try await coordinator.restoreHistory()
         return coordinator
@@ -584,7 +589,8 @@ public actor TransferCoordinator: TransferCoordinating {
             resourceOwnership: TransferIOResourceOwnership(
                 registry: resources,
                 token: resourceToken
-            )
+            ),
+            resumeObserver: resumeObserver
         ).run(on: channel)
     }
 

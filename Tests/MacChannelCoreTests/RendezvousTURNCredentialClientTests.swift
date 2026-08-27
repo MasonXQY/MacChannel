@@ -61,7 +61,7 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         TURNClientURLProtocol.reset()
         TURNClientURLProtocol.response = """
-        {"credential":"secret","expiresAt":"2027-01-15T08:11:01Z","urls":["turn:localhost:3478"],"username":"1800000661:opaque"}
+        {"credential":"secret","expiresAt":"2027-01-15T08:11:01Z","urls":["turn:localhost:3478?transport=udp"],"username":"1800000661:opaque"}
         """.data(using: .utf8)!
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TURNClientURLProtocol.self]
@@ -163,6 +163,9 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
             "turn:-turn.test:3478?transport=udp",
             "turn:turn-.test:3478?transport=udp",
             "turn:turn..test:3478?transport=udp",
+            "turn:[:::]:3478?transport=udp",
+            "turn:[1:2:3]:3478?transport=udp",
+            "turn:[::ffff::1]:3478?transport=udp",
         ]
         for url in malformedURLs {
             let client = try makeClient(
@@ -180,6 +183,24 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
                 XCTAssertEqual(error as? RendezvousTURNClientError, .invalidResponse)
             }
         }
+    }
+
+    func testAcceptsOnlySyntacticallyValidIPv6Literals() async throws {
+        let client = try makeClient(
+            statusCode: 200,
+            response: response(
+                urls: [
+                    "turn:[::1]:3478?transport=udp",
+                    "turns:[2001:db8::1]:5349?transport=tcp",
+                ],
+                username: "1800000600:opaque",
+                credential: "secret"
+            )
+        )
+
+        let credentials = try await client.fetch()
+
+        XCTAssertEqual(credentials.urls.count, 2)
     }
 
     private func makeClient(

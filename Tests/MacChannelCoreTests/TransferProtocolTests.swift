@@ -116,15 +116,30 @@ final class TransferProtocolTests: XCTestCase {
 
         let resumed = TestSecureChannelPair.make()
         let recorder = TestChunkRecorder()
+        let negotiationRecorder = TestResumeNegotiationRecorder()
         async let receive: TransferReceiveResult = ReceiveSession(
             transferID: manifest.id,
             destinationDirectory: destination
         ).run(on: resumed.receiver)
-        _ = try await SendSession(manifest, recorder: recorder).run(on: resumed.sender)
+        _ = try await SendSession(
+            manifest,
+            recorder: recorder,
+            resumeObserver: negotiationRecorder
+        ).run(on: resumed.sender)
         _ = try await receive
 
         let sentCoordinates = await recorder.coordinates
+        let recordedNegotiation = await negotiationRecorder.values.last
+        let negotiation = try XCTUnwrap(recordedNegotiation)
         XCTAssertEqual(sentCoordinates.map(\.chunkIndex), [2, 3])
+        XCTAssertEqual(
+            negotiation.resumeMap.ranges,
+            [try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 2)]
+        )
+        XCTAssertEqual(
+            negotiation.acceptedBytes,
+            UInt64(TransferProtocolLimits.maximumChunkBytes * 2)
+        )
         XCTAssertEqual(
             try Data(contentsOf: destination.appendingPathComponent("payload.bin")),
             bytes
@@ -2372,6 +2387,14 @@ private actor TestChunkRecorder: TransferChunkRecording {
 
     func recordSentChunk(_ coordinate: ChunkCoordinate) {
         coordinates.append(coordinate)
+    }
+}
+
+private actor TestResumeNegotiationRecorder: TransferResumeNegotiationObserving {
+    private(set) var values: [TransferResumeNegotiation] = []
+
+    func recordResumeNegotiation(_ value: TransferResumeNegotiation) {
+        values.append(value)
     }
 }
 

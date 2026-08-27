@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum RendezvousTURNClientError: Error, Equatable, Sendable {
@@ -277,9 +278,9 @@ public struct RendezvousTURNCredentialClient: Sendable {
             else { return false }
             host = value[value.index(after: value.startIndex)..<closing]
             portText = value[value.index(closing, offsetBy: 2)...]
-            guard host.allSatisfy({ $0.isHexDigit || $0 == ":" || $0 == "." }),
-                  host.contains(":")
-            else { return false }
+            var address = in6_addr()
+            let parsed = String(host).withCString { inet_pton(AF_INET6, $0, &address) }
+            guard parsed == 1 else { return false }
         } else {
             guard let separator = value.lastIndex(of: ":"),
                   separator > value.startIndex,
@@ -313,6 +314,7 @@ public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
     private let base: ICEConfiguration
     private let fetcher: any RendezvousTURNCredentialFetching
     private let now: @Sendable () -> Date
+    private let minimumRemainingLifetime: TimeInterval
     private var cached: RendezvousTURNCredentials?
     private var refreshTask: Task<RendezvousTURNCredentials, Error>?
     private var refreshGeneration = 0
@@ -321,11 +323,13 @@ public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
     public init(
         base: ICEConfiguration,
         fetcher: any RendezvousTURNCredentialFetching,
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = Date.init,
+        minimumRemainingLifetime: TimeInterval = 30
     ) {
         self.base = ICEConfiguration(stunURLs: base.stunURLs, turnServers: [])
         self.fetcher = fetcher
         self.now = now
+        self.minimumRemainingLifetime = max(0, minimumRemainingLifetime)
     }
 
     public func configuration(for route: ConnectionRoute) async throws -> ICEConfiguration {
@@ -334,7 +338,9 @@ public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
             return base
         }
         let requestDate = now()
-        if let cached, cached.isUsable(at: requestDate) {
+        if let cached,
+           cached.isUsable(at: requestDate.addingTimeInterval(minimumRemainingLifetime))
+        {
             return combined(with: cached, for: route)
         }
         let task: Task<RendezvousTURNCredentials, Error>
@@ -359,7 +365,9 @@ public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
                 Task { await self.cancel(waiter: waiter, generation: generation) }
             }
             try Task.checkCancellation()
-            guard credentials.isUsable(at: now()) else {
+            guard credentials.isUsable(
+                at: now().addingTimeInterval(minimumRemainingLifetime)
+            ) else {
                 finish(waiter: waiter, generation: generation)
                 throw RendezvousTURNClientError.invalidResponse
             }

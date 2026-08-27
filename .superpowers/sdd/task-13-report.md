@@ -57,6 +57,21 @@ Review fixes also followed RED-first boundaries:
 - Failure injection showed `verify-e2e.sh` leaked its temporary log; a second
   macOS Bash 3.2 check caught the empty-array `set -u` edge on the Docker-blocked
   path. Both cleanup paths are executable Go contract tests.
+- Resume evidence now comes from the protocol's decoded authenticated
+  `ResumeMap`, correlated to the newly negotiated connection. A LAN regression
+  interrupts after durable receiver progress, requires a non-empty accepted map,
+  and measures cumulative wire bytes on every post-interruption connection. A
+  from-zero retransmission mutant fails the same evidence predicate.
+- Restart coverage now retires the complete old sender runtime and rebuilds the
+  file-backed secret store, identity, authenticated trust repository, device
+  directory, ICE provider, signaling, database, and coordinator. It proves the
+  identity key is stable, trust is loaded from disk, the directory is rebuilt
+  from durable trust, and the retired aggregate rejects later use.
+- Construction and teardown cleanup actions are throwing, always run in reverse
+  order, retain the first error, and tests assert that the harness root is gone.
+- TURN credential refresh uses a 30-second connection safety margin, the success
+  fixture has an expiry exactly matching its username, and IPv6 literals are
+  accepted only when `inet_pton(AF_INET6, ...)` parses them.
 
 ## Implemented coverage
 
@@ -69,19 +84,21 @@ Review fixes also followed RED-first boundaries:
 | Unwritable destination | PASS: exact destination-not-writable error, sender failed phase, empty staging, no publication |
 | Tampered encrypted chunk | PASS: exact transfer authentication failure, sender failed phase, no publication |
 | Revoked peer | PASS: trust revocation prevents an authenticated WebRTC channel |
-| Sender process lifecycle restart | PASS: active WebRTC channel closed; old coordinator, connector, signaling, session, SQLite handle, and identity store instance replaced; same durable TransferID and identity restored from disk and completed |
+| Sender process lifecycle restart | PASS: active WebRTC channel closed; the entire old runtime aggregate is retired; secret store, identity, trust repository, directory, ICE provider, signaling, SQLite handle, and coordinator are rebuilt; durable trust and the same TransferID/identity key are restored from disk; old aggregate use is rejected |
 | One target among three online clients | PASS: only selected receiver publishes; third client download root remains empty |
 | Internet ICE | BLOCKED: requires the Docker STUN/rendezvous stack |
 | Forced TURN and 1 GiB resume | BLOCKED: requires real coturn allocation and relay data plane |
 
 The 1 GiB test creates the source with a reusable 1 MiB buffer and requires a
 working RSS sampler. It waits for both sender and receiver durable offsets to
-reach 256 MiB, proves an active channel was closed, and then requires a new
-connection ID/count, a nonzero durable resume offset, and bytes on the new
-connection that are less than a from-zero resend. It reconnects the same
+reach 256 MiB, proves an active channel was closed, and then requires one or
+more new connection IDs, a protocol-observed non-empty authenticated resume map,
+and cumulative wire bytes across all new connections that fit within the
+remaining payload plus bounded protocol overhead. It reconnects the same
 TransferID, hashes source and destination in 1 MiB chunks, and requires peak RSS
-growth below 256 MiB. Any missing interruption or RSS evidence fails the gate.
-This test is deliberately not reported as passed on a host without Docker.
+growth below 256 MiB. Any missing interruption, resume negotiation, transport,
+or RSS evidence fails the gate. This test is deliberately not reported as
+passed on a host without Docker.
 
 ## TURN REST production adapter
 
@@ -124,13 +141,12 @@ This is a required external gate, not a relay PASS.
 
 ## Verification results
 
-- Review focus (`ICEConfigurationProviderTests`, TURN client, connection
-  coordinator, database lifecycle, and integration): 41 tests, 0 failures,
-  2 Docker-gated skips.
-- Local integration focus: 13 tests, 0 failures, 2 Docker-gated skips.
+- Review focus (transfer protocol, authenticated trust persistence, ICE/TURN,
+  and integration): 109 tests, 0 failures, 2 Docker-gated skips.
+- Local integration focus: 18 tests, 0 failures, 2 Docker-gated skips.
 - `bash Scripts/verify-e2e.sh --local-only`: PASS, including matching direct LAN
   SHA-256 values.
-- `swift test --no-parallel`: 403 tests, 0 failures, 3 expected skips (the
+- `swift test --no-parallel`: 411 tests, 0 failures, 3 expected skips (the
   existing Go httptest wrapper plus Internet ICE and 1 GiB forced TURN).
 - `go test -race ./... -count=1`: PASS for all rendezvous packages.
 - `go vet ./...`: PASS.

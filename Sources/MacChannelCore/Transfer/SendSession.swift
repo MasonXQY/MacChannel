@@ -5,6 +5,22 @@ public struct TransferSendResult: Equatable, Sendable {
     public let sentChunkCount: Int
 }
 
+public struct TransferResumeNegotiation: Equatable, Sendable {
+    public let transferID: TransferID
+    public let resumeMap: ResumeMap
+    public let acceptedBytes: UInt64
+
+    public init(transferID: TransferID, resumeMap: ResumeMap, acceptedBytes: UInt64) {
+        self.transferID = transferID
+        self.resumeMap = resumeMap
+        self.acceptedBytes = acceptedBytes
+    }
+}
+
+public protocol TransferResumeNegotiationObserving: Sendable {
+    func recordResumeNegotiation(_ value: TransferResumeNegotiation) async
+}
+
 protocol TransferChunkRecording: Sendable {
     func recordSentChunk(_ coordinate: ChunkCoordinate) async
 }
@@ -12,29 +28,34 @@ protocol TransferChunkRecording: Sendable {
 public struct SendSession: Sendable {
     private let manifest: TransferManifest
     private let recorder: (any TransferChunkRecording)?
+    private let resumeObserver: (any TransferResumeNegotiationObserving)?
     private let control: TransferSessionControl?
     private let resourceOwnership: TransferIOResourceOwnership?
 
     public init(
         _ manifest: TransferManifest,
-        control: TransferSessionControl? = nil
+        control: TransferSessionControl? = nil,
+        resumeObserver: (any TransferResumeNegotiationObserving)? = nil
     ) {
         self.manifest = manifest
         recorder = nil
         self.control = control
         resourceOwnership = nil
+        self.resumeObserver = resumeObserver
     }
 
     init(
         _ manifest: TransferManifest,
         recorder: any TransferChunkRecording,
         control: TransferSessionControl? = nil,
-        resourceOwnership: TransferIOResourceOwnership? = nil
+        resourceOwnership: TransferIOResourceOwnership? = nil,
+        resumeObserver: (any TransferResumeNegotiationObserving)? = nil
     ) {
         self.manifest = manifest
         self.recorder = recorder
         self.control = control
         self.resourceOwnership = resourceOwnership
+        self.resumeObserver = resumeObserver
     }
 
     public func run(on channel: any SecureChannel) async throws -> TransferSendResult {
@@ -102,6 +123,13 @@ public struct SendSession: Sendable {
                 throw protocolError(for: acceptedFrame)
             }
             try validate(map: resumeMap)
+            await resumeObserver?.recordResumeNegotiation(
+                TransferResumeNegotiation(
+                    transferID: manifest.id,
+                    resumeMap: resumeMap,
+                    acceptedBytes: acceptedBytes(in: resumeMap)
+                )
+            )
 
             var sentCount = 0
             var sentCoverage = ChunkCoverage()
@@ -233,6 +261,18 @@ public struct SendSession: Sendable {
             await channel.close()
             if error is CancellationError { throw TransferProtocolError.cancelled }
             throw error
+        }
+    }
+
+    private func acceptedBytes(in map: ResumeMap) -> UInt64 {
+        map.ranges.reduce(into: UInt64(0)) { total, range in
+            guard Int(range.entryIndex) < manifest.entries.count else { return }
+            let entry = manifest.entries[Int(range.entryIndex)]
+            guard entry.kind == .file else { return }
+            let chunkBytes = UInt64(TransferProtocolLimits.maximumChunkBytes)
+            let lower = min(entry.size, UInt64(range.lowerBound) * chunkBytes)
+            let upper = min(entry.size, UInt64(range.upperBound) * chunkBytes)
+            total += upper - lower
         }
     }
 

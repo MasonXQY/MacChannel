@@ -236,10 +236,10 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             keychain: keychain,
             policy: configuration.identityPolicy
         )
-        let trustStore = LocalTrustSnapshotStore(
+        let trustStore = AuthenticatedTrustSnapshotStore(
             url: configuration.dataDirectory.appendingPathComponent("trust.json"),
-            keychain: keychain,
-            keychainPolicy: configuration.identityPolicy
+            secrets: keychain,
+            policy: configuration.identityPolicy
         )
         let trustRepository = try await trustStore.load(identity: identity)
         let currentTrust = await trustRepository.currentTrustStore()
@@ -534,88 +534,6 @@ private final class RuntimeStatusSource: @unchecked Sendable {
 
     func yield(_ status: AppRuntimeStatus) { continuation.yield(status) }
     func finish() { continuation.finish() }
-}
-
-protocol TrustSnapshotPersisting: Sendable {
-    func persistLatest(from repository: TrustRepository) async throws
-}
-
-private actor LocalTrustSnapshotStore: TrustSnapshotPersisting {
-    private static let generationAccount = "trust-snapshot-generation"
-    private let url: URL
-    private let keychain: KeychainStore
-    private let keychainPolicy: KeychainPolicy
-
-    init(
-        url: URL,
-        keychain: KeychainStore,
-        keychainPolicy: KeychainPolicy = KeychainStore.identityPolicy
-    ) {
-        self.url = url
-        self.keychain = keychain
-        self.keychainPolicy = keychainPolicy
-    }
-
-    func load(identity: DeviceIdentity) throws -> TrustRepository {
-        let generation = try storedGeneration()
-        if FileManager.default.fileExists(atPath: url.path) {
-            let snapshot = try JSONDecoder().decode(
-                TrustStoreSnapshot.self,
-                from: Data(contentsOf: url)
-            )
-            let store = try TrustStore(
-                snapshot: snapshot,
-                expectedOwner: identity,
-                minimumGeneration: generation
-            )
-            if snapshot.generation > generation {
-                try storeGeneration(snapshot.generation)
-            }
-            return try TrustRepository(
-                ownerIdentity: identity,
-                trustStore: store,
-                persistedGeneration: snapshot.generation
-            )
-        }
-        guard generation == 0 else { throw ProductionRuntimeError.invalidTrustGeneration }
-        return try TrustRepository(
-            ownerIdentity: identity,
-            trustStore: TrustStore(owner: identity.id),
-            persistedGeneration: 0
-        )
-    }
-
-    func persistLatest(from repository: TrustRepository) async throws {
-        guard let snapshot = try? await repository.latestSignedSnapshot() else { return }
-        let data = try JSONEncoder().encode(snapshot)
-        try data.write(to: url, options: .atomic)
-        guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else {
-            throw ProductionRuntimeError.invalidTrustGeneration
-        }
-        try storeGeneration(snapshot.generation)
-    }
-
-    private func storedGeneration() throws -> UInt64 {
-        guard let data = try keychain.data(
-            for: Self.generationAccount,
-            policy: keychainPolicy
-        ) else { return 0 }
-        guard data.count == MemoryLayout<UInt64>.size else {
-            throw ProductionRuntimeError.invalidTrustGeneration
-        }
-        return data.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
-    }
-
-    private func storeGeneration(_ generation: UInt64) throws {
-        let data = Data((0..<8).reversed().map { shift in
-            UInt8(truncatingIfNeeded: generation >> UInt64(shift * 8))
-        })
-        try keychain.store(
-            data,
-            for: Self.generationAccount,
-            policy: keychainPolicy
-        )
-    }
 }
 
 actor RuntimeSettingsStore {

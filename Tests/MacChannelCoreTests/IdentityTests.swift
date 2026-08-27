@@ -14,6 +14,37 @@ final class IdentityTests: XCTestCase {
         XCTAssertTrue(try second.publicKey.isValidSignature(first.sign(message), for: message))
     }
 
+    func testAuthenticatedTrustSnapshotStoreReopensSignedTrustFromDisk() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let secrets = MemorySecretStore()
+        let identity = try DeviceIdentity.loadOrCreate(keychain: secrets)
+        let peer = try DeviceIdentity.ephemeral()
+        let firstStore = AuthenticatedTrustSnapshotStore(
+            url: directory.appendingPathComponent("trust.json"),
+            secrets: secrets
+        )
+        let firstRepository = try await firstStore.load(identity: identity)
+        _ = try await firstRepository.issueAuthorization(
+            subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+        try await firstStore.persistLatest(from: firstRepository)
+
+        let reopenedStore = AuthenticatedTrustSnapshotStore(
+            url: directory.appendingPathComponent("trust.json"),
+            secrets: secrets
+        )
+        let reopenedRepository = try await reopenedStore.load(identity: identity)
+        let reopenedPeerKey = await reopenedRepository.publicKey(for: peer.id)
+
+        XCTAssertNotEqual(ObjectIdentifier(firstRepository), ObjectIdentifier(reopenedRepository))
+        XCTAssertEqual(reopenedPeerKey, peer.publicKey.rawRepresentation)
+    }
+
     func testRevokedDeviceIsNoLongerTrusted() throws {
         let owner = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()
@@ -385,7 +416,7 @@ private func snapshotByReplacing(
     )
 }
 
-private final class MemorySecretStore: SecretStore {
+private final class MemorySecretStore: SecretStore, @unchecked Sendable {
     private var secrets: [String: Data] = [:]
     private(set) var requestedPolicies: [KeychainPolicy] = []
 
