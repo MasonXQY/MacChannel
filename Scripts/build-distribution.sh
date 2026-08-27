@@ -9,6 +9,15 @@ version="${MACCHANNEL_VERSION:-1.0.0}"
 build_number="${MACCHANNEL_BUILD_NUMBER:-1}"
 notary_profile="${MACCHANNEL_NOTARY_PROFILE:-}"
 volume_name="Mac 通道"
+dist_root="$repo_root/dist"
+
+mkdir -p "$dist_root"
+chmod 700 "$dist_root"
+rm -f \
+    "$dist_root/MacChannel.dmg" \
+    "$dist_root/MacChannel.manifest.json" \
+    "$dist_root/.MacChannel.dmg.new" \
+    "$dist_root/.MacChannel.manifest.json.new"
 
 fail_usage() {
     echo "$1" >&2
@@ -33,15 +42,6 @@ fi
 
 team_id="$(sed -E 's/^.*\(([A-Z0-9]{10})\)$/\1/' <<<"$identity")"
 [[ "$team_id" =~ ^[A-Z0-9]{10}$ ]] || fail_usage "could not derive the signing Team ID"
-
-dist_root="$repo_root/dist"
-mkdir -p "$dist_root"
-chmod 700 "$dist_root"
-rm -f \
-    "$dist_root/MacChannel.dmg" \
-    "$dist_root/MacChannel.manifest.json" \
-    "$dist_root/.MacChannel.dmg.new" \
-    "$dist_root/.MacChannel.manifest.json.new"
 
 build_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-distribution.XXXXXX")"
 chmod 700 "$build_root"
