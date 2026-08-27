@@ -9,6 +9,7 @@ public enum MeshConnectionPurpose: UInt8, CaseIterable, Codable, Sendable {
 public enum MeshFrameLimit: Int, Sendable {
     case preauthentication = 8_192
     case secure = 65_536
+    case encrypted = 65_562
 }
 
 public enum MeshWireError: Error, Equatable, Sendable {
