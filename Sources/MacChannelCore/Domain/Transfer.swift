@@ -65,5 +65,6 @@ public enum MacChannelError: Error, Equatable, Sendable {
     case pairingStaleOperation
     case connectionFailed
     case transferFailed
+    case transferInvalidState
     case cancelled
 }

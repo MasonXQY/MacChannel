@@ -216,7 +216,7 @@ final class TransferCoordinatorTests: XCTestCase {
         )
         try await connector.waitUntilConnecting()
 
-        await coordinator.pause(id)
+        try await coordinator.pause(id)
         await connector.releaseConnection()
         try await Task.sleep(for: .milliseconds(100))
 
@@ -225,6 +225,32 @@ final class TransferCoordinatorTests: XCTestCase {
 
         try await coordinator.resume(id)
         try await waitForPhase(.completed, id: id, on: coordinator)
+    }
+
+    func testResumeOfKnownNonpausedTransferThrowsInvalidState() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let source = root.appendingPathComponent("stale-resume.txt")
+        try Data("resume exactly once".utf8).write(to: source)
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let connector = PausingMemoryConnector(destination: destination)
+        let coordinator = TransferCoordinator(
+            connector: connector,
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")),
+            outgoingDirectory: root.appendingPathComponent("outgoing")
+        )
+        let id = try await coordinator.send(items: [source], to: DeviceID(rawValue: UUID()))
+        try await connector.waitUntilConnecting()
+
+        do {
+            try await coordinator.resume(id)
+            XCTFail("A nonpaused transfer must reject stale resume controls")
+        } catch {
+            XCTAssertEqual(error as? MacChannelError, .transferInvalidState)
+        }
+        await coordinator.cancel(id)
+        await connector.releaseConnection()
     }
 
     func testIncomingListenerRejectsUntrustedSourceBeforeStaging() async throws {
@@ -1209,10 +1235,10 @@ final class TransferCoordinatorTests: XCTestCase {
         )
         try await persistence.waitForBlockedWrites(1)
 
-        let pause = Task { await coordinator.pause(id) }
+        let pause = Task { try await coordinator.pause(id) }
         try await waitForClaimedPhase(.paused, id: id, on: coordinator)
         await persistence.releaseBlockedWrites()
-        await pause.value
+        try await pause.value
         try await waitForPhase(.paused, id: id, on: coordinator)
 
         let started = await connector.startedIDs()
@@ -1282,7 +1308,12 @@ final class TransferCoordinatorTests: XCTestCase {
         let id = try await coordinator.send(items: [payload], to: peer)
         try await persistence.waitForBlockedWrites(1)
 
-        await coordinator.pause(id)
+        do {
+            try await coordinator.pause(id)
+            XCTFail("Published completion must reject a stale pause control")
+        } catch {
+            XCTAssertEqual(error as? MacChannelError, .transferInvalidState)
+        }
         let claimed = await coordinator.claimedPhase(for: id)
         XCTAssertEqual(claimed, .completed)
         await persistence.releaseBlockedWrites()
@@ -1612,7 +1643,7 @@ final class TransferCoordinatorTests: XCTestCase {
         )
         let id = try await first.send(items: [payload], to: peer)
         try await firstConnector.waitUntilStarted(1)
-        await first.pause(id)
+        try await first.pause(id)
         try await waitForPhase(.paused, id: id, on: first)
         await first.shutdownForRestart()
         await firstConnector.releaseAll()
@@ -2149,7 +2180,7 @@ final class TransferCoordinatorTests: XCTestCase {
             to: DeviceID(rawValue: UUID())
         )
         try await connector.waitUntilStarted(1)
-        await coordinator.pause(id)
+        try await coordinator.pause(id)
         try await waitForPhase(.paused, id: id, on: coordinator)
         await coordinator.cancel(id)
         try await waitForPhase(.cancelled, id: id, on: coordinator)

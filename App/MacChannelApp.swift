@@ -42,6 +42,8 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
     private var surfaceController: AppSurfaceController?
     private var bootstrapTask: Task<Void, Never>?
     private var terminationPending = false
+    private var runtimeShutdownComplete = false
+    private var productionLaunchDiagnostics: ProductionLaunchDiagnostics?
 
     init(
         initialContainer: AppContainer,
@@ -64,6 +66,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
             if let container {
                 self.container = container
                 self.install(container, status: status)
+                self.completeProductionLaunchTestIfRequested(status: status, container: container)
             } else {
                 self.statusItemController?.setRuntimeStatus(status)
             }
@@ -113,11 +116,13 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let runtimeHost else { return .terminateNow }
+        guard !runtimeShutdownComplete else { return .terminateNow }
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
         bootstrapTask?.cancel()
         Task {
             await runtimeHost.shutdown()
+            self.finishProductionLaunchTestIfRequested()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
@@ -137,6 +142,62 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
             NSApplication.shared.terminate(nil)
         }
     }
+
+    private func completeProductionLaunchTestIfRequested(
+        status: AppRuntimeStatus,
+        container: AppContainer
+    ) {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let flag = arguments.firstIndex(of: "--production-launch-test"),
+              arguments.indices.contains(flag + 1),
+              container.runtimeIdentityID != nil,
+              status != .loading,
+              NSApplication.shared.activationPolicy() == .accessory,
+              statusItemController != nil
+        else { return }
+        let statusName: String
+        switch status {
+        case .ready: statusName = "ready"
+        case .offline: statusName = "offline"
+        case .loading, .error: return
+        }
+        productionLaunchDiagnostics = ProductionLaunchDiagnostics(
+            marker: URL(fileURLWithPath: arguments[flag + 1]),
+            status: statusName,
+            identityID: container.runtimeIdentityID!.rawValue.uuidString.lowercased(),
+            settingsAvailable: container.settingsSurfaceService.isAvailable,
+            statusInstalled: statusItemController != nil
+        )
+        guard let runtimeHost else { return }
+        Task {
+            await runtimeHost.shutdown()
+            self.runtimeShutdownComplete = true
+            self.finishProductionLaunchTestIfRequested()
+            NSApplication.shared.terminate(nil)
+        }
+    }
+
+    private func finishProductionLaunchTestIfRequested() {
+        guard let diagnostics = productionLaunchDiagnostics else { return }
+        let object: [String: Any] = [
+            "identityID": diagnostics.identityID,
+            "runtimeStatus": diagnostics.status,
+            "settingsAvailable": diagnostics.settingsAvailable,
+            "shutdownComplete": true,
+            "statusInstalled": diagnostics.statusInstalled,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) {
+            try? data.write(to: diagnostics.marker, options: .atomic)
+        }
+    }
+}
+
+private struct ProductionLaunchDiagnostics {
+    let marker: URL
+    let status: String
+    let identityID: String
+    let settingsAvailable: Bool
+    let statusInstalled: Bool
 }
 
 @MainActor

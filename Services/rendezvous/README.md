@@ -2,6 +2,29 @@
 
 Every request below carries the existing signed HTTP authentication envelope. The server derives the request source from the connection; a client-provided source address is never authoritative. Byte fields are JSON base64 strings and are opaque to the service.
 
+## Signed envelope v1
+
+Swift HTTP requests, Swift WebSocket authentication, and the Go verifier sign the
+same compact UTF-8 JSON object. Its keys are sorted lexicographically and the
+signature field is omitted:
+
+```json
+{"deviceID":"lowercase-uuid","epochMilliseconds":1726000000123,"nonce":"base64","payload":"base64","publicKey":"base64"}
+```
+
+- `deviceID` is lowercase.
+- `epochMilliseconds` is a signed 64-bit JSON integer.
+- Byte fields use padded RFC 4648 standard base64.
+- No insignificant whitespace is emitted and `/` is not escaped.
+- The P-256 ECDSA signature covers the SHA-256 digest of these exact bytes and is
+  encoded as ASN.1 DER in the outer envelope's `signature` base64 field.
+- CryptoKit's 64-byte `X || Y` public-key representation and SEC1's 65-byte
+  uncompressed representation are both accepted by the Go verifier.
+
+The fixed cross-language vectors live in
+`Fixtures/signed-envelope-v1.json`; Swift verifies the Go-produced vector and Go
+verifies the Swift-produced vector.
+
 The endpoints mirror the Swift `PairingTransport` state order:
 
 | Swift operation | Method and path | Authenticated payload | Success response |

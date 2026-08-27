@@ -14,6 +14,13 @@ final class AppRuntimeTests: XCTestCase {
             AppLaunchMode.resolve(arguments: [], environment: ["MACCHANNEL_RUNTIME": "local-shell"]),
             .localShell
         )
+        XCTAssertEqual(
+            AppLaunchMode.resolve(
+                arguments: ["MacChannelApp", "--production-launch-test", "/tmp/marker"],
+                environment: [:]
+            ),
+            .production
+        )
     }
 
     func testProductionConfigurationRequiresWSSAndDerivesHTTPSPairingOrigin() throws {
@@ -32,6 +39,43 @@ final class AppRuntimeTests: XCTestCase {
 
         XCTAssertEqual(configuration.rendezvousWebSocketURL?.absoluteString, "wss://example.test/v1/ws")
         XCTAssertEqual(configuration.rendezvousHTTPOrigin?.absoluteString, "https://example.test")
+        XCTAssertEqual(
+            try configuration.endpoints(persistedURL: "wss://persisted.test/v1/ws")
+                .webSocketURL.absoluteString,
+            "wss://example.test/v1/ws"
+        )
+    }
+
+    func testPackagedConfigurationProvidesSecureLocalStackDefaultWithoutEnvironment() throws {
+        let configuration = try ProductionRuntimeConfiguration.current(environment: [:])
+
+        XCTAssertEqual(
+            configuration.rendezvousWebSocketURL?.absoluteString,
+            "wss://localhost:8443/v1/ws"
+        )
+        XCTAssertEqual(
+            configuration.rendezvousHTTPOrigin?.absoluteString,
+            "https://localhost:8443"
+        )
+        XCTAssertEqual(
+            try configuration.endpoints(persistedURL: "wss://relay.example/v1/ws")
+                .webSocketURL.absoluteString,
+            "wss://relay.example/v1/ws"
+        )
+    }
+
+    func testRendezvousURLValidationRejectsCredentialsAndNormalizesHTTPSOrWSS() throws {
+        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("http://localhost:8443"))
+        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("wss://user:secret@localhost:8443/v1/ws"))
+        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("wss://localhost:8443/v1/ws?token=secret"))
+        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("wss://localhost:8443/v1/ws#fragment"))
+        XCTAssertThrowsError(try RendezvousEndpointConfiguration.parse("wss://localhost:8443/another-path"))
+
+        let https = try RendezvousEndpointConfiguration.parse("https://relay.example:8443")
+        XCTAssertEqual(https.webSocketURL.absoluteString, "wss://relay.example:8443/v1/ws")
+        XCTAssertEqual(https.httpOrigin.absoluteString, "https://relay.example:8443")
+        let wss = try RendezvousEndpointConfiguration.parse("wss://relay.example:8443/v1/ws")
+        XCTAssertEqual(wss, https)
     }
 
     @MainActor
@@ -209,6 +253,20 @@ final class AppRuntimeTests: XCTestCase {
         let reloaded = await reloadedIterator.next()?.first
         let reloadedItem = try XCTUnwrap(reloaded)
         XCTAssertEqual(reloadedItem.outputURL, actualOutput)
+    }
+
+    func testRendezvousURLPersistsInRuntimeSettings() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        let settings = try RuntimeSettingsStore(url: url, trustedDevices: [])
+
+        try await settings.updateRendezvousURL("wss://relay.example:8443/v1/ws")
+
+        let reloaded = try RuntimeSettingsStore(url: url, trustedDevices: [])
+        let snapshot = await reloaded.current()
+        XCTAssertEqual(snapshot.rendezvousURL, "wss://relay.example:8443/v1/ws")
     }
 
     @MainActor

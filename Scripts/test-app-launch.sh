@@ -4,6 +4,8 @@ set -euo pipefail
 bash Scripts/build-app.sh
 
 marker_path="$(mktemp -t macchannel-launch.XXXXXX)"
+production_launch_dir="$(mktemp -d -t macchannel-production-launch.XXXXXX)"
+production_marker_path="$production_launch_dir/marker.json"
 rm -f "$marker_path"
 opener_pid=""
 
@@ -12,6 +14,8 @@ cleanup() {
         kill "$opener_pid" 2>/dev/null || true
     fi
     rm -f "$marker_path"
+    rm -f "$production_marker_path"
+    rmdir "$production_launch_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -27,5 +31,25 @@ done
 
 test -f "$marker_path"
 grep -qx "ready accessory" "$marker_path"
+wait "$opener_pid"
+opener_pid=""
+
+env -u MACCHANNEL_RENDEZVOUS_URL -u MACCHANNEL_RUNTIME \
+    /usr/bin/open -n -W .build/MacChannel.app --args --production-launch-test "$production_marker_path" &
+opener_pid=$!
+
+for _ in {1..150}; do
+    [[ -f "$production_marker_path" ]] && break
+    sleep 0.1
+done
+
+test -f "$production_marker_path"
+jq -e '
+    (.runtimeStatus == "offline" or .runtimeStatus == "ready") and
+    (.identityID | type == "string" and length > 0) and
+    .settingsAvailable == true and
+    .statusInstalled == true and
+    .shutdownComplete == true
+' "$production_marker_path" >/dev/null
 wait "$opener_pid"
 opener_pid=""

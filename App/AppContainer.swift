@@ -12,6 +12,7 @@ final class AppContainer {
     let pairingStates: AsyncStream<PairingState>?
     let settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)?
     let transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)?
+    let runtimeIdentityID: DeviceID?
 
     init(
         deviceDirectory: DeviceDirectory,
@@ -22,7 +23,8 @@ final class AppContainer {
         transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)? = nil,
         pairingStates: AsyncStream<PairingState>? = nil,
         settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)? = nil,
-        transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil
+        transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil,
+        runtimeIdentityID: DeviceID? = nil
     ) {
         self.deviceDirectory = deviceDirectory
         self.transferCoordinator = transferCoordinator
@@ -33,6 +35,7 @@ final class AppContainer {
         self.pairingStates = pairingStates
         self.settingsSnapshots = settingsSnapshots
         self.transferHistory = transferHistory
+        self.runtimeIdentityID = runtimeIdentityID
     }
 
     static func localShell() -> AppContainer {

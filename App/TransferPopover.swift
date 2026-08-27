@@ -301,7 +301,7 @@ final class NativeTransferSurfaceService: TransferSurfaceServicing {
     }
 
     func pause(_ id: TransferID) async throws {
-        await coordinator.pause(id)
+        try await coordinator.pause(id)
     }
 
     func resume(_ id: TransferID) async throws {

@@ -2,6 +2,74 @@ import AppKit
 import MacChannelCore
 import SwiftUI
 
+enum DeviceFanAccessibilityAdmission: Equatable {
+    case admitted(StatusItemDragFingerprint)
+    case noPhysicalDrag
+    case invalid
+}
+
+/// Holds only the active physical drag capability. A VoiceOver action can use
+/// it, but cannot manufacture a send without first entering the fan with the
+/// same unchanged pasteboard and drag sequence.
+@MainActor
+final class DeviceFanAccessibilityLease {
+    private(set) var hasEnteredFan = false
+    private var pasteboard: NSPasteboard?
+    private var sequenceNumber: Int?
+
+    func enter(
+        pasteboard: NSPasteboard,
+        sequenceNumber: Int,
+        expected: StatusItemDragFingerprint,
+        intent: DropIntent,
+        dragEntered: (StatusItemDragFingerprint) -> Bool
+    ) -> Bool {
+        let observed = StatusItemDragFingerprint(
+            sequenceNumber: sequenceNumber,
+            pasteboardChangeCount: pasteboard.changeCount
+        )
+        guard observed == expected,
+              (try? DropIntent(pasteboard: pasteboard)) == intent,
+              dragEntered(observed)
+        else { return false }
+        hasEnteredFan = true
+        self.pasteboard = pasteboard
+        self.sequenceNumber = sequenceNumber
+        return true
+    }
+
+    func admission(
+        expected: StatusItemDragFingerprint,
+        intent: DropIntent
+    ) -> DeviceFanAccessibilityAdmission {
+        guard hasEnteredFan, let pasteboard, let sequenceNumber else {
+            return .noPhysicalDrag
+        }
+        let observed = StatusItemDragFingerprint(
+            sequenceNumber: sequenceNumber,
+            pasteboardChangeCount: pasteboard.changeCount
+        )
+        guard observed == expected,
+              (try? DropIntent(pasteboard: pasteboard)) == intent
+        else { return .invalid }
+        return .admitted(observed)
+    }
+
+    @discardableResult
+    func clear() -> StatusItemDragFingerprint? {
+        let observed = sequenceNumber.map {
+            StatusItemDragFingerprint(
+                sequenceNumber: $0,
+                pasteboardChangeCount: pasteboard?.changeCount ?? 0
+            )
+        }
+        hasEnteredFan = false
+        pasteboard = nil
+        sequenceNumber = nil
+        return observed
+    }
+}
+
 @MainActor
 final class DeviceFanPanel: NSPanel {
     private(set) var visibleTargets: [DeviceFanTarget] = []
@@ -88,6 +156,11 @@ final class DeviceFanPanel: NSPanel {
         rebuildContent()
     }
 
+    func activateVisibleTargetForAccessibility(at index: Int) -> Bool {
+        guard visibleTargets.indices.contains(index) else { return false }
+        return dropView?.activate(visibleTargets[index]) ?? false
+    }
+
     private func rebuildContent() {
         guard let request else { return }
         visibleTargets = isExpanded
@@ -157,7 +230,7 @@ private final class DeviceFanDropView: NSView {
     private let model: DeviceFanViewModel
     private let host: NSHostingView<DeviceFanView>
     private var session: DeviceFanDropSession
-    private var hasEnteredFan = false
+    private let accessibilityLease = DeviceFanAccessibilityLease()
 
     init(
         frame: CGRect,
@@ -193,37 +266,55 @@ private final class DeviceFanDropView: NSView {
         model.replaceTargets(targets)
     }
 
-    private func activate(_ target: DeviceFanTarget) -> Bool {
+    fileprivate func activate(_ target: DeviceFanTarget) -> Bool {
         switch target {
         case .more:
             model.hover(target)
             return true
         case .device:
-            _ = session.hover(target)
-            model.hover(nil)
-            return session.perform(
-                fingerprint: request.fingerprint,
-                select: request.select,
-                cancel: request.cancel
-            )
+            switch accessibilityLease.admission(
+                expected: request.fingerprint,
+                intent: request.intent
+            ) {
+            case let .admitted(observed):
+                _ = session.hover(target)
+                model.hover(nil)
+                accessibilityLease.clear()
+                return session.perform(
+                    fingerprint: observed,
+                    select: request.select,
+                    cancel: request.cancel
+                )
+            case .noPhysicalDrag:
+                request.announce("请使用键盘设备菜单选择接收设备；当前没有可发送的拖放项目。")
+                return false
+            case .invalid:
+                accessibilityLease.clear()
+                session.rejectInvalidDrop(cancel: request.cancel)
+                request.announce("拖放内容已变化，请重新拖放文件后再发送。")
+                return false
+            }
         }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let observed = fingerprint(for: sender)
-        guard observed == request.fingerprint,
-              (try? DropIntent(pasteboard: sender.draggingPasteboard)) != nil,
-              request.dragEntered(observed)
+        guard accessibilityLease.enter(
+            pasteboard: sender.draggingPasteboard,
+            sequenceNumber: sender.draggingSequenceNumber,
+            expected: request.fingerprint,
+            intent: request.intent,
+            dragEntered: request.dragEntered
+        )
         else { return [] }
-        hasEnteredFan = true
         updateHover(sender)
         return .copy
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard hasEnteredFan,
-              fingerprint(for: sender) == request.fingerprint,
-              (try? DropIntent(pasteboard: sender.draggingPasteboard)) != nil
+        guard case .admitted = accessibilityLease.admission(
+            expected: request.fingerprint,
+            intent: request.intent
+        )
         else { return [] }
         if let event = NSApp.currentEvent {
             _ = autoscroll(with: event)
@@ -234,29 +325,30 @@ private final class DeviceFanDropView: NSView {
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
         model.hover(nil)
-        guard hasEnteredFan else { return }
-        hasEnteredFan = false
-        _ = request.dragExited(sender.map(fingerprint(for:)) ?? request.fingerprint)
+        guard accessibilityLease.hasEnteredFan else { return }
+        let observed = accessibilityLease.clear()
+        _ = request.dragExited(observed ?? sender.map(fingerprint(for:)) ?? request.fingerprint)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard hasEnteredFan else { return false }
-        guard fingerprint(for: sender) == request.fingerprint,
-              (try? DropIntent(pasteboard: sender.draggingPasteboard)) != nil
-        else {
-            hasEnteredFan = false
+        switch accessibilityLease.admission(expected: request.fingerprint, intent: request.intent) {
+        case let .admitted(observed):
+            updateHover(sender)
+            accessibilityLease.clear()
+            model.hover(nil)
+            return session.perform(
+                fingerprint: observed,
+                select: request.select,
+                cancel: request.cancel
+            )
+        case .noPhysicalDrag:
+            return false
+        case .invalid:
+            accessibilityLease.clear()
             model.hover(nil)
             session.rejectInvalidDrop(cancel: request.cancel)
             return false
         }
-        updateHover(sender)
-        hasEnteredFan = false
-        model.hover(nil)
-        return session.perform(
-            fingerprint: request.fingerprint,
-            select: request.select,
-            cancel: request.cancel
-        )
     }
 
     private func updateHover(_ sender: NSDraggingInfo) {

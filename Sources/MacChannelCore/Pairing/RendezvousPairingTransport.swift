@@ -2,17 +2,37 @@ import CryptoKit
 import Foundation
 
 public actor RendezvousPairingTransport: PairingTransport {
+    private static let maximumHostTasks = 8
     private let identity: DeviceIdentity
     private let origin: URL
     private let session: URLSession
     private var hostTasks: [String: Task<Void, Never>] = [:]
+    private var hostReservations: Set<String> = []
+    private var isStopped = false
 
     public init(
         identity: DeviceIdentity,
         origin: URL,
         session: URLSession = .shared
     ) throws {
-        guard origin.scheme?.lowercased() == "https", origin.host != nil else {
+        try self.init(
+            identity: identity,
+            origin: origin,
+            session: session,
+            allowInsecureForTesting: false
+        )
+    }
+
+    init(
+        identity: DeviceIdentity,
+        origin: URL,
+        session: URLSession = .shared,
+        allowInsecureForTesting: Bool
+    ) throws {
+        let scheme = origin.scheme?.lowercased()
+        guard origin.host != nil,
+              scheme == "https" || (allowInsecureForTesting && scheme == "http")
+        else {
             throw AuthenticatedPresenceError.insecureOrigin
         }
         self.identity = identity
@@ -25,6 +45,15 @@ public actor RendezvousPairingTransport: PairingTransport {
     }
 
     public func publish(_ offer: PairingOffer, endpoint: any PairingHostEndpoint) async throws {
+        guard !isStopped else { throw CancellationError() }
+        if let previous = hostTasks.removeValue(forKey: offer.code) {
+            previous.cancel()
+            await previous.value
+        }
+        guard hostTasks.count + hostReservations.count < Self.maximumHostTasks,
+              hostReservations.insert(offer.code).inserted
+        else { throw PairingError.resourceExhausted }
+        defer { hostReservations.remove(offer.code) }
         let encoded = try Self.encoder.encode(OfferWire(offer))
         _ = try await request(
             method: "POST",
@@ -32,7 +61,10 @@ public actor RendezvousPairingTransport: PairingTransport {
             payload: PublishPayload(code: offer.code, hostOffer: encoded),
             expected: [201]
         )
-        hostTasks[offer.code]?.cancel()
+        guard !isStopped else {
+            await remove(code: offer.code)
+            throw CancellationError()
+        }
         hostTasks[offer.code] = Task { [weak self] in
             await self?.serveHost(code: offer.code, endpoint: endpoint, expiresAt: offer.expiresAt)
         }
@@ -76,7 +108,10 @@ public actor RendezvousPairingTransport: PairingTransport {
     }
 
     public func remove(code: String) async {
-        hostTasks.removeValue(forKey: code)?.cancel()
+        if let task = hostTasks.removeValue(forKey: code) {
+            task.cancel()
+            await task.value
+        }
         _ = try? await request(
             method: "DELETE",
             path: "/v1/pairing/\(escaped(code))",
@@ -154,10 +189,13 @@ public actor RendezvousPairingTransport: PairingTransport {
         return try Self.decoder.decode(AuthorizationWire.self, from: response.authorizationEnvelope).value
     }
 
-    public func stop() {
-        hostTasks.values.forEach { $0.cancel() }
+    public func stop() async {
+        isStopped = true
+        let tasks = Array(hostTasks.values)
         hostTasks.removeAll()
+        tasks.forEach { $0.cancel() }
         session.invalidateAndCancel()
+        for task in tasks { await task.value }
     }
 
     private func serveHost(
@@ -241,11 +279,11 @@ public actor RendezvousPairingTransport: PairingTransport {
         return data
     }
 
-    private func signedEnvelope(payload: Data) throws -> HTTPEnvelope {
+    private func signedEnvelope(payload: Data) throws -> RendezvousSignedEnvelope {
         var random = SystemRandomNumberGenerator()
         let nonce = Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &random) })
         let epochMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
-        let unsigned = HTTPEnvelope(
+        let unsigned = RendezvousSignedEnvelope(
             deviceID: identity.id.rawValue.uuidString.lowercased(),
             nonce: nonce,
             payload: payload,
@@ -253,7 +291,7 @@ public actor RendezvousPairingTransport: PairingTransport {
             epochMilliseconds: epochMilliseconds,
             signature: Data()
         )
-        return HTTPEnvelope(
+        return RendezvousSignedEnvelope(
             deviceID: unsigned.deviceID,
             nonce: nonce,
             payload: payload,
@@ -302,40 +340,6 @@ public actor RendezvousPairingTransport: PairingTransport {
 
 public protocol RendezvousPairingHostEndpoint: PairingHostEndpoint {
     func accept(_ request: PairingJoinRequest, sessionID: PairingSessionID) async throws -> PairingJoinResponse
-}
-
-private struct HTTPEnvelope: Codable {
-    let deviceID: String
-    let nonce: Data
-    let payload: Data
-    let publicKey: Data
-    let epochMilliseconds: Int64
-    let signature: Data
-
-    func canonicalPayload() -> Data {
-        struct Canonical: Encodable {
-            let deviceID: String
-            let nonce: String
-            let payload: String
-            let publicKey: String
-            let epochMilliseconds: Int64
-        }
-        return try! JSONEncoder.sorted.encode(Canonical(
-            deviceID: deviceID.lowercased(),
-            nonce: nonce.base64EncodedString(),
-            payload: payload.base64EncodedString(),
-            publicKey: publicKey.base64EncodedString(),
-            epochMilliseconds: epochMilliseconds
-        ))
-    }
-}
-
-private extension JSONEncoder {
-    static var sorted: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return encoder
-    }
 }
 
 private struct CodePayload: Codable { let code: String }

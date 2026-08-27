@@ -11,6 +11,7 @@ struct DeviceFanRequest {
     let dragExited: @MainActor (StatusItemDragFingerprint) -> Bool
     let select: @MainActor (DeviceID) -> Bool
     let cancel: @MainActor () -> Void
+    let announce: @MainActor (String) -> Void
 }
 
 @MainActor
@@ -120,6 +121,9 @@ final class StatusItemController: NSObject {
                 },
                 cancel: { [weak self] in
                     self?.cancelDrag(token)
+                },
+                announce: { [weak self] message in
+                    self?.announce(message)
                 }
             )
         )

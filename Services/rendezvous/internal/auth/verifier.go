@@ -71,18 +71,15 @@ func (e *Envelope) UnmarshalJSON(data []byte) error {
 }
 
 func (e Envelope) CanonicalPayload() []byte {
-	payload := struct {
-		DeviceID          string `json:"deviceID"`
-		Nonce             string `json:"nonce"`
-		Payload           string `json:"payload"`
-		PublicKey         string `json:"publicKey"`
-		EpochMilliseconds int64  `json:"epochMilliseconds"`
-	}{
-		DeviceID:          strings.ToLower(e.DeviceID),
-		Nonce:             base64.StdEncoding.EncodeToString(e.Nonce),
-		Payload:           base64.StdEncoding.EncodeToString(e.Payload),
-		PublicKey:         base64.StdEncoding.EncodeToString(e.PublicKey),
-		EpochMilliseconds: e.EpochMilliseconds,
+	// encoding/json sorts string map keys. This makes the signed byte sequence
+	// explicit and independent from Go struct declaration order, matching the
+	// Swift encoder's `.sortedKeys` canonical format.
+	payload := map[string]any{
+		"deviceID":          strings.ToLower(e.DeviceID),
+		"epochMilliseconds": e.EpochMilliseconds,
+		"nonce":             base64.StdEncoding.EncodeToString(e.Nonce),
+		"payload":           base64.StdEncoding.EncodeToString(e.Payload),
+		"publicKey":         base64.StdEncoding.EncodeToString(e.PublicKey),
 	}
 	encoded, _ := json.Marshal(payload)
 	return encoded
@@ -485,6 +482,13 @@ func DeviceID(publicKey []byte) string {
 }
 
 func parsePublicKey(raw []byte) (*ecdsa.PublicKey, error) {
+	// CryptoKit's P-256 `rawRepresentation` is the 64-byte X || Y
+	// representation. Go's elliptic package expects SEC1 uncompressed form.
+	// Continue accepting the existing 65-byte form for server-side fixtures and
+	// deployed clients while canonicalizing neither representation on the wire.
+	if len(raw) == 64 {
+		raw = append([]byte{4}, raw...)
+	}
 	x, y := elliptic.Unmarshal(elliptic.P256(), raw)
 	if x == nil || y == nil {
 		return nil, ErrInvalidEnvelope

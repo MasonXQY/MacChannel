@@ -18,6 +18,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +34,38 @@ import (
 	"macchannel/rendezvous/internal/presence"
 	"macchannel/rendezvous/internal/signal"
 )
+
+func TestLiveSwiftClientPairingAndWebSocketAuthentication(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Swift macOS integration client requires Darwin")
+	}
+	if os.Getenv("MACCHANNEL_CROSS_LANGUAGE") != "1" {
+		t.Skip("set MACCHANNEL_CROSS_LANGUAGE=1 to run the Swift-to-Go live integration")
+	}
+	verifier := auth.NewVerifier(auth.VerifierConfig{})
+	registry := auth.NewTrustRegistry()
+	router := NewRouter(Config{
+		Verifier: verifier,
+		Registry: registry,
+		Pairings: pairing.NewMemoryStore(pairing.StoreConfig{Capacity: 16}),
+		Presence: presence.NewHub(registry),
+		Signals:  signal.NewHub(registry),
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("swift", "test", "--filter", "GoRendezvousInteropTests/testLiveSwiftPairingHTTPAndWebSocketAuthenticationAgainstGoRouter")
+	command.Dir = repositoryRoot
+	command.Env = append(os.Environ(), "MACCHANNEL_GO_TEST_SERVER_URL="+server.URL)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Swift live integration failed: %v\n%s", err, output)
+	}
+}
 
 type testClock struct {
 	mu  sync.Mutex

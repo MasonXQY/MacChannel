@@ -149,7 +149,21 @@ public actor AuthenticatedPresenceSession {
     private var streamsFinished = false
 
     public init(identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket, client: PresenceClient, trustRepository: TrustRepository? = nil) throws {
-        guard origin.scheme?.lowercased() == "wss", origin.host != nil else { throw AuthenticatedPresenceError.insecureOrigin }
+        try self.init(
+            identity: identity,
+            origin: origin,
+            socket: socket,
+            client: client,
+            trustRepository: trustRepository,
+            allowInsecureForTesting: false
+        )
+    }
+
+    init(identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket, client: PresenceClient, trustRepository: TrustRepository? = nil, allowInsecureForTesting: Bool) throws {
+        let scheme = origin.scheme?.lowercased()
+        guard origin.host != nil,
+              scheme == "wss" || (allowInsecureForTesting && scheme == "ws")
+        else { throw AuthenticatedPresenceError.insecureOrigin }
         self.identity = identity; self.origin = origin; self.socket = socket; self.client = client; self.trustRepository = trustRepository
         var presenceContinuation: AsyncStream<RendezvousPresenceEvent>.Continuation!
         presenceStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) { presenceContinuation = $0 }
@@ -297,18 +311,26 @@ public actor AuthenticatedPresenceSession {
     private func makeAuthentication(challenge: Challenge) throws -> Data {
         let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
         let publicKey = identity.publicKey.rawRepresentation
-        struct Canonical: Encodable {
-            let deviceID: String; let nonce: String; let payload: String; let publicKey: String; let epochMilliseconds: Int64
-        }
-        let canonical = Canonical(deviceID: identity.id.rawValue.uuidString.lowercased(), nonce: challenge.nonce.base64EncodedString(), payload: Self.authenticationPayload.base64EncodedString(), publicKey: publicKey.base64EncodedString(), epochMilliseconds: timestamp)
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let signature = try identity.sign(encoder.encode(canonical)).derRepresentation
-        let envelope: [String: Any] = [
-            "deviceID": identity.id.rawValue.uuidString.lowercased(), "nonce": challenge.nonce.base64EncodedString(),
-            "payload": Self.authenticationPayload.base64EncodedString(), "publicKey": publicKey.base64EncodedString(),
-            "epochMilliseconds": timestamp, "signature": signature.base64EncodedString(),
-        ]
-        return try JSONSerialization.data(withJSONObject: ["envelope": envelope], options: [.sortedKeys])
+        let unsigned = RendezvousSignedEnvelope(
+            deviceID: identity.id.rawValue.uuidString.lowercased(),
+            nonce: challenge.nonce,
+            payload: Self.authenticationPayload,
+            publicKey: publicKey,
+            epochMilliseconds: timestamp,
+            signature: Data()
+        )
+        let envelope = RendezvousSignedEnvelope(
+            deviceID: unsigned.deviceID,
+            nonce: unsigned.nonce,
+            payload: unsigned.payload,
+            publicKey: unsigned.publicKey,
+            epochMilliseconds: unsigned.epochMilliseconds,
+            signature: try identity.sign(unsigned.canonicalPayload()).derRepresentation
+        )
+        struct Authentication: Encodable { let envelope: RendezvousSignedEnvelope }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(Authentication(envelope: envelope))
     }
 
     private struct Challenge { let nonce: Data }

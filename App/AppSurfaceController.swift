@@ -25,6 +25,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private var previousSamples: [TransferID: (date: Date, completedBytes: Int64)] = [:]
     private var transferTokens: [TransferID: StatusItemDragToken] = [:]
     private var latestSnapshots: [TransferID: TransferSnapshot] = [:]
+    private var lastLiveItems: [TransferID: TransferSurfaceItem] = [:]
     private var persistedHistory: [TransferID: TransferSurfaceItem] = [:]
     private var liveTerminalHistory: [TransferID: TransferSurfaceItem] = [:]
     private weak var statusController: StatusItemController?
@@ -193,12 +194,23 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     func updateSettings(_ snapshot: SettingsSurfaceSnapshot) {
         settingsModel.defaultDirectory = snapshot.defaultDirectory
+        settingsModel.rendezvousURL = snapshot.rendezvousURL
         updateDeviceSettings(snapshot.devices)
     }
 
     func updateTransferSnapshots(_ snapshots: [TransferSnapshot]) {
         let timestamp = now()
         let incoming = snapshots.map { snapshot in
+            let itemTimestamp: Date
+            if let previous = lastLiveItems[snapshot.id], previous.snapshot == snapshot {
+                itemTimestamp = previous.updatedAt
+            } else if let persisted = persistedHistory[snapshot.id], persisted.snapshot == snapshot {
+                itemTimestamp = persisted.updatedAt
+            } else if let terminal = liveTerminalHistory[snapshot.id], terminal.snapshot == snapshot {
+                itemTimestamp = terminal.updatedAt
+            } else {
+                itemTimestamp = timestamp
+            }
             let speed = speed(for: snapshot, at: timestamp)
             let remaining = speed.flatMap { speed -> TimeInterval? in
                 guard speed > 0 else { return nil }
@@ -216,7 +228,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 estimatedTimeRemaining: remaining,
                 outputURL: persistedHistory[snapshot.id]?.outputURL
                     ?? liveTerminalHistory[snapshot.id]?.outputURL,
-                updatedAt: timestamp
+                updatedAt: itemTimestamp
             )
         }
         let terminal: Set<TransferPhase> = [.completed, .failed, .cancelled]
@@ -236,6 +248,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
             return item
         }
         latestSnapshots = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.snapshot) })
+        lastLiveItems = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         transferModel.active = items.filter { !terminal.contains($0.snapshot.phase) }
         let activeIDs = Set(transferModel.active.map(\.id))
         previousSamples = previousSamples.filter { activeIDs.contains($0.key) }
@@ -336,6 +349,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         historyTask = nil
         transferTokens.removeAll()
         latestSnapshots.removeAll()
+        lastLiveItems.removeAll()
+        previousSamples.removeAll()
         persistedHistory.removeAll()
         liveTerminalHistory.removeAll()
         statusController = nil

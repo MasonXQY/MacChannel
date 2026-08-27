@@ -93,6 +93,46 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testRendezvousSettingsRejectInvalidInputAndRollBackPersistenceFailure() async {
+        let announcer = RecordingAccessibilityAnnouncer()
+        let original = RendezvousEndpointConfiguration.packagedDefault
+        let model = SettingsSurfaceModel(rendezvousURL: original, announcer: announcer)
+        let service = FailingSettingsSurfaceService()
+
+        await model.updateRendezvousURL("wss://user:secret@relay.example/v1/ws", using: service)
+        XCTAssertEqual(model.rendezvousURL, original)
+        XCTAssertEqual(
+            model.actionError,
+            "请输入不含账号、密码、查询参数的安全 https 或 wss 地址。"
+        )
+
+        await model.updateRendezvousURL("https://relay.example:8443", using: service)
+        XCTAssertEqual(model.rendezvousURL, original)
+        XCTAssertEqual(
+            model.actionError,
+            "无法保存安全中继地址，请检查本地存储权限后重试。"
+        )
+        XCTAssertEqual(announcer.messages.count, 2)
+    }
+
+    @MainActor
+    func testRendezvousSettingsCommitNormalizedURLAndAnnounceRestart() async {
+        let announcer = RecordingAccessibilityAnnouncer()
+        let model = SettingsSurfaceModel(announcer: announcer)
+        let service = SuccessfulRendezvousSettingsService()
+
+        await model.updateRendezvousURL("https://relay.example:8443", using: service)
+
+        XCTAssertEqual(model.rendezvousURL, "wss://relay.example:8443/v1/ws")
+        XCTAssertNil(model.actionError)
+        XCTAssertEqual(
+            model.actionNotice,
+            "安全中继地址已保存；请重新启动 Mac 通道后生效。"
+        )
+        XCTAssertEqual(announcer.messages, ["安全中继地址已保存；请重新启动 Mac 通道后生效。"])
+    }
+
+    @MainActor
     func testPairingFailureKeepsIdleStateAndPublishesActionableError() async {
         let announcer = RecordingAccessibilityAnnouncer()
         let model = PairingSurfaceModel(entryCode: "123456", announcer: announcer)
@@ -557,6 +597,50 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testUnchangedTerminalSnapshotsKeepTimestampWhenUnrelatedTransferProgresses() throws {
+        let first = TransferID(rawValue: UUID())
+        let second = TransferID(rawValue: UUID())
+        let active = TransferID(rawValue: UUID())
+        let peer = DeviceID(rawValue: UUID())
+        let model = TransferSurfaceModel()
+        var timestamp: TimeInterval = 1_000
+        let surfaces = makeSurfaces(
+            transferModel: model,
+            now: { Date(timeIntervalSince1970: timestamp) }
+        )
+
+        surfaces.updateTransferSnapshots([completedSnapshot(id: first, peer: peer)])
+        timestamp = 2_000
+        surfaces.updateTransferSnapshots([
+            completedSnapshot(id: first, peer: peer),
+            completedSnapshot(id: second, peer: peer),
+        ])
+        timestamp = 3_000
+        surfaces.updateTransferSnapshots([
+            completedSnapshot(id: first, peer: peer),
+            completedSnapshot(id: second, peer: peer),
+            TransferSnapshot(
+                id: active,
+                peer: peer,
+                phase: .transferring,
+                completedBytes: 5,
+                totalBytes: 10,
+                route: .relay
+            ),
+        ])
+
+        XCTAssertEqual(model.history.map(\.id), [second, first])
+        XCTAssertEqual(
+            try XCTUnwrap(model.history.first { $0.id == first }).updatedAt,
+            Date(timeIntervalSince1970: 1_000)
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(model.history.first { $0.id == second }).updatedAt,
+            Date(timeIntervalSince1970: 2_000)
+        )
+    }
+
+    @MainActor
     func testHostPairingStateHydratesPendingPeerIdentity() async throws {
         let peer = DeviceSummary(
             id: DeviceID(rawValue: UUID()),
@@ -865,7 +949,19 @@ private final class FailingSettingsSurfaceService: DeviceSettingsServicing {
         throw SurfaceActionFailure.expected
     }
     func updateDefaultDirectory(_ directory: URL) async throws { throw SurfaceActionFailure.expected }
+    func updateRendezvousURL(_ value: String) async throws { throw SurfaceActionFailure.expected }
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws { throw SurfaceActionFailure.expected }
+}
+
+@MainActor
+private final class SuccessfulRendezvousSettingsService: DeviceSettingsServicing {
+    let isAvailable = true
+    func rename(_ id: DeviceID, to displayName: String) async throws {}
+    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult { .committed }
+    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {}
+    func updateDefaultDirectory(_ directory: URL) async throws {}
+    func updateRendezvousURL(_ value: String) async throws {}
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
 }
 
 @MainActor

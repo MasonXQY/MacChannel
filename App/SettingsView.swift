@@ -65,7 +65,18 @@ struct DeviceSetting: Identifiable, Equatable, Sendable {
 
 struct SettingsSurfaceSnapshot: Equatable, Sendable {
     let defaultDirectory: URL?
+    let rendezvousURL: String
     let devices: [DeviceSetting]
+
+    init(
+        defaultDirectory: URL?,
+        rendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault,
+        devices: [DeviceSetting]
+    ) {
+        self.defaultDirectory = defaultDirectory
+        self.rendezvousURL = rendezvousURL
+        self.devices = devices
+    }
 }
 
 @MainActor
@@ -84,26 +95,62 @@ protocol DeviceSettingsServicing: AnyObject {
         maximumBytes: UInt64?
     ) async throws
     func updateDefaultDirectory(_ directory: URL) async throws
+    func updateRendezvousURL(_ value: String) async throws
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws
 }
+
+extension DeviceSettingsServicing {
+    func updateRendezvousURL(_ value: String) async throws {
+        throw DeviceSettingsSurfaceError.unavailable
+    }
+}
+
+private enum DeviceSettingsSurfaceError: Error { case unavailable }
 
 @MainActor
 final class SettingsSurfaceModel: ObservableObject {
     @Published var defaultDirectory: URL?
+    @Published var rendezvousURL: String
     @Published var devices: [DeviceSetting]
     @Published var actionError: String?
+    @Published var actionNotice: String?
     private let announcer: any AccessibilityAnnouncing
 
     init(
         defaultDirectory: URL? = nil,
+        rendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault,
         devices: [DeviceSetting] = [],
         actionError: String? = nil,
         announcer: (any AccessibilityAnnouncing)? = nil
     ) {
         self.defaultDirectory = defaultDirectory
+        self.rendezvousURL = rendezvousURL
         self.devices = devices
         self.actionError = actionError
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
+    }
+
+    func updateRendezvousURL(
+        _ value: String,
+        using service: any DeviceSettingsServicing
+    ) async {
+        let endpoints: RendezvousEndpointConfiguration
+        do {
+            endpoints = try RendezvousEndpointConfiguration.parse(value)
+        } catch {
+            publishError("请输入不含账号、密码、查询参数的安全 https 或 wss 地址。")
+            return
+        }
+        do {
+            try await service.updateRendezvousURL(endpoints.webSocketURL.absoluteString)
+            rendezvousURL = endpoints.webSocketURL.absoluteString
+            actionError = nil
+            let notice = "安全中继地址已保存；请重新启动 Mac 通道后生效。"
+            actionNotice = notice
+            announcer.announce(notice)
+        } catch {
+            publishError("无法保存安全中继地址，请检查本地存储权限后重试。")
+        }
     }
 
     func rename(
@@ -186,6 +233,7 @@ final class SettingsSurfaceModel: ObservableObject {
     }
 
     private func publishError(_ message: String) {
+        actionNotice = nil
         actionError = message
         announcer.announce(message)
     }
@@ -217,6 +265,22 @@ struct SettingsView: View {
     let service: any DeviceSettingsServicing
     let directorySelector: any DirectorySelecting
     let onDismiss: () -> Void
+    @State private var draftRendezvousURL: String
+    @FocusState private var rendezvousFocused: Bool
+    @Namespace private var rendezvousValidation
+
+    init(
+        model: SettingsSurfaceModel,
+        service: any DeviceSettingsServicing,
+        directorySelector: any DirectorySelecting,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.model = model
+        self.service = service
+        self.directorySelector = directorySelector
+        self.onDismiss = onDismiss
+        _draftRendezvousURL = State(initialValue: model.rendezvousURL)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -247,10 +311,50 @@ struct SettingsView: View {
                     .padding(.bottom, 12)
                     .accessibilityLabel(error)
             }
+            if let notice = model.actionNotice {
+                Label(notice, systemImage: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                    .accessibilityLabel(notice)
+            }
 
             Divider()
 
             Form {
+                Section("安全中继") {
+                    HStack {
+                        TextField("wss://localhost:8443/v1/ws", text: $draftRendezvousURL)
+                            .focused($rendezvousFocused)
+                            .frame(minHeight: 40)
+                            .onSubmit(saveRendezvousURL)
+                            .accessibilityLabel("安全中继地址")
+                            .accessibilityHint(rendezvousValidationGuidance)
+                            .accessibilityLabeledPair(
+                                role: .content,
+                                id: "rendezvous-url",
+                                in: rendezvousValidation
+                            )
+                        Button("保存地址", action: saveRendezvousURL)
+                            .disabled(!RendezvousEndpointConfiguration.isValid(draftRendezvousURL))
+                            .frame(minHeight: 40)
+                    }
+                    Text("仅支持不含账号、密码或查询参数的 https / wss 地址；保存后需重新启动。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if !RendezvousEndpointConfiguration.isValid(draftRendezvousURL) {
+                        Label(rendezvousValidationGuidance, systemImage: "exclamationmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel(rendezvousValidationGuidance)
+                            .accessibilityLabeledPair(
+                                role: .label,
+                                id: "rendezvous-url",
+                                in: rendezvousValidation
+                            )
+                    }
+                }
+
                 Section("默认接收目录") {
                     HStack {
                         Label(defaultDirectoryText, systemImage: "folder")
@@ -293,8 +397,23 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .disabled(!service.isAvailable)
         }
-        .frame(width: 560, height: 620)
+        .frame(width: 560, height: 700)
         .onExitCommand(perform: onDismiss)
+        .onChange(of: model.rendezvousURL) { _, updated in
+            draftRendezvousURL = updated
+        }
+    }
+
+    private func saveRendezvousURL() {
+        guard RendezvousEndpointConfiguration.isValid(draftRendezvousURL) else {
+            rendezvousFocused = true
+            return
+        }
+        Task { await model.updateRendezvousURL(draftRendezvousURL, using: service) }
+    }
+
+    private var rendezvousValidationGuidance: String {
+        "请输入完整的安全地址，例如 wss://relay.example/v1/ws；请移除账号、密码和问号后的参数。"
     }
 
     private var defaultDirectoryText: String {
@@ -480,6 +599,7 @@ final class UnavailableDeviceSettingsService: DeviceSettingsServicing {
         maximumBytes: UInt64?
     ) async throws { throw SettingsSurfaceError.unavailable }
     func updateDefaultDirectory(_ directory: URL) async throws { throw SettingsSurfaceError.unavailable }
+    func updateRendezvousURL(_ value: String) async throws { throw SettingsSurfaceError.unavailable }
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws { throw SettingsSurfaceError.unavailable }
 }
 

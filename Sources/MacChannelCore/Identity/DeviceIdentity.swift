@@ -18,10 +18,13 @@ public struct DeviceIdentity: Sendable {
         id = Self.deviceID(for: privateKey.publicKey.rawRepresentation)
     }
 
-    public static func loadOrCreate(keychain: any SecretStore) throws -> DeviceIdentity {
+    public static func loadOrCreate(
+        keychain: any SecretStore,
+        policy: KeychainPolicy = KeychainStore.identityPolicy
+    ) throws -> DeviceIdentity {
         if let storedPrivateKey = try keychain.data(
             for: privateKeyAccount,
-            policy: KeychainStore.identityPolicy
+            policy: policy
         ) {
             do {
                 return try DeviceIdentity(
@@ -36,7 +39,7 @@ public struct DeviceIdentity: Sendable {
         try keychain.store(
             identity.privateKey.rawRepresentation,
             for: privateKeyAccount,
-            policy: KeychainStore.identityPolicy
+            policy: policy
         )
         return identity
     }

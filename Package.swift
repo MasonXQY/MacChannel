@@ -22,7 +22,8 @@ let package = Package(
         .target(
             name: "MacChannelAppKit",
             dependencies: ["MacChannelCore"],
-            path: "App"
+            path: "App",
+            resources: [.copy("Resources")]
         ),
         .executableTarget(
             name: "MacChannelApp",

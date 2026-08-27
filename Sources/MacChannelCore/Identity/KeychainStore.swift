@@ -41,7 +41,11 @@ public struct KeychainStore: SecretStore, Sendable {
         synchronizable: false
     )
 
-    public init() {}
+    private let allowedPolicy: KeychainPolicy
+
+    public init(policy: KeychainPolicy = KeychainStore.identityPolicy) {
+        allowedPolicy = policy
+    }
 
     public func data(for account: String, policy: KeychainPolicy) throws -> Data? {
         try validate(policy)
@@ -101,8 +105,19 @@ public struct KeychainStore: SecretStore, Sendable {
         }
     }
 
+    public func removeAll() throws {
+        let status = SecItemDelete([
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: allowedPolicy.service,
+            kSecAttrSynchronizable: kSecAttrSynchronizableAny,
+        ] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainStoreError.operationFailed(status)
+        }
+    }
+
     private func validate(_ policy: KeychainPolicy) throws {
-        guard policy == Self.identityPolicy else {
+        guard policy == allowedPolicy else {
             throw KeychainStoreError.invalidPolicy
         }
     }

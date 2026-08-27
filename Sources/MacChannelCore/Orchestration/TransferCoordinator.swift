@@ -145,18 +145,22 @@ public actor TransferCoordinator: TransferCoordinating {
         return package.id
     }
 
-    public func pause(_ id: TransferID) async {
+    public func pause(_ id: TransferID) async throws {
         guard let transfer = transfers[id], !isTerminal(transfer.desiredSnapshot.phase),
             transfer.desiredSnapshot.phase != .cancelling
-        else { return }
-        guard let receipt = try? claimTransition(id, to: .paused) else { return }
+        else { throw MacChannelError.transferInvalidState }
+        let receipt = try claimTransition(id, to: .paused)
         await transfer.control.pause()
-        try? await receipt.wait()
+        try await receipt.wait()
+        guard transfers[id]?.desiredSnapshot.phase == .paused else {
+            throw MacChannelError.transferInvalidState
+        }
     }
 
     public func resume(_ id: TransferID) async throws {
-        guard let transfer = transfers[id] else { throw MacChannelError.transferFailed }
-        guard transfer.desiredSnapshot.phase == .paused else { return }
+        guard let transfer = transfers[id], transfer.desiredSnapshot.phase == .paused else {
+            throw MacChannelError.transferInvalidState
+        }
         let resumedPhase: TransferPhase
         if !active.contains(id) {
             resumedPhase = .preparing
@@ -169,7 +173,9 @@ public actor TransferCoordinator: TransferCoordinating {
         }
         let receipt = try claimTransition(id, to: resumedPhase)
         try await receipt.wait()
-        guard transfers[id]?.desiredSnapshot.phase == resumedPhase else { return }
+        guard transfers[id]?.desiredSnapshot.phase == resumedPhase else {
+            throw MacChannelError.transferInvalidState
+        }
         await transfer.control.resume()
         if !active.contains(id), !pending.contains(id) { pending.append(id) }
         scheduleTransfers()

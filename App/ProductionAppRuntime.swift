@@ -8,12 +8,17 @@ struct ProductionRuntimeConfiguration {
     let dataDirectory: URL
     let rendezvousWebSocketURL: URL?
     let rendezvousHTTPOrigin: URL?
+    let environmentRendezvousURL: String?
+    let packagedRendezvousURL: String
     let ice: ICEConfiguration
     let bonjourPort: UInt16
+    let identityPolicy: KeychainPolicy
+    let isIsolatedLaunchTest: Bool
 
     static func current(
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        arguments: [String] = ProcessInfo.processInfo.arguments
     ) throws -> ProductionRuntimeConfiguration {
         let applicationSupport = try fileManager.url(
             for: .applicationSupportDirectory,
@@ -21,27 +26,33 @@ struct ProductionRuntimeConfiguration {
             appropriateFor: nil,
             create: true
         )
-        let directory = applicationSupport.appendingPathComponent("MacChannel", isDirectory: true)
-        let configured = environment["MACCHANNEL_RENDEZVOUS_URL"].flatMap(URL.init(string:))
-        let webSocketURL: URL?
-        let httpOrigin: URL?
-        if let configured {
-            guard configured.scheme?.lowercased() == "wss", configured.host != nil else {
-                throw ProductionRuntimeError.insecureRendezvousURL
-            }
-            var webSocket = URLComponents(url: configured, resolvingAgainstBaseURL: false)
-            if webSocket?.path.isEmpty == true { webSocket?.path = "/v1/ws" }
-            webSocketURL = webSocket?.url
-            var http = URLComponents(url: configured, resolvingAgainstBaseURL: false)
-            http?.scheme = "https"
-            http?.path = ""
-            http?.query = nil
-            http?.fragment = nil
-            httpOrigin = http?.url
-        } else {
-            webSocketURL = nil
-            httpOrigin = nil
-        }
+        let launchTestMarker: String? = arguments.firstIndex(of: "--production-launch-test")
+            .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
+        let directory = launchTestMarker.map {
+            URL(fileURLWithPath: $0).appendingPathExtension("runtime")
+        } ?? applicationSupport.appendingPathComponent("MacChannel", isDirectory: true)
+        let identityPolicy = launchTestMarker.map { marker in
+            let suffix = URL(fileURLWithPath: marker).lastPathComponent
+                .filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }
+            return KeychainPolicy(
+                service: "com.mason.macchannel.identity.launch-test.\(suffix)",
+                accessibility: .afterFirstUnlockThisDeviceOnly,
+                synchronizable: false
+            )
+        } ?? KeychainStore.identityPolicy
+        let resource = Bundle.module.url(
+            forResource: "RuntimeConfig",
+            withExtension: "json",
+            subdirectory: "Resources"
+        ) ?? Bundle.module.url(forResource: "RuntimeConfig", withExtension: "json")
+        guard let resource else { throw ProductionRuntimeError.missingRuntimeConfiguration }
+        struct RuntimeConfigWire: Decodable { let rendezvousURL: String }
+        let packaged = try JSONDecoder().decode(
+            RuntimeConfigWire.self,
+            from: Data(contentsOf: resource)
+        ).rendezvousURL
+        let environmentURL = environment["MACCHANNEL_RENDEZVOUS_URL"]
+        let endpoints = try RendezvousEndpointConfiguration.parse(environmentURL ?? packaged)
         let stunURLs = environment["MACCHANNEL_STUN_URLS"]?
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -49,17 +60,68 @@ struct ProductionRuntimeConfiguration {
         let port = environment["MACCHANNEL_BONJOUR_PORT"].flatMap(UInt16.init) ?? 45_873
         return ProductionRuntimeConfiguration(
             dataDirectory: directory,
-            rendezvousWebSocketURL: webSocketURL,
-            rendezvousHTTPOrigin: httpOrigin,
+            rendezvousWebSocketURL: endpoints.webSocketURL,
+            rendezvousHTTPOrigin: endpoints.httpOrigin,
+            environmentRendezvousURL: environmentURL,
+            packagedRendezvousURL: packaged,
             ice: ICEConfiguration(stunURLs: stunURLs, turnServers: []),
-            bonjourPort: port
+            bonjourPort: port,
+            identityPolicy: identityPolicy,
+            isIsolatedLaunchTest: launchTestMarker != nil
+        )
+    }
+
+    func endpoints(persistedURL: String) throws -> RendezvousEndpointConfiguration {
+        try RendezvousEndpointConfiguration.parse(
+            environmentRendezvousURL ?? (persistedURL.isEmpty ? packagedRendezvousURL : persistedURL)
         )
     }
 }
 
 enum ProductionRuntimeError: Error {
     case insecureRendezvousURL
+    case missingRuntimeConfiguration
     case invalidTrustGeneration
+}
+
+struct RendezvousEndpointConfiguration: Equatable {
+    static let packagedDefault = "wss://localhost:8443/v1/ws"
+
+    let webSocketURL: URL
+    let httpOrigin: URL
+
+    static func isValid(_ value: String) -> Bool {
+        (try? parse(value)) != nil
+    }
+
+    static func parse(_ value: String) throws -> RendezvousEndpointConfiguration {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "wss",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.path.isEmpty || components.path == "/" || components.path == "/v1/ws"
+        else { throw ProductionRuntimeError.insecureRendezvousURL }
+        components.scheme = "wss"
+        components.path = "/v1/ws"
+        guard let webSocketURL = components.url else {
+            throw ProductionRuntimeError.insecureRendezvousURL
+        }
+        components.scheme = "https"
+        components.path = ""
+        guard let httpOrigin = components.url else {
+            throw ProductionRuntimeError.insecureRendezvousURL
+        }
+        return RendezvousEndpointConfiguration(
+            webSocketURL: webSocketURL,
+            httpOrigin: httpOrigin
+        )
+    }
 }
 
 @MainActor
@@ -96,6 +158,10 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let connectionListener: WebRTCConnectionListener?
     private let incomingController: IncomingRuntimeController?
     private let transferCoordinator: TransferCoordinator?
+    private let trustRepository: TrustRepository
+    private let trustStore: any TrustSnapshotPersisting
+    private let launchTestKeychain: KeychainStore?
+    private let launchTestDataDirectory: URL?
     private var stopped = false
 
     private init(
@@ -111,7 +177,11 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         pairingTransport: RendezvousPairingTransport?,
         connectionListener: WebRTCConnectionListener?,
         incomingController: IncomingRuntimeController?,
-        transferCoordinator: TransferCoordinator?
+        transferCoordinator: TransferCoordinator?,
+        trustRepository: TrustRepository,
+        trustStore: any TrustSnapshotPersisting,
+        launchTestKeychain: KeychainStore?,
+        launchTestDataDirectory: URL?
     ) {
         self.container = container
         self.initialStatus = initialStatus
@@ -126,6 +196,10 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         self.connectionListener = connectionListener
         self.incomingController = incomingController
         self.transferCoordinator = transferCoordinator
+        self.trustRepository = trustRepository
+        self.trustStore = trustStore
+        self.launchTestKeychain = launchTestKeychain
+        self.launchTestDataDirectory = launchTestDataDirectory
     }
 
     static func bootstrap(
@@ -151,11 +225,21 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        let keychain = KeychainStore()
-        let identity = try DeviceIdentity.loadOrCreate(keychain: keychain)
+        let keychain = KeychainStore(policy: configuration.identityPolicy)
+        if configuration.isIsolatedLaunchTest {
+            cleanup.push {
+                try? keychain.removeAll()
+                try? FileManager.default.removeItem(at: configuration.dataDirectory)
+            }
+        }
+        let identity = try DeviceIdentity.loadOrCreate(
+            keychain: keychain,
+            policy: configuration.identityPolicy
+        )
         let trustStore = LocalTrustSnapshotStore(
             url: configuration.dataDirectory.appendingPathComponent("trust.json"),
-            keychain: keychain
+            keychain: keychain,
+            keychainPolicy: configuration.identityPolicy
         )
         let trustRepository = try await trustStore.load(identity: identity)
         let currentTrust = await trustRepository.currentTrustStore()
@@ -164,7 +248,11 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
 
         let settingsStore = try RuntimeSettingsStore(
             url: configuration.dataDirectory.appendingPathComponent("settings.json"),
-            trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id])
+            trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id]),
+            defaultRendezvousURL: configuration.packagedRendezvousURL
+        )
+        let configuredEndpoints = try configuration.endpoints(
+            persistedURL: await settingsStore.current().rendezvousURL
         )
         let database = try TransferDatabase(
             url: configuration.dataDirectory.appendingPathComponent("transfers.sqlite3")
@@ -218,32 +306,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             await trustPersistenceTask.value
         }
 
-        guard let webSocketURL = configuration.rendezvousWebSocketURL,
-              let httpOrigin = configuration.rendezvousHTTPOrigin
-        else {
-            let container = AppContainer(
-                deviceDirectory: directory,
-                transferCoordinator: UnavailableTransferCoordinator(),
-                settingsSurfaceService: settingsService,
-                settingsSnapshots: { await settingsStore.snapshots() },
-                transferHistory: { await history.stream() }
-            )
-            return ProductionAppRuntime(
-                container: container,
-                initialStatus: .offline("安全中继未配置；局域网发现和本地设置仍可使用。"),
-                browser: browser,
-                advertiser: advertiser,
-                trustPersistenceTask: trustPersistenceTask,
-                historySource: history,
-                statusSource: statusSource,
-                presenceSession: nil,
-                presenceTask: nil,
-                pairingTransport: nil,
-                connectionListener: nil,
-                incomingController: nil,
-                transferCoordinator: nil
-            )
-        }
+        let webSocketURL = configuredEndpoints.webSocketURL
+        let httpOrigin = configuredEndpoints.httpOrigin
 
         let httpSession = URLSession(configuration: .ephemeral)
         let pairingTransport = try RendezvousPairingTransport(
@@ -276,7 +340,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         )
 
         do {
-            try await presence.connect()
+            try await RuntimePresenceConnect.withTimeout(.seconds(5), session: presence)
         } catch {
             await presence.stop()
             let container = AppContainer(
@@ -286,7 +350,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                 settingsSurfaceService: settingsService,
                 pairingStates: pairingCoordinator.states,
                 settingsSnapshots: { await settingsStore.snapshots() },
-                transferHistory: { await history.stream() }
+                transferHistory: { await history.stream() },
+                runtimeIdentityID: identity.id
             )
             return ProductionAppRuntime(
                 container: container,
@@ -301,7 +366,13 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                 pairingTransport: pairingTransport,
                 connectionListener: nil,
                 incomingController: nil,
-                transferCoordinator: nil
+                transferCoordinator: nil,
+                trustRepository: trustRepository,
+                trustStore: trustStore,
+                launchTestKeychain: configuration.isIsolatedLaunchTest ? keychain : nil,
+                launchTestDataDirectory: configuration.isIsolatedLaunchTest
+                    ? configuration.dataDirectory
+                    : nil
             )
         }
         cleanup.push { await presence.stop() }
@@ -365,7 +436,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             transferSnapshots: { await transferCoordinator.snapshots() },
             pairingStates: pairingCoordinator.states,
             settingsSnapshots: { await settingsStore.snapshots() },
-            transferHistory: { await history.stream() }
+            transferHistory: { await history.stream() },
+            runtimeIdentityID: identity.id
         )
         return ProductionAppRuntime(
             container: container,
@@ -380,7 +452,13 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             pairingTransport: pairingTransport,
             connectionListener: connectionListener,
             incomingController: incoming,
-            transferCoordinator: transferCoordinator
+            transferCoordinator: transferCoordinator,
+            trustRepository: trustRepository,
+            trustStore: trustStore,
+            launchTestKeychain: configuration.isIsolatedLaunchTest ? keychain : nil,
+            launchTestDataDirectory: configuration.isIsolatedLaunchTest
+                ? configuration.dataDirectory
+                : nil
         )
     }
 
@@ -388,21 +466,51 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         guard !stopped else { return }
         stopped = true
         await historySource.stop()
-        trustPersistenceTask.cancel()
         await RuntimePresenceShutdown.cancelCloseAndWait(presenceTask) {
             if let presenceSession { await presenceSession.stop() }
         }
-        await trustPersistenceTask.value
         if let incomingController { await incomingController.stop() }
         if let connectionListener { await connectionListener.stop() }
         if let transferCoordinator { await transferCoordinator.shutdownForRestart() }
         if let pairingTransport { await pairingTransport.stop() }
+        do {
+            try await trustStore.persistLatest(from: trustRepository)
+        } catch {
+            statusSource.yield(.error("无法保存设备信任状态；请检查本地存储权限。"))
+        }
+        trustPersistenceTask.cancel()
+        await trustPersistenceTask.value
         await browser.stop()
         await advertiser.stopAndWait()
+        try? launchTestKeychain?.removeAll()
+        if let launchTestDataDirectory {
+            try? FileManager.default.removeItem(at: launchTestDataDirectory)
+        }
         statusSource.finish()
     }
 
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { statusSource.stream }
+}
+
+enum RuntimePresenceConnect {
+    static func withTimeout(
+        _ timeout: Duration,
+        session: AuthenticatedPresenceSession
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await session.connect() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                await session.stop()
+                throw AuthenticatedPresenceError.transport("connection_timeout")
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw AuthenticatedPresenceError.transport("connection_cancelled")
+            }
+            return first
+        }
+    }
 }
 
 private final class RuntimeStatusSource: @unchecked Sendable {
@@ -427,10 +535,16 @@ private actor LocalTrustSnapshotStore: TrustSnapshotPersisting {
     private static let generationAccount = "trust-snapshot-generation"
     private let url: URL
     private let keychain: KeychainStore
+    private let keychainPolicy: KeychainPolicy
 
-    init(url: URL, keychain: KeychainStore) {
+    init(
+        url: URL,
+        keychain: KeychainStore,
+        keychainPolicy: KeychainPolicy = KeychainStore.identityPolicy
+    ) {
         self.url = url
         self.keychain = keychain
+        self.keychainPolicy = keychainPolicy
     }
 
     func load(identity: DeviceIdentity) throws -> TrustRepository {
@@ -475,7 +589,7 @@ private actor LocalTrustSnapshotStore: TrustSnapshotPersisting {
     private func storedGeneration() throws -> UInt64 {
         guard let data = try keychain.data(
             for: Self.generationAccount,
-            policy: KeychainStore.identityPolicy
+            policy: keychainPolicy
         ) else { return 0 }
         guard data.count == MemoryLayout<UInt64>.size else {
             throw ProductionRuntimeError.invalidTrustGeneration
@@ -490,7 +604,7 @@ private actor LocalTrustSnapshotStore: TrustSnapshotPersisting {
         try keychain.store(
             data,
             for: Self.generationAccount,
-            policy: KeychainStore.identityPolicy
+            policy: keychainPolicy
         )
     }
 }
@@ -504,19 +618,26 @@ actor RuntimeSettingsStore {
     }
     private struct Wire: Codable {
         var defaultDirectoryPath: String?
+        var rendezvousURL: String?
         var devices: [UUID: DeviceWire]
     }
 
     private let url: URL
+    private let defaultRendezvousURL: String
     private var wire: Wire
     private var subscribers: [UUID: AsyncStream<SettingsSurfaceSnapshot>.Continuation] = [:]
 
-    init(url: URL, trustedDevices: Set<DeviceID>) throws {
+    init(
+        url: URL,
+        trustedDevices: Set<DeviceID>,
+        defaultRendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault
+    ) throws {
         self.url = url
+        self.defaultRendezvousURL = defaultRendezvousURL
         if FileManager.default.fileExists(atPath: url.path) {
             wire = try JSONDecoder().decode(Wire.self, from: Data(contentsOf: url))
         } else {
-            wire = Wire(defaultDirectoryPath: nil, devices: [:])
+            wire = Wire(defaultDirectoryPath: nil, rendezvousURL: nil, devices: [:])
         }
         for device in trustedDevices where wire.devices[device.rawValue] == nil {
             wire.devices[device.rawValue] = DeviceWire(
@@ -563,6 +684,11 @@ actor RuntimeSettingsStore {
 
     func updateDefaultDirectory(_ directory: URL) throws {
         try mutate { $0.defaultDirectoryPath = directory.standardizedFileURL.path }
+    }
+
+    func updateRendezvousURL(_ value: String) throws {
+        let endpoints = try RendezvousEndpointConfiguration.parse(value)
+        try mutate { $0.rendezvousURL = endpoints.webSocketURL.absoluteString }
     }
 
     func updateDirectory(_ directory: URL?, for id: DeviceID) throws {
@@ -617,6 +743,7 @@ actor RuntimeSettingsStore {
     private func snapshot(_ wire: Wire) -> SettingsSurfaceSnapshot {
         SettingsSurfaceSnapshot(
             defaultDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:)),
+            rendezvousURL: wire.rendezvousURL ?? defaultRendezvousURL,
             devices: wire.devices.map { id, value in
                 DeviceSetting(
                     device: DeviceSummary(
@@ -684,6 +811,9 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
     func updateDefaultDirectory(_ directory: URL) async throws {
         try await store.updateDefaultDirectory(directory)
         await onReceiveConfigurationChanged?()
+    }
+    func updateRendezvousURL(_ value: String) async throws {
+        try await store.updateRendezvousURL(value)
     }
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {
         try await store.updateDirectory(directory, for: id)

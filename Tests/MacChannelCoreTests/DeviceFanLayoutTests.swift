@@ -212,6 +212,82 @@ final class DeviceFanLayoutTests: XCTestCase {
     }
 
     @MainActor
+    func testAccessibilityLeaseRejectsActivationWithoutPhysicalFanEntry() throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        pasteboard.clearContents()
+        pasteboard.writeObjects([NSURL(fileURLWithPath: "/tmp/original.txt")])
+        let expected = StatusItemDragFingerprint(
+            sequenceNumber: 17,
+            pasteboardChangeCount: pasteboard.changeCount
+        )
+        let lease = DeviceFanAccessibilityLease()
+
+        XCTAssertEqual(
+            lease.admission(expected: expected, intent: try DropIntent(pasteboard: pasteboard)),
+            .noPhysicalDrag
+        )
+    }
+
+    @MainActor
+    func testAccessibilityLeaseReparsesPasteboardAndRejectsMutation() throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        pasteboard.clearContents()
+        pasteboard.writeObjects([NSURL(fileURLWithPath: "/tmp/original.txt")])
+        let intent = try DropIntent(pasteboard: pasteboard)
+        let expected = StatusItemDragFingerprint(
+            sequenceNumber: 18,
+            pasteboardChangeCount: pasteboard.changeCount
+        )
+        let lease = DeviceFanAccessibilityLease()
+        XCTAssertTrue(
+            lease.enter(
+                pasteboard: pasteboard,
+                sequenceNumber: 18,
+                expected: expected,
+                intent: intent,
+                dragEntered: { $0 == expected }
+            )
+        )
+
+        pasteboard.clearContents()
+        pasteboard.writeObjects([NSURL(fileURLWithPath: "/tmp/mutated.txt")])
+
+        XCTAssertEqual(lease.admission(expected: expected, intent: intent), .invalid)
+    }
+
+    @MainActor
+    func testNativeAccessibilityActivationWithoutPhysicalDragDoesNotSelect() throws {
+        let intent = try DropIntent(items: [.fileURL(URL(fileURLWithPath: "/tmp/original.txt"))])
+        var selections = 0
+        var announcements: [String] = []
+        var state = StatusItemDropStateMachine()
+        let token = try XCTUnwrap(state.begin(intent: intent))
+        let panel = DeviceFanPanel()
+        panel.prepare(
+            request: DeviceFanRequest(
+                token: token,
+                intent: intent,
+                devices: makeDevices(count: 1),
+                fingerprint: StatusItemDragFingerprint(sequenceNumber: 1, pasteboardChangeCount: 2),
+                dragEntered: { _ in true },
+                dragExited: { _ in true },
+                select: { _ in selections += 1; return true },
+                cancel: {},
+                announce: { announcements.append($0) }
+            ),
+            anchor: CGRect(x: 100, y: 500, width: 30, height: 24),
+            screen: CGRect(x: 0, y: 0, width: 800, height: 600)
+        )
+
+        XCTAssertFalse(panel.activateVisibleTargetForAccessibility(at: 0))
+        XCTAssertEqual(selections, 0)
+        XCTAssertEqual(
+            announcements,
+            ["请使用键盘设备菜单选择接收设备；当前没有可发送的拖放项目。"]
+        )
+    }
+
+    @MainActor
     func testPanelIsBorderlessNonactivatingAndDoesNotStealKeyFocus() {
         let panel = DeviceFanPanel()
 
@@ -243,7 +319,8 @@ final class DeviceFanLayoutTests: XCTestCase {
             dragEntered: { $0 == fingerprint },
             dragExited: { $0 == fingerprint },
             select: { _ in true },
-            cancel: {}
+            cancel: {},
+            announce: { _ in }
         )
         let panel = DeviceFanPanel()
         let anchor = CGRect(x: 880, y: 870, width: 30, height: 24)
@@ -280,7 +357,8 @@ final class DeviceFanLayoutTests: XCTestCase {
             dragEntered: { _ in true },
             dragExited: { _ in true },
             select: { _ in true },
-            cancel: {}
+            cancel: {},
+            announce: { _ in }
         )
         let panel = DeviceFanPanel()
         panel.prepare(
@@ -314,7 +392,8 @@ final class DeviceFanLayoutTests: XCTestCase {
                 dragEntered: { _ in true },
                 dragExited: { _ in true },
                 select: { _ in true },
-                cancel: {}
+                cancel: {},
+                announce: { _ in }
             ),
             anchor: CGRect(x: -1_200, y: 880, width: 30, height: 24),
             screen: CGRect(x: -1_280, y: 0, width: 360, height: 900)

@@ -21,6 +21,10 @@ Status: implementation complete; final verification recorded below
   drops cancel once, and `performDragOperation` returns the exact synchronous
   `select(DeviceID) -> Bool` admission result. A target that goes offline at
   release is rejected, announced once in Chinese, and returns the UI to idle.
+  VoiceOver activation can consume that same physical lease only after the fan
+  has accepted the current drag and reparsed the unchanged pasteboard. Without
+  a physical drag it cannot send and instead announces the keyboard device-menu
+  alternative.
 - Pairing supports sanitized six-digit codes and explicit human fingerprint
   confirmation. The confirmation surface displays the peer identity established
   by the authenticated handshake and will not enable confirmation without both
@@ -29,7 +33,7 @@ Status: implementation complete; final verification recorded below
   progress, speed, ETA, pause, resume, cancel, and Finder actions. Live snapshots
   and persisted history are merged by `TransferID`, so live terminal updates
   cannot erase durable filenames or output URLs. The merged UI history is
-  deterministically bounded to 200 entries, live-only terminal history to 100,
+  deterministically bounded to 200 entries, including live-only terminal history,
   and speed samples are retained only for active transfers. Failed transfers do
   not expose a resume action because the coordinator only resumes paused work.
 - Completed inbound transfers publish their real `ReceiveSession` output URL to
@@ -39,9 +43,11 @@ Status: implementation complete; final verification recorded below
 - Settings provide per-device rename, trust revocation, automatic acceptance,
   size limit, and default/per-device destination selection through `NSOpenPanel`.
   A unified settings snapshot restores the default directory and all device
-  policies. Size limits use checked ASCII decimal parsing through the exact
-  `UInt64` boundary; malformed, overflow, and partial-prefix values are rejected
-  without a runtime trap.
+  policies. The packaged secure rendezvous default is editable and persisted in
+  a Chinese settings section; only credential-free `https`/`wss` origins are
+  accepted and the UI clearly says that restart is required. Size limits use
+  checked ASCII decimal parsing through the exact `UInt64` boundary; malformed,
+  overflow, and partial-prefix values are rejected without a runtime trap.
 - Status-menu entry points, fields, actions, errors, availability, and
   accessibility values are in Simplified Chinese. Popovers close with Escape,
   restore focus to the status item, use native keyboard semantics, and disable
@@ -65,6 +71,15 @@ Status: implementation complete; final verification recorded below
   connection/listener services, inbound receiving, and transfer/history streams.
   `localShell` is available only through the smoke-test argument or explicit
   `MACCHANNEL_RUNTIME=local-shell` environment setting.
+- `RuntimeConfig.json` ships a secure `wss://localhost:8443/v1/ws` default for
+  the Task 12 local stack. An environment URL remains an optional override, not
+  the only production path. The production launch gate starts this composition
+  without `--smoke-test`, observes a real Keychain identity, installed status
+  surface, and truthful ready/offline state, then waits for orderly shutdown.
+- HTTP pairing and WebSocket authentication share one explicit sorted-key JSON
+  signing format. Fixed Swift/Go signature vectors verify both directions, and
+  a live Swift client completes publish, lookup, join, host response, and
+  WebSocket authentication against the real Go router.
 - Bootstrap publishes explicit loading, ready, offline, and error states. A
   missing or unreachable secure rendezvous keeps LAN discovery and local settings
   usable with truthful Chinese status. Startup resources register reverse-order
@@ -77,6 +92,10 @@ Status: implementation complete; final verification recorded below
   instead of presenting a false rollback. Concurrent post-commit failures are
   accumulated so a lower-priority settings warning cannot hide required security
   recovery guidance.
+- Pause and resume reject stale transfer state through a typed error rather than
+  silently succeeding. Pairing shutdown caps host accept work, cancels it, and
+  awaits even cancellation-insensitive acceptors before final trust persistence
+  is stopped.
 
 ## TDD and review evidence
 
@@ -99,15 +118,26 @@ Status: implementation complete; final verification recorded below
   missing inbound history notifications, guessed Finder paths, an invalid failed
   resume control, partial trust-commit ambiguity, hover-edge drop loss, and silent
   VoiceOver errors. Red tests reproduced each contract before the fixes above.
-- Final independent review reported no Critical, Important, or Moderate findings
-  and marked Task 11 ready.
+- Production re-review then found declaration-order-sensitive signed envelopes,
+  environment-only runtime configuration, unstable terminal timestamps, an
+  overpowered accessibility send action, incomplete pairing shutdown, and a
+  nonthrowing pause contract. Cross-language, integration, layout, lifecycle,
+  and failure-path regressions now cover each correction.
 
 ## Verification
 
-- Focused runtime, fan, surface, and inbound-receive tests: 54 tests, 0 failures.
-- `swift test`: 361 tests, 0 failures, 0 unexpected failures.
+- Focused runtime, fan, surface, pairing-shutdown, signed-envelope, and
+  cross-language tests: pass.
+- `swift test`: 376 tests, 0 failures, 1 expected skip for the separately run
+  Go-hosted integration test.
+- `MACCHANNEL_CROSS_LANGUAGE=1 go test ./internal/httpapi -run
+  TestLiveSwiftClientPairingAndWebSocketAuthentication -v -count=1`: pass.
+- `go test -race ./...`: pass.
+- `go vet ./...`: pass.
 - `bash Scripts/build-app.sh`: pass.
-- `bash Scripts/test-app-launch.sh`: pass; LaunchServices started the accessory
-  bundle, verified its status-item launch handshake, and observed clean exit.
+- `bash Scripts/test-app-launch.sh`: pass; LaunchServices first verified the
+  explicit local smoke shell, then launched production without rendezvous/runtime
+  environment overrides, observed a real identity plus ready/offline status and
+  installed settings/status surfaces, and verified completed shutdown.
 - `swift format lint --recursive --strict App Sources Tests`: clean.
 - `git diff --check`: clean.
