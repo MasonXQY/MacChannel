@@ -30,11 +30,15 @@ public enum IncomingTransferCapacity {
         maximumActiveTransfers + maximumQueuedConnections
 
     // WebRTC can additionally have eight authenticated acceptances in flight,
-    // but retains no second established-channel queue before this listener.
+    // but retains no second established-channel queue before this listener. A
+    // zero-buffer source reader can hold one rejected channel while shared
+    // close admission is backpressured at the process-wide resource cap.
     public static let maximumUpstreamAcceptances = 8
+    public static let maximumBackpressuredCloseAdmissions = 1
     public static let maximumDetachedHandshakeOperations = 8
     public static let maximumEndToEndConnections =
         maximumEstablishedConnections + maximumUpstreamAcceptances
+        + maximumBackpressuredCloseAdmissions
     public static let maximumRetainedConnectionsAndOperations =
         maximumEndToEndConnections + maximumDetachedHandshakeOperations
 }
@@ -57,14 +61,13 @@ public actor IncomingTransferListener {
     private let capacity: any ReceiveCapacityProviding
     private let inactivityTimeout: Duration
     private let resources = BoundedChannelResourceRegistry.shared
+    private let closeRegistry = IncomingChannelCloseRegistry.shared
 
     private var readerTask: Task<Void, Never>?
     private var pending: [IncomingTransferConnection] = []
     private var active: [UUID: ActiveReceive] = [:]
     private var activeTransferIDs: Set<TransferID> = []
     private var schedulingWorker: Task<Void, Never>?
-    private var closingBacklog: [any SecureChannel] = []
-    private var closingBacklogWorker: Task<Void, Never>?
     private var stopped = false
 
     public init(
@@ -88,18 +91,17 @@ public actor IncomingTransferListener {
     deinit {
         readerTask?.cancel()
         schedulingWorker?.cancel()
-        closingBacklogWorker?.cancel()
         for receive in active.values { receive.task.cancel() }
     }
 
     public func start() {
         guard !stopped, readerTask == nil else { return }
-        readerTask = Task { [weak self, source] in
+        readerTask = Task { [weak self, source, closeRegistry, timeout = inactivityTimeout] in
             do {
                 let connections = await source.connections()
                 for try await connection in connections {
                     guard !Task.isCancelled, let self else {
-                        await connection.channel.close()
+                        await closeRegistry.submit(connection.channel, timeout: timeout)
                         return
                     }
                     await self.enqueue(connection)
@@ -121,7 +123,6 @@ public actor IncomingTransferListener {
         active.removeAll()
         activeTransferIDs.removeAll()
         for receive in receives { receive.task.cancel() }
-        closingBacklog.append(contentsOf: queued.map(\.channel))
         for receive in receives {
             await resources.beginClose(
                 receive.channel,
@@ -129,7 +130,9 @@ public actor IncomingTransferListener {
                 timeout: inactivityTimeout
             )
         }
-        drainClosingBacklog()
+        for connection in queued {
+            await closeRegistry.submit(connection.channel, timeout: inactivityTimeout)
+        }
     }
 
     private func enqueue(_ connection: IncomingTransferConnection) async {
@@ -168,9 +171,12 @@ public actor IncomingTransferListener {
             }
             let connection = pending.removeFirst()
             guard !stopped else {
-                closingBacklog.append(connection.channel)
-                await resources.finishWithoutClose(resourceToken)
-                drainClosingBacklog()
+                await resources.beginClose(
+                    connection.channel,
+                    token: resourceToken,
+                    timeout: inactivityTimeout
+                )
+                await resources.runnerReturned(resourceToken)
                 continue
             }
             let token = UUID()
@@ -250,41 +256,10 @@ public actor IncomingTransferListener {
 
     private func resourceCapacityReleased() {
         schedule()
-        drainClosingBacklog()
     }
 
     private func closeRejected(_ channel: any SecureChannel) async {
-        while !Task.isCancelled {
-            if let token = await resources.reserve(.inbound, onReleased: { [weak self] in
-                await self?.resourceCapacityReleased()
-            }) {
-                await resources.beginClose(channel, token: token, timeout: inactivityTimeout)
-                await resources.runnerReturned(token)
-                return
-            }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        closingBacklog.append(channel)
-        drainClosingBacklog()
-    }
-
-    private func drainClosingBacklog() {
-        guard closingBacklogWorker == nil, !closingBacklog.isEmpty else { return }
-        closingBacklogWorker = Task { [weak self] in
-            await self?.drainClosures()
-        }
-    }
-
-    private func drainClosures() async {
-        defer { closingBacklogWorker = nil }
-        while !closingBacklog.isEmpty {
-            guard let token = await resources.reserve(.inbound, onReleased: { [weak self] in
-                await self?.resourceCapacityReleased()
-            }) else { return }
-            let channel = closingBacklog.removeFirst()
-            await resources.beginClose(channel, token: token, timeout: inactivityTimeout)
-            await resources.runnerReturned(token)
-        }
+        await closeRegistry.submit(channel, timeout: inactivityTimeout)
     }
 
     func retainedResourceCount() async -> Int {

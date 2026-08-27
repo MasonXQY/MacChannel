@@ -1409,7 +1409,7 @@ final class ReceiveStoreTests: XCTestCase {
             try await fixture.database.record(replacement, displayFilename: "changed.txt")
             XCTFail("Expected immutable identity rejection")
         } catch {
-            XCTAssertEqual(error as? ReceiveStoreError, .invalidManifest)
+            XCTAssertEqual(error as? TransferPersistenceError, .identityConflict)
         }
         let history = try await fixture.database.history(limit: 1)
         XCTAssertEqual(history.first?.peer, fixture.source)

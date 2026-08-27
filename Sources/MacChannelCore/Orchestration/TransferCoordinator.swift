@@ -609,6 +609,10 @@ public actor TransferCoordinator: TransferCoordinating {
                 )
             } catch {
                 if Task.isCancelled || shuttingDown { return }
+                if isPermanentPersistenceConflict(error) {
+                    await failPermanently(id, intent: intent, error: error)
+                    return
+                }
                 if (error as? TransferPersistenceError) == .conditionalConflict {
                     if await reconcileConditionalConflict(id, intent: intent) { continue }
                     return
@@ -664,17 +668,22 @@ public actor TransferCoordinator: TransferCoordinating {
             let displayFilename = transfers[id]?.displayFilename ?? ""
             var record: TransferHistoryRecord
             if let existing {
-                guard existing.direction == .outbound,
-                    existing.peer == intent.snapshot.peer,
+                guard existing.direction == .outbound else {
+                    throw TransferPersistenceError.directionConflict
+                }
+                guard existing.peer == intent.snapshot.peer,
                     existing.displayFilename == displayFilename,
                     existing.aggregateSize == UInt64(intent.snapshot.totalBytes)
-                else { throw TransferPersistenceError.conditionalConflict }
+                else { throw TransferPersistenceError.identityConflict }
                 record = existing
             } else {
                 record = try await persistence.quarantineOutboundTransfer(
                     intent.snapshot,
                     displayFilename: displayFilename
                 )
+            }
+            if record.phase == .verifying {
+                record = try await completePublishedRecord(record)
             }
             let compatibleCommit =
                 record.completedBytes >= UInt64(intent.snapshot.completedBytes)
@@ -696,6 +705,10 @@ public actor TransferCoordinator: TransferCoordinating {
             await adoptPersistedRecord(record, for: id, intent: intent)
             return true
         } catch {
+            if isPermanentPersistenceConflict(error) {
+                await failPermanently(id, intent: intent, error: error)
+                return false
+            }
             guard (error as? TransferPersistenceError) == .conditionalConflict else {
                 try? await Task.sleep(for: persistenceRetryDelay)
                 return true
@@ -707,11 +720,16 @@ public actor TransferCoordinator: TransferCoordinating {
                     record.direction == .outbound,
                     record.peer == intent.snapshot.peer,
                     record.displayFilename == transfers[id]?.displayFilename,
-                    record.aggregateSize == UInt64(intent.snapshot.totalBytes),
-                    isTerminal(record.phase)
+                    record.aggregateSize == UInt64(intent.snapshot.totalBytes)
                 {
-                    await adoptPersistedRecord(record, for: id, intent: intent)
-                    return true
+                    if record.phase == .verifying {
+                        try? await Task.sleep(for: persistenceRetryDelay)
+                        return true
+                    }
+                    if isTerminal(record.phase) {
+                        await adoptPersistedRecord(record, for: id, intent: intent)
+                        return true
+                    }
                 }
             } catch {
                 guard (error as? TransferPersistenceError) == .conditionalConflict else {
@@ -722,6 +740,100 @@ public actor TransferCoordinator: TransferCoordinating {
             await failClosedAfterConflict(id, intent: intent)
             return false
         }
+    }
+
+    private func failPermanently(
+        _ id: TransferID,
+        intent: PersistenceIntent,
+        error: Error
+    ) async {
+        guard var current = transfers[id],
+            current.persistenceQueue.first?.epoch == intent.epoch
+        else {
+            await intent.completion.resolve(.failure(error))
+            return
+        }
+        let completions = current.persistenceQueue.map(\.completion)
+        current.persistenceQueue.removeAll()
+        current.persistenceWorker = nil
+        pending.removeAll { $0 == id }
+        current.runner?.cancel()
+        if let channel = current.channel {
+            transfers[id] = current
+            beginBoundedClose(for: id, channel: channel)
+            current = transfers[id] ?? current
+        }
+        active.remove(id)
+        if let runner = current.runner, let runnerToken = current.runnerToken {
+            detachedRunners[runnerToken] = runner
+            let resourceToken = current.resourceToken
+            let resourceHasChannel = current.resourceHasChannel
+            Task { [weak self] in
+                await runner.value
+                await self?.detachedRunnerFinished(
+                    runnerToken,
+                    resourceToken: resourceToken,
+                    resourceHasChannel: resourceHasChannel
+                )
+            }
+        } else if let resourceToken = current.resourceToken {
+            if current.resourceHasChannel {
+                await resources.runnerReturned(resourceToken)
+            } else {
+                await resources.finishWithoutClose(resourceToken)
+            }
+        }
+        transfers.removeValue(forKey: id)
+        try? current.package.remove()
+        for completion in completions { await completion.resolve(.failure(error)) }
+        scheduleTransfers()
+    }
+
+    private func isPermanentPersistenceConflict(_ error: Error) -> Bool {
+        switch error as? TransferPersistenceError {
+        case .identityConflict, .directionConflict:
+            return true
+        case .conditionalConflict, nil:
+            return false
+        }
+    }
+
+    private func completePublishedRecord(
+        _ record: TransferHistoryRecord
+    ) async throws -> TransferHistoryRecord {
+        let completed = TransferSnapshot(
+            id: record.id,
+            peer: record.peer,
+            phase: .completed,
+            completedBytes: Int64(record.aggregateSize),
+            totalBytes: Int64(record.aggregateSize),
+            route: record.route
+        )
+        do {
+            try await persistence.persist(
+                completed,
+                displayFilename: record.displayFilename,
+                expectedPhase: .verifying
+            )
+        } catch {
+            guard (error as? TransferPersistenceError) == .conditionalConflict,
+                let current = try await persistence.persistedTransfer(id: record.id),
+                current.direction == .outbound,
+                current.peer == record.peer,
+                current.displayFilename == record.displayFilename,
+                current.aggregateSize == record.aggregateSize,
+                current.phase == .completed
+            else { throw error }
+            return current
+        }
+        guard let current = try await persistence.persistedTransfer(id: record.id),
+            current.direction == .outbound,
+            current.peer == record.peer,
+            current.displayFilename == record.displayFilename,
+            current.aggregateSize == record.aggregateSize,
+            current.phase == .completed
+        else { throw TransferPersistenceError.conditionalConflict }
+        return current
     }
 
     private func adoptPersistedRecord(
@@ -967,6 +1079,23 @@ public actor TransferCoordinator: TransferCoordinating {
                 totalBytes: Int64(record.aggregateSize),
                 route: record.route
             )
+            if record.phase == .verifying {
+                if let package = packageByID.removeValue(forKey: record.id) {
+                    try package.remove()
+                }
+                let completed = try await completePublishedRecord(record)
+                appendRestoredTerminal(
+                    TransferSnapshot(
+                        id: completed.id,
+                        peer: completed.peer,
+                        phase: .completed,
+                        completedBytes: Int64(completed.aggregateSize),
+                        totalBytes: Int64(completed.aggregateSize),
+                        route: completed.route
+                    )
+                )
+                continue
+            }
             guard let package = packageByID.removeValue(forKey: record.id) else {
                 if isTerminal(record.phase) {
                     appendRestoredTerminal(snapshot)

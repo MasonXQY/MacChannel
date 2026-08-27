@@ -772,13 +772,70 @@ final class TransferCoordinatorTests: XCTestCase {
         let retained = await listener.retainedResourceCount()
         XCTAssertEqual(retained, BoundedChannelResourceRegistry.maximumPerDirection)
 
-        await listener.stop()
+        let stopping = Task { await listener.stop() }
         await gate.release()
+        await stopping.value
         let releaseDeadline = ContinuousClock.now + .seconds(5)
         while await listener.retainedResourceCount() != 0 {
             guard ContinuousClock.now < releaseDeadline else {
                 throw CoordinatorTestError.timedOut
             }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func testIncomingCloseAdmissionIsSharedAcrossCancelledListenerLifecycles() async throws {
+        XCTAssertEqual(IncomingTransferCapacity.maximumBackpressuredCloseAdmissions, 1)
+        XCTAssertEqual(
+            IncomingTransferCapacity.maximumEndToEndConnections,
+            IncomingTransferCapacity.maximumEstablishedConnections
+                + IncomingTransferCapacity.maximumUpstreamAcceptances
+                + IncomingTransferCapacity.maximumBackpressuredCloseAdmissions
+        )
+
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let gate = NoncooperativeCloseGate()
+        var lifecycles: [(IncomingTransferListener, SuspendedYieldIncomingSource)] = []
+
+        for index in 0..<8 {
+            let channel = NoncooperativeCloseChannel(gate: gate)
+            let connection = IncomingTransferConnection(
+                source: DeviceID(rawValue: UUID()),
+                transferID: TransferID(rawValue: UUID()),
+                channel: channel
+            )
+            let source = SuspendedYieldIncomingSource(connection: connection)
+            let listener = IncomingTransferListener(
+                source: source,
+                policy: ReceivePolicy(trustedSources: []),
+                database: try TransferDatabase(
+                    url: root.appendingPathComponent("lifecycle-\(index).sqlite")
+                ),
+                incomingDirectory: root.appendingPathComponent("incoming-\(index)"),
+                inactivityTimeout: .milliseconds(10)
+            )
+            await listener.start()
+            try await source.waitUntilRequested()
+            await listener.stop()
+            await source.releaseYield()
+            lifecycles.append((listener, source))
+        }
+
+        try await gate.waitUntilStarted(BoundedChannelResourceRegistry.maximumPerDirection)
+        try await Task.sleep(for: .milliseconds(50))
+        let startedAtCap = await gate.startedCount()
+        let retainedAtCap = await BoundedChannelResourceRegistry.shared.counts()
+        XCTAssertEqual(startedAtCap, BoundedChannelResourceRegistry.maximumPerDirection)
+        XCTAssertEqual(retainedAtCap.inbound, BoundedChannelResourceRegistry.maximumPerDirection)
+
+        await gate.release()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            let started = await gate.startedCount()
+            let retained = await BoundedChannelResourceRegistry.shared.counts()
+            if started == lifecycles.count, retained.inbound == 0 { break }
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
             try await Task.sleep(for: .milliseconds(5))
         }
     }
@@ -819,8 +876,9 @@ final class TransferCoordinatorTests: XCTestCase {
         XCTAssertEqual(retained, BoundedChannelResourceRegistry.maximumPerDirection)
         XCTAssertEqual(readers, BoundedChannelResourceRegistry.maximumPerDirection)
 
-        await listener.stop()
+        let stopping = Task { await listener.stop() }
         await gate.release()
+        await stopping.value
         let deadline = ContinuousClock.now + .seconds(5)
         while await listener.retainedResourceCount() != 0 {
             guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
@@ -1573,29 +1631,104 @@ final class TransferCoordinatorTests: XCTestCase {
         XCTAssertEqual(record?.phase, .completed)
     }
 
-    func testConditionalConflictCannotResumeFromDurableVerification() async throws {
+    func testOutboundRestartCompletesDurableVerificationWithoutReconnect() async throws {
         let root = try makeCoordinatorTemporaryDirectory()
         defer { removeCoordinatorTemporaryDirectory(root) }
-        let payload = root.appendingPathComponent("verifying-conflict.txt")
-        try Data("durable verification cannot resend".utf8).write(to: payload)
+        let payload = root.appendingPathComponent("published-before-crash.txt")
+        try Data("receiver already published".utf8).write(to: payload)
         let peer = DeviceID(rawValue: UUID())
+        let outgoing = root.appendingPathComponent("outgoing")
+        let package = try OutgoingTransferPackage.create(items: [payload], peer: peer, in: outgoing)
         let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
-        let persistence = AdvanceToVerifyingThenConflictPersistence(database: database)
+        try await persistOutboundLifecycleThroughVerification(package, database: database)
         let connector = CountingBlockingConnector()
-        let coordinator = TransferCoordinator(
+        let coordinator = try await TransferCoordinator.restoring(
             connector: connector,
-            database: persistence,
-            outgoingDirectory: root.appendingPathComponent("outgoing"),
-            cancellationWatchdogDelay: .milliseconds(10)
+            database: database,
+            outgoingDirectory: outgoing
         )
 
-        let id = try await coordinator.send(items: [payload], to: peer)
-        try await waitForPhase(.failed, id: id, on: coordinator)
+        try await waitForPhase(.completed, id: package.id, on: coordinator)
 
         let started = await connector.startedIDs()
         XCTAssertEqual(started, [])
-        let record = try await database.persistedTransfer(id: id)
-        XCTAssertEqual(record?.phase, .failed)
+        let record = try await database.persistedTransfer(id: package.id)
+        XCTAssertEqual(record?.phase, .completed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: package.directory.path))
+    }
+
+    func testOutboundRestartCompletesVerificationAfterPackageCleanupAlreadyFinished() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let payload = root.appendingPathComponent("already-cleaned.txt")
+        try Data("published package cleanup was durable".utf8).write(to: payload)
+        let peer = DeviceID(rawValue: UUID())
+        let outgoing = root.appendingPathComponent("outgoing")
+        let package = try OutgoingTransferPackage.create(items: [payload], peer: peer, in: outgoing)
+        let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
+        try await persistOutboundLifecycleThroughVerification(package, database: database)
+        try package.remove()
+        let connector = CountingBlockingConnector()
+
+        let coordinator = try await TransferCoordinator.restoring(
+            connector: connector,
+            database: database,
+            outgoingDirectory: outgoing
+        )
+
+        try await waitForPhase(.completed, id: package.id, on: coordinator)
+        let started = await connector.startedIDs()
+        XCTAssertEqual(started, [])
+        let record = try await database.persistedTransfer(id: package.id)
+        XCTAssertEqual(record?.phase, .completed)
+    }
+
+    func testConcretePersistenceIdentityConflictFailsSendOnceAndPreservesExistingRow()
+        async throws
+    {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let payload = root.appendingPathComponent("identity-conflict.txt")
+        try Data("new private package".utf8).write(to: payload)
+        let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
+        let persistence = ConcreteIdentityConflictPersistence(database: database)
+        let coordinator = TransferCoordinator(
+            connector: CountingBlockingConnector(),
+            database: persistence,
+            outgoingDirectory: root.appendingPathComponent("outgoing"),
+            persistenceRetryDelay: .milliseconds(1)
+        )
+
+        do {
+            _ = try await coordinator.send(
+                items: [payload],
+                to: DeviceID(rawValue: UUID())
+            )
+            XCTFail("Expected the concrete identity conflict to fail permanently")
+        } catch {
+            XCTAssertEqual(error as? TransferPersistenceError, .identityConflict)
+        }
+
+        let attemptCount = await persistence.attemptCount()
+        XCTAssertEqual(attemptCount, 1)
+        guard let conflictID = await persistence.conflictID() else {
+            return XCTFail("Expected the persistence seam to capture the package identity")
+        }
+        let existing = try await database.persistedTransfer(id: conflictID)
+        let conflictingPeer = await persistence.conflictingPeer()
+        XCTAssertEqual(existing?.peer, conflictingPeer)
+        XCTAssertEqual(existing?.phase, .preparing)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath:
+                    root.appendingPathComponent("outgoing")
+                    .appendingPathComponent(conflictID.rawValue.uuidString.lowercased()).path
+            )
+        )
+        let active = await coordinator.activeTransferCount()
+        let retained = await coordinator.retainedResourceCount()
+        XCTAssertEqual(active, 0)
+        XCTAssertEqual(retained, 0)
     }
 
     func testConditionalConflictReconciliationRetriesTransientReadFailure() async throws {
@@ -1779,6 +1912,143 @@ final class TransferCoordinatorTests: XCTestCase {
         }
         let verifying = try await database.history().first
         XCTAssertEqual(verifying?.phase, .verifying)
+    }
+
+    func testConcreteDatabaseClassifiesIdentityAndDirectionConflictsPermanently() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
+        let id = TransferID(rawValue: UUID())
+        let peer = DeviceID(rawValue: UUID())
+        let snapshot = TransferSnapshot(
+            id: id,
+            peer: peer,
+            phase: .preparing,
+            completedBytes: 0,
+            totalBytes: 10,
+            route: .lan
+        )
+        try await database.persist(snapshot, displayFilename: "identity.bin", expectedPhase: nil)
+
+        for mismatch in [
+            TransferSnapshot(
+                id: id,
+                peer: DeviceID(rawValue: UUID()),
+                phase: .connecting,
+                completedBytes: 0,
+                totalBytes: 10,
+                route: .lan
+            ),
+            TransferSnapshot(
+                id: id,
+                peer: peer,
+                phase: .connecting,
+                completedBytes: 0,
+                totalBytes: 11,
+                route: .lan
+            ),
+        ] {
+            do {
+                try await database.persist(
+                    mismatch,
+                    displayFilename: "identity.bin",
+                    expectedPhase: .preparing
+                )
+                XCTFail("Expected an identity conflict")
+            } catch {
+                XCTAssertEqual(error as? TransferPersistenceError, .identityConflict)
+            }
+        }
+        do {
+            try await database.persist(
+                snapshot,
+                displayFilename: "other-name.bin",
+                expectedPhase: .preparing
+            )
+            XCTFail("Expected a filename identity conflict")
+        } catch {
+            XCTAssertEqual(error as? TransferPersistenceError, .identityConflict)
+        }
+
+        let inboundID = TransferID(rawValue: UUID())
+        let inbound = TransferSnapshot(
+            id: inboundID,
+            peer: peer,
+            phase: .preparing,
+            completedBytes: 0,
+            totalBytes: 10,
+            route: .lan
+        )
+        try await database.record(inbound, displayFilename: "incoming.bin")
+        do {
+            try await database.persist(
+                inbound,
+                displayFilename: "incoming.bin",
+                expectedPhase: .preparing
+            )
+            XCTFail("Expected a direction conflict")
+        } catch {
+            XCTAssertEqual(error as? TransferPersistenceError, .directionConflict)
+        }
+
+        let preserved = try await database.persistedTransfer(id: id)
+        XCTAssertEqual(preserved?.phase, .preparing)
+        XCTAssertEqual(preserved?.peer, peer)
+        XCTAssertEqual(preserved?.displayFilename, "identity.bin")
+    }
+
+    func testQuarantineNeverRewritesPublishedVerificationAsFailure() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let payload = root.appendingPathComponent("published.txt")
+        try Data("published".utf8).write(to: payload)
+        let peer = DeviceID(rawValue: UUID())
+        let package = try OutgoingTransferPackage.create(
+            items: [payload],
+            peer: peer,
+            in: root.appendingPathComponent("outgoing")
+        )
+        let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
+        try await persistOutboundLifecycleThroughVerification(package, database: database)
+
+        do {
+            _ = try await database.quarantineOutboundTransfer(
+                TransferSnapshot(
+                    id: package.id,
+                    peer: peer,
+                    phase: .connecting,
+                    completedBytes: 0,
+                    totalBytes: package.totalBytes,
+                    route: .lan
+                ),
+                displayFilename: package.displayFilename
+            )
+            XCTFail("Expected published verification to reject quarantine")
+        } catch {
+            XCTAssertEqual(error as? TransferPersistenceError, .conditionalConflict)
+        }
+        let preserved = try await database.persistedTransfer(id: package.id)
+        XCTAssertEqual(preserved?.phase, .verifying)
+
+        for forbiddenPhase in [TransferPhase.failed, .cancelled] {
+            do {
+                try await database.record(
+                    TransferSnapshot(
+                        id: package.id,
+                        peer: peer,
+                        phase: forbiddenPhase,
+                        completedBytes: package.totalBytes,
+                        totalBytes: package.totalBytes,
+                        route: .lan
+                    ),
+                    displayFilename: package.displayFilename,
+                    direction: .outbound
+                )
+                XCTFail("Expected outbound verification to reject \(forbiddenPhase)")
+            } catch {}
+            let stillPublished = try await database.persistedTransfer(id: package.id)
+            XCTAssertEqual(stillPublished?.phase, .verifying)
+        }
     }
 
     func testOutgoingPackageRejectsMetadataTampering() throws {
@@ -2011,6 +2281,42 @@ private func firstProgressSnapshot(
         group.cancelAll()
         return result
     }
+}
+
+private func persistOutboundLifecycleThroughVerification(
+    _ package: OutgoingTransferPackage,
+    database: TransferDatabase
+) async throws {
+    func snapshot(_ phase: TransferPhase) -> TransferSnapshot {
+        TransferSnapshot(
+            id: package.id,
+            peer: package.peer,
+            phase: phase,
+            completedBytes: phase == .verifying ? package.totalBytes : 0,
+            totalBytes: package.totalBytes,
+            route: .lan
+        )
+    }
+    try await database.persist(
+        snapshot(.preparing),
+        displayFilename: package.displayFilename,
+        expectedPhase: nil
+    )
+    try await database.persist(
+        snapshot(.connecting),
+        displayFilename: package.displayFilename,
+        expectedPhase: .preparing
+    )
+    try await database.persist(
+        snapshot(.transferring),
+        displayFilename: package.displayFilename,
+        expectedPhase: .connecting
+    )
+    try await database.persist(
+        snapshot(.verifying),
+        displayFilename: package.displayFilename,
+        expectedPhase: .transferring
+    )
 }
 
 private func currentPhase(
@@ -2263,6 +2569,44 @@ private actor MemoryIncomingTransferSource: IncomingTransferConnectionSource {
 
     func offer(_ connection: IncomingTransferConnection) {
         continuation.yield(connection)
+    }
+}
+
+private actor SuspendedYieldIncomingSource: IncomingTransferConnectionSource {
+    private let stream: AsyncThrowingStream<IncomingTransferConnection, Error>
+    private var requested = false
+    private var released = false
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(connection: IncomingTransferConnection) {
+        stream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(1)) { continuation in
+            continuation.yield(connection)
+            continuation.finish()
+        }
+    }
+
+    func connections() async -> AsyncThrowingStream<IncomingTransferConnection, Error> {
+        requested = true
+        if !released {
+            await withCheckedContinuation { continuation in
+                releaseWaiter = continuation
+            }
+        }
+        return stream
+    }
+
+    func waitUntilRequested() async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !requested {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func releaseYield() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
     }
 }
 
@@ -2822,9 +3166,13 @@ private actor AdvanceThenConflictPersistence: TransferSnapshotPersistence {
     func didAdvance() -> Bool { advanced }
 }
 
-private actor AdvanceToVerifyingThenConflictPersistence: TransferSnapshotPersistence {
+private actor ConcreteIdentityConflictPersistence: TransferSnapshotPersistence {
     private let database: TransferDatabase
-    private var advanced = false
+    private let conflictPeer = DeviceID(
+        rawValue: UUID(uuidString: "ffffffff-ffff-ffff-ffff-ffffffffffff")!
+    )
+    private var attempts = 0
+    private var capturedID: TransferID?
 
     init(database: TransferDatabase) {
         self.database = database
@@ -2835,46 +3183,21 @@ private actor AdvanceToVerifyingThenConflictPersistence: TransferSnapshotPersist
         displayFilename: String,
         expectedPhase: TransferPhase?
     ) async throws {
-        if snapshot.phase == .connecting, !advanced {
-            advanced = true
-            try await database.persist(
-                TransferSnapshot(
-                    id: snapshot.id,
-                    peer: snapshot.peer,
-                    phase: .connecting,
-                    completedBytes: snapshot.completedBytes,
-                    totalBytes: snapshot.totalBytes,
-                    route: snapshot.route
-                ),
-                displayFilename: displayFilename,
-                expectedPhase: expectedPhase
-            )
-            try await database.persist(
-                TransferSnapshot(
-                    id: snapshot.id,
-                    peer: snapshot.peer,
-                    phase: .transferring,
-                    completedBytes: snapshot.completedBytes,
-                    totalBytes: snapshot.totalBytes,
-                    route: snapshot.route
-                ),
-                displayFilename: displayFilename,
-                expectedPhase: .connecting
-            )
-            try await database.persist(
-                TransferSnapshot(
-                    id: snapshot.id,
-                    peer: snapshot.peer,
-                    phase: .verifying,
-                    completedBytes: snapshot.totalBytes,
-                    totalBytes: snapshot.totalBytes,
-                    route: snapshot.route
-                ),
-                displayFilename: displayFilename,
-                expectedPhase: .transferring
-            )
-            throw TransferPersistenceError.conditionalConflict
-        }
+        attempts += 1
+        guard attempts == 1 else { throw TransferPersistenceError.conditionalConflict }
+        capturedID = snapshot.id
+        try await database.persist(
+            TransferSnapshot(
+                id: snapshot.id,
+                peer: conflictPeer,
+                phase: .preparing,
+                completedBytes: 0,
+                totalBytes: snapshot.totalBytes,
+                route: snapshot.route
+            ),
+            displayFilename: displayFilename,
+            expectedPhase: nil
+        )
         try await database.persist(
             snapshot,
             displayFilename: displayFilename,
@@ -2890,15 +3213,9 @@ private actor AdvanceToVerifyingThenConflictPersistence: TransferSnapshotPersist
         try await database.persistedTransfer(id: id)
     }
 
-    func quarantineOutboundTransfer(
-        _ snapshot: TransferSnapshot,
-        displayFilename: String
-    ) async throws -> TransferHistoryRecord {
-        try await database.quarantineOutboundTransfer(
-            snapshot,
-            displayFilename: displayFilename
-        )
-    }
+    func attemptCount() -> Int { attempts }
+    func conflictID() -> TransferID? { capturedID }
+    func conflictingPeer() -> DeviceID { conflictPeer }
 }
 
 private actor ConflictThenReadFailurePersistence: TransferSnapshotPersistence {
@@ -3078,6 +3395,58 @@ private actor CloseTrackingSilentChannel: SecureChannel {
     }
 
     func closeCount() -> Int { closes }
+}
+
+private actor NoncooperativeCloseGate {
+    private var started = 0
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func startAndWait() async {
+        started += 1
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func waitUntilStarted(_ count: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while started < count {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func startedCount() -> Int { started }
+
+    func release() {
+        released = true
+        let continuations = waiters
+        waiters.removeAll()
+        for continuation in continuations { continuation.resume() }
+    }
+}
+
+private actor NoncooperativeCloseChannel: SecureChannel {
+    nonisolated let route: ConnectionRoute = .lan
+    private let gate: NoncooperativeCloseGate
+
+    init(gate: NoncooperativeCloseGate) {
+        self.gate = gate
+    }
+
+    func send(_ frame: Data) async throws {}
+
+    nonisolated func frames() -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in continuation.finish() }
+    }
+
+    func exportKey(label: String, context: Data, length: Int) async throws -> Data {
+        Data(repeating: 9, count: length)
+    }
+
+    func close() async { await gate.startAndWait() }
 }
 
 private actor CancellationInsensitiveFramesChannel: SecureChannel {

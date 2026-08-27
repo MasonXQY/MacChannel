@@ -16,7 +16,10 @@ Status: implementation complete; final verification recorded below
 - Transient database errors retain both the transfer and its persistence worker.
   The worker uses capped exponential retry and resumes the runner once its
   required phase is durable; no nonterminal transfer is left runnerless because
-  a write failed.
+  a write failed. Concrete peer/name/size and direction mismatches are typed
+  permanent conflicts: they fail after one write, preserve the authoritative
+  SQLite row, remove the newly created private package, and retain no logical
+  transfer slot.
 - Send sessions reuse the same `TransferID` across LAN/internet/relay reconnects.
   The receiver's hardened journal supplies the `ResumeMap`, verified chunks are
   not resent, and a route change updates the existing transfer instead of
@@ -25,6 +28,12 @@ Status: implementation complete; final verification recorded below
   irreversible verifying/completed epochs before channel close or any other
   await. Cancellation after receiver publication returns `tooLate`; a blocked
   or failed close cannot rewrite the send as cancelled.
+- A durable outbound `verifying` row means the receiver already published the
+  transfer. Restart never queues or reconnects it: package cleanup is retried
+  idempotently (an already-missing package is valid), SQLite conditionally
+  advances `verifying` to `completed`, and the same `TransferID` is published as
+  completed. Quarantine, snapshot recording, and conflict reconciliation cannot
+  rewrite outbound verification to failed or cancelled.
 - Pause, resume, and cancel remain linearizable while connection or verification
   persistence is blocked. The cancellation watchdog releases the active slot
   even when a connector ignores cancellation, while late connector/runner work
@@ -100,10 +109,11 @@ Status: implementation complete; final verification recorded below
   SQLite history, cleanup, or atomic publication.
 - The listener owns at most two active and 32 queued established channels. The
   WebRTC source has no second established-channel buffer and permits at most
-  eight authenticated acceptances in flight, for a documented end-to-end bound
-  of 42 connections. Cancellation-insensitive handshake operations are tracked,
-  reaped on exit, and capped at eight; the combined retained connection/work
-  bound is therefore 50.
+  eight authenticated acceptances in flight. Its zero-buffer reader can retain
+  one rejected channel while shared close admission is backpressured, for a
+  documented end-to-end bound of 43 connections. Cancellation-insensitive
+  handshake operations are tracked, reaped on exit, and capped at eight; the
+  combined retained connection/work bound is therefore 51.
 - Channel-owning work additionally uses one process-wide resource registry with
   a hard bound of four inbound, four outbound, and eight total. A token is held
   until the protocol runner, connector/handshake, all send/frame operations,
@@ -114,6 +124,12 @@ Status: implementation complete; final verification recorded below
   successful connector handoff carries runner-local channel/token ownership,
   so a concurrent watchdog cannot erase cleanup before close is registered; a
   stale no-channel observer cannot satisfy an already-started close.
+- Channels rejected before a receive runner exists—including cancellation after
+  source yield and before enqueue—enter one process-wide close-admission
+  registry shared by every listener instance. It allocates no second channel
+  backlog: the yielding reader or lifecycle caller backpressures at the global
+  inbound cap, and every close begins only after reserving the same resource
+  token used by active receives.
 - A configurable watchdog (30 seconds by default) covers the receiver challenge
   send, key export, initial offer, and later inbound inactivity. Even a transport
   operation that ignores cancellation cannot retain an incoming slot. Silent
@@ -145,23 +161,26 @@ The implementation was driven by deterministic regressions for:
 - pre-channel retry reservation release, exact legacy key-link crash recovery,
   cleanup of all queued persistence waiters after a durable conflict, transient
   conflict re-read recovery, irreversible verification regression rejection,
-  and late channel-handoff ownership.
+  late channel-handoff ownership, process restart after the verifying commit
+  with present/already-cleaned package states, concrete identity/direction
+  conflicts, and repeated cancelled-listener close lifecycles across instances.
 
 An independent code review identified a stale verification completion race,
 unbounded failed-package retention, incomplete pre-offer timeout coverage, a
 yield/cancel channel-close edge, missing power-loss synchronization, and leaked
 interrupted build trees. Each finding was reproduced or covered by a focused
-regression and corrected before the final gate. The final independent re-review
-reported no remaining Critical or Important findings.
+regression and corrected. A later review found the restart-verification,
+permanent-mismatch, and cross-listener close-admission gaps documented above;
+all three were reproduced with concrete regressions before the final gate.
 
 ## Verification
 
-- `swift test --filter TransferCoordinatorTests`: 52 tests, 0 failures.
+- `swift test --filter TransferCoordinatorTests`: 57 tests, 0 failures.
 - `swift test --filter ConnectionCoordinatorTests`: 14 tests, 0 failures.
 - `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
 - `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures.
 - `swift test --filter ReceiveStoreTests`: 64 tests, 0 failures.
-- `swift test`: 275 tests, 0 failures, 0 unexpected failures.
+- `swift test`: 280 tests, 0 failures, 0 unexpected failures.
 - `bash Scripts/build-app.sh`: pass.
 - `swift format lint --recursive --strict Sources Tests`: clean.
 - `git diff --check`: clean.

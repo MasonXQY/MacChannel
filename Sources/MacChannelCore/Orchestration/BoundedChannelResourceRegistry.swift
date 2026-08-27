@@ -144,3 +144,40 @@ actor BoundedChannelResourceRegistry {
         Task { await reservation.onReleased() }
     }
 }
+
+/// Process-wide admission for inbound channels that must be closed before they
+/// ever acquired a receive-runner token. Listener lifecycles share this
+/// backpressure point, and only the global inbound resource cap can start close
+/// work. Callers retain one yielded channel while waiting; no second close
+/// backlog is allocated here.
+actor IncomingChannelCloseRegistry {
+    static let shared = IncomingChannelCloseRegistry()
+
+    private let resources = BoundedChannelResourceRegistry.shared
+    private var admissionWaiters: [CheckedContinuation<Void, Never>] = []
+    private var capacityGeneration: UInt64 = 0
+
+    func submit(_ channel: any SecureChannel, timeout: Duration) async {
+        while true {
+            let observedGeneration = capacityGeneration
+            if let token = await resources.reserve(.inbound, onReleased: {
+                await IncomingChannelCloseRegistry.shared.resourceCapacityReleased()
+            }) {
+                await resources.beginClose(channel, token: token, timeout: timeout)
+                await resources.runnerReturned(token)
+                return
+            }
+            if observedGeneration != capacityGeneration { continue }
+            await withCheckedContinuation { continuation in
+                admissionWaiters.append(continuation)
+            }
+        }
+    }
+
+    private func resourceCapacityReleased() {
+        capacityGeneration &+= 1
+        let waiters = admissionWaiters
+        admissionWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+}

@@ -42,8 +42,17 @@ public extension TransferSnapshotPersistence {
         displayFilename: String
     ) async throws -> TransferHistoryRecord {
         let existing = try await persistedTransfer(id: snapshot.id)
-        guard existing?.direction == .outbound || existing == nil else {
-            throw TransferPersistenceError.conditionalConflict
+        if let existing {
+            guard existing.direction == .outbound else {
+                throw TransferPersistenceError.directionConflict
+            }
+            guard existing.peer == snapshot.peer,
+                existing.displayFilename == displayFilename,
+                existing.aggregateSize == UInt64(snapshot.totalBytes)
+            else { throw TransferPersistenceError.identityConflict }
+            guard existing.phase != .verifying else {
+                throw TransferPersistenceError.conditionalConflict
+            }
         }
         let failed = TransferSnapshot(
             id: snapshot.id,
@@ -67,6 +76,8 @@ public extension TransferSnapshotPersistence {
 
 public enum TransferPersistenceError: Error, Equatable, Sendable {
     case conditionalConflict
+    case identityConflict
+    case directionConflict
 }
 
 struct TransferPreparationRecord: Equatable, Sendable {
@@ -352,7 +363,13 @@ public actor TransferDatabase {
                 displayFilename: displayFilename,
                 direction: direction
             ) {
-                guard isAllowedPhaseTransition(from: existing.phase, to: snapshot.phase) else {
+                let transitionAllowed =
+                    direction == .outbound
+                    ? isAllowedOutboundPhaseTransition(
+                        from: existing.phase,
+                        to: snapshot.phase
+                    ) : isAllowedPhaseTransition(from: existing.phase, to: snapshot.phase)
+                guard transitionAllowed else {
                     throw ReceiveStoreError.databaseFailure
                 }
                 let update = try statement(
@@ -516,6 +533,9 @@ public actor TransferDatabase {
                 displayFilename: displayFilename,
                 direction: .outbound
             )
+            if existing?.phase == .verifying {
+                throw TransferPersistenceError.conditionalConflict
+            }
             if let existing, existing.phase != .completed && existing.phase != .failed
                 && existing.phase != .cancelled {
                 let update = try statement(
@@ -524,7 +544,7 @@ public actor TransferDatabase {
                     SET completed_bytes = MAX(completed_bytes, ?), updated_at = ?,
                         route = ?, phase = 'failed'
                     WHERE id = ? AND direction = 'outbound'
-                      AND phase NOT IN ('completed', 'failed', 'cancelled')
+                      AND phase NOT IN ('verifying', 'completed', 'failed', 'cancelled')
                     """
                 )
                 defer { sqlite3_finalize(update) }
@@ -1477,17 +1497,24 @@ public actor TransferDatabase {
         try bind(snapshot.id.rawValue.uuidString.lowercased(), to: query, at: 1)
         let first = sqlite3_step(query)
         if first == SQLITE_DONE { return nil }
+        guard first == SQLITE_ROW else { throw ReceiveStoreError.databaseFailure }
+        let storedPeer = textColumn(query, 0)
+        let storedFilename = textColumn(query, 1)
+        let storedSize = sqlite3_column_int64(query, 2)
         let completedBytes = sqlite3_column_int64(query, 4)
-        guard first == SQLITE_ROW,
-            textColumn(query, 0) == snapshot.peer.rawValue.uuidString.lowercased(),
-            textColumn(query, 1) == displayFilename,
-            sqlite3_column_int64(query, 2) == snapshot.totalBytes,
-            let phaseText = textColumn(query, 3),
+        let storedDirection = textColumn(query, 5)
+        guard let phaseText = textColumn(query, 3),
             let phase = TransferPhase(rawValue: phaseText),
-            textColumn(query, 5) == direction.rawValue,
             completedBytes >= 0,
             sqlite3_step(query) == SQLITE_DONE
-        else { throw ReceiveStoreError.invalidManifest }
+        else { throw ReceiveStoreError.databaseFailure }
+        guard storedDirection == direction.rawValue else {
+            throw TransferPersistenceError.directionConflict
+        }
+        guard storedPeer == snapshot.peer.rawValue.uuidString.lowercased(),
+            storedFilename == displayFilename,
+            storedSize == snapshot.totalBytes
+        else { throw TransferPersistenceError.identityConflict }
         return ExistingSnapshot(
             phase: phase,
             completedBytes: completedBytes
