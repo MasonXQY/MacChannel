@@ -96,6 +96,9 @@ if [[ -n "$codesign_identity" ]]; then
     codesign "${signing_args[@]}" "$working_app"
 
     mv "$working_app" "$app_path"
+    xattr -cr "$app_path"
     signing_root=""
     trap - EXIT
+else
+    xattr -cr "$app_path"
 fi
