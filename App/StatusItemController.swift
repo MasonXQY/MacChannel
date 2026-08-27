@@ -3,6 +3,7 @@ import MacChannelCore
 
 @MainActor
 struct DeviceFanRequest {
+    let token: StatusItemDragToken
     let intent: DropIntent
     let devices: [DeviceSummary]
     let fingerprint: StatusItemDragFingerprint
@@ -20,6 +21,9 @@ final class StatusItemController: NSObject {
     var onDismissDeviceFan: ((StatusItemDragToken) -> Void)?
     var onTransferStarted: ((TransferID, StatusItemDragToken) -> Void)?
     var onAnnouncement: ((String) -> Void)?
+    var onShowTransfers: (() -> Void)?
+    var onShowPairing: (() -> Void)?
+    var onShowSettings: (() -> Void)?
 
     var phase: StatusItemPhase { state.phase }
     var nativeButton: NSStatusBarButton? { statusItem?.button }
@@ -30,6 +34,8 @@ final class StatusItemController: NSObject {
     private var state = StatusItemDropStateMachine()
     private var devices: [DeviceSummary]
     private var currentFanToken: StatusItemDragToken?
+    private var activeSelectionToken: StatusItemDragToken?
+    private var announcedOfflineToken: StatusItemDragToken?
     private var dragRegionSession: DragRegionSession!
     private var statusItem: NSStatusItem?
     private var deviceTask: Task<Void, Never>?
@@ -88,6 +94,8 @@ final class StatusItemController: NSObject {
         guard let token = state.begin(intent: intent) else { return nil }
         dragRegionSession.begin(token: token, fingerprint: fingerprint, in: .icon)
         currentFanToken = token
+        activeSelectionToken = token
+        announcedOfflineToken = nil
         renderPhase()
 
         if let staleFan {
@@ -95,6 +103,7 @@ final class StatusItemController: NSObject {
         }
         onPresentDeviceFan?(
             DeviceFanRequest(
+                token: token,
                 intent: intent,
                 devices: devices.filter { $0.availability != .offline },
                 fingerprint: fingerprint,
@@ -145,6 +154,10 @@ final class StatusItemController: NSObject {
         if currentFanToken == token {
             currentFanToken = nil
         }
+        if activeSelectionToken == token {
+            activeSelectionToken = nil
+            announcedOfflineToken = nil
+        }
         onDismissDeviceFan?(token)
         renderPhase()
     }
@@ -162,7 +175,7 @@ final class StatusItemController: NSObject {
     func performKeyboardSend() {
         guard let urls = filePicker.chooseFiles() else { return }
         guard let intent = try? DropIntent(items: urls.map(DropItem.fileURL)) else {
-            announce("The selected items cannot be sent.")
+            announce("所选项目无法发送。")
             return
         }
 
@@ -170,13 +183,13 @@ final class StatusItemController: NSObject {
             .filter { $0.availability != .offline }
             .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
         guard !onlineDevices.isEmpty else {
-            announce("No online devices available.")
+            announce("没有在线设备。")
             return
         }
 
         let staleFan = currentFanToken
         guard let token = state.begin(intent: intent) else {
-            announce("A transfer is already active.")
+            announce("已有传输正在进行。")
             return
         }
         if let staleFan {
@@ -184,6 +197,8 @@ final class StatusItemController: NSObject {
             onDismissDeviceFan?(staleFan)
         }
         currentFanToken = nil
+        activeSelectionToken = token
+        announcedOfflineToken = nil
         renderPhase()
 
         deviceMenuPresenter.present(
@@ -207,13 +222,19 @@ final class StatusItemController: NSObject {
     }
 
     private func selectTarget(_ device: DeviceID, token: StatusItemDragToken) -> Bool {
-        guard devices.contains(where: {
-            $0.id == device && $0.availability != .offline
-        }), let claim = state.claimDrop(token: token, target: device)
-        else { return false }
+        guard devices.contains(where: { $0.id == device && $0.availability != .offline }) else {
+            if activeSelectionToken == token, announcedOfflineToken != token {
+                announcedOfflineToken = token
+                announce("目标设备已离线，请重新选择。")
+            }
+            return false
+        }
+        guard let claim = state.claimDrop(token: token, target: device) else { return false }
 
         dragRegionSession.invalidate(token: token)
         currentFanToken = nil
+        activeSelectionToken = nil
+        announcedOfflineToken = nil
         onDismissDeviceFan?(token)
         renderPhase()
 
@@ -225,7 +246,7 @@ final class StatusItemController: NSObject {
                 )
                 self?.onTransferStarted?(transferID, token)
             } catch {
-                // Transfer surfaces added in the next task own user-facing errors.
+                self?.announce("无法开始传输，请检查连接和设备状态。")
                 self?.completeTransfer(token: token)
             }
         }
@@ -261,7 +282,7 @@ final class StatusItemController: NSObject {
 
     private func configureMenu() {
         let send = NSMenuItem(
-            title: "Send Files…",
+            title: "发送文件…",
             action: #selector(chooseFiles(_:)),
             keyEquivalent: "s"
         )
@@ -270,8 +291,36 @@ final class StatusItemController: NSObject {
         statusMenu.addItem(send)
         statusMenu.addItem(.separator())
 
+        let transfers = NSMenuItem(
+            title: "传输与历史",
+            action: #selector(showTransfers(_:)),
+            keyEquivalent: "t"
+        )
+        transfers.keyEquivalentModifierMask = [.command, .shift]
+        transfers.target = self
+        statusMenu.addItem(transfers)
+
+        let pairing = NSMenuItem(
+            title: "配对设备",
+            action: #selector(showPairing(_:)),
+            keyEquivalent: "p"
+        )
+        pairing.keyEquivalentModifierMask = [.command, .shift]
+        pairing.target = self
+        statusMenu.addItem(pairing)
+
+        let settings = NSMenuItem(
+            title: "设置",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
+        )
+        settings.keyEquivalentModifierMask = [.command]
+        settings.target = self
+        statusMenu.addItem(settings)
+        statusMenu.addItem(.separator())
+
         let quit = NSMenuItem(
-            title: "Quit MacChannel",
+            title: "退出 Mac 通道",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -288,9 +337,9 @@ final class StatusItemController: NSObject {
         host.focusRingType = .default
         host.setAccessibilityElement(true)
         host.setAccessibilityRole(.button)
-        host.setAccessibilityLabel("MacChannel file transfer")
+        host.setAccessibilityLabel("Mac 通道文件传输")
         host.setAccessibilityHelp(
-            "Open the status menu, or drag local files here to choose a device."
+            "打开状态菜单，或将本地文件拖到这里选择接收设备。"
         )
         button.setAccessibilityElement(false)
         button.frame = host.bounds
@@ -311,8 +360,8 @@ final class StatusItemController: NSObject {
 
     private func renderPhase() {
         button.phase = state.phase
-        nativeButton?.setAccessibilityValue(state.phase.presentation.accessibilityValue)
-        nativeButton?.toolTip = state.phase.presentation.accessibilityValue
+        nativeButton?.setAccessibilityValue(state.phase.localizedAccessibilityValue)
+        nativeButton?.toolTip = state.phase.localizedAccessibilityValue
         statusItem?.length = button.preferredWidth
     }
 
@@ -338,5 +387,17 @@ final class StatusItemController: NSObject {
 
     @objc private func chooseFiles(_ sender: Any?) {
         performKeyboardSend()
+    }
+
+    @objc private func showTransfers(_ sender: Any?) {
+        onShowTransfers?()
+    }
+
+    @objc private func showPairing(_ sender: Any?) {
+        onShowPairing?()
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        onShowSettings?()
     }
 }

@@ -188,10 +188,28 @@ final class PairingTests: XCTestCase {
         let expectedFingerprint = fingerprint(for: result)
         let hostAwaitingState = await context.host.currentState()
         let joinerAwaitingState = await context.joiner.currentState()
+        let hostPendingPeer = await context.host.pendingPeerSummary()
+        let joinerPendingPeer = await context.joiner.pendingPeerSummary()
 
         XCTAssertEqual(result.fingerprint, expectedFingerprint)
         XCTAssertEqual(hostAwaitingState, .awaitingFingerprint(local: expectedFingerprint, remote: expectedFingerprint))
         XCTAssertEqual(joinerAwaitingState, .awaitingFingerprint(local: expectedFingerprint, remote: expectedFingerprint))
+        XCTAssertEqual(
+            hostPendingPeer,
+            DeviceSummary(
+                id: context.joinerID,
+                displayName: "Joining Mac",
+                availability: .internet
+            )
+        )
+        XCTAssertEqual(
+            joinerPendingPeer,
+            DeviceSummary(
+                id: context.hostID,
+                displayName: "Host Mac",
+                availability: .internet
+            )
+        )
 
         _ = try await context.host.confirmFingerprint(expectedFingerprint)
         _ = try await context.joiner.confirmFingerprint(expectedFingerprint)

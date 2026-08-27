@@ -16,17 +16,47 @@ public enum MacChannelApplication {
 private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private let container: AppContainer
     private var statusItemController: StatusItemController?
+    private var surfaceController: AppSurfaceController?
 
     init(container: AppContainer) {
         self.container = container
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItemController = StatusItemController(
+        let statusController = StatusItemController(
             deviceDirectory: container.deviceDirectory,
             transferCoordinator: container.transferCoordinator
         )
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: container.transferCoordinator
+            ),
+            pairingService: container.pairingSurfaceService,
+            settingsService: container.settingsSurfaceService,
+            directorySelector: container.directorySelector
+        )
+        surfaces.bind(to: statusController)
+        surfaces.observe(container.deviceDirectory)
+        if let transferSnapshots = container.transferSnapshots {
+            surfaces.observeTransferSnapshots(transferSnapshots)
+        }
+        if let pairingStates = container.pairingStates {
+            surfaces.observePairingStates(pairingStates)
+        }
+        if let settingsSnapshots = container.settingsSnapshots {
+            surfaces.observeSettings(settingsSnapshots)
+        }
+        if let transferHistory = container.transferHistory {
+            surfaces.observeTransferHistory(transferHistory)
+        }
+        statusItemController = statusController
+        surfaceController = surfaces
         completeLaunchSmokeTestIfRequested()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        surfaceController?.invalidate()
+        statusItemController?.invalidate()
     }
 
     private func completeLaunchSmokeTestIfRequested() {

@@ -10,17 +10,17 @@ final class StatusItemAppKitTests: XCTestCase {
 
         XCTAssertTrue(button.registeredDraggedTypes.contains(.fileURL))
         XCTAssertEqual(button.accessibilityRole(), .button)
-        XCTAssertEqual(button.accessibilityLabel(), "MacChannel file transfer")
+        XCTAssertEqual(button.accessibilityLabel(), "Mac 通道文件传输")
         XCTAssertTrue(button.acceptsFirstResponder)
         XCTAssertEqual(button.focusRingType, .default)
 
         button.phase = .ready
         XCTAssertEqual(button.title, "Ready")
-        XCTAssertEqual(button.accessibilityValue() as? String, "Ready to choose a device")
+        XCTAssertEqual(button.accessibilityValue() as? String, "可选择接收设备")
 
         button.phase = .transferring(progress: 0.42)
         XCTAssertEqual(button.title, "42%")
-        XCTAssertEqual(button.accessibilityValue() as? String, "Transferring, 42 percent")
+        XCTAssertEqual(button.accessibilityValue() as? String, "正在传输，42%")
     }
 
     @MainActor
@@ -31,7 +31,7 @@ final class StatusItemAppKitTests: XCTestCase {
             transferCoordinator: RecordingTransferCoordinator()
         )
 
-        let sendItem = controller.statusMenu.items.first { $0.title == "Send Files…" }
+        let sendItem = controller.statusMenu.items.first { $0.title == "发送文件…" }
         XCTAssertEqual(sendItem?.keyEquivalent, "s")
         XCTAssertEqual(sendItem?.keyEquivalentModifierMask, [.command, .shift])
     }
@@ -98,7 +98,33 @@ final class StatusItemAppKitTests: XCTestCase {
 
         XCTAssertEqual(controller.phase, .idle)
         XCTAssertEqual(menu.presentCount, 0)
-        XCTAssertEqual(announcements, ["No online devices available."])
+        XCTAssertEqual(announcements, ["没有在线设备。"])
+    }
+
+    @MainActor
+    func testFailedSendReturnsIdleAndAnnouncesActionableError() async throws {
+        let target = DeviceID(rawValue: UUID())
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "书房 Mac", availability: .lan)],
+            transferCoordinator: FailingTransferCoordinator(),
+            filePicker: StubStatusItemFilePicker(
+                result: [URL(fileURLWithPath: "/tmp/a")]
+            ),
+            deviceMenuPresenter: menu
+        )
+        var announcements: [String] = []
+        controller.onAnnouncement = { announcements.append($0) }
+
+        controller.performKeyboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        for _ in 0..<100 where controller.phase != .idle {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(announcements, ["无法开始传输，请检查连接和设备状态。"])
     }
 
     @MainActor
@@ -115,8 +141,8 @@ final class StatusItemAppKitTests: XCTestCase {
         XCTAssertNotNil(nativeButton.action)
         XCTAssertTrue(nativeButton.isAccessibilityElement())
         XCTAssertEqual(nativeButton.accessibilityRole(), .button)
-        XCTAssertEqual(nativeButton.accessibilityLabel(), "MacChannel file transfer")
-        XCTAssertEqual(nativeButton.accessibilityValue() as? String, "Idle")
+        XCTAssertEqual(nativeButton.accessibilityLabel(), "Mac 通道文件传输")
+        XCTAssertEqual(nativeButton.accessibilityValue() as? String, "空闲")
         XCTAssertFalse(controller.button.isAccessibilityElement())
         XCTAssertEqual(nativeButton.focusRingType, .default)
     }
@@ -210,13 +236,21 @@ final class StatusItemAppKitTests: XCTestCase {
             transferCoordinator: transfer
         )
         var request: DeviceFanRequest?
+        var announcements: [String] = []
+        var dismissals = 0
         controller.onPresentDeviceFan = { request = $0 }
+        controller.onAnnouncement = { announcements.append($0) }
+        controller.onDismissDeviceFan = { _ in dismissals += 1 }
         _ = controller.beginDrop(
             try DropIntent(items: [.fileURL(URL(fileURLWithPath: "/tmp/a"))])
         )
 
         XCTAssertEqual(request?.select(target), false)
-        XCTAssertEqual(controller.phase, .ready)
+        request?.cancel()
+        request?.cancel()
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(announcements, ["目标设备已离线，请重新选择。"])
+        XCTAssertEqual(dismissals, 1)
         let sentCount = await transfer.sentCount()
         XCTAssertEqual(sentCount, 0)
     }
@@ -298,6 +332,16 @@ private actor RecordingTransferCoordinator: TransferCoordinating {
 
     func sentCount() -> Int { sends.count }
     func sentItems() -> [([URL], DeviceID)] { sends }
+}
+
+private actor FailingTransferCoordinator: TransferCoordinating {
+    func send(items: [URL], to device: DeviceID) async throws -> TransferID {
+        throw MacChannelError.connectionFailed
+    }
+
+    func pause(_ id: TransferID) async {}
+    func resume(_ id: TransferID) async throws {}
+    func cancel(_ id: TransferID) async -> TransferCancellationResult { .tooLate }
 }
 
 @MainActor

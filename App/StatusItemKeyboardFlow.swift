@@ -24,8 +24,8 @@ final class NativeStatusItemFilePicker: StatusItemFilePicking {
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.canCreateDirectories = false
-        panel.message = "Choose files or folders to send."
-        panel.prompt = "Choose"
+        panel.message = "选择要发送的文件或文件夹。"
+        panel.prompt = "选择"
         return panel.runModal() == .OK ? panel.urls : nil
     }
 }
@@ -38,10 +38,10 @@ final class NativeStatusItemDeviceMenuPresenter: StatusItemDeviceMenuPresenting 
         select: @escaping (DeviceID) -> Bool,
         cancel: @escaping () -> Void
     ) {
-        let menu = NSMenu(title: "Choose a device")
-        let heading = NSMenuItem(title: "Choose a device", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "选择接收设备")
+        let heading = NSMenuItem(title: "选择接收设备", action: nil, keyEquivalent: "")
         heading.isEnabled = false
-        heading.setAccessibilityLabel("Choose a device")
+        heading.setAccessibilityLabel("选择接收设备")
         menu.addItem(heading)
         menu.addItem(.separator())
 
@@ -60,7 +60,7 @@ final class NativeStatusItemDeviceMenuPresenter: StatusItemDeviceMenuPresenting 
             )
             item.target = target
             item.setAccessibilityLabel(
-                "Send to \(device.displayName), \(availabilityLabel(device.availability))"
+                "发送到\(device.displayName)，\(availabilityLabel(device.availability))"
             )
             menu.addItem(item)
         }
@@ -79,9 +79,9 @@ final class NativeStatusItemDeviceMenuPresenter: StatusItemDeviceMenuPresenting 
 
     private func availabilityLabel(_ availability: DeviceAvailability) -> String {
         switch availability {
-        case .lan: "nearby"
-        case .internet: "online"
-        case .offline: "offline"
+        case .lan: "局域网在线"
+        case .internet: "互联网在线"
+        case .offline: "离线"
         }
     }
 }

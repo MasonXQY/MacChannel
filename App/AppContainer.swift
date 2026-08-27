@@ -5,13 +5,34 @@ import MacChannelCore
 final class AppContainer {
     let deviceDirectory: DeviceDirectory
     let transferCoordinator: any TransferCoordinating
+    let pairingSurfaceService: any PairingSurfaceServicing
+    let settingsSurfaceService: any DeviceSettingsServicing
+    let directorySelector: any DirectorySelecting
+    let transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)?
+    let pairingStates: AsyncStream<PairingState>?
+    let settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)?
+    let transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)?
 
     init(
         deviceDirectory: DeviceDirectory,
-        transferCoordinator: any TransferCoordinating
+        transferCoordinator: any TransferCoordinating,
+        pairingSurfaceService: any PairingSurfaceServicing = UnavailablePairingSurfaceService(),
+        settingsSurfaceService: any DeviceSettingsServicing = UnavailableDeviceSettingsService(),
+        directorySelector: any DirectorySelecting = NativeDirectorySelector(),
+        transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)? = nil,
+        pairingStates: AsyncStream<PairingState>? = nil,
+        settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)? = nil,
+        transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil
     ) {
         self.deviceDirectory = deviceDirectory
         self.transferCoordinator = transferCoordinator
+        self.pairingSurfaceService = pairingSurfaceService
+        self.settingsSurfaceService = settingsSurfaceService
+        self.directorySelector = directorySelector
+        self.transferSnapshots = transferSnapshots
+        self.pairingStates = pairingStates
+        self.settingsSnapshots = settingsSnapshots
+        self.transferHistory = transferHistory
     }
 
     static func localShell() -> AppContainer {

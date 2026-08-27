@@ -71,6 +71,10 @@ public actor PairingCoordinator: PairingHostEndpoint {
         stateContinuation.finish()
     }
 
+    public func pendingPeerSummary() -> DeviceSummary? {
+        pendingConfirmation?.peer
+    }
+
     public func createCode() async throws -> String {
         guard !codeCreationInProgress, !joinInProgress, !commitInProgress else {
             throw PairingError.operationInProgress

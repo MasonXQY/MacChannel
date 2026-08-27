@@ -114,8 +114,8 @@ final class StatusItemButton: NSStatusBarButton {
         registerForDraggedTypes([.fileURL])
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel("MacChannel file transfer")
-        setAccessibilityHelp("Open the status menu, or drag local files here to choose a device.")
+        setAccessibilityLabel("Mac 通道文件传输")
+        setAccessibilityHelp("打开状态菜单，或将本地文件拖到这里选择接收设备。")
         render()
     }
 
@@ -129,8 +129,8 @@ final class StatusItemButton: NSStatusBarButton {
             return symbol
         }
         contentTintColor = phase == .ready ? .controlAccentColor : .labelColor
-        setAccessibilityValue(presentation.accessibilityValue)
-        toolTip = presentation.accessibilityValue
+        setAccessibilityValue(phase.localizedAccessibilityValue)
+        toolTip = phase.localizedAccessibilityValue
         needsDisplay = true
     }
 
@@ -139,5 +139,18 @@ final class StatusItemButton: NSStatusBarButton {
             sequenceNumber: sender.draggingSequenceNumber,
             pasteboardChangeCount: sender.draggingPasteboard.changeCount
         )
+    }
+}
+
+extension StatusItemPhase {
+    var localizedAccessibilityValue: String {
+        switch self {
+        case .idle:
+            "空闲"
+        case .ready:
+            "可选择接收设备"
+        case .transferring:
+            "正在传输，\(presentation.title)"
+        }
     }
 }
