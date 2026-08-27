@@ -75,8 +75,11 @@
 
 ## 客户端更新
 
-1. 从干净 commit 构建 Release，嵌入正确生产 WSS URL。
-2. 对主程序和嵌入 framework 使用 Developer ID 签名，验证 hardened runtime。
+1. 从干净 commit 构建 Release，嵌入正确生产 WSS URL。签名输出应放在非文件同步目录：
+   `MACCHANNEL_BUILD_CONFIGURATION=release MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: …"
+   MACCHANNEL_APP_OUTPUT=/tmp/MacChannel.app bash Scripts/build-app.sh`。
+2. 构建器会从内到外签名嵌入 framework、主程序和 app，并启用 hardened runtime 与可信时间戳；
+   运行 `Scripts/test-release-signing.sh` 和 `codesign --verify --deep --strict` 验证。
 3. 上传 Apple 公证、等待成功并 staple；运行 `codesign --verify --deep --strict`、
    `spctl --assess --type execute` 和 `stapler validate`。
 4. 在 macOS 14 及当前支持版本验证升级保留 identity、trust、设置、历史和续传状态。
@@ -98,6 +101,5 @@
 
 - 本机缺少 Docker，完整服务栈与 forced TURN 尚未运行。
 - 没有两/三台实机验收证据。
-- 当前主机存在 Developer ID Application identity，但开发 bundler 未使用它，产物仅可能
-  带 SwiftPM ad-hoc 签名且资源封装无法通过 strict verify；同时没有 notarytool 凭据。
-  Release 签名、Gatekeeper、公证和 staple 均为 BLOCKED / NOT RUN。
+- 当前主机的 Developer ID Application 签名、hardened runtime、可信时间戳和 strict verify
+  已通过；但没有 notarytool 凭据。公证、staple 与最终 Gatekeeper 验收仍为 BLOCKED / NOT RUN。

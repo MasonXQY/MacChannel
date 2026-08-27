@@ -3,8 +3,7 @@
 Mac 通道是一款原生 macOS 菜单栏文件传输工具。把文件或文件夹拖到菜单栏图标，
 选择一台已配对且在线的 Mac，松手即可发送。它支持多台 Mac，但每次只发送到一个目标。
 
-> 当前是开发构建，尚未完成双/三台真实 Mac、生产 TURN、Developer ID 签名和 Apple
-> 公证验收，请勿把它当作已发布版本分发。
+> 当前尚未完成双/三台真实 Mac、生产 TURN 和 Apple 公证验收，请勿把它当作已发布版本分发。
 
 ## 使用要求
 
@@ -19,8 +18,17 @@ bash Scripts/build-app.sh
 open .build/MacChannel.app
 ```
 
-这是未签名的开发构建。若 macOS 阻止打开，请不要关闭系统整体安全设置；开发者应使用
-自己的 Developer ID 完成签名和公证。正式安装包必须能通过 Gatekeeper 验证。
+这是开发构建。正式签名构建必须指定 Developer ID 和非文件同步目录作为输出位置：
+
+```sh
+MACCHANNEL_BUILD_CONFIGURATION=release \
+MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: 组织名称 (TEAMID)" \
+MACCHANNEL_APP_OUTPUT="/tmp/MacChannel.app" \
+bash Scripts/build-app.sh
+```
+
+构建器会启用 hardened runtime、签名嵌入 framework，并申请可信时间戳。正式分发前仍须完成
+Apple 公证、staple 和 Gatekeeper 验证；不要关闭系统整体安全设置。
 
 ## 第一次配对
 

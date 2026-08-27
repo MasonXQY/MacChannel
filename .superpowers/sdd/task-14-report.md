@@ -43,19 +43,22 @@ Docker, signing, or notarization evidence was invented.
   test are `BLOCKED`.
 - At least two physical Macs plus a third-device pairing case are not available
   in this automated host session. RM-01 through RM-12 remain `NOT RUN`.
-- A Developer ID Application identity is installed, but `build-app.sh` does not
-  use it; SwiftPM outputs may carry ad-hoc signatures and the assembled
-  development bundle does not produce a strict-verifying resource envelope:
-  `codesign --verify --deep --strict` reported that resources required by the
-  signature are absent. `notarytool` also reported that credentials are missing.
-  Release signing, Gatekeeper assessment, notarization, and staple validation
-  remain `BLOCKED / NOT RUN`.
+- The installed Developer ID Application identity now produces a release app
+  with hardened runtime, trusted timestamp, sealed resources, successful strict
+  verification, and a successful menu-bar smoke launch. `notarytool` credentials
+  are still missing, so notarization, staple validation, and final Gatekeeper
+  assessment remain `BLOCKED / NOT RUN`.
 
 ## Fresh local verification
 
 - `bash Scripts/build-app.sh`: PASS; `.build/MacChannel.app` produced.
 - `bash Scripts/test-app-launch.sh`: PASS; development and production assembly
   smoke paths launched and exited.
+- `MACCHANNEL_CODESIGN_IDENTITY=... bash Scripts/test-release-signing.sh`: PASS;
+  Developer ID authority, hardened runtime, strict verification, sealed resources,
+  and signed menu-bar smoke launch all passed.
+- `bash Scripts/test-build-app-contract.sh`: PASS; a signing failure publishes no
+  app-shaped output and removes its private signing workspace.
 - `swift test --no-parallel`: 411 tests, 0 failures, 3 expected environment skips.
 - `go test -race ./... -count=1` and `go vet ./...`: PASS.
 - `bash Scripts/verify-e2e.sh --local-only`: 18 integration tests, 0 failures,
