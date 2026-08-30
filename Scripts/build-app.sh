@@ -3,8 +3,8 @@ set -euo pipefail
 
 build_configuration="${MACCHANNEL_BUILD_CONFIGURATION:-debug}"
 codesign_identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-app_version="${MACCHANNEL_VERSION:-1.0.0}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-1}"
+app_version="${MACCHANNEL_VERSION:-1.1.0}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-2}"
 
 case "$build_configuration" in
     debug|release) ;;
