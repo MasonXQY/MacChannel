@@ -25,8 +25,14 @@ public actor MeshConnectionListener {
     public static let maximumConcurrentHandshakes = 4
 
     private struct Handshake {
+        let ordinal: UInt64
         let connection: any MeshByteConnection
         let task: Task<Void, Never>
+    }
+
+    private struct CompletedHandshake {
+        let purpose: MeshConnectionPurpose?
+        let connection: any MeshByteConnection
     }
 
     private struct ConnectionWaiter {
@@ -38,6 +44,9 @@ public actor MeshConnectionListener {
     private var started = false
     private var stopped = false
     private var handshakes: [UUID: Handshake] = [:]
+    private var completedHandshakes: [UInt64: CompletedHandshake] = [:]
+    private var nextAcceptanceOrdinal: UInt64 = 0
+    private var nextDeliveryOrdinal: UInt64 = 0
     private var queues: [MeshConnectionPurpose: [any MeshByteConnection]] = [:]
     private var waiters: [MeshConnectionPurpose: [ConnectionWaiter]] = [:]
 
@@ -65,11 +74,13 @@ public actor MeshConnectionListener {
         handshakes.removeAll()
         let retained = queues.values.flatMap { $0 }
         queues.removeAll()
+        let completed = completedHandshakes.values.map(\.connection)
+        completedHandshakes.removeAll()
         let pendingWaiters = waiters.values.flatMap { $0 }
         waiters.removeAll()
 
         for waiter in pendingWaiters { waiter.continuation.resume(returning: nil) }
-        for connection in active + retained { await connection.close() }
+        for connection in active + retained + completed { await connection.close() }
         for task in tasks {
             task.cancel()
             await task.value
@@ -86,7 +97,7 @@ public actor MeshConnectionListener {
     }
 
     public func retainedConnectionCount() -> Int {
-        queues.values.reduce(handshakes.count) { $0 + $1.count }
+        queues.values.reduce(handshakes.count + completedHandshakes.count) { $0 + $1.count }
     }
 
     public func activeHandshakeCount() -> Int { handshakes.count }
@@ -98,6 +109,8 @@ public actor MeshConnectionListener {
             return
         }
         let identifier = UUID()
+        let ordinal = nextAcceptanceOrdinal
+        nextAcceptanceOrdinal &+= 1
         let task = Task { [weak self] in
             do {
                 let framed = MeshFramedConnection(transport: connection)
@@ -115,7 +128,11 @@ public actor MeshConnectionListener {
                 await self?.finishHandshake(identifier, purpose: nil, connection: connection)
             }
         }
-        handshakes[identifier] = Handshake(connection: connection, task: task)
+        handshakes[identifier] = Handshake(
+            ordinal: ordinal,
+            connection: connection,
+            task: task
+        )
     }
 
     private func finishHandshake(
@@ -123,25 +140,41 @@ public actor MeshConnectionListener {
         purpose: MeshConnectionPurpose?,
         connection: (any MeshByteConnection)?
     ) async {
-        guard handshakes.removeValue(forKey: identifier) != nil else { return }
-        guard !stopped, let purpose, let connection else {
-            if let connection { await connection.close() }
+        guard let handshake = handshakes.removeValue(forKey: identifier) else { return }
+        guard let connection else { return }
+        completedHandshakes[handshake.ordinal] = CompletedHandshake(
+            purpose: purpose,
+            connection: connection
+        )
+        await drainCompletedHandshakes()
+    }
+
+    private func drainCompletedHandshakes() async {
+        while let completed = completedHandshakes.removeValue(forKey: nextDeliveryOrdinal) {
+            nextDeliveryOrdinal &+= 1
+            await deliverCompletedHandshake(completed)
+        }
+    }
+
+    private func deliverCompletedHandshake(_ completed: CompletedHandshake) async {
+        guard !stopped, let purpose = completed.purpose else {
+            await completed.connection.close()
             return
         }
 
         if var purposeWaiters = waiters[purpose], !purposeWaiters.isEmpty {
             let waiter = purposeWaiters.removeFirst()
             waiters[purpose] = purposeWaiters
-            waiter.continuation.resume(returning: connection)
+            waiter.continuation.resume(returning: completed.connection)
             return
         }
 
         var queue = queues[purpose, default: []]
         guard queue.count < maximumRetainedConnections(for: purpose) else {
-            await connection.close()
+            await completed.connection.close()
             return
         }
-        queue.append(connection)
+        queue.append(completed.connection)
         queues[purpose] = queue
     }
 

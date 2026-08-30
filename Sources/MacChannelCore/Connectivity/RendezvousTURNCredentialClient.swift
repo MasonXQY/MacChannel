@@ -542,6 +542,14 @@ public actor RefreshingICEConfigurationProvider: ICEConfigurationProviding {
         guard refreshGeneration == generation else { return }
         refreshWaiters.remove(waiter)
         guard refreshWaiters.isEmpty else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(10))
+            await self?.cancelRefreshIfUnobserved(generation: generation)
+        }
+    }
+
+    private func cancelRefreshIfUnobserved(generation: Int) {
+        guard refreshGeneration == generation, refreshWaiters.isEmpty else { return }
         refreshTask?.cancel()
         refreshTask = nil
     }
