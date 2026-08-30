@@ -313,6 +313,9 @@ func TestVerifyE2EUsesAndRemovesAnIsolatedComposeProject(t *testing.T) {
 			t.Errorf("verify-e2e isolation contract missing %q", required)
 		}
 	}
+	if !strings.Contains(verifier, "env -u MACCHANNEL_COMPOSE_PROJECT_NAME -u COMPOSE_PROJECT_NAME") {
+		t.Fatal("verify-e2e must not leak its isolated Compose project into runner contract tests")
+	}
 }
 
 func withoutSingleQuotedShellSegments(script string) string {
