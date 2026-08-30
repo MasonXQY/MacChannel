@@ -98,7 +98,10 @@ struct DeviceSetting: Identifiable, Equatable, Sendable {
 }
 
 struct SettingsSurfaceSnapshot: Equatable, Sendable {
+    let localDisplayName: String
     let defaultDirectory: URL?
+    let autoReceive: Bool
+    let launchAtLogin: Bool
     let rendezvousURL: String
     let connectivityMode: ConnectivityMode
     let personalMeshEnabled: Bool
@@ -106,14 +109,20 @@ struct SettingsSurfaceSnapshot: Equatable, Sendable {
     let devices: [DeviceSetting]
 
     init(
+        localDisplayName: String = Host.current().localizedName ?? "Mac",
         defaultDirectory: URL?,
+        autoReceive: Bool = true,
+        launchAtLogin: Bool = false,
         rendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault,
         connectivityMode: ConnectivityMode = .personalMesh,
         personalMeshEnabled: Bool = false,
         personalMeshStatus: PersonalMeshStatus = .checking,
         devices: [DeviceSetting]
     ) {
+        self.localDisplayName = localDisplayName
         self.defaultDirectory = defaultDirectory
+        self.autoReceive = autoReceive
+        self.launchAtLogin = launchAtLogin
         self.rendezvousURL = rendezvousURL
         self.connectivityMode = connectivityMode
         self.personalMeshEnabled = personalMeshEnabled
@@ -130,6 +139,9 @@ protocol DirectorySelecting: AnyObject {
 @MainActor
 protocol DeviceSettingsServicing: AnyObject {
     var isAvailable: Bool { get }
+    func updateLocalDisplayName(_ name: String) async throws
+    func updateAutoReceive(_ enabled: Bool) async throws
+    func updateLaunchAtLogin(_ enabled: Bool) async throws
     func rename(_ id: DeviceID, to displayName: String) async throws
     func revoke(_ id: DeviceID) async throws -> SurfaceActionResult
     func updateReceivePolicy(
@@ -146,6 +158,15 @@ protocol DeviceSettingsServicing: AnyObject {
 }
 
 extension DeviceSettingsServicing {
+    func updateLocalDisplayName(_ name: String) async throws {
+        throw DeviceSettingsSurfaceError.unavailable
+    }
+    func updateAutoReceive(_ enabled: Bool) async throws {
+        throw DeviceSettingsSurfaceError.unavailable
+    }
+    func updateLaunchAtLogin(_ enabled: Bool) async throws {
+        throw DeviceSettingsSurfaceError.unavailable
+    }
     func updateRendezvousURL(_ value: String) async throws {
         throw DeviceSettingsSurfaceError.unavailable
     }
@@ -162,7 +183,10 @@ private enum DeviceSettingsSurfaceError: Error { case unavailable }
 
 @MainActor
 final class SettingsSurfaceModel: ObservableObject {
+    @Published var localDisplayName: String
     @Published var defaultDirectory: URL?
+    @Published var autoReceive: Bool
+    @Published var launchAtLogin: Bool
     @Published var rendezvousURL: String
     @Published var connectivityMode: ConnectivityMode
     @Published var personalMeshEnabled: Bool
@@ -173,7 +197,10 @@ final class SettingsSurfaceModel: ObservableObject {
     private let announcer: any AccessibilityAnnouncing
 
     init(
+        localDisplayName: String = Host.current().localizedName ?? "Mac",
         defaultDirectory: URL? = nil,
+        autoReceive: Bool = true,
+        launchAtLogin: Bool = false,
         rendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault,
         connectivityMode: ConnectivityMode = .personalMesh,
         personalMeshEnabled: Bool = false,
@@ -182,7 +209,10 @@ final class SettingsSurfaceModel: ObservableObject {
         actionError: String? = nil,
         announcer: (any AccessibilityAnnouncing)? = nil
     ) {
+        self.localDisplayName = localDisplayName
         self.defaultDirectory = defaultDirectory
+        self.autoReceive = autoReceive
+        self.launchAtLogin = launchAtLogin
         self.rendezvousURL = rendezvousURL
         self.connectivityMode = connectivityMode
         self.personalMeshEnabled = personalMeshEnabled
@@ -190,6 +220,53 @@ final class SettingsSurfaceModel: ObservableObject {
         self.devices = devices
         self.actionError = actionError
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
+    }
+
+    func updateLocalDisplayName(
+        _ value: String,
+        using service: any DeviceSettingsServicing
+    ) async {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let previous = localDisplayName
+        do {
+            try await service.updateLocalDisplayName(trimmed)
+            localDisplayName = trimmed
+            actionError = nil
+        } catch {
+            localDisplayName = previous
+            publishError("无法保存本机名称，请稍后重试。")
+        }
+    }
+
+    func updateAutoReceive(
+        _ enabled: Bool,
+        using service: any DeviceSettingsServicing
+    ) async {
+        let previous = autoReceive
+        do {
+            try await service.updateAutoReceive(enabled)
+            autoReceive = enabled
+            actionError = nil
+        } catch {
+            autoReceive = previous
+            publishError("无法保存自动接收设置，请稍后重试。")
+        }
+    }
+
+    func updateLaunchAtLogin(
+        _ enabled: Bool,
+        using service: any DeviceSettingsServicing
+    ) async {
+        let previous = launchAtLogin
+        do {
+            try await service.updateLaunchAtLogin(enabled)
+            launchAtLogin = enabled
+            actionError = nil
+        } catch {
+            launchAtLogin = previous
+            publishError("无法保存登录启动设置，请稍后重试。")
+        }
     }
 
     func updateConnectivityMode(

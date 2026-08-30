@@ -193,7 +193,10 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     func updateSettings(_ snapshot: SettingsSurfaceSnapshot) {
+        settingsModel.localDisplayName = snapshot.localDisplayName
         settingsModel.defaultDirectory = snapshot.defaultDirectory
+        settingsModel.autoReceive = snapshot.autoReceive
+        settingsModel.launchAtLogin = snapshot.launchAtLogin
         settingsModel.rendezvousURL = snapshot.rendezvousURL
         settingsModel.connectivityMode = snapshot.connectivityMode
         settingsModel.personalMeshEnabled = snapshot.personalMeshEnabled

@@ -94,6 +94,37 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testEssentialSettingsCommitAndFailuresRollBack() async {
+        let model = SettingsSurfaceModel(
+            localDisplayName: "原名称",
+            autoReceive: true,
+            launchAtLogin: false
+        )
+        let service = RecordingEssentialSettingsService()
+
+        await model.updateLocalDisplayName("  工作室 Mac  ", using: service)
+        await model.updateAutoReceive(false, using: service)
+        await model.updateLaunchAtLogin(true, using: service)
+
+        XCTAssertEqual(model.localDisplayName, "工作室 Mac")
+        XCTAssertFalse(model.autoReceive)
+        XCTAssertTrue(model.launchAtLogin)
+        XCTAssertEqual(service.localDisplayName, "工作室 Mac")
+        XCTAssertEqual(service.autoReceive, false)
+        XCTAssertEqual(service.launchAtLogin, true)
+
+        service.shouldFail = true
+        await model.updateLocalDisplayName("失败名称", using: service)
+        await model.updateAutoReceive(true, using: service)
+        await model.updateLaunchAtLogin(false, using: service)
+
+        XCTAssertEqual(model.localDisplayName, "工作室 Mac")
+        XCTAssertFalse(model.autoReceive)
+        XCTAssertTrue(model.launchAtLogin)
+        XCTAssertEqual(model.actionError, "无法保存登录启动设置，请稍后重试。")
+    }
+
+    @MainActor
     func testRendezvousSettingsRejectInvalidInputAndRollBackPersistenceFailure() async {
         let announcer = RecordingAccessibilityAnnouncer()
         let original = RendezvousEndpointConfiguration.packagedDefault
@@ -441,12 +472,18 @@ final class TransferSurfaceTests: XCTestCase {
         let defaultDirectory = URL(fileURLWithPath: "/tmp/默认")
         surfaces.updateSettings(
             SettingsSurfaceSnapshot(
+                localDisplayName: "工作室 Mac",
                 defaultDirectory: defaultDirectory,
+                autoReceive: false,
+                launchAtLogin: true,
                 devices: [persisted]
             )
         )
 
+        XCTAssertEqual(model.localDisplayName, "工作室 Mac")
         XCTAssertEqual(model.defaultDirectory, defaultDirectory)
+        XCTAssertFalse(model.autoReceive)
+        XCTAssertTrue(model.launchAtLogin)
         XCTAssertEqual(model.devices, [persisted])
     }
 
@@ -1065,6 +1102,33 @@ private final class WarningSettingsSurfaceService: DeviceSettingsServicing {
     }
     func updateDefaultDirectory(_ directory: URL) async throws {}
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
+}
+
+@MainActor
+private final class RecordingEssentialSettingsService: DeviceSettingsServicing {
+    let isAvailable = true
+    var shouldFail = false
+    private(set) var localDisplayName: String?
+    private(set) var autoReceive: Bool?
+    private(set) var launchAtLogin: Bool?
+
+    func rename(_ id: DeviceID, to displayName: String) async throws {}
+    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult { .committed }
+    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {}
+    func updateDefaultDirectory(_ directory: URL) async throws {}
+    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
+    func updateLocalDisplayName(_ name: String) async throws {
+        if shouldFail { throw SurfaceActionFailure.expected }
+        localDisplayName = name
+    }
+    func updateAutoReceive(_ enabled: Bool) async throws {
+        if shouldFail { throw SurfaceActionFailure.expected }
+        autoReceive = enabled
+    }
+    func updateLaunchAtLogin(_ enabled: Bool) async throws {
+        if shouldFail { throw SurfaceActionFailure.expected }
+        launchAtLogin = enabled
+    }
 }
 
 @MainActor

@@ -930,10 +930,11 @@ actor RuntimeSettingsStore {
         var directoryPath: String?
     }
     private struct Wire: Codable {
+        var schemaVersion: Int?
+        var localDisplayName: String?
         var defaultDirectoryPath: String?
-        var rendezvousURL: String?
-        var connectivityMode: ConnectivityMode?
-        var personalMeshEnabled: Bool?
+        var autoReceive: Bool?
+        var launchAtLogin: Bool?
         var devices: [UUID: DeviceWire]
     }
 
@@ -953,17 +954,24 @@ actor RuntimeSettingsStore {
         let existed = FileManager.default.fileExists(atPath: url.path)
         if existed {
             wire = try JSONDecoder().decode(Wire.self, from: Data(contentsOf: url))
-            if wire.connectivityMode == nil { wire.connectivityMode = .publicService }
         } else {
             wire = Wire(
+                schemaVersion: 2,
+                localDisplayName: Host.current().localizedName ?? "Mac",
                 defaultDirectoryPath: nil,
-                rendezvousURL: nil,
-                connectivityMode: .personalMesh,
-                personalMeshEnabled: false,
+                autoReceive: true,
+                launchAtLogin: false,
                 devices: [:]
             )
         }
-        if wire.personalMeshEnabled == nil { wire.personalMeshEnabled = false }
+        wire.schemaVersion = 2
+        if wire.localDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            != false
+        {
+            wire.localDisplayName = Host.current().localizedName ?? "Mac"
+        }
+        if wire.autoReceive == nil { wire.autoReceive = true }
+        if wire.launchAtLogin == nil { wire.launchAtLogin = false }
         for device in trustedDevices where wire.devices[device.rawValue] == nil {
             wire.devices[device.rawValue] = DeviceWire(
                 displayName: "已配对 Mac",
@@ -1015,18 +1023,27 @@ actor RuntimeSettingsStore {
         try mutate { $0.defaultDirectoryPath = directory.standardizedFileURL.path }
     }
 
+    func updateLocalDisplayName(_ name: String) throws {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw SettingsStoreError.invalidDisplayName }
+        try mutate { $0.localDisplayName = trimmed }
+    }
+
+    func updateAutoReceive(_ enabled: Bool) throws {
+        try mutate { $0.autoReceive = enabled }
+    }
+
+    func updateLaunchAtLogin(_ enabled: Bool) throws {
+        try mutate { $0.launchAtLogin = enabled }
+    }
+
     func updateRendezvousURL(_ value: String) throws {
-        let endpoints = try RendezvousEndpointConfiguration.parse(value)
-        try mutate { $0.rendezvousURL = endpoints.webSocketURL.absoluteString }
+        _ = try RendezvousEndpointConfiguration.parse(value)
     }
 
-    func updateConnectivityMode(_ mode: ConnectivityMode) throws {
-        try mutate { $0.connectivityMode = mode }
-    }
+    func updateConnectivityMode(_ mode: ConnectivityMode) throws {}
 
-    func updatePersonalMeshEnabled(_ enabled: Bool) throws {
-        try mutate { $0.personalMeshEnabled = enabled }
-    }
+    func updatePersonalMeshEnabled(_ enabled: Bool) throws {}
 
     func updatePersonalMeshStatus(_ status: PersonalMeshStatus) {
         personalMeshStatus = status
@@ -1113,10 +1130,13 @@ actor RuntimeSettingsStore {
 
     private func snapshot(_ wire: Wire) -> SettingsSurfaceSnapshot {
         SettingsSurfaceSnapshot(
+            localDisplayName: wire.localDisplayName ?? "Mac",
             defaultDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:)),
-            rendezvousURL: wire.rendezvousURL ?? defaultRendezvousURL,
-            connectivityMode: wire.connectivityMode ?? .publicService,
-            personalMeshEnabled: wire.personalMeshEnabled ?? false,
+            autoReceive: wire.autoReceive ?? true,
+            launchAtLogin: wire.launchAtLogin ?? false,
+            rendezvousURL: defaultRendezvousURL,
+            connectivityMode: .publicService,
+            personalMeshEnabled: false,
             personalMeshStatus: personalMeshStatus,
             devices: wire.devices.map { id, value in
                 DeviceSetting(
@@ -1138,7 +1158,7 @@ actor RuntimeSettingsStore {
     private func removeSubscriber(_ id: UUID) { subscribers.removeValue(forKey: id) }
 }
 
-private enum SettingsStoreError: Error { case unknownDevice, persistence }
+private enum SettingsStoreError: Error { case unknownDevice, invalidDisplayName, persistence }
 
 @MainActor
 final class ProductionDeviceSettingsService: DeviceSettingsServicing {
@@ -1164,6 +1184,16 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
         self.openURL = openURL
     }
 
+    func updateLocalDisplayName(_ name: String) async throws {
+        try await store.updateLocalDisplayName(name)
+    }
+    func updateAutoReceive(_ enabled: Bool) async throws {
+        try await store.updateAutoReceive(enabled)
+        await onReceiveConfigurationChanged?()
+    }
+    func updateLaunchAtLogin(_ enabled: Bool) async throws {
+        try await store.updateLaunchAtLogin(enabled)
+    }
     func rename(_ id: DeviceID, to displayName: String) async throws {
         try await store.rename(id, to: displayName)
     }
@@ -1333,6 +1363,31 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     func pendingPeer() async -> DeviceSummary? { await coordinator.pendingPeerSummary() }
 }
 
+enum RuntimeReceivePolicy {
+    static func make(
+        snapshot: SettingsSurfaceSnapshot,
+        trustedSources: Set<DeviceID>
+    ) -> ReceivePolicy {
+        ReceivePolicy(
+            trustedSources: trustedSources,
+            defaultAutoAccept: snapshot.autoReceive,
+            perDevice: Dictionary(
+                uniqueKeysWithValues: snapshot.devices.map {
+                    (
+                        $0.id,
+                        DeviceReceivePolicy(
+                            autoAccept: snapshot.autoReceive && $0.autoAccept,
+                            maximumBytes: SettingsSizeLimit.bytes(
+                                megabytes: $0.maximumMegabytes
+                            )
+                        )
+                    )
+                }
+            )
+        )
+    }
+}
+
 private actor IncomingRuntimeController {
     private let source: any IncomingTransferConnectionSource
     private let trustRepository: TrustRepository
@@ -1383,18 +1438,9 @@ private actor IncomingRuntimeController {
     private func makeListener() async -> IncomingTransferListener {
         let trust = await trustRepository.currentTrustStore()
         let snapshot = await settings.current()
-        let policy = ReceivePolicy(
-            trustedSources: trust.trustedDeviceIDs.subtracting([ownerID]),
-            perDevice: Dictionary(
-                uniqueKeysWithValues: snapshot.devices.map {
-                    (
-                        $0.id,
-                        DeviceReceivePolicy(
-                            autoAccept: $0.autoAccept,
-                            maximumBytes: SettingsSizeLimit.bytes(megabytes: $0.maximumMegabytes)
-                        )
-                    )
-                })
+        let policy = RuntimeReceivePolicy.make(
+            snapshot: snapshot,
+            trustedSources: trust.trustedDeviceIDs.subtracting([ownerID])
         )
         return IncomingTransferListener(
             source: source,

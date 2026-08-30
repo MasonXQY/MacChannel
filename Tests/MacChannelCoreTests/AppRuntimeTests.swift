@@ -304,18 +304,51 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(retained, actualOutput)
     }
 
-    func testRendezvousURLPersistsInRuntimeSettings() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let url = root.appendingPathComponent("settings.json")
-        let settings = try RuntimeSettingsStore(url: url, trustedDevices: [])
+    @MainActor
+    func testProductionSettingsServicePersistsEssentialPreferences() async throws {
+        let fixture = try makeTrustedRuntimeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let service = ProductionDeviceSettingsService(
+            store: fixture.settings,
+            trustRepository: fixture.repository,
+            trustStore: FailingTrustSnapshotPersister()
+        )
 
-        try await settings.updateRendezvousURL("wss://relay.example:8443/v1/ws")
+        try await service.updateLocalDisplayName("工作室 Mac")
+        try await service.updateAutoReceive(false)
+        try await service.updateLaunchAtLogin(true)
 
-        let reloaded = try RuntimeSettingsStore(url: url, trustedDevices: [])
-        let snapshot = await reloaded.current()
-        XCTAssertEqual(snapshot.rendezvousURL, "wss://relay.example:8443/v1/ws")
+        let snapshot = await fixture.settings.current()
+        XCTAssertEqual(snapshot.localDisplayName, "工作室 Mac")
+        XCTAssertFalse(snapshot.autoReceive)
+        XCTAssertTrue(snapshot.launchAtLogin)
+    }
+
+    func testGlobalAutoReceiveGatesOtherwiseEnabledTrustedDevices() throws {
+        let peer = DeviceID(rawValue: UUID())
+        let snapshot = SettingsSurfaceSnapshot(
+            defaultDirectory: nil,
+            autoReceive: false,
+            devices: [
+                DeviceSetting(
+                    device: DeviceSummary(
+                        id: peer,
+                        displayName: "书房 Mac",
+                        availability: .internet
+                    ),
+                    autoAccept: true
+                )
+            ]
+        )
+
+        let policy = RuntimeReceivePolicy.make(
+            snapshot: snapshot,
+            trustedSources: [peer]
+        )
+
+        XCTAssertThrowsError(try policy.authorize(source: peer, aggregateBytes: 1)) { error in
+            XCTAssertEqual(error as? ReceiveStoreError, .automaticReceiveDisabled)
+        }
     }
 
     @MainActor
