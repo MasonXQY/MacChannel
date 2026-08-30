@@ -7,6 +7,7 @@ public enum PairingError: Error, Equatable, Sendable {
     case rateLimited
     case fingerprintMismatch
     case authorizationPending
+    case authorizationRejected
     case noPendingConfirmation
     case invalidPeerIdentity
     case invalidHandshake
@@ -32,6 +33,8 @@ extension PairingError {
             .pairingFingerprintMismatch
         case .authorizationPending:
             .pairingAuthorizationPending
+        case .authorizationRejected:
+            .pairingRejected
         case .invalidPeerIdentity, .invalidHandshake:
             .pairingHandshakeFailed
         case .noPendingConfirmation, .invalidTrustStore:
@@ -52,6 +55,9 @@ public enum PairingState: Equatable, Sendable {
     case idle
     case displayingCode(expiresAt: Date)
     case joining
+    case approvalRequested(DeviceSummary)
+    case awaitingHostApproval(DeviceSummary)
+    case committing(DeviceSummary)
     case awaitingFingerprint(local: String, remote: String)
     case confirmed(DeviceSummary)
     case failed(MacChannelError)

@@ -306,7 +306,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
             switch state {
             case .idle, .confirmed, .failed:
                 pairingModel.hostedCode = nil
-            case .displayingCode, .joining, .awaitingFingerprint:
+            case .displayingCode, .joining, .approvalRequested, .awaitingHostApproval,
+                .committing, .awaitingFingerprint:
                 break
             }
         }
@@ -319,6 +320,11 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
             }
         }
         switch state {
+        case let .approvalRequested(peer), let .awaitingHostApproval(peer),
+            let .committing(peer):
+            pendingPeerTask?.cancel()
+            pendingPeerTask = nil
+            pairingModel.pendingPeer = peer
         case .awaitingFingerprint:
             pendingPeerTask?.cancel()
             pairingModel.pendingPeer = nil

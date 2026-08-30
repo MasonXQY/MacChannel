@@ -4,6 +4,74 @@ import XCTest
 @testable import MacChannelCore
 
 final class PairingTests: XCTestCase {
+    func testJoinerWaitsForSingleHostApprovalBeforeEitherSideCompletesPairing() async throws {
+        let context = try PairingTestContext()
+        _ = try await context.joiner.join(code: try await context.host.createCode())
+
+        let hostApprovalState = await context.host.currentState()
+        let joinerWaitingState = await context.joiner.currentState()
+        XCTAssertEqual(
+            hostApprovalState,
+            .approvalRequested(
+                DeviceSummary(
+                    id: context.joinerID,
+                    displayName: "Joining Mac",
+                    availability: .internet
+                )
+            )
+        )
+        XCTAssertEqual(
+            joinerWaitingState,
+            .awaitingHostApproval(
+                DeviceSummary(
+                    id: context.hostID,
+                    displayName: "Host Mac",
+                    availability: .internet
+                )
+            )
+        )
+        let hostTrustedBeforeApproval = await context.host.isTrusted(context.joinerID)
+        let joinerTrustedBeforeApproval = await context.joiner.isTrusted(context.hostID)
+        XCTAssertFalse(hostTrustedBeforeApproval)
+        XCTAssertFalse(joinerTrustedBeforeApproval)
+
+        let joinerCompletion = Task {
+            try await context.joiner.awaitHostApproval()
+        }
+        await Task.yield()
+        let issued = try await context.host.approvePendingPairing()
+        let received = try await joinerCompletion.value
+
+        XCTAssertEqual(received.signature, issued.signature)
+        let hostTrustedAfterApproval = await context.host.isTrusted(context.joinerID)
+        let joinerTrustedAfterApproval = await context.joiner.isTrusted(context.hostID)
+        XCTAssertTrue(hostTrustedAfterApproval)
+        XCTAssertTrue(joinerTrustedAfterApproval)
+    }
+
+    func testHostRejectionNotifiesWaitingJoinerAndLeavesBothSidesUntrusted() async throws {
+        let context = try PairingTestContext()
+        _ = try await context.joiner.join(code: try await context.host.createCode())
+        let joinerCompletion = Task {
+            try await context.joiner.awaitHostApproval()
+        }
+        await Task.yield()
+
+        try await context.host.rejectPendingPairing()
+
+        await XCTAssertThrowsErrorAsync(try await joinerCompletion.value) { error in
+            XCTAssertEqual(error as? PairingError, .authorizationRejected)
+        }
+        let hostTrustedAfterRejection = await context.host.isTrusted(context.joinerID)
+        let joinerTrustedAfterRejection = await context.joiner.isTrusted(context.hostID)
+        let hostStateAfterRejection = await context.host.currentState()
+        let joinerStateAfterRejection = await context.joiner.currentState()
+        XCTAssertFalse(hostTrustedAfterRejection)
+        XCTAssertFalse(joinerTrustedAfterRejection)
+        XCTAssertEqual(hostStateAfterRejection, .idle)
+        XCTAssertEqual(joinerStateAfterRejection, .failed(.pairingRejected))
+    }
+
     func testCreateCodePublishesSixDigitsForFiveMinutes() async throws {
         let clock = TestClock(now: Date(timeIntervalSince1970: 1_000))
         let server = MemoryPairingServer(clock: clock)
@@ -182,7 +250,7 @@ final class PairingTests: XCTestCase {
         }
     }
 
-    func testAuthenticatedECDHHandshakeShowsMatchingFingerprintAndConfirmationEstablishesTrust() async throws {
+    func testAuthenticatedECDHHandshakeRequestsHostApprovalAndEstablishesTrust() async throws {
         let context = try PairingTestContext()
         let result = try await context.joiner.join(code: try await context.host.createCode())
         let expectedFingerprint = fingerprint(for: result)
@@ -192,8 +260,26 @@ final class PairingTests: XCTestCase {
         let joinerPendingPeer = await context.joiner.pendingPeerSummary()
 
         XCTAssertEqual(result.fingerprint, expectedFingerprint)
-        XCTAssertEqual(hostAwaitingState, .awaitingFingerprint(local: expectedFingerprint, remote: expectedFingerprint))
-        XCTAssertEqual(joinerAwaitingState, .awaitingFingerprint(local: expectedFingerprint, remote: expectedFingerprint))
+        XCTAssertEqual(
+            hostAwaitingState,
+            .approvalRequested(
+                DeviceSummary(
+                    id: context.joinerID,
+                    displayName: "Joining Mac",
+                    availability: .internet
+                )
+            )
+        )
+        XCTAssertEqual(
+            joinerAwaitingState,
+            .awaitingHostApproval(
+                DeviceSummary(
+                    id: context.hostID,
+                    displayName: "Host Mac",
+                    availability: .internet
+                )
+            )
+        )
         XCTAssertEqual(
             hostPendingPeer,
             DeviceSummary(
@@ -518,7 +604,7 @@ final class PairingTests: XCTestCase {
         await blockingHostTransport.waitUntilReserveStarted()
 
         let newCode = try await host.createCode()
-        let newResult = try await newJoiner.join(code: newCode)
+        _ = try await newJoiner.join(code: newCode)
         await blockingHostTransport.releaseReserve()
 
         await XCTAssertThrowsErrorAsync(try await oldConfirmation.value) { error in
@@ -533,7 +619,13 @@ final class PairingTests: XCTestCase {
         XCTAssertFalse(trustsNew)
         XCTAssertEqual(
             currentState,
-            .awaitingFingerprint(local: newResult.fingerprint, remote: newResult.fingerprint)
+            .approvalRequested(
+                DeviceSummary(
+                    id: newJoinerIdentity.id,
+                    displayName: "Mac",
+                    availability: .internet
+                )
+            )
         )
     }
 

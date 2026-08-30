@@ -233,7 +233,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
                 issuedAuthorization: nil,
                 deliveryReservation: nil
             )
-            transition(to: .awaitingFingerprint(local: fingerprint, remote: fingerprint))
+            transition(to: .awaitingHostApproval(peer))
             return PairingJoinResult(
                 sessionID: response.sessionID,
                 peer: peer,
@@ -340,7 +340,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
                 issuedAuthorization: nil,
                 deliveryReservation: nil
             )
-            transition(to: .awaitingFingerprint(local: fingerprint, remote: fingerprint))
+            transition(to: .approvalRequested(peer))
             return PairingJoinResponse(
                 sessionID: sessionID,
                 hostIdentitySignature: try identity.sign(responseTranscript).derRepresentation,
@@ -388,6 +388,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
 
         pending.localConfirmed = true
         pendingConfirmation = pending
+        transition(to: .committing(pending.peer))
         do {
             switch pending.role {
             case .host:
@@ -397,10 +398,69 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
             }
         } catch {
             if pendingMatches(pending) {
-                transitionToFailure(error)
+                if error as? PairingError == .authorizationPending {
+                    transition(to: .awaitingHostApproval(pending.peer))
+                } else {
+                    transitionToFailure(error)
+                }
             }
             throw error
         }
+    }
+
+    @discardableResult
+    public func approvePendingPairing() async throws -> SignedTrustRecord {
+        guard let pending = pendingConfirmation else {
+            throw PairingError.noPendingConfirmation
+        }
+        guard case .host = pending.role else {
+            throw PairingError.operationInProgress
+        }
+        return try await confirmFingerprint(pending.fingerprint)
+    }
+
+    @discardableResult
+    public func awaitHostApproval() async throws -> SignedTrustRecord {
+        guard let initial = pendingConfirmation else {
+            throw PairingError.noPendingConfirmation
+        }
+        guard case .joiner = initial.role else {
+            throw PairingError.operationInProgress
+        }
+        while true {
+            do {
+                return try await confirmFingerprint(initial.fingerprint)
+            } catch PairingError.authorizationPending {
+                try validatePendingIsCurrentAndLive(initial)
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                throw error
+            }
+        }
+    }
+
+    public func rejectPendingPairing() async throws {
+        guard !commitInProgress,
+            !confirmationInProgress,
+            !joinInProgress,
+            !codeCreationInProgress
+        else { throw PairingError.operationInProgress }
+        guard let pending = pendingConfirmation else {
+            throw PairingError.noPendingConfirmation
+        }
+        guard case .host = pending.role else {
+            throw PairingError.operationInProgress
+        }
+        if let bilateral = transport as? any BilateralPairingTransport {
+            await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
+        } else {
+            try await transport.rejectAuthorization(for: pending.sessionID)
+        }
+        if let reservation = pending.deliveryReservation {
+            await transport.cancelAuthorizationDelivery(reservation)
+        }
+        clearPendingIfMatching(pending)
+        transition(to: .idle)
     }
 
     public func currentState() -> PairingState {

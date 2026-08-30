@@ -18,11 +18,15 @@ public protocol PairingTransport: Sendable {
         _ envelope: PairingAuthorizationEnvelope, reservation: PairingDeliveryReservation)
         async throws
     func cancelAuthorizationDelivery(_ reservation: PairingDeliveryReservation) async
+    func rejectAuthorization(for sessionID: PairingSessionID) async throws
     func authorization(for sessionID: PairingSessionID) async throws -> PairingAuthorizationEnvelope
 }
 
 extension PairingTransport {
     public var codeLifetime: TimeInterval { 300 }
+    public func rejectAuthorization(for sessionID: PairingSessionID) async throws {
+        throw PairingError.invalidHandshake
+    }
 }
 
 /// Direct transports use this extension to exchange both directional trust
@@ -87,6 +91,10 @@ public struct MemoryPairingTransport: PairingTransport {
         await server.cancelAuthorizationDelivery(reservation, source: source)
     }
 
+    public func rejectAuthorization(for sessionID: PairingSessionID) async throws {
+        try await server.rejectAuthorization(for: sessionID, source: source)
+    }
+
     public func authorization(for sessionID: PairingSessionID) async throws
         -> PairingAuthorizationEnvelope
     {
@@ -121,6 +129,11 @@ public actor MemoryPairingServer {
         var retrieved: Bool
     }
 
+    private struct RejectedRoute {
+        let route: SessionRoute
+        let expiresAt: Date
+    }
+
     private static let sourceFailureLimit = 5
     private static let codeFailureLimit = 20
     private static let globalFailureLimit = 100
@@ -138,6 +151,7 @@ public actor MemoryPairingServer {
     private var offers: [String: StoredOffer] = [:]
     private var sessionRoutes: [PairingSessionID: SessionRoute] = [:]
     private var deliveredMailboxes: [PairingSessionID: DeliveredMailbox] = [:]
+    private var rejectedRoutes: [PairingSessionID: RejectedRoute] = [:]
     private var reservations: [UUID: ReservationEntry] = [:]
     private var pendingRoutesBySource: [PairingSourceContext: Int] = [:]
     private var pendingRoutesGlobal = 0
@@ -312,9 +326,28 @@ public actor MemoryPairingServer {
         purgeExpiredState()
     }
 
+    func rejectAuthorization(for sessionID: PairingSessionID, source: PairingSourceContext) throws {
+        purgeExpiredState()
+        guard let route = sessionRoutes[sessionID], route.host == source else {
+            throw PairingError.invalidHandshake
+        }
+        sessionRoutes.removeValue(forKey: sessionID)
+        rejectedRoutes[sessionID] = RejectedRoute(
+            route: route,
+            expiresAt: clock.now.addingTimeInterval(Self.authorizationMailboxTTL)
+        )
+    }
+
     func authorization(for sessionID: PairingSessionID, source: PairingSourceContext) throws
         -> PairingAuthorizationEnvelope
     {
+        if let rejection = rejectedRoutes[sessionID], rejection.route.joiner == source {
+            guard clock.now < rejection.expiresAt else {
+                rejectedRoutes.removeValue(forKey: sessionID)
+                throw PairingError.sessionExpired
+            }
+            throw PairingError.authorizationRejected
+        }
         if let mailbox = deliveredMailboxes[sessionID], mailbox.joiner == source,
             clock.now >= mailbox.expiresAt
         {
@@ -461,6 +494,7 @@ public actor MemoryPairingServer {
         globalFailures = globalFailures.filter { $0 > cutoff }
         offers = offers.filter { $0.value.offer.expiresAt > now }
         deliveredMailboxes = deliveredMailboxes.filter { $0.value.expiresAt > now }
+        rejectedRoutes = rejectedRoutes.filter { $0.value.expiresAt > now }
         let reservedSessions = Set(reservations.values.map(\.reservation.sessionID))
         let expired = sessionRoutes.compactMap { id, route in
             route.expiresAt <= now && !reservedSessions.contains(id) ? id : nil

@@ -180,6 +180,16 @@ public actor RendezvousPairingTransport: PairingTransport {
         )
     }
 
+    public func rejectAuthorization(for sessionID: PairingSessionID) async throws {
+        let session = sessionID.rawValue.uuidString.lowercased()
+        _ = try await request(
+            method: "POST",
+            path: "/v1/pairing/sessions/\(escaped(session))/authorization/reject",
+            payload: SessionPayload(sessionID: session),
+            expected: [204]
+        )
+    }
+
     public func authorization(
         for sessionID: PairingSessionID
     ) async throws -> PairingAuthorizationEnvelope {
@@ -333,6 +343,7 @@ public actor RendezvousPairingTransport: PairingTransport {
         case 409: .codeAlreadyUsed
         case 410: .sessionExpired
         case 425: .authorizationPending
+        case 422: .authorizationRejected
         case 429: .rateLimited
         case 503: .resourceExhausted
         default: .invalidHandshake

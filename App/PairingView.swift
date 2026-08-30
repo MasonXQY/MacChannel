@@ -229,6 +229,15 @@ struct PairingView: View {
                 Label("正在验证配对码…", systemImage: "arrow.triangle.2.circlepath")
                     .frame(maxWidth: .infinity, minHeight: 80)
                     .accessibilityLabel("正在验证配对码")
+            case let .approvalRequested(device):
+                Label("\(device.displayName) 想要加入", systemImage: "person.crop.circle.badge.questionmark")
+                    .frame(maxWidth: .infinity, minHeight: 80)
+            case let .awaitingHostApproval(device):
+                Label("等待 \(device.displayName) 允许…", systemImage: "hourglass")
+                    .frame(maxWidth: .infinity, minHeight: 80)
+            case let .committing(device):
+                Label("正在安全连接 \(device.displayName)…", systemImage: "lock.shield")
+                    .frame(maxWidth: .infinity, minHeight: 80)
             case let .awaitingFingerprint(local, _):
                 fingerprintContent(peer: model.pendingPeer, fingerprint: local)
             case let .confirmed(device):
@@ -395,6 +404,7 @@ struct PairingView: View {
         case .pairingCodeExpired: "配对码已过期"
         case .pairingCodeAlreadyUsed: "配对码已使用"
         case .pairingRateLimited: "尝试次数过多，请稍后再试"
+        case .pairingRejected: "另一台 Mac 拒绝了配对"
         case .pairingFingerprintMismatch: "设备指纹不一致"
         case .pairingSessionExpired: "配对会话已过期"
         default: "无法完成配对"

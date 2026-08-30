@@ -13,15 +13,14 @@ final class MeshPairingTests: XCTestCase {
             hostState, .displayingCode(expiresAt: fixture.clock.now.addingTimeInterval(600)))
 
         let joined = try await fixture.joiner.join(code: code)
-        let pendingFingerprint = await fixture.host.pendingFingerprint()
-        let hostFingerprint = try XCTUnwrap(pendingFingerprint)
+        let hostFingerprint = joined.fingerprint
         XCTAssertEqual(joined.fingerprint, hostFingerprint)
 
         _ = try await fixture.host.confirmFingerprint(hostFingerprint)
         let hostBeforePeerCommit = await fixture.host.currentState()
         XCTAssertEqual(
             hostBeforePeerCommit,
-            .awaitingFingerprint(local: hostFingerprint, remote: hostFingerprint)
+            .committing(fixture.joinerSummary)
         )
         let hostPrematureTrust = await fixture.host.isTrusted(fixture.joinerIdentity.id)
         let joinerPrematureTrust = await fixture.joiner.isTrusted(fixture.hostIdentity.id)
@@ -274,8 +273,7 @@ final class MeshPairingTests: XCTestCase {
         let fixture = try await MeshPairingFixture.make()
         let code = try await fixture.host.createCode()
         let joined = try await fixture.joiner.join(code: code)
-        let pendingFingerprint = await fixture.host.pendingFingerprint()
-        let fingerprint = try XCTUnwrap(pendingFingerprint)
+        let fingerprint = joined.fingerprint
         _ = try await fixture.host.confirmFingerprint(fingerprint)
         _ = try await fixture.joinTransport.authorization(for: joined.sessionID)
 
@@ -659,13 +657,6 @@ private final class MeshPairingTestConnection: MeshByteConnection, @unchecked Se
         try await link.receive(side: side, maximum: maximum)
     }
     func close() async { await link.close(side: side) }
-}
-
-extension PairingCoordinator {
-    fileprivate func pendingFingerprint() async -> String? {
-        guard case .awaitingFingerprint(let local, _) = currentState() else { return nil }
-        return local
-    }
 }
 
 extension PairingJoinRequest {
