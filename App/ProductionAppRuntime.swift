@@ -253,8 +253,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
 
         let settingsStore = try RuntimeSettingsStore(
             url: configuration.dataDirectory.appendingPathComponent("settings.json"),
-            trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id]),
-            defaultRendezvousURL: configuration.packagedRendezvousURL
+            trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id])
         )
         let settingsSnapshot = await settingsStore.current()
         let database = try TransferDatabase(
@@ -558,17 +557,14 @@ actor RuntimeSettingsStore {
     }
 
     private let url: URL
-    private let defaultRendezvousURL: String
     private var wire: Wire
     private var subscribers: [UUID: AsyncStream<SettingsSurfaceSnapshot>.Continuation] = [:]
 
     init(
         url: URL,
-        trustedDevices: Set<DeviceID>,
-        defaultRendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault
+        trustedDevices: Set<DeviceID>
     ) throws {
         self.url = url
-        self.defaultRendezvousURL = defaultRendezvousURL
         let existed = FileManager.default.fileExists(atPath: url.path)
         if existed {
             wire = try JSONDecoder().decode(Wire.self, from: Data(contentsOf: url))
@@ -655,10 +651,6 @@ actor RuntimeSettingsStore {
         try mutate { $0.launchAtLogin = enabled }
     }
 
-    func updateRendezvousURL(_ value: String) throws {
-        _ = try RendezvousEndpointConfiguration.parse(value)
-    }
-
     func updateDirectory(_ directory: URL?, for id: DeviceID) throws {
         try mutate { candidate in
             guard candidate.devices[id.rawValue] != nil else {
@@ -742,7 +734,6 @@ actor RuntimeSettingsStore {
             defaultDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:)),
             autoReceive: wire.autoReceive ?? true,
             launchAtLogin: wire.launchAtLogin ?? false,
-            rendezvousURL: defaultRendezvousURL,
             devices: wire.devices.map { id, value in
                 DeviceSetting(
                     device: DeviceSummary(
@@ -834,16 +825,14 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
 protocol ProductionPairingCoordinating: Sendable {
     func createCode() async throws -> String
     func join(code: String) async throws -> PairingJoinResult
-    func confirmForSurface(_ fingerprint: String) async throws
+    func approvePendingPairing() async throws -> SignedTrustRecord
+    func rejectPendingPairing() async throws
+    func awaitHostApproval() async throws -> SignedTrustRecord
     func cancelPendingPairing() async throws
     func pendingPeerSummary() async -> DeviceSummary?
 }
 
-extension PairingCoordinator: ProductionPairingCoordinating {
-    func confirmForSurface(_ fingerprint: String) async throws {
-        _ = try await confirmFingerprint(fingerprint)
-    }
-}
+extension PairingCoordinator: ProductionPairingCoordinating {}
 
 @MainActor
 final class PersistingPairingSurfaceService: PairingSurfaceServicing {
@@ -871,11 +860,11 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     func join(code: String) async throws -> PairingJoinResult {
         return try await coordinator.join(code: code)
     }
-    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
+    func approve() async throws -> SurfaceActionResult {
         let pendingPeer = await coordinator.pendingPeerSummary()
         var warnings: [String] = []
         do {
-            try await coordinator.confirmForSurface(fingerprint)
+            _ = try await coordinator.approvePendingPairing()
         } catch {
             guard let pendingPeer,
                 await trustRepository.isTrusted(pendingPeer.id)
@@ -890,6 +879,27 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
         if let device = pendingPeer,
             await trustRepository.isTrusted(device.id)
         {
+            do {
+                try await settings.recordPaired(device)
+            } catch {
+                warnings.append("设备信任已建立，但设备设置未保存；请检查存储权限后重试。")
+            }
+        }
+        await onReceiveConfigurationChanged?()
+        guard !warnings.isEmpty else { return .committed }
+        return .committedWithWarning(warnings.joined(separator: " "))
+    }
+    func reject() async throws { try await coordinator.rejectPendingPairing() }
+    func awaitHostApproval() async throws -> SurfaceActionResult {
+        let pendingPeer = await coordinator.pendingPeerSummary()
+        _ = try await coordinator.awaitHostApproval()
+        var warnings: [String] = []
+        do {
+            try await trustStore.persistLatest(from: trustRepository)
+        } catch {
+            warnings.append("设备信任已建立，但本地信任记录未保存；请检查存储权限后重启确认。")
+        }
+        if let device = pendingPeer, await trustRepository.isTrusted(device.id) {
             do {
                 try await settings.recordPaired(device)
             } catch {

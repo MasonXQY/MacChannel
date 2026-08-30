@@ -12,8 +12,8 @@ final class PersonalMeshRuntimeTests: XCTestCase {
         let freshURL = root.appendingPathComponent("fresh.json")
         let fresh = try RuntimeSettingsStore(url: freshURL, trustedDevices: [])
         let freshSnapshot = await fresh.current()
-        XCTAssertEqual(freshSnapshot.connectivityMode, .publicService)
-        XCTAssertFalse(freshSnapshot.personalMeshEnabled)
+        XCTAssertFalse(freshSnapshot.localDisplayName.isEmpty)
+        XCTAssertTrue(freshSnapshot.autoReceive)
     }
 
     func testEssentialUserPreferencesPersistWithoutNetworkConfiguration() async throws {
@@ -71,8 +71,6 @@ final class PersonalMeshRuntimeTests: XCTestCase {
             trustedDevices: [peer]
         )
         let snapshot = await migrated.current()
-        XCTAssertEqual(snapshot.connectivityMode, .publicService)
-        XCTAssertFalse(snapshot.personalMeshEnabled)
         XCTAssertEqual(snapshot.defaultDirectory?.path, "/tmp/downloads")
         XCTAssertEqual(snapshot.devices.first?.displayName, "书房 Mac")
         XCTAssertFalse(try XCTUnwrap(snapshot.devices.first).autoAccept)

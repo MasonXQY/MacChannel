@@ -16,48 +16,27 @@ enum PairingCodeInput {
     }
 }
 
-struct PairingFingerprintPresentation: Equatable {
-    let peer: DeviceSummary?
-    let fingerprint: String
-
-    var canConfirm: Bool { peer != nil && !fingerprint.isEmpty }
-    var peerText: String {
-        guard let peer else { return "尚未确认对端设备身份" }
-        return "正在配对：\(peer.displayName)"
-    }
-    var statusText: String {
-        guard !fingerprint.isEmpty else { return "尚未生成安全指纹" }
-        return peer == nil ? "等待获取对端设备身份" : "等待你在另一台 Mac 上人工核对"
-    }
-    var statusSymbol: String { canConfirm ? "person.2.badge.key" : "exclamationmark.triangle" }
-    var accessibilityFingerprint: String {
-        fingerprint.filter { !$0.isWhitespace }.map(String.init).joined(separator: " ")
-    }
-}
-
-struct MeshPairingPeerChoice: Identifiable, Equatable, Sendable {
-    let id: String
-    let displayName: String
-}
-
 @MainActor
 protocol PairingSurfaceServicing: AnyObject {
     var isAvailable: Bool { get }
     var codeLifetime: TimeInterval { get }
     func createCode() async throws -> String
     func join(code: String) async throws -> PairingJoinResult
-    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult
+    func approve() async throws -> SurfaceActionResult
+    func reject() async throws
+    func awaitHostApproval() async throws -> SurfaceActionResult
     func cancel() async throws
     func pendingPeer() async -> DeviceSummary?
-    func availableMeshPeers() async -> [MeshPairingPeerChoice]
-    func selectMeshPeer(_ id: String) async throws
 }
 
 extension PairingSurfaceServicing {
     var codeLifetime: TimeInterval { 300 }
     func pendingPeer() async -> DeviceSummary? { nil }
-    func availableMeshPeers() async -> [MeshPairingPeerChoice] { [] }
-    func selectMeshPeer(_ id: String) async throws {}
+    func approve() async throws -> SurfaceActionResult { throw PairingSurfaceError.unavailable }
+    func reject() async throws { throw PairingSurfaceError.unavailable }
+    func awaitHostApproval() async throws -> SurfaceActionResult {
+        throw PairingSurfaceError.unavailable
+    }
 }
 
 @MainActor
@@ -67,10 +46,9 @@ final class PairingSurfaceModel: ObservableObject {
     @Published var entryCode: String
     @Published var pendingPeer: DeviceSummary?
     @Published var actionError: String?
-    @Published var meshPeers: [MeshPairingPeerChoice]
-    @Published var selectedMeshPeerID: String?
     @Published var hostedCodeLifetimeMinutes: Int = 5
     private let announcer: any AccessibilityAnnouncing
+    private var approvalTask: Task<Void, Never>?
 
     init(
         state: PairingState = .idle,
@@ -78,8 +56,6 @@ final class PairingSurfaceModel: ObservableObject {
         entryCode: String = "",
         pendingPeer: DeviceSummary? = nil,
         actionError: String? = nil,
-        meshPeers: [MeshPairingPeerChoice] = [],
-        selectedMeshPeerID: String? = nil,
         announcer: (any AccessibilityAnnouncing)? = nil
     ) {
         self.state = state
@@ -87,31 +63,10 @@ final class PairingSurfaceModel: ObservableObject {
         self.entryCode = PairingCodeInput.sanitize(entryCode)
         self.pendingPeer = pendingPeer
         self.actionError = actionError
-        self.meshPeers = meshPeers
-        self.selectedMeshPeerID = selectedMeshPeerID
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
     }
 
-    func refreshMeshPeers(using service: any PairingSurfaceServicing) async {
-        let peers = await service.availableMeshPeers()
-        meshPeers = peers
-        if peers.count == 1, selectedMeshPeerID == nil {
-            selectedMeshPeerID = peers[0].id
-            try? await service.selectMeshPeer(peers[0].id)
-        } else if let selectedMeshPeerID, !peers.contains(where: { $0.id == selectedMeshPeerID }) {
-            self.selectedMeshPeerID = nil
-        }
-    }
-
-    func selectMeshPeer(_ id: String, using service: any PairingSurfaceServicing) async {
-        do {
-            try await service.selectMeshPeer(id)
-            selectedMeshPeerID = id
-            actionError = nil
-        } catch {
-            publishError("无法选择这台 Mac，请刷新后重试。")
-        }
-    }
+    deinit { approvalTask?.cancel() }
 
     func createCode(using service: any PairingSurfaceServicing) async {
         actionError = nil
@@ -132,29 +87,56 @@ final class PairingSurfaceModel: ObservableObject {
         do {
             let result = try await service.join(code: code)
             pendingPeer = result.peer
-            state = .awaitingFingerprint(local: result.fingerprint, remote: result.fingerprint)
+            state = .awaitingHostApproval(result.peer)
+            approvalTask?.cancel()
+            approvalTask = Task { [weak self, service] in
+                do {
+                    let outcome = try await service.awaitHostApproval()
+                    guard !Task.isCancelled else { return }
+                    self?.state = .confirmed(result.peer)
+                    self?.publishWarning(outcome.warning)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self?.publishError("未能完成配对，请在两台 Mac 上重试。")
+                }
+            }
         } catch {
             publishError("无法验证配对码，请检查网络后重试。")
         }
     }
 
-    func confirm(fingerprint: String, using service: any PairingSurfaceServicing) async {
+    func approve(using service: any PairingSurfaceServicing) async {
         actionError = nil
+        let peer = pendingPeer
+        if let peer { state = .committing(peer) }
         do {
-            let result = try await service.confirmFingerprint(fingerprint)
-            if let peer = pendingPeer {
-                state = .confirmed(peer)
-            }
-            if let warning = result.warning {
-                publishError(warning)
-            }
+            let result = try await service.approve()
+            publishWarning(result.warning)
         } catch {
-            publishError("无法确认安全指纹，请重新核对后重试。")
+            if let peer { state = .approvalRequested(peer) }
+            publishError("无法允许这台 Mac，请检查网络后重试。")
+        }
+    }
+
+    func reject(using service: any PairingSurfaceServicing) async {
+        actionError = nil
+        approvalTask?.cancel()
+        approvalTask = nil
+        do {
+            try await service.reject()
+            pendingPeer = nil
+            state = .idle
+        } catch {
+            publishError("无法拒绝这次配对，请检查网络后重试。")
         }
     }
 
     func cancel(using service: any PairingSurfaceServicing) async -> Bool {
         actionError = nil
+        approvalTask?.cancel()
+        approvalTask = nil
         do {
             try await service.cancel()
             return true
@@ -167,6 +149,11 @@ final class PairingSurfaceModel: ObservableObject {
     private func publishError(_ message: String) {
         actionError = message
         announcer.announce(message)
+    }
+
+    private func publishWarning(_ warning: String?) {
+        guard let warning else { return }
+        publishError(warning)
     }
 }
 
@@ -205,7 +192,6 @@ struct PairingView: View {
             if case .idle = model.state {
                 codeFieldFocused = true
             }
-            Task { await model.refreshMeshPeers(using: service) }
         }
         .onExitCommand(perform: dismiss)
     }
@@ -230,16 +216,16 @@ struct PairingView: View {
                     .frame(maxWidth: .infinity, minHeight: 80)
                     .accessibilityLabel("正在验证配对码")
             case let .approvalRequested(device):
-                Label("\(device.displayName) 想要加入", systemImage: "person.crop.circle.badge.questionmark")
-                    .frame(maxWidth: .infinity, minHeight: 80)
+                approvalContent(device)
             case let .awaitingHostApproval(device):
                 Label("等待 \(device.displayName) 允许…", systemImage: "hourglass")
                     .frame(maxWidth: .infinity, minHeight: 80)
             case let .committing(device):
                 Label("正在安全连接 \(device.displayName)…", systemImage: "lock.shield")
                     .frame(maxWidth: .infinity, minHeight: 80)
-            case let .awaitingFingerprint(local, _):
-                fingerprintContent(peer: model.pendingPeer, fingerprint: local)
+            case .awaitingFingerprint:
+                Label("正在更新旧配对会话…", systemImage: "arrow.triangle.2.circlepath")
+                    .frame(maxWidth: .infinity, minHeight: 80)
             case let .confirmed(device):
                 Label("已与 \(device.displayName) 建立信任", systemImage: "checkmark.shield.fill")
                     .foregroundStyle(.green)
@@ -252,30 +238,9 @@ struct PairingView: View {
 
     private var idleContent: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("输入另一台 Mac 显示的六位配对码。双方确认指纹后才会建立信任。")
+            Text("在另一台 Mac 上显示配对码，然后在这里输入。旧 Mac 允许一次即可。")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            if !model.meshPeers.isEmpty {
-                Text("选择显示配对码的 Mac")
-                    .font(.headline)
-                ForEach(model.meshPeers) { peer in
-                    Button {
-                        Task { await model.selectMeshPeer(peer.id, using: service) }
-                    } label: {
-                        HStack {
-                            Label(peer.displayName, systemImage: "desktopcomputer")
-                            Spacer()
-                            if model.selectedMeshPeerID == peer.id {
-                                Image(systemName: "checkmark.circle.fill")
-                            }
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("选择 \(peer.displayName)")
-                    .accessibilityValue(model.selectedMeshPeerID == peer.id ? "已选择" : "未选择")
-                }
-            }
 
             TextField("六位配对码", text: codeBinding)
                 .font(.system(size: 26, weight: .semibold, design: .monospaced))
@@ -290,10 +255,7 @@ struct PairingView: View {
             HStack(spacing: 10) {
                 Button("输入配对码", systemImage: "arrow.right.circle", action: join)
                     .buttonStyle(.borderedProminent)
-                    .disabled(
-                        !PairingCodeInput.isComplete(model.entryCode)
-                            || (!model.meshPeers.isEmpty && model.selectedMeshPeerID == nil)
-                    )
+                    .disabled(!PairingCodeInput.isComplete(model.entryCode))
                     .frame(minHeight: 40)
                 Button("在本机生成配对码", systemImage: "number") {
                     Task { await model.createCode(using: service) }
@@ -319,48 +281,27 @@ struct PairingView: View {
         .frame(maxWidth: .infinity, minHeight: 120)
     }
 
-    private func fingerprintContent(
-        peer: DeviceSummary?,
-        fingerprint: String
-    ) -> some View {
-        let presentation = PairingFingerprintPresentation(peer: peer, fingerprint: fingerprint)
-        return VStack(alignment: .leading, spacing: 14) {
-            Text("请在另一台 Mac 上找到同一配对会话，并逐字核对以下安全指纹。应用不会替你完成这一步。")
-                .fixedSize(horizontal: false, vertical: true)
-            Label(presentation.peerText, systemImage: "desktopcomputer")
+    private func approvalContent(_ peer: DeviceSummary) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("\(peer.displayName) 想要加入", systemImage: "desktopcomputer.and.arrow.down")
                 .font(.headline)
-                .accessibilityLabel(presentation.peerText)
-            fingerprintRow("安全指纹", fingerprint)
-            Label(presentation.statusText, systemImage: presentation.statusSymbol)
-                .foregroundStyle(presentation.canConfirm ? Color.secondary : Color.red)
-                .accessibilityLabel(presentation.statusText)
+            Text("只在你正在另一台 Mac 上配对时允许。允许后，这几台 Mac 就能互相发送文件。")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("取消配对", role: .cancel, action: dismiss)
-                    .frame(minHeight: 40)
+                Button("拒绝", role: .destructive) {
+                    Task { await model.reject(using: service) }
+                }
+                .frame(minHeight: 40)
                 Spacer()
-                Button("我已在另一台 Mac 核对一致", systemImage: "checkmark.shield") {
-                    Task { await model.confirm(fingerprint: fingerprint, using: service) }
+                Button("允许", systemImage: "checkmark.shield") {
+                    Task { await model.approve(using: service) }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!presentation.canConfirm)
+                .keyboardShortcut(.defaultAction)
                 .frame(minHeight: 40)
             }
         }
-    }
-
-    private func fingerprintRow(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title)
-                .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .leading)
-            Text(value)
-                .font(.system(.body, design: .monospaced, weight: .semibold))
-                .textSelection(.enabled)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "\(title)，\(PairingFingerprintPresentation(peer: nil, fingerprint: value).accessibilityFingerprint)"
-        )
     }
 
     private func failedContent(_ error: MacChannelError) -> some View {
@@ -405,7 +346,7 @@ struct PairingView: View {
         case .pairingCodeAlreadyUsed: "配对码已使用"
         case .pairingRateLimited: "尝试次数过多，请稍后再试"
         case .pairingRejected: "另一台 Mac 拒绝了配对"
-        case .pairingFingerprintMismatch: "设备指纹不一致"
+        case .pairingFingerprintMismatch: "旧设备验证信息不一致"
         case .pairingSessionExpired: "配对会话已过期"
         default: "无法完成配对"
         }
@@ -419,7 +360,9 @@ final class UnavailablePairingSurfaceService: PairingSurfaceServicing {
     func join(code: String) async throws -> PairingJoinResult {
         throw PairingSurfaceError.unavailable
     }
-    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
+    func approve() async throws -> SurfaceActionResult { throw PairingSurfaceError.unavailable }
+    func reject() async throws { throw PairingSurfaceError.unavailable }
+    func awaitHostApproval() async throws -> SurfaceActionResult {
         throw PairingSurfaceError.unavailable
     }
     func cancel() async throws { throw PairingSurfaceError.unavailable }
@@ -442,8 +385,15 @@ final class PairingCoordinatorSurfaceService: PairingSurfaceServicing {
         try await coordinator.join(code: code)
     }
 
-    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
-        _ = try await coordinator.confirmFingerprint(fingerprint)
+    func approve() async throws -> SurfaceActionResult {
+        _ = try await coordinator.approvePendingPairing()
+        return .committed
+    }
+
+    func reject() async throws { try await coordinator.rejectPendingPairing() }
+
+    func awaitHostApproval() async throws -> SurfaceActionResult {
+        _ = try await coordinator.awaitHostApproval()
         return .committed
     }
 

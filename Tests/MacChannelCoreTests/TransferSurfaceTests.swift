@@ -18,26 +18,77 @@ final class TransferSurfaceTests: XCTestCase {
         XCTAssertEqual(PairingCodeInput.spaced("123456"), "1 2 3 4 5 6")
     }
 
-    func testFingerprintPresentationRequiresExplicitCrossDeviceHumanCheck() {
-        let peer = DeviceSummary(
+    @MainActor
+    func testJoinerMovesToWaitingStateAndStartsAutomaticApprovalWait() async {
+        let host = DeviceSummary(
             id: DeviceID(rawValue: UUID()),
             displayName: "书房 Mac",
             availability: .internet
         )
-        let presentation = PairingFingerprintPresentation(
-            peer: peer,
-            fingerprint: "ABCD EFGH"
-        )
-        XCTAssertTrue(presentation.canConfirm)
-        XCTAssertEqual(presentation.peerText, "正在配对：书房 Mac")
-        XCTAssertEqual(presentation.statusText, "等待你在另一台 Mac 上人工核对")
-        XCTAssertEqual(presentation.statusSymbol, "person.2.badge.key")
-        XCTAssertEqual(presentation.accessibilityFingerprint, "A B C D E F G H")
+        let service = HostApprovalPairingSurfaceService(peer: host)
+        let model = PairingSurfaceModel(entryCode: "123456")
 
-        let unavailable = PairingFingerprintPresentation(peer: nil, fingerprint: "")
-        XCTAssertFalse(unavailable.canConfirm)
-        XCTAssertEqual(unavailable.peerText, "尚未确认对端设备身份")
-        XCTAssertEqual(unavailable.statusText, "尚未生成安全指纹")
+        await model.join(using: service)
+
+        XCTAssertEqual(model.state, .awaitingHostApproval(host))
+        XCTAssertNil(model.actionError)
+        for _ in 0..<100 where service.waitCount == 0 { await Task.yield() }
+        XCTAssertEqual(service.waitCount, 1)
+    }
+
+    @MainActor
+    func testHostApprovalAndRejectionCallTheirExplicitServiceActions() async {
+        let joiner = DeviceSummary(
+            id: DeviceID(rawValue: UUID()),
+            displayName: "客厅 Mac",
+            availability: .internet
+        )
+        let service = HostApprovalPairingSurfaceService(peer: joiner)
+        let model = PairingSurfaceModel(state: .approvalRequested(joiner))
+
+        await model.approve(using: service)
+        XCTAssertEqual(service.approvalCount, 1)
+
+        model.state = .approvalRequested(joiner)
+        await model.reject(using: service)
+        XCTAssertEqual(service.rejectionCount, 1)
+        XCTAssertEqual(model.state, .idle)
+    }
+
+    @MainActor
+    func testLoginItemRegistrationFailureRollsBackVisibleSetting() async {
+        let loginItems = StubLoginItemRegistration(error: SurfaceActionFailure.expected)
+        let service = RecordingEssentialSettingsService()
+        let model = SettingsSurfaceModel(launchAtLogin: false)
+
+        await model.updateLaunchAtLogin(true, loginItems: loginItems, using: service)
+
+        XCTAssertFalse(model.launchAtLogin)
+        XCTAssertNil(service.launchAtLogin)
+        XCTAssertEqual(
+            model.actionError,
+            "无法设置登录时启动，请在系统设置中允许后重试。"
+        )
+    }
+
+    func testOrdinaryPairingAndSettingsSourcesContainNoExpertNetworkOrFingerprintControls() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let pairing = try String(
+            contentsOf: root.appendingPathComponent("App/PairingView.swift"),
+            encoding: .utf8
+        )
+        let settings = try String(
+            contentsOf: root.appendingPathComponent("App/SettingsView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(pairing.contains("指纹"))
+        for forbidden in ["Tailscale", "连接方式", "安全中继地址", "rendezvousURL"] {
+            XCTAssertFalse(settings.contains(forbidden), "unexpected ordinary setting: \(forbidden)")
+        }
     }
 
     @MainActor
@@ -101,10 +152,11 @@ final class TransferSurfaceTests: XCTestCase {
             launchAtLogin: false
         )
         let service = RecordingEssentialSettingsService()
+        let loginItems = StubLoginItemRegistration()
 
         await model.updateLocalDisplayName("  工作室 Mac  ", using: service)
         await model.updateAutoReceive(false, using: service)
-        await model.updateLaunchAtLogin(true, using: service)
+        await model.updateLaunchAtLogin(true, loginItems: loginItems, using: service)
 
         XCTAssertEqual(model.localDisplayName, "工作室 Mac")
         XCTAssertFalse(model.autoReceive)
@@ -116,7 +168,7 @@ final class TransferSurfaceTests: XCTestCase {
         service.shouldFail = true
         await model.updateLocalDisplayName("失败名称", using: service)
         await model.updateAutoReceive(true, using: service)
-        await model.updateLaunchAtLogin(false, using: service)
+        await model.updateLaunchAtLogin(false, loginItems: loginItems, using: service)
 
         XCTAssertEqual(model.localDisplayName, "工作室 Mac")
         XCTAssertFalse(model.autoReceive)
@@ -124,52 +176,7 @@ final class TransferSurfaceTests: XCTestCase {
         XCTAssertEqual(model.actionError, "无法保存登录启动设置，请稍后重试。")
     }
 
-    @MainActor
-    func testRendezvousSettingsRejectInvalidInputAndRollBackPersistenceFailure() async {
-        let announcer = RecordingAccessibilityAnnouncer()
-        let original = RendezvousEndpointConfiguration.packagedDefault
-        let model = SettingsSurfaceModel(rendezvousURL: original, announcer: announcer)
-        let service = FailingSettingsSurfaceService()
-
-        await model.updateRendezvousURL("wss://user:secret@relay.example/v1/ws", using: service)
-        XCTAssertEqual(model.rendezvousURL, original)
-        XCTAssertEqual(
-            model.actionError,
-            "请输入不含账号、密码、查询参数的安全 https 或 wss 地址。"
-        )
-
-        await model.updateRendezvousURL("https://relay.example:8443", using: service)
-        XCTAssertEqual(model.rendezvousURL, original)
-        XCTAssertEqual(
-            model.actionError,
-            "无法保存安全中继地址，请检查本地存储权限后重试。"
-        )
-        XCTAssertEqual(announcer.messages.count, 2)
-    }
-
-    @MainActor
-    func testRendezvousSettingsCommitNormalizedURLAndAnnounceRestart() async {
-        let announcer = RecordingAccessibilityAnnouncer()
-        let model = SettingsSurfaceModel(announcer: announcer)
-        let service = SuccessfulRendezvousSettingsService()
-
-        await model.updateRendezvousURL("https://relay.example:8443", using: service)
-
-        XCTAssertEqual(model.rendezvousURL, "wss://relay.example:8443/v1/ws")
-        XCTAssertNil(model.actionError)
-        XCTAssertEqual(
-            model.actionNotice,
-            "安全中继地址已保存；请重新启动 Mac 通道后生效。"
-        )
-        XCTAssertEqual(announcer.messages, ["安全中继地址已保存；请重新启动 Mac 通道后生效。"])
-    }
-
-    func testPersonalMeshStatesAndEstablishedRoutesUsePlainChineseLabels() {
-        XCTAssertEqual(PersonalMeshStatus.tailscaleNotInstalled.localizedText, "安装 Tailscale")
-        XCTAssertEqual(PersonalMeshStatus.tailscaleDisconnected.localizedText, "请先连接 Tailscale")
-        XCTAssertEqual(PersonalMeshStatus.readyToEnable.localizedText, "启用个人网络通道")
-        XCTAssertEqual(PersonalMeshStatus.portConflict.localizedText, "端口已被其他服务使用")
-
+    func testEstablishedInternetRouteUsesPlainChineseLabel() {
         let direct = TransferSurfaceItem(
             snapshot: TransferSnapshot(
                 id: TransferID(rawValue: UUID()),
@@ -188,28 +195,6 @@ final class TransferSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(direct.routeText, "互联网直连")
         XCTAssertEqual(direct.routeSymbol, "network")
-    }
-
-    @MainActor
-    func testPersonalMeshModeAndEnableActionsCommitAndAnnounce() async {
-        let announcer = RecordingAccessibilityAnnouncer()
-        let model = SettingsSurfaceModel(
-            connectivityMode: .publicService,
-            personalMeshStatus: .readyToEnable,
-            announcer: announcer
-        )
-        let service = SuccessfulPersonalMeshSettingsService()
-
-        await model.updateConnectivityMode(.personalMesh, using: service)
-        await model.enablePersonalMesh(using: service)
-
-        XCTAssertEqual(model.connectivityMode, .personalMesh)
-        XCTAssertEqual(model.personalMeshStatus, .enabled)
-        XCTAssertTrue(model.personalMeshEnabled)
-        XCTAssertEqual(service.mode, .personalMesh)
-        XCTAssertEqual(service.enableCount, 1)
-        XCTAssertTrue(announcer.messages.contains { $0.contains("新连接") })
-        XCTAssertTrue(announcer.messages.contains { $0.contains("个人网络通道已启用") })
     }
 
     @MainActor
@@ -245,16 +230,13 @@ final class TransferSurfaceTests: XCTestCase {
 
         let pairingAnnouncer = RecordingAccessibilityAnnouncer()
         let pairing = PairingSurfaceModel(
-            state: .awaitingFingerprint(local: "ABCD", remote: "ABCD"),
+            state: .approvalRequested(peer),
             pendingPeer: peer,
             announcer: pairingAnnouncer
         )
-        await pairing.confirm(
-            fingerprint: "ABCD",
-            using: WarningPairingSurfaceService(peer: peer)
-        )
+        await pairing.approve(using: WarningPairingSurfaceService(peer: peer))
 
-        XCTAssertEqual(pairing.state, .confirmed(peer))
+        XCTAssertEqual(pairing.state, .committing(peer))
         XCTAssertEqual(pairing.actionError, WarningPairingSurfaceService.warning)
         XCTAssertEqual(pairingAnnouncer.messages, [WarningPairingSurfaceService.warning])
     }
@@ -999,11 +981,41 @@ private final class PendingPeerPairingService: PairingSurfaceServicing {
     func join(code: String) async throws -> PairingJoinResult {
         throw SurfaceActionFailure.expected
     }
-    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
-        .committed
-    }
     func cancel() async throws {}
     func pendingPeer() async -> DeviceSummary? { peer }
+}
+
+@MainActor
+private final class HostApprovalPairingSurfaceService: PairingSurfaceServicing {
+    let isAvailable = true
+    let peer: DeviceSummary
+    private(set) var approvalCount = 0
+    private(set) var rejectionCount = 0
+    private(set) var waitCount = 0
+
+    init(peer: DeviceSummary) { self.peer = peer }
+
+    func createCode() async throws -> String { "123456" }
+    func join(code: String) async throws -> PairingJoinResult {
+        PairingJoinResult(
+            sessionID: PairingSessionID(),
+            peer: peer,
+            fingerprint: "internal",
+            hostEphemeralPublicKey: Data(),
+            joiningEphemeralPublicKey: Data()
+        )
+    }
+    func approve() async throws -> SurfaceActionResult {
+        approvalCount += 1
+        return .committed
+    }
+    func reject() async throws { rejectionCount += 1 }
+    func awaitHostApproval() async throws -> SurfaceActionResult {
+        waitCount += 1
+        try await Task.sleep(for: .seconds(60))
+        return .committed
+    }
+    func cancel() async throws {}
 }
 
 @MainActor
@@ -1011,9 +1023,6 @@ private final class FailingPairingSurfaceService: PairingSurfaceServicing {
     let isAvailable = true
     func createCode() async throws -> String { throw SurfaceActionFailure.expected }
     func join(code: String) async throws -> PairingJoinResult {
-        throw SurfaceActionFailure.expected
-    }
-    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
         throw SurfaceActionFailure.expected
     }
     func cancel() async throws { throw SurfaceActionFailure.expected }
@@ -1031,7 +1040,7 @@ private final class WarningPairingSurfaceService: PairingSurfaceServicing {
     func join(code: String) async throws -> PairingJoinResult {
         throw SurfaceActionFailure.expected
     }
-    func confirmFingerprint(_ fingerprint: String) async throws -> SurfaceActionResult {
+    func approve() async throws -> SurfaceActionResult {
         .committedWithWarning(Self.warning)
     }
     func cancel() async throws {}
@@ -1053,41 +1062,9 @@ private final class FailingSettingsSurfaceService: DeviceSettingsServicing {
     func updateDefaultDirectory(_ directory: URL) async throws {
         throw SurfaceActionFailure.expected
     }
-    func updateRendezvousURL(_ value: String) async throws { throw SurfaceActionFailure.expected }
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {
         throw SurfaceActionFailure.expected
     }
-}
-
-@MainActor
-private final class SuccessfulRendezvousSettingsService: DeviceSettingsServicing {
-    let isAvailable = true
-    func rename(_ id: DeviceID, to displayName: String) async throws {}
-    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult { .committed }
-    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {
-    }
-    func updateDefaultDirectory(_ directory: URL) async throws {}
-    func updateRendezvousURL(_ value: String) async throws {}
-    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
-}
-
-@MainActor
-private final class SuccessfulPersonalMeshSettingsService: DeviceSettingsServicing {
-    let isAvailable = true
-    private(set) var mode: ConnectivityMode?
-    private(set) var enableCount = 0
-    func rename(_ id: DeviceID, to displayName: String) async throws {}
-    func revoke(_ id: DeviceID) async throws -> SurfaceActionResult { .committed }
-    func updateReceivePolicy(_ id: DeviceID, autoAccept: Bool, maximumBytes: UInt64?) async throws {
-    }
-    func updateDefaultDirectory(_ directory: URL) async throws {}
-    func updateRendezvousURL(_ value: String) async throws {}
-    func updateConnectivityMode(_ mode: ConnectivityMode) async throws { self.mode = mode }
-    func enablePersonalMesh() async throws -> PersonalMeshStatus {
-        enableCount += 1
-        return .enabled
-    }
-    func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {}
 }
 
 @MainActor
@@ -1128,6 +1105,15 @@ private final class RecordingEssentialSettingsService: DeviceSettingsServicing {
     func updateLaunchAtLogin(_ enabled: Bool) async throws {
         if shouldFail { throw SurfaceActionFailure.expected }
         launchAtLogin = enabled
+    }
+}
+
+@MainActor
+private final class StubLoginItemRegistration: LoginItemRegistering {
+    let error: Error?
+    init(error: Error? = nil) { self.error = error }
+    func setEnabled(_ enabled: Bool) throws {
+        if let error { throw error }
     }
 }
 

@@ -397,7 +397,7 @@ final class AppRuntimeTests: XCTestCase {
             trustRepository: repository
         )
 
-        let result = try await service.confirmFingerprint("ABCD")
+        let result = try await service.approve()
 
         let warning = try XCTUnwrap(result.warning)
         XCTAssertTrue(warning.contains("对端授权确认未完成"))
@@ -469,14 +469,17 @@ private actor MutatingProductionPairingCoordinator: ProductionPairingCoordinatin
 
     func createCode() async throws -> String { throw RuntimeTestError.failed }
     func join(code: String) async throws -> PairingJoinResult { throw RuntimeTestError.failed }
-    func confirmForSurface(_ fingerprint: String) async throws {
-        _ = try await repository.issueAuthorization(
+    func approvePendingPairing() async throws -> SignedTrustRecord {
+        let authorization = try await repository.issueAuthorization(
             subject: peer.id,
             subjectPublicKey: peerIdentity.publicKey.rawRepresentation,
             timestamp: Date()
         )
         if throwsAfterMutation { throw RuntimeTestError.failed }
+        return authorization
     }
+    func rejectPendingPairing() async throws {}
+    func awaitHostApproval() async throws -> SignedTrustRecord { throw RuntimeTestError.failed }
     func cancelPendingPairing() async throws {}
     func pendingPeerSummary() async -> DeviceSummary? { peer }
 }

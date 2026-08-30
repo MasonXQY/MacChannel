@@ -197,10 +197,6 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         settingsModel.defaultDirectory = snapshot.defaultDirectory
         settingsModel.autoReceive = snapshot.autoReceive
         settingsModel.launchAtLogin = snapshot.launchAtLogin
-        settingsModel.rendezvousURL = snapshot.rendezvousURL
-        settingsModel.connectivityMode = snapshot.connectivityMode
-        settingsModel.personalMeshEnabled = snapshot.personalMeshEnabled
-        settingsModel.personalMeshStatus = snapshot.personalMeshStatus
         updateDeviceSettings(snapshot.devices)
     }
 
