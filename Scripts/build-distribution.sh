@@ -181,7 +181,7 @@ if [[ -n "$notary_profile" ]]; then
     test "$(plutil -extract status raw -o - "$notary_result")" = Accepted
     xcrun stapler staple "$image_path"
     xcrun stapler validate "$image_path"
-    spctl --assess --type open --verbose=2 "$image_path"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$image_path"
     release_state=notarized
 fi
 

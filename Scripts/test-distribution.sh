@@ -9,6 +9,9 @@ if [[ ! -x Scripts/build-distribution.sh ]]; then
     exit 1
 fi
 
+grep -F 'spctl --assess --type open --context context:primary-signature' \
+    Scripts/build-distribution.sh >/dev/null
+
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then
     echo "MACCHANNEL_CODESIGN_IDENTITY is required for distribution tests" >&2
