@@ -35,11 +35,13 @@ enum AppRuntimeStatus: Equatable {
 protocol AppRuntimeLifecycle: AnyObject {
     var container: AppContainer { get }
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>?
+    func reconnectPublicService() async
     func shutdown() async
 }
 
 extension AppRuntimeLifecycle {
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { nil }
+    func reconnectPublicService() async {}
 }
 
 struct AppRuntimeLaunch {
@@ -115,6 +117,10 @@ final class AppRuntimeHost {
         if let runtime { await stopOnce(runtime) }
         runtime = nil
         buildTask = nil
+    }
+
+    func reconnectPublicService() async {
+        await runtime?.reconnectPublicService()
     }
 
     private func stopOnce(_ runtime: any AppRuntimeLifecycle) async {

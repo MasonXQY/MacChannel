@@ -5,6 +5,51 @@ import XCTest
 @testable import MacChannelCore
 
 final class AppRuntimeTests: XCTestCase {
+    func testFailedInitialPublicConnectRetriesWithoutRebuildingLocalRuntime() async throws {
+        let connector = SequencedPublicServiceConnector(connectResults: [false, true])
+        let lifecycle = PublicServiceLifecycle(
+            connectionFactory: { await connector.makeConnection() },
+            backoff: .immediateForTests
+        )
+
+        await lifecycle.start()
+        for _ in 0..<1_000 {
+            if await connector.attemptCount() == 2,
+                await lifecycle.currentState() == .online
+            { break }
+            await Task.yield()
+        }
+
+        let attempts = await connector.attemptCount()
+        let state = await lifecycle.currentState()
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(state, .online)
+        await lifecycle.stop()
+    }
+
+    func testConcurrentReconnectRequestsNeverOverlapPublicConnectAttempts() async throws {
+        let connector = SequencedPublicServiceConnector(connectResults: [true, true, true])
+        let lifecycle = PublicServiceLifecycle(
+            connectionFactory: { await connector.makeConnection() },
+            backoff: .immediateForTests
+        )
+        await lifecycle.start()
+        for _ in 0..<1_000 where await lifecycle.currentState() != .online {
+            await Task.yield()
+        }
+
+        async let first: Void = lifecycle.reconnectNow()
+        async let second: Void = lifecycle.reconnectNow()
+        _ = await (first, second)
+        for _ in 0..<1_000 where await connector.attemptCount() < 2 {
+            await Task.yield()
+        }
+
+        let maximumConcurrentAttempts = await connector.maximumConcurrentAttempts()
+        XCTAssertEqual(maximumConcurrentAttempts, 1)
+        await lifecycle.stop()
+    }
+
     func testLaunchModeUsesProductionUnlessShellIsExplicit() {
         XCTAssertEqual(AppLaunchMode.resolve(arguments: [], environment: [:]), .production)
         XCTAssertEqual(
@@ -56,6 +101,19 @@ final class AppRuntimeTests: XCTestCase {
                 environment: ["MACCHANNEL_RENDEZVOUS_URL": "ws://example.test/v1/ws"],
                 arguments: ["MacChannel", "--production-launch-test", marker]
             )
+        )
+    }
+
+    func testIsolatedLaunchKeepsOutgoingRecoveryInsideItsRuntimeDirectory() throws {
+        let marker = "/tmp/macchannel-storage-\(UUID().uuidString)"
+        let configuration = try ProductionRuntimeConfiguration.current(
+            environment: [:],
+            arguments: ["MacChannel", "--production-launch-test", marker]
+        )
+
+        XCTAssertEqual(
+            configuration.outgoingDirectory,
+            configuration.dataDirectory.appendingPathComponent("Outgoing", isDirectory: true)
         )
     }
 
@@ -588,6 +646,47 @@ private actor AsyncCompletionProbe {
 }
 
 private enum RuntimeTestError: Error { case failed }
+
+private actor SequencedPublicServiceConnector {
+    private var connectResults: [Bool]
+    private var attempts = 0
+    private var concurrentAttempts = 0
+    private var maximumConcurrent = 0
+    private var runWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+
+    init(connectResults: [Bool]) { self.connectResults = connectResults }
+
+    func makeConnection() -> PublicServiceConnection {
+        let id = UUID()
+        return PublicServiceConnection(
+            connect: { try await self.connect() },
+            run: { try await self.run(id: id) },
+            stop: { await self.stop(id: id) }
+        )
+    }
+
+    func attemptCount() -> Int { attempts }
+    func maximumConcurrentAttempts() -> Int { maximumConcurrent }
+
+    private func connect() throws {
+        attempts += 1
+        concurrentAttempts += 1
+        maximumConcurrent = max(maximumConcurrent, concurrentAttempts)
+        defer { concurrentAttempts -= 1 }
+        guard !connectResults.isEmpty else { return }
+        guard connectResults.removeFirst() else { throw RuntimeTestError.failed }
+    }
+
+    private func run(id: UUID) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            runWaiters[id] = continuation
+        }
+    }
+
+    private func stop(id: UUID) {
+        runWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+}
 
 private actor RuntimeTransferCoordinatorStub: TransferCoordinating {
     func send(items: [URL], to device: DeviceID) async throws -> TransferID {

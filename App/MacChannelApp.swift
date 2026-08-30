@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Network
 
 @MainActor
 public enum MacChannelApplication {
@@ -44,6 +45,8 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
     private var terminationPending = false
     private var runtimeShutdownComplete = false
     private var productionLaunchDiagnostics: ProductionLaunchDiagnostics?
+    private var networkMonitor: NWPathMonitor?
+    private var networkWasAvailable = false
 
     init(
         initialContainer: AppContainer,
@@ -72,6 +75,24 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
             }
         }
         bootstrapTask = Task { await runtimeHost.bootstrap() }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let shouldReconnect = !self.networkWasAvailable
+                self.networkWasAvailable = true
+                if shouldReconnect { await runtimeHost.reconnectPublicService() }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "app.macchannel.network-monitor"))
+        networkMonitor = monitor
     }
 
     private func install(_ container: AppContainer, status: AppRuntimeStatus) {
@@ -109,9 +130,17 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        networkMonitor?.cancel()
+        networkMonitor = nil
         bootstrapTask?.cancel()
         surfaceController?.invalidate()
         statusItemController?.invalidate()
+    }
+
+    @objc private func workspaceDidWake() {
+        guard let runtimeHost else { return }
+        Task { await runtimeHost.reconnectPublicService() }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
