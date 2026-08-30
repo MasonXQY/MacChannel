@@ -114,7 +114,7 @@ struct SettingsSurfaceSnapshot: Equatable, Sendable {
         autoReceive: Bool = true,
         launchAtLogin: Bool = false,
         rendezvousURL: String = RendezvousEndpointConfiguration.packagedDefault,
-        connectivityMode: ConnectivityMode = .personalMesh,
+        connectivityMode: ConnectivityMode = .publicService,
         personalMeshEnabled: Bool = false,
         personalMeshStatus: PersonalMeshStatus = .checking,
         devices: [DeviceSetting]

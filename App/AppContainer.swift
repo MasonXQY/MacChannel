@@ -13,7 +13,6 @@ final class AppContainer {
     let settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)?
     let transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)?
     let runtimeIdentityID: DeviceID?
-    let runtimeConnectivityMode: ConnectivityMode?
 
     init(
         deviceDirectory: DeviceDirectory,
@@ -25,8 +24,7 @@ final class AppContainer {
         pairingStates: AsyncStream<PairingState>? = nil,
         settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)? = nil,
         transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil,
-        runtimeIdentityID: DeviceID? = nil,
-        runtimeConnectivityMode: ConnectivityMode? = nil
+        runtimeIdentityID: DeviceID? = nil
     ) {
         self.deviceDirectory = deviceDirectory
         self.transferCoordinator = transferCoordinator
@@ -38,7 +36,6 @@ final class AppContainer {
         self.settingsSnapshots = settingsSnapshots
         self.transferHistory = transferHistory
         self.runtimeIdentityID = runtimeIdentityID
-        self.runtimeConnectivityMode = runtimeConnectivityMode
     }
 
     static func localShell() -> AppContainer {

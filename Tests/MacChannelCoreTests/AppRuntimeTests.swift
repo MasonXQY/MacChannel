@@ -5,25 +5,6 @@ import XCTest
 @testable import MacChannelCore
 
 final class AppRuntimeTests: XCTestCase {
-    func testIsolatedLaunchCanExerciseBothConnectivityModesWithoutProductionOverride() throws {
-        let marker = "/tmp/macchannel-mode-\(UUID().uuidString)"
-        let personal = try ProductionRuntimeConfiguration.current(
-            environment: ["MACCHANNEL_LAUNCH_TEST_CONNECTIVITY_MODE": "personalMesh"],
-            arguments: ["MacChannel", "--production-launch-test", marker]
-        )
-        let publicMode = try ProductionRuntimeConfiguration.current(
-            environment: ["MACCHANNEL_LAUNCH_TEST_CONNECTIVITY_MODE": "publicService"],
-            arguments: ["MacChannel", "--production-launch-test", marker]
-        )
-        let ignored = try ProductionRuntimeConfiguration.current(
-            environment: ["MACCHANNEL_LAUNCH_TEST_CONNECTIVITY_MODE": "publicService"],
-            arguments: ["MacChannel"]
-        )
-
-        XCTAssertEqual(personal.isolatedConnectivityMode, .personalMesh)
-        XCTAssertEqual(publicMode.isolatedConnectivityMode, .publicService)
-        XCTAssertNil(ignored.isolatedConnectivityMode)
-    }
     func testLaunchModeUsesProductionUnlessShellIsExplicit() {
         XCTAssertEqual(AppLaunchMode.resolve(arguments: [], environment: [:]), .production)
         XCTAssertEqual(
@@ -45,27 +26,36 @@ final class AppRuntimeTests: XCTestCase {
         )
     }
 
-    func testProductionConfigurationRequiresWSSAndDerivesHTTPSPairingOrigin() throws {
-        XCTAssertThrowsError(
-            try ProductionRuntimeConfiguration.current(
-                environment: ["MACCHANNEL_RENDEZVOUS_URL": "ws://example.test/v1/ws"]
-            )
+    func testNormalLaunchUsesPackagedEndpointAndOnlyIsolatedLaunchCanOverrideIt() throws {
+        let normal = try ProductionRuntimeConfiguration.current(
+            environment: [
+                "MACCHANNEL_RENDEZVOUS_URL": "wss://example.test/v1/ws",
+            ],
+            arguments: ["MacChannel"]
         )
+        XCTAssertEqual(normal.rendezvousWebSocketURL?.absoluteString, "wss://localhost:8443/v1/ws")
+        XCTAssertEqual(normal.rendezvousHTTPOrigin?.absoluteString, "https://localhost:8443")
 
-        let configuration = try ProductionRuntimeConfiguration.current(
+        let marker = "/tmp/macchannel-endpoint-\(UUID().uuidString)"
+        let isolated = try ProductionRuntimeConfiguration.current(
             environment: [
                 "MACCHANNEL_RENDEZVOUS_URL": "wss://example.test/v1/ws",
                 "MACCHANNEL_STUN_URLS": "stun:a.test, stun:b.test",
-            ]
+            ],
+            arguments: ["MacChannel", "--production-launch-test", marker]
         )
-
         XCTAssertEqual(
-            configuration.rendezvousWebSocketURL?.absoluteString, "wss://example.test/v1/ws")
-        XCTAssertEqual(configuration.rendezvousHTTPOrigin?.absoluteString, "https://example.test")
+            isolated.rendezvousWebSocketURL?.absoluteString, "wss://example.test/v1/ws")
+        XCTAssertEqual(isolated.rendezvousHTTPOrigin?.absoluteString, "https://example.test")
         XCTAssertEqual(
-            try configuration.endpoints(persistedURL: "wss://persisted.test/v1/ws")
-                .webSocketURL.absoluteString,
+            try isolated.endpoints().webSocketURL.absoluteString,
             "wss://example.test/v1/ws"
+        )
+        XCTAssertThrowsError(
+            try ProductionRuntimeConfiguration.current(
+                environment: ["MACCHANNEL_RENDEZVOUS_URL": "ws://example.test/v1/ws"],
+                arguments: ["MacChannel", "--production-launch-test", marker]
+            )
         )
     }
 
@@ -81,9 +71,8 @@ final class AppRuntimeTests: XCTestCase {
             "https://localhost:8443"
         )
         XCTAssertEqual(
-            try configuration.endpoints(persistedURL: "wss://relay.example/v1/ws")
-                .webSocketURL.absoluteString,
-            "wss://relay.example/v1/ws"
+            try configuration.endpoints().webSocketURL.absoluteString,
+            "wss://localhost:8443/v1/ws"
         )
     }
 
