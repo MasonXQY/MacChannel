@@ -154,6 +154,7 @@ public actor AuthenticatedPresenceSession {
     private let trustResultContinuation: AsyncStream<RendezvousTrustResult>.Continuation
     private let protocolErrorContinuation: AsyncStream<RendezvousProtocolError>.Continuation
     private let trustRecordContinuation: AsyncStream<SignedTrustRecord>.Continuation
+    private var pendingTrustRecords: [SignedTrustRecord] = []
     private var streamsFinished = false
 
     public init(
@@ -244,6 +245,30 @@ public actor AuthenticatedPresenceSession {
         }
     }
 
+    public func sendTrustUpdate(_ records: [SignedTrustRecord]) async throws {
+        guard running else { throw AuthenticatedPresenceError.authenticationRejected }
+        guard !records.isEmpty, records.count <= 256 else {
+            throw AuthenticatedPresenceError.frameTooLarge
+        }
+        struct TrustUpdate: Encodable {
+            let type = "trust-update"
+            let trustRecords: [SignedTrustRecord]
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let frame = try encoder.encode(TrustUpdate(trustRecords: records))
+        guard frame.count <= Self.maximumFrameBytes else {
+            throw AuthenticatedPresenceError.frameTooLarge
+        }
+        do {
+            try await socket.send(frame)
+        } catch let error as AuthenticatedPresenceError {
+            throw error
+        } catch {
+            throw AuthenticatedPresenceError.transport("send_failed")
+        }
+    }
+
     public func connect() async throws {
         await client.disconnect()
         let challenge = try decodeChallenge(try await receiveFrame())
@@ -296,8 +321,10 @@ public actor AuthenticatedPresenceSession {
                         throw AuthenticatedPresenceError.invalidFrame
                     }
                     let signedRecord = try decodeTrustRecord(record)
-                    try await trustRepository.ingest(signedRecord)
-                    trustRecordContinuation.yield(signedRecord)
+                    try await ingestMembershipCatchUp(
+                        signedRecord,
+                        into: trustRepository
+                    )
                 case "signal":
                     guard let from = frame.from, let uuid = UUID(uuidString: from),
                         let payload = frame.payload
@@ -340,9 +367,46 @@ public actor AuthenticatedPresenceSession {
 
     public func stop() async {
         running = false
+        pendingTrustRecords.removeAll()
         finishStreams()
         await client.disconnect()
         await socket.close()
+    }
+
+    private func ingestMembershipCatchUp(
+        _ record: SignedTrustRecord,
+        into repository: TrustRepository
+    ) async throws {
+        do {
+            if try await repository.ingestIfNew(record) {
+                trustRecordContinuation.yield(record)
+            }
+        } catch TrustStoreError.untrustedIssuer {
+            guard pendingTrustRecords.count < 256 else {
+                throw AuthenticatedPresenceError.frameTooLarge
+            }
+            if !pendingTrustRecords.contains(where: { $0.signature == record.signature }) {
+                pendingTrustRecords.append(record)
+            }
+            return
+        }
+
+        var madeProgress = true
+        while madeProgress && !pendingTrustRecords.isEmpty {
+            madeProgress = false
+            var stillPending: [SignedTrustRecord] = []
+            for candidate in pendingTrustRecords {
+                do {
+                    if try await repository.ingestIfNew(candidate) {
+                        trustRecordContinuation.yield(candidate)
+                    }
+                    madeProgress = true
+                } catch TrustStoreError.untrustedIssuer {
+                    stillPending.append(candidate)
+                }
+            }
+            pendingTrustRecords = stillPending
+        }
     }
 
     private func finishStreams() {

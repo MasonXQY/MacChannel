@@ -943,6 +943,89 @@ func TestAuthorizationReservationSurvivesPairingExpiryUntilMailboxExpiry(t *test
 	}
 }
 
+func TestHostCanRejectAuthorizationWithoutCreatingTrustMailbox(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
+	store := pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now})
+	host := newIdentity(t)
+	joiner := newIdentity(t)
+	if err := store.CreateSession(context.Background(), "123456", host.id, "203.0.113.1", []byte("offer"), clock.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.Join(context.Background(), "123456", joiner.id, "203.0.113.2", []byte("join"), clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitJoinResponse(context.Background(), session.ID, host.id, []byte("response"), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RejectAuthorization(context.Background(), session.ID, "outsider", clock.Now()); !errors.Is(err, pairing.ErrForbidden) {
+		t.Fatalf("outsider rejection error=%v, want forbidden", err)
+	}
+	if err := store.RejectAuthorization(context.Background(), session.ID, host.id, clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RejectAuthorization(context.Background(), session.ID, host.id, clock.Now()); err != nil {
+		t.Fatalf("idempotent rejection error=%v", err)
+	}
+	if _, err := store.Authorization(context.Background(), session.ID, joiner.id, clock.Now()); !errors.Is(err, pairing.ErrRejected) {
+		t.Fatalf("authorization after rejection error=%v, want rejected", err)
+	}
+}
+
+func TestPairingRejectionEndpointNotifiesJoiner(t *testing.T) {
+	api := newTestAPI(t)
+	host := api.identity
+	joiner := newIdentity(t)
+	outsider := newIdentity(t)
+	code := api.createPairing(t, api.signedRequestAs(t, host, map[string]any{"hostOffer": []byte("offer")}))
+	joinResponse := api.doEnvelope(
+		t,
+		http.MethodPost,
+		"/v1/pairing/"+code+"/join",
+		api.signedRequestAs(t, joiner, map[string]any{"code": code, "joinRequest": []byte("join")}),
+		nil,
+	)
+	defer joinResponse.Body.Close()
+	if joinResponse.StatusCode != http.StatusAccepted {
+		t.Fatalf("join status=%d body=%s", joinResponse.StatusCode, readBody(joinResponse.Body))
+	}
+	var joined struct {
+		SessionID string `json:"sessionID"`
+	}
+	if err := json.NewDecoder(joinResponse.Body).Decode(&joined); err != nil {
+		t.Fatal(err)
+	}
+	responsePath := "/v1/pairing/sessions/" + joined.SessionID + "/response"
+	response := api.doEnvelope(t, http.MethodPost, responsePath, api.signedRequestAs(t, host, map[string]any{
+		"sessionID": joined.SessionID, "joinResponse": []byte("response"),
+	}), nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("response status=%d", response.StatusCode)
+	}
+	rejectPath := "/v1/pairing/sessions/" + joined.SessionID + "/authorization/reject"
+	for _, item := range []struct {
+		identity testIdentity
+		want     int
+	}{{outsider, http.StatusForbidden}, {host, http.StatusNoContent}, {host, http.StatusNoContent}} {
+		rejected := api.doEnvelope(t, http.MethodPost, rejectPath, api.signedRequestAs(t, item.identity, map[string]any{
+			"sessionID": joined.SessionID,
+		}), nil)
+		rejected.Body.Close()
+		if rejected.StatusCode != item.want {
+			t.Fatalf("reject status=%d want=%d", rejected.StatusCode, item.want)
+		}
+	}
+	retrievePath := "/v1/pairing/sessions/" + joined.SessionID + "/authorization/retrieve"
+	retrieved := api.doEnvelope(t, http.MethodPost, retrievePath, api.signedRequestAs(t, joiner, map[string]any{
+		"sessionID": joined.SessionID,
+	}), nil)
+	defer retrieved.Body.Close()
+	if retrieved.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("retrieve after rejection status=%d body=%s", retrieved.StatusCode, readBody(retrieved.Body))
+	}
+}
+
 func TestCommittedMailboxRetriesIgnoreExpiredReservationUntilMailboxExpiry(t *testing.T) {
 	clock := &testClock{now: time.Unix(1_800_000_000, 0)}
 	store := pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now})
@@ -2947,6 +3030,65 @@ func TestTrustUpdateFanoutIsPerRecordNonEchoingAndReplaySafe(t *testing.T) {
 		t.Fatalf("owner signal = %#v", routed)
 	}
 	expectNoFrameType(t, cWS, "trust-record")
+}
+
+func TestTrustRegistryReturnsMissedGraphRecordsForOfflineMember(t *testing.T) {
+	registry := auth.NewTrustRegistry()
+	a := newIdentity(t)
+	b := newIdentity(t)
+	d := newIdentity(t)
+	aToD := a.trustRecord(t, d, 1)
+	aToB := a.trustRecord(t, b, 2)
+	for _, presentation := range []struct {
+		device testIdentity
+		record auth.SignedTrustRecord
+	}{
+		{a, aToD}, {d, aToD}, {a, aToB}, {b, aToB},
+	} {
+		if err := registry.AuthenticateDevice(
+			presentation.device.id,
+			presentation.device.publicKey,
+			[]auth.SignedTrustRecord{presentation.record},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	missed := registry.RecordsForGraph(d.id, []auth.SignedTrustRecord{aToD})
+	if len(missed) != 1 || missed[0].Subject != b.id {
+		t.Fatalf("missed records = %#v, want A authorizes B", missed)
+	}
+}
+
+func TestWebSocketAuthenticationDeliversOfflineMembershipCatchUp(t *testing.T) {
+	registry := auth.NewTrustRegistry()
+	a := newIdentity(t)
+	b := newIdentity(t)
+	d := newIdentity(t)
+	aToD := a.trustRecord(t, d, 1)
+	aToB := a.trustRecord(t, b, 2)
+	for _, presentation := range []struct {
+		device testIdentity
+		record auth.SignedTrustRecord
+	}{
+		{a, aToD}, {d, aToD}, {a, aToB}, {b, aToB},
+	} {
+		if err := registry.AuthenticateDevice(
+			presentation.device.id,
+			presentation.device.publicKey,
+			[]auth.SignedTrustRecord{presentation.record},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := newTestAPIWithRegistry(t, registry)
+	dWS := api.authenticatedWebSocket(t, d, []auth.SignedTrustRecord{aToD})
+	defer dWS.Close()
+
+	frame := readUntilType(t, dWS, "trust-record")
+	if trustRecordSubject(t, frame) != b.id {
+		t.Fatalf("catch-up record = %#v, want subject %s", frame, b.id)
+	}
 }
 
 func TestTrustUpdateBatchIsAtomicBeforeFanoutAndDurableConfirm(t *testing.T) {

@@ -1260,6 +1260,71 @@ func (r *TrustRegistry) DevicesInGraph(deviceID string) []string {
 	return result
 }
 
+// RecordsForGraph returns the current signed membership edges that a
+// reconnecting device has not presented. The records remain opaque authority:
+// every client still verifies issuer trust, signatures and sequences locally.
+func (r *TrustRegistry) RecordsForGraph(deviceID string, excluding []SignedTrustRecord) []SignedTrustRecord {
+	deviceID = strings.ToLower(deviceID)
+	if r.refreshPersistent() != nil {
+		return nil
+	}
+	excluded := make(map[[32]byte]bool, len(excluding))
+	for _, record := range excluding {
+		excluded[trustRecordHash(record)] = true
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	graph := map[string]bool{deviceID: true}
+	queue := []string{deviceID}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for peer, active := range r.adjacency[current] {
+			if active && !graph[peer] {
+				graph[peer] = true
+				queue = append(queue, peer)
+			}
+		}
+	}
+	type orderedRecord struct {
+		order  uint64
+		record SignedTrustRecord
+	}
+	available := make([]orderedRecord, 0, len(r.directional))
+	for _, state := range r.directional {
+		issuer := strings.ToLower(state.record.Issuer)
+		if !graph[issuer] || !state.issuerConfirmed || state.pendingExpired {
+			continue
+		}
+		if state.action == TrustAuthorize && !state.established && !state.legacyActive {
+			continue
+		}
+		if excluded[state.hash] {
+			continue
+		}
+		available = append(available, orderedRecord{order: state.order, record: state.record})
+	}
+	sort.Slice(available, func(left, right int) bool {
+		if available[left].order != available[right].order {
+			return available[left].order < available[right].order
+		}
+		return string(available[left].record.CanonicalPayload()) < string(available[right].record.CanonicalPayload())
+	})
+	if len(available) > 256 {
+		available = available[len(available)-256:]
+	}
+	result := make([]SignedTrustRecord, 0, len(available))
+	for _, item := range available {
+		result = append(result, item.record)
+	}
+	return result
+}
+
+func trustRecordHash(record SignedTrustRecord) [32]byte {
+	input := append(append([]byte{}, record.CanonicalPayload()...), record.Signature...)
+	return sha256.Sum256(input)
+}
+
 // RefreshPersistent polls durable trust state once and reports whether this
 // registry installed a newer committed version. Memory-only registries return
 // false so callers do not perform periodic work without a durable source.

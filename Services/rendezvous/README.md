@@ -40,6 +40,7 @@ The endpoints mirror the Swift `PairingTransport` state order:
 | `deliverAuthorization` | `POST .../{sessionID}/authorization` | `sessionID, id, authorizationEnvelope` | `204` |
 | `authorization` | `POST .../{sessionID}/authorization/retrieve` | `sessionID` | `200 {authorizationEnvelope}` once, `425` while pending, then `410` |
 | `cancelAuthorizationDelivery` | `POST .../{sessionID}/authorization/cancel` | `sessionID, id` | `204` (idempotent) |
+| host rejection | `POST .../{sessionID}/authorization/reject` | `sessionID` | `204`; joiner retrieve returns `422` |
 | `remove` | `DELETE /v1/pairing/{code}` | `code` | `204` (host-bound for retained session state; successful-retry idempotency is bounded by cleanup) |
 
 The opaque serialized client values contain the Task 3 fields:
@@ -53,3 +54,5 @@ For exact `PairingTransport.publish` compatibility the host supplies the six-dig
 The reservation field `id` matches `PairingDeliveryReservation.id`; `reservationID` remains accepted as a legacy alias.
 
 The service participant-binds each post-join operation to the authenticated host or joiner identity. The code offer expires independently. Submitting a join request starts a bounded five-minute pending handshake. Only the host's atomic response commit starts the canonical five-minute session. A reserved or committed authorization mailbox has its own fifteen-minute expiry and survives process restart in PostgreSQL mode. Idempotency is intentionally bounded by the retained session/mailbox/tombstone lifetime; after cleanup, retries may return `404` or `410` instead of succeeding indefinitely.
+
+After authenticated WebSocket reconnect, the service sends current signed trust records from the device's established graph that the client did not present during authentication. Clients still verify every signature and issuer locally and quarantine temporarily out-of-order records. Live clients publish updated signed records with `trust-update`; the service never creates a trust record itself.

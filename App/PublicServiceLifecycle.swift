@@ -260,6 +260,13 @@ actor ReconnectableRendezvousSignalSession: RendezvousSignalSession {
         try await activeSession.sendSignal(payload, to: device)
     }
 
+    func sendTrustUpdate(_ records: [SignedTrustRecord]) async throws {
+        guard let activeSession else {
+            throw AuthenticatedPresenceError.transport("public_service_offline")
+        }
+        try await activeSession.sendTrustUpdate(records)
+    }
+
     func finish() {
         forwardingTask?.cancel()
         forwardingTask = nil

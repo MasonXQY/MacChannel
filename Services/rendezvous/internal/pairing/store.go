@@ -23,6 +23,7 @@ var (
 	ErrPending   = errors.New("pairing item pending")
 	ErrConflict  = errors.New("pairing item conflicts with committed state")
 	ErrForbidden = errors.New("pairing participant mismatch")
+	ErrRejected  = errors.New("pairing authorization rejected")
 )
 
 const (
@@ -49,6 +50,7 @@ type Store interface {
 	CommitAuthorization(ctx context.Context, sessionID, hostDeviceID, reservationID string, encryptedAuthorization []byte, now time.Time) error
 	DeliveryStatus(ctx context.Context, sessionID, hostDeviceID, reservationID string, now time.Time) (string, error)
 	CancelAuthorization(ctx context.Context, sessionID, hostDeviceID, reservationID string, now time.Time) error
+	RejectAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) error
 	Authorization(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error)
 	Cleanup(ctx context.Context, now time.Time) error
 }
@@ -95,6 +97,7 @@ type storedSession struct {
 	authorizationCommittedAt *time.Time
 	authorizationRetrievedAt *time.Time
 	authorizationExpiresAt   *time.Time
+	authorizationRejectedAt  *time.Time
 }
 
 type AttemptLimiter struct {
@@ -548,6 +551,32 @@ func (s *MemoryStore) CancelAuthorization(_ context.Context, sessionID, hostDevi
 	return nil
 }
 
+func (s *MemoryStore) RejectAuthorization(_ context.Context, sessionID, hostDeviceID string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
+		return ErrForbidden
+	}
+	if session.removedAt != nil {
+		return ErrGone
+	}
+	if session.authorizationCommittedAt != nil {
+		return ErrConflict
+	}
+	if session.authorizationRejectedAt != nil {
+		return nil
+	}
+	if session.joinResponseCommittedAt == nil || session.sessionExpiresAt == nil || !now.Before(*session.sessionExpiresAt) {
+		return ErrGone
+	}
+	session.authorizationRejectedAt = timePointer(now)
+	return nil
+}
+
 func (s *MemoryStore) Authorization(_ context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -560,6 +589,9 @@ func (s *MemoryStore) Authorization(_ context.Context, sessionID, joinerDeviceID
 	}
 	if session.removedAt != nil {
 		return nil, ErrGone
+	}
+	if session.authorizationRejectedAt != nil {
+		return nil, ErrRejected
 	}
 	if session.authorizationCommittedAt == nil {
 		if session.reservationExpiresAt != nil && now.Before(*session.reservationExpiresAt) {
@@ -1333,6 +1365,46 @@ func (s *PostgresStore) CancelAuthorization(ctx context.Context, sessionID, host
 	return tx.Commit()
 }
 
+func (s *PostgresStore) RejectAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedHost string
+	var sessionExpires, responseCommitted, authorizationCommitted, rejectedAt, removedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT host_device_id, session_expires_at,
+		join_response_committed_at, authorization_committed_at, authorization_rejected_at, removed_at
+		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
+		&storedHost, &sessionExpires, &responseCommitted, &authorizationCommitted, &rejectedAt, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) {
+		return ErrForbidden
+	}
+	if removedAt.Valid {
+		return ErrGone
+	}
+	if authorizationCommitted.Valid {
+		return ErrConflict
+	}
+	if rejectedAt.Valid {
+		return tx.Commit()
+	}
+	if !responseCommitted.Valid || !sessionExpires.Valid || !now.Before(sessionExpires.Time) {
+		return ErrGone
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET authorization_rejected_at = $2
+		WHERE session_id = $1`, sessionID, now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *PostgresStore) Authorization(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1341,13 +1413,15 @@ func (s *PostgresStore) Authorization(ctx context.Context, sessionID, joinerDevi
 	defer tx.Rollback()
 	var storedJoiner string
 	var mailboxExpires, reservationExpires, sessionExpires sql.NullTime
-	var committedAt, retrievedAt, removedAt sql.NullTime
+	var committedAt, retrievedAt, rejectedAt, removedAt sql.NullTime
 	var payload []byte
 	err = tx.QueryRowContext(ctx, `SELECT joiner_device_id, authorization_expires_at,
 		authorization_reservation_expires_at, session_expires_at,
-		authorization_committed_at, authorization_retrieved_at, encrypted_authorization, removed_at
+		authorization_committed_at, authorization_retrieved_at, authorization_rejected_at,
+		encrypted_authorization, removed_at
 		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
-		&storedJoiner, &mailboxExpires, &reservationExpires, &sessionExpires, &committedAt, &retrievedAt, &payload, &removedAt)
+		&storedJoiner, &mailboxExpires, &reservationExpires, &sessionExpires, &committedAt, &retrievedAt,
+		&rejectedAt, &payload, &removedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1359,6 +1433,9 @@ func (s *PostgresStore) Authorization(ctx context.Context, sessionID, joinerDevi
 	}
 	if removedAt.Valid {
 		return nil, ErrGone
+	}
+	if rejectedAt.Valid {
+		return nil, ErrRejected
 	}
 	if !committedAt.Valid {
 		if (reservationExpires.Valid && now.Before(reservationExpires.Time)) || (sessionExpires.Valid && now.Before(sessionExpires.Time)) {

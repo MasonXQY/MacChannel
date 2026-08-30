@@ -163,6 +163,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let statusSource: RuntimeStatusSource
     private let publicServiceLifecycle: PublicServiceLifecycle?
     private let publicServiceStatusTask: Task<Void, Never>?
+    private let publicServiceTrustTask: Task<Void, Never>?
     private let signalSession: ReconnectableRendezvousSignalSession?
     private let pairingTransport: RendezvousPairingTransport?
     private let connectionListener: WebRTCConnectionListener?
@@ -184,6 +185,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         statusSource: RuntimeStatusSource,
         publicServiceLifecycle: PublicServiceLifecycle?,
         publicServiceStatusTask: Task<Void, Never>?,
+        publicServiceTrustTask: Task<Void, Never>?,
         signalSession: ReconnectableRendezvousSignalSession?,
         pairingTransport: RendezvousPairingTransport?,
         connectionListener: WebRTCConnectionListener?,
@@ -203,6 +205,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         self.statusSource = statusSource
         self.publicServiceLifecycle = publicServiceLifecycle
         self.publicServiceStatusTask = publicServiceStatusTask
+        self.publicServiceTrustTask = publicServiceTrustTask
         self.signalSession = signalSession
         self.pairingTransport = pairingTransport
         self.connectionListener = connectionListener
@@ -432,9 +435,29 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                 }
             }
         }
+        let publicServiceTrustTask = Task {
+            let updates = await trustRepository.updates()
+            var isInitialSnapshot = true
+            for await _ in updates {
+                guard !Task.isCancelled else { return }
+                if isInitialSnapshot {
+                    isInitialSnapshot = false
+                    continue
+                }
+                let records = await trustRepository.authenticationRecords()
+                guard !records.isEmpty else { continue }
+                do {
+                    try await signalSession.sendTrustUpdate(records)
+                } catch {
+                    await publicServiceLifecycle.reconnectNow()
+                }
+            }
+        }
         cleanup.push {
+            publicServiceTrustTask.cancel()
             publicServiceStatusTask.cancel()
             await publicServiceLifecycle.stop()
+            await publicServiceTrustTask.value
             await publicServiceStatusTask.value
         }
         await publicServiceLifecycle.start()
@@ -461,6 +484,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             statusSource: statusSource,
             publicServiceLifecycle: publicServiceLifecycle,
             publicServiceStatusTask: publicServiceStatusTask,
+            publicServiceTrustTask: publicServiceTrustTask,
             signalSession: signalSession,
             pairingTransport: pairingTransport,
             connectionListener: connectionListener,
@@ -479,7 +503,9 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         guard !stopped else { return }
         stopped = true
         await historySource.stop()
+        publicServiceTrustTask?.cancel()
         await publicServiceLifecycle?.stop()
+        await publicServiceTrustTask?.value
         publicServiceStatusTask?.cancel()
         await publicServiceStatusTask?.value
         if let incomingController { await incomingController.stop() }

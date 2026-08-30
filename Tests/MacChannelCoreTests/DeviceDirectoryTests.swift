@@ -283,6 +283,86 @@ final class DeviceDirectoryTests: XCTestCase {
         await session.stop()
     }
 
+    func testRendezvousSessionPublishesMembershipUpdatesOnAuthenticatedSocket() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        let record = try SignedTrustRecord.authorizing(peer, signedBy: identity)
+        let socket = MemoryPresenceSocket(incoming: [
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 13, count: 32).base64EncodedString(),
+                "expiresAt": 9_999_999_999_999,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+        ])
+        let session = try AuthenticatedPresenceSession(
+            identity: identity,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: PresenceClient(directory: DeviceDirectory(trust: .allowing(identity.id)))
+        )
+        try await session.connect()
+
+        try await session.sendTrustUpdate([record])
+
+        let sent = await socket.sentFrames()
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: sent[1]) as? [String: Any])
+        XCTAssertEqual(object["type"] as? String, "trust-update")
+        XCTAssertEqual((object["trustRecords"] as? [Any])?.count, 1)
+        await session.stop()
+    }
+
+    func testRendezvousSessionAppliesOutOfOrderMembershipCatchUp() async throws {
+        let local = try DeviceIdentity.ephemeral()
+        let bridge = try DeviceIdentity.ephemeral()
+        let existing = try DeviceIdentity.ephemeral()
+        let newest = try DeviceIdentity.ephemeral()
+        let repository = try TrustRepository(
+            ownerIdentity: local,
+            trustStore: TrustStore(owner: local.id),
+            persistedGeneration: 0
+        )
+        _ = try await repository.issueAuthorization(
+            subject: bridge.id,
+            subjectPublicKey: bridge.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+        let bridgeToExisting = try SignedTrustRecord.authorizing(
+            existing, signedBy: bridge, sequence: 1
+        )
+        let existingToNewest = try SignedTrustRecord.authorizing(
+            newest, signedBy: existing, sequence: 1
+        )
+        let socket = MemoryPresenceSocket(incoming: [
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 14, count: 32).base64EncodedString(),
+                "expiresAt": 9_999_999_999_999,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": local.id.rawValue.uuidString.lowercased()]),
+            try trustRecordFrame(existingToNewest),
+            try trustRecordFrame(bridgeToExisting),
+        ])
+        let session = try AuthenticatedPresenceSession(
+            identity: local,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: PresenceClient(directory: DeviceDirectory(trust: .allowing(local.id))),
+            trustRepository: repository
+        )
+
+        try await session.connect()
+        do {
+            try await session.run()
+        } catch let error as AuthenticatedPresenceError {
+            XCTAssertEqual(error, .transport("no_frame"))
+        }
+
+        let trustsExisting = await repository.isTrusted(existing.id)
+        let trustsNewest = await repository.isTrusted(newest.id)
+        XCTAssertTrue(trustsExisting)
+        XCTAssertTrue(trustsNewest)
+        await session.stop()
+    }
+
     func testRendezvousSessionDoesNotDropBurstOfICECandidates() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let peer = DeviceID(rawValue: UUID())
@@ -700,6 +780,22 @@ private actor BonjourApplyGate {
 
 private func frame(_ object: [String: Any]) throws -> Data {
     try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+}
+
+private func trustRecordFrame(_ record: SignedTrustRecord) throws -> Data {
+    try frame([
+        "type": "trust-record",
+        "record": [
+            "action": record.action.rawValue,
+            "epochMilliseconds": record.epochMilliseconds,
+            "issuer": record.issuer.rawValue.uuidString.lowercased(),
+            "issuerPublicKey": record.issuerPublicKey.base64EncodedString(),
+            "issuerSequence": record.issuerSequence,
+            "subject": record.subject.rawValue.uuidString.lowercased(),
+            "subjectPublicKey": record.subjectPublicKey.base64EncodedString(),
+            "signature": record.signature.base64EncodedString(),
+        ],
+    ])
 }
 
 private struct WebSocketCanonical: Encodable {

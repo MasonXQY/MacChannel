@@ -180,6 +180,7 @@ func NewRouter(config Config) http.Handler {
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization", router.commitAuthorization)
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/status", router.authorizationStatus)
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/cancel", router.cancelAuthorization)
+	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/reject", router.rejectAuthorization)
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/authorization/retrieve", router.retrieveAuthorization)
 	mux.HandleFunc("GET /v1/ws", router.webSocket)
 	mux.HandleFunc("POST /v1/turn-credentials", router.turnCredentials)
@@ -563,6 +564,25 @@ func (r *Router) retrieveAuthorization(writer http.ResponseWriter, request *http
 	})
 }
 
+func (r *Router) rejectAuthorization(writer http.ResponseWriter, request *http.Request) {
+	envelope, ok := r.authenticateHTTP(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		SessionID string `json:"sessionID"`
+	}
+	sessionID := request.PathValue("sessionID")
+	if err := decodeStrict(bytes.NewReader(envelope.Payload), &payload, maximumBodySize); err != nil || payload.SessionID != sessionID {
+		writeError(writer, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if writePairingError(writer, r.pairings.RejectAuthorization(request.Context(), sessionID, envelope.DeviceID, r.clock())) {
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 func writePairingError(writer http.ResponseWriter, err error) bool {
 	switch {
 	case err == nil:
@@ -582,6 +602,8 @@ func writePairingError(writer http.ResponseWriter, err error) bool {
 		writeError(writer, http.StatusTooManyRequests, "rate_limited")
 	case errors.Is(err, pairing.ErrInvalid):
 		writeError(writer, http.StatusBadRequest, "invalid_request")
+	case errors.Is(err, pairing.ErrRejected):
+		writeError(writer, http.StatusUnprocessableEntity, "pairing_rejected")
 	default:
 		writeError(writer, http.StatusInternalServerError, "internal_error")
 	}
@@ -668,6 +690,11 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 	defer unregisterSignal()
 	if err := peer.SendJSON(map[string]string{"type": "auth-ok", "deviceID": deviceID}); err != nil {
 		return
+	}
+	for _, record := range r.registry.RecordsForGraph(deviceID, authentication.TrustRecords) {
+		if err := peer.SendJSON(map[string]any{"type": "trust-record", "record": record}); err != nil {
+			return
+		}
 	}
 	disconnectPresence, err := r.presence.Connect(deviceID, source, peer)
 	if err != nil {

@@ -204,6 +204,18 @@ public actor TrustRepository {
     /// Accept only an already signed trust record, then persist an owner-signed
     /// local snapshot before exposing the resulting state to discovery.
     public func ingest(_ record: SignedTrustRecord) throws {
+        _ = try ingestIfNew(record)
+    }
+
+    /// Idempotent ingestion is required for durable membership catch-up: a
+    /// reconnecting service may resend the latest signed edge that this Mac
+    /// already persisted before its acknowledgement was observed.
+    @discardableResult
+    public func ingestIfNew(_ record: SignedTrustRecord) throws -> Bool {
+        let key = RecordKey(issuer: record.issuer, subject: record.subject)
+        if authenticationRecordsByPair[key]?.signature == record.signature {
+            return false
+        }
         var candidate = store
         try candidate.ingest(record)
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
@@ -211,6 +223,7 @@ public actor TrustRepository {
         latestSnapshot = snapshot
         recordAuthenticationProof(record)
         publishUpdate()
+        return true
     }
 
     private func recordAuthenticationProof(_ record: SignedTrustRecord) {
