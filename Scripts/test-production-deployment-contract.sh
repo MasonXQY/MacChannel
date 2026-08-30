@@ -4,9 +4,11 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 compose="$root/Infrastructure/production/docker-compose.yml"
 example="$root/Infrastructure/production/env.example"
+workflow="$root/.github/workflows/publish-service-images.yml"
 
 test -f "$compose"
 test -f "$example"
+test -f "$workflow"
 rg -q 'MACCHANNEL_RENDEZVOUS_IMAGE=.*@sha256' "$example"
 rg -q 'MACCHANNEL_COTURN_IMAGE=.*@sha256' "$example"
 rg -q 'MACCHANNEL_POSTGRES_MIGRATION_IMAGE=.*@sha256' "$example"
@@ -32,5 +34,16 @@ if rg -n 'POSTGRES_PASSWORD=|TURN_SHARED_SECRET=' "$compose"; then
 fi
 
 rg -q 'docker compose run --rm migrate-v1-1' "$root/Infrastructure/production/README.md"
+
+rg -q 'packages: write' "$workflow"
+rg -q 'ghcr\.io/masonxqy/macchannel-rendezvous' "$workflow"
+rg -q 'ghcr\.io/masonxqy/macchannel-coturn' "$workflow"
+rg -q 'platforms: linux/amd64,linux/arm64' "$workflow"
+rg -q 'sbom: true' "$workflow"
+rg -q 'provenance: mode=max' "$workflow"
+if rg -n 'uses: [^@[:space:]]+@v[0-9]' "$workflow"; then
+    echo "service image workflow contains a mutable major-version action reference" >&2
+    exit 1
+fi
 
 echo "production deployment contract PASS"
