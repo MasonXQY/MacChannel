@@ -1,3 +1,4 @@
+#if MACCHANNEL_LEGACY_MESH
 import Foundation
 import Network
 
@@ -200,3 +201,4 @@ enum MeshTransferPreludeCodec {
         return value
     }
 }
+#endif

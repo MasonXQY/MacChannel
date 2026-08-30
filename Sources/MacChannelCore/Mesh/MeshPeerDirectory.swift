@@ -94,11 +94,13 @@ public enum MeshPeerProbeCodec {
     }
 }
 
+#if MACCHANNEL_LEGACY_MESH
 public protocol TailscaleStatusProviding: Sendable {
     func status() async throws -> TailscaleStatus
 }
 
 extension TailscaleCommandClient: TailscaleStatusProviding {}
+#endif
 
 public protocol MeshPeerProbing: Sendable {
     func probe(
@@ -110,6 +112,7 @@ public protocol MeshPeerProbing: Sendable {
     ) async throws -> MeshPeerProbeResponse
 }
 
+#if MACCHANNEL_LEGACY_MESH
 public protocol MeshRefreshSleeping: Sendable {
     func sleep(for duration: Duration) async throws
 }
@@ -287,6 +290,7 @@ public actor MeshPeerDirectory {
         subscribers.removeValue(forKey: identifier)
     }
 }
+#endif
 
 public struct NWMeshPeerProber: MeshPeerProbing {
     public init() {}

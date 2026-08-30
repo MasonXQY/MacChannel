@@ -1,3 +1,4 @@
+#if MACCHANNEL_LEGACY_MESH
 import Foundation
 
 public actor MeshTransferConnectionSource: IncomingTransferConnectionSource {
@@ -146,3 +147,4 @@ public actor MeshTransferConnectionSource: IncomingTransferConnectionSource {
         readerTask?.cancel()
     }
 }
+#endif

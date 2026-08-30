@@ -17,6 +17,9 @@ let package = Package(
             name: "MacChannelCore",
             dependencies: [
                 .product(name: "WebRTC", package: "WebRTC"),
+            ],
+            swiftSettings: [
+                .define("MACCHANNEL_LEGACY_MESH", .when(configuration: .debug)),
             ]
         ),
         .target(

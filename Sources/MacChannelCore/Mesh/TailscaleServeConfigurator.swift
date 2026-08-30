@@ -1,4 +1,5 @@
 import Darwin
+#if MACCHANNEL_LEGACY_MESH
 import Foundation
 
 public enum TailscaleServeState: Sendable, Equatable {
@@ -299,3 +300,4 @@ public actor TailscaleServeConfigurator {
 }
 
 extension TailscaleServeConfigurator: TailscaleServeManaging {}
+#endif

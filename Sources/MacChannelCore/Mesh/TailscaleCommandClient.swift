@@ -1,4 +1,5 @@
 import Darwin
+#if MACCHANNEL_LEGACY_MESH
 import Foundation
 import Network
 
@@ -450,3 +451,4 @@ private final class TailscaleProcessExecution: @unchecked Sendable {
         }
     }
 }
+#endif

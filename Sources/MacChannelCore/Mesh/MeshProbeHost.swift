@@ -1,3 +1,4 @@
+#if MACCHANNEL_LEGACY_MESH
 import Foundation
 
 public actor MeshProbeHost {
@@ -64,3 +65,4 @@ public actor MeshProbeHost {
         await connection.close()
     }
 }
+#endif
