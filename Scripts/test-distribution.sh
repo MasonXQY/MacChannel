@@ -109,6 +109,7 @@ codesign --verify --deep --strict --verbose=2 "$mounted_path/MacChannel.app"
 plist="$mounted_path/MacChannel.app/Contents/Info.plist"
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.0.0
 test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 1
+test "$(plutil -extract CFBundlePackageType raw -o - "$plist")" = APPL
 
 mutated_app="$test_root/Mutated.app"
 ditto "$mounted_path/MacChannel.app" "$mutated_app"

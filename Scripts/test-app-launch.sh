@@ -27,6 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 test "$(plutil -extract LSUIElement raw .build/MacChannel.app/Contents/Info.plist)" = "true"
+test "$(plutil -extract CFBundlePackageType raw .build/MacChannel.app/Contents/Info.plist)" = "APPL"
 
 /usr/bin/open -n -W .build/MacChannel.app --args --smoke-test "$marker_path" &
 opener_pid=$!

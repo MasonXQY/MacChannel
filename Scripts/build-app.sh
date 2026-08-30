@@ -79,6 +79,8 @@ cat > "$contents_path/Info.plist" <<PLIST
     <string>com.mason.macchannel</string>
     <key>CFBundleName</key>
     <string>MacChannel</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
     <key>CFBundleShortVersionString</key>
     <string>$app_version</string>
     <key>CFBundleVersion</key>
