@@ -63,7 +63,25 @@ public struct KeychainStore: SecretStore, Sendable {
 
         switch status {
         case errSecSuccess:
-            return try validatedData(from: result, policy: policy)
+            let validated = try validatedData(from: result, policy: policy)
+            if validated.requiresAccessibilityMigration {
+                let migrationQuery: [CFString: Any] = [
+                    kSecClass: kSecClassGenericPassword,
+                    kSecAttrService: policy.service,
+                    kSecAttrAccount: account,
+                    kSecAttrSynchronizable: kCFBooleanFalse as Any,
+                ]
+                let migrationStatus = SecItemUpdate(
+                    migrationQuery as CFDictionary,
+                    [
+                        kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                    ] as CFDictionary
+                )
+                guard migrationStatus == errSecSuccess else {
+                    throw KeychainStoreError.operationFailed(migrationStatus)
+                }
+            }
+            return validated.data
         case errSecItemNotFound:
             return nil
         default:
@@ -122,18 +140,23 @@ public struct KeychainStore: SecretStore, Sendable {
         }
     }
 
-    private func validatedData(from result: CFTypeRef?, policy: KeychainPolicy) throws -> Data {
+    private func validatedData(
+        from result: CFTypeRef?,
+        policy: KeychainPolicy
+    ) throws -> (data: Data, requiresAccessibilityMigration: Bool) {
         guard let attributes = result as? [String: Any],
-              let data = attributes[kSecValueData as String] as? Data,
-              let accessibility = attributes[kSecAttrAccessible as String] as? String,
-              accessibility == kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+              let data = attributes[kSecValueData as String] as? Data
         else {
             throw KeychainStoreError.unexpectedAttributes
         }
+        let accessibility = attributes[kSecAttrAccessible as String] as? String
         let synchronizable = attributes[kSecAttrSynchronizable as String] as? Bool ?? false
         guard synchronizable == policy.synchronizable else {
             throw KeychainStoreError.unexpectedAttributes
         }
-        return data
+        return (
+            data,
+            accessibility != kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+        )
     }
 }

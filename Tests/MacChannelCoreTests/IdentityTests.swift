@@ -1,10 +1,44 @@
 import CryptoKit
 import Foundation
+import Security
 import XCTest
 
 @testable import MacChannelCore
 
 final class IdentityTests: XCTestCase {
+    func testKeychainStoreMigratesLegacyAccessibilityWithoutChangingIdentity() throws {
+        let service = "com.mason.macchannel.identity.test.\(UUID().uuidString)"
+        let account = "p256-signing-private-key"
+        let policy = KeychainPolicy(
+            service: service,
+            accessibility: .afterFirstUnlockThisDeviceOnly,
+            synchronizable: false
+        )
+        let legacyKey = P256.Signing.PrivateKey()
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecAttrSynchronizable: kSecAttrSynchronizableAny,
+        ]
+        SecItemDelete(query as CFDictionary)
+        defer { SecItemDelete(query as CFDictionary) }
+        var legacyItem = query
+        legacyItem[kSecValueData] = legacyKey.rawRepresentation
+        legacyItem[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+        legacyItem[kSecAttrSynchronizable] = kCFBooleanFalse
+        XCTAssertEqual(SecItemAdd(legacyItem as CFDictionary, nil), errSecSuccess)
+        let keychain = KeychainStore(policy: policy)
+        let identity = try DeviceIdentity.loadOrCreate(
+            keychain: keychain,
+            policy: policy
+        )
+        let reloaded = try DeviceIdentity.loadOrCreate(keychain: keychain, policy: policy)
+
+        XCTAssertEqual(identity.publicKey.rawRepresentation, legacyKey.publicKey.rawRepresentation)
+        XCTAssertEqual(reloaded.id, identity.id)
+    }
+
     func testIdentityPersistsAndSigns() throws {
         let keychain = MemorySecretStore()
         let first = try DeviceIdentity.loadOrCreate(keychain: keychain)
