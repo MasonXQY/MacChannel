@@ -1,0 +1,66 @@
+name: macchannel-production
+
+services:
+  rendezvous:
+    image: ${MACCHANNEL_RENDEZVOUS_IMAGE:?set a digest-pinned rendezvous image}
+    environment:
+      POSTGRES_HOST: ${MACCHANNEL_POSTGRES_HOST:?set the private PostgreSQL host}
+      POSTGRES_PORT: ${MACCHANNEL_POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${MACCHANNEL_POSTGRES_DB:-macchannel}
+      POSTGRES_USER: ${MACCHANNEL_POSTGRES_USER:-macchannel}
+      POSTGRES_PASSWORD_FILE: /run/macchannel/postgres-password
+      POSTGRES_SSLMODE: verify-full
+      RENDEZVOUS_ADDR: 127.0.0.1:8080
+      RENDEZVOUS_TLS_ADDR: :8443
+      RENDEZVOUS_TLS_CERT_FILE: /run/macchannel/localhost.pem
+      RENDEZVOUS_TLS_KEY_FILE: /run/macchannel/localhost-key.pem
+      TURN_SHARED_SECRET_FILE: /run/macchannel/turn-shared-secret
+      TURN_URLS: ${MACCHANNEL_TURN_URLS:?set the official STUN and TURN URLs}
+      MACCHANNEL_ALLOWED_WS_ORIGINS: ${MACCHANNEL_ALLOWED_WS_ORIGINS:?set the official HTTPS origin}
+    volumes:
+      - ${MACCHANNEL_SECRET_DIRECTORY:?set the protected secret directory}:/stack-secrets:ro
+    ports:
+      - 443:8443
+      - 127.0.0.1:8080:8080
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /run/macchannel:size=1m,uid=0,gid=0,mode=0700
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8080/healthz]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
+
+  coturn:
+    image: ${MACCHANNEL_COTURN_IMAGE:?set a digest-pinned coturn image}
+    environment:
+      TURN_EXTERNAL_IP: ${MACCHANNEL_TURN_EXTERNAL_IP:?set the public relay IPv4}
+      TURN_REALM: ${MACCHANNEL_TURN_REALM:?set the TURN DNS name}
+    volumes:
+      - ${MACCHANNEL_SECRET_DIRECTORY:?set the protected secret directory}:/stack-secrets:ro
+    ports:
+      - 3478:3478/udp
+      - 3478:3478/tcp
+      - 5349:5349/tcp
+      - 49160-49200:49160-49200/udp
+      - 49160-49200:49160-49200/tcp
+      - 127.0.0.1:9641:9641
+    read_only: true
+    tmpfs:
+      - /run/coturn:size=1m,uid=65534,gid=65534,mode=0700
+      - /var/lib/coturn:size=1m,uid=65534,gid=65534,mode=0700
+      - /tmp:size=4m,mode=1777
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, turnutils_stunclient, -p, "3478", 127.0.0.1]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
