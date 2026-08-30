@@ -1,8 +1,38 @@
 name: macchannel-production
 
 services:
+  migrate-v1-1:
+    image: ${MACCHANNEL_POSTGRES_MIGRATION_IMAGE:?set a digest-pinned PostgreSQL client image}
+    environment:
+      PGHOST: ${MACCHANNEL_POSTGRES_HOST:?set the private PostgreSQL host}
+      PGPORT: ${MACCHANNEL_POSTGRES_PORT:-5432}
+      PGDATABASE: ${MACCHANNEL_POSTGRES_DB:-macchannel}
+      PGUSER: ${MACCHANNEL_POSTGRES_USER:-macchannel}
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: /stack-secrets/postgres-root-ca.pem
+      PGPASSFILE: /run/macchannel/pgpass
+    volumes:
+      - ${MACCHANNEL_SECRET_DIRECTORY:?set the protected secret directory}:/stack-secrets:ro
+      - ../../Services/migrations:/migrations:ro
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - >-
+        umask 077;
+        printf '%s:%s:%s:%s:%s\n' "$${PGHOST}" "$${PGPORT}" "$${PGDATABASE}" "$${PGUSER}"
+        "$$(cat /stack-secrets/postgres-password)" > "$${PGPASSFILE}";
+        exec psql -v ON_ERROR_STOP=1 -f /migrations/006_pairing_rejection.sql
+    read_only: true
+    tmpfs:
+      - /run/macchannel:size=1m,uid=0,gid=0,mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
   rendezvous:
     image: ${MACCHANNEL_RENDEZVOUS_IMAGE:?set a digest-pinned rendezvous image}
+    depends_on:
+      migrate-v1-1:
+        condition: service_completed_successfully
     environment:
       POSTGRES_HOST: ${MACCHANNEL_POSTGRES_HOST:?set the private PostgreSQL host}
       POSTGRES_PORT: ${MACCHANNEL_POSTGRES_PORT:-5432}
@@ -10,6 +40,7 @@ services:
       POSTGRES_USER: ${MACCHANNEL_POSTGRES_USER:-macchannel}
       POSTGRES_PASSWORD_FILE: /run/macchannel/postgres-password
       POSTGRES_SSLMODE: verify-full
+      POSTGRES_SSLROOTCERT_FILE: /run/macchannel/postgres-root-ca.pem
       RENDEZVOUS_ADDR: 127.0.0.1:8080
       RENDEZVOUS_TLS_ADDR: :8443
       RENDEZVOUS_TLS_CERT_FILE: /run/macchannel/localhost.pem
@@ -19,6 +50,24 @@ services:
       MACCHANNEL_ALLOWED_WS_ORIGINS: ${MACCHANNEL_ALLOWED_WS_ORIGINS:?set the official HTTPS origin}
     volumes:
       - ${MACCHANNEL_SECRET_DIRECTORY:?set the protected secret directory}:/stack-secrets:ro
+    entrypoint:
+      - /usr/local/bin/secret-launcher
+      - --uid
+      - "65532"
+      - --gid
+      - "65532"
+      - --copy
+      - /stack-secrets/postgres-password=/run/macchannel/postgres-password
+      - --copy
+      - /stack-secrets/postgres-root-ca.pem=/run/macchannel/postgres-root-ca.pem
+      - --copy
+      - /stack-secrets/turn-shared-secret=/run/macchannel/turn-shared-secret
+      - --copy
+      - /stack-secrets/tls/localhost.pem=/run/macchannel/localhost.pem
+      - --copy
+      - /stack-secrets/tls/localhost-key.pem=/run/macchannel/localhost-key.pem
+      - --
+      - /usr/local/bin/rendezvous
     ports:
       - 443:8443
       - 127.0.0.1:8080:8080

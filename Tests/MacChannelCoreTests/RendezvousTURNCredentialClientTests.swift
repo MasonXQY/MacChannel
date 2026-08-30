@@ -84,6 +84,30 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
         }
     }
 
+    func testAcceptsServerMintedTenMinuteCredentialAcrossClockBoundary() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        TURNClientURLProtocol.reset()
+        TURNClientURLProtocol.response = response(
+            urls: ["turn:localhost:3478?transport=udp"],
+            username: "1800000660:opaque",
+            credential: "secret",
+            expiresAt: "2027-01-15T08:11:00Z"
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TURNClientURLProtocol.self]
+        let client = try RendezvousTURNCredentialClient(
+            identity: DeviceIdentity.ephemeral(),
+            origin: URL(string: "http://rendezvous.test")!,
+            session: URLSession(configuration: configuration),
+            now: { now },
+            allowInsecureForTesting: true
+        )
+
+        let credentials = try await client.fetch()
+
+        XCTAssertEqual(credentials.expiresAt.timeIntervalSince(now), 660)
+    }
+
     func testMapsAuthenticationAvailabilityAndNonHTTPResponses() async throws {
         let statuses: [(Int, RendezvousTURNClientError)] = [
             (401, .authenticationRejected),
@@ -232,13 +256,16 @@ final class RendezvousTURNCredentialClientTests: XCTestCase {
         )
     }
 
-    private func response(urls: [String], username: String, credential: String) -> Data {
+    private func response(
+        urls: [String], username: String, credential: String,
+        expiresAt: String = "2027-01-15T08:10:00Z"
+    ) -> Data {
         try! JSONSerialization.data(
             withJSONObject: [
                 "urls": urls,
                 "username": username,
                 "credential": credential,
-                "expiresAt": "2027-01-15T08:10:00Z",
+                "expiresAt": expiresAt,
             ], options: [.sortedKeys])
     }
 }

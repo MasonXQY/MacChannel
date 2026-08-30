@@ -7,7 +7,13 @@ infrastructure_root="${repository_root}/Infrastructure"
 secret_root="${MACCHANNEL_LOCAL_STATE_ROOT:-${infrastructure_root}/.local-secrets}"
 tls_root="${secret_root}/tls"
 compose_file="${infrastructure_root}/docker-compose.yml"
-export COMPOSE_PROJECT_NAME=macchannel-local
+export COMPOSE_PROJECT_NAME="${MACCHANNEL_COMPOSE_PROJECT_NAME:-macchannel-local}"
+if [[ ! "${COMPOSE_PROJECT_NAME}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+  echo "Compose 项目名格式无效。" >&2
+  exit 2
+fi
+stack_secret_volume="${COMPOSE_PROJECT_NAME}_stack_secrets"
+postgres_volume="${COMPOSE_PROJECT_NAME}_postgres_data"
 prepare_only=false
 install_trust=true
 turn_external_ip=
@@ -48,11 +54,11 @@ rollback() {
     if [[ "${stack_touched}" == true ]]; then
       TURN_EXTERNAL_IP="${turn_external_ip:-127.0.0.1}" \
         docker compose -f "${compose_file}" down --remove-orphans >/dev/null 2>&1
-      if [[ "${stack_secret_volume_owned}" == true ]] && volume_is_still_owned macchannel-local_stack_secrets; then
-        docker volume rm macchannel-local_stack_secrets >/dev/null 2>&1
+      if [[ "${stack_secret_volume_owned}" == true ]] && volume_is_still_owned "${stack_secret_volume}"; then
+        docker volume rm "${stack_secret_volume}" >/dev/null 2>&1
       fi
-      if [[ "${postgres_volume_owned}" == true ]] && volume_is_still_owned macchannel-local_postgres_data; then
-        docker volume rm macchannel-local_postgres_data >/dev/null 2>&1
+      if [[ "${postgres_volume_owned}" == true ]] && volume_is_still_owned "${postgres_volume}"; then
+        docker volume rm "${postgres_volume}" >/dev/null 2>&1
       fi
     fi
     if [[ "${trust_added}" == true ]]; then
@@ -283,8 +289,8 @@ chmod 700 "${secret_root}" "${tls_root}"
 export TURN_EXTERNAL_IP="${turn_external_ip}"
 
 stack_touched=true
-ensure_runner_volume macchannel-local_stack_secrets stack_secret_volume_owned
-ensure_runner_volume macchannel-local_postgres_data postgres_volume_owned
+ensure_runner_volume "${stack_secret_volume}" stack_secret_volume_owned
+ensure_runner_volume "${postgres_volume}" postgres_volume_owned
 docker compose -f "${compose_file}" up --build --no-deps secret-init
 docker compose -f "${compose_file}" cp secret-init:/stack-secrets/turn-shared-secret "${secret_root}/turn-shared-secret"
 docker compose -f "${compose_file}" cp secret-init:/stack-secrets/tls/local-ca.pem "${tls_root}/local-ca.pem"
@@ -293,6 +299,10 @@ docker compose -f "${compose_file}" cp secret-init:/stack-secrets/tls/localhost-
 validate_exported_material
 install_local_trust_if_needed
 
+docker compose -f "${compose_file}" up -d --build --wait postgres
+docker compose -f "${compose_file}" exec -T postgres \
+  psql -v ON_ERROR_STOP=1 -U macchannel -d macchannel \
+  -f /docker-entrypoint-initdb.d/006_pairing_rejection.sql >/dev/null
 docker compose -f "${compose_file}" up -d --build --wait
 
 # The launchers copy the root-readable named-volume files to private tmpfs,

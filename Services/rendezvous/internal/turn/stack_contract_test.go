@@ -294,12 +294,24 @@ func TestRunnerUsesBracedNamedExpansionsForBash32(t *testing.T) {
 	if match := regexp.MustCompile(`\$[A-Za-z_][A-Za-z0-9_]*`).FindString(withoutSingleQuotedShellSegments(runner)); match != "" {
 		t.Fatalf("unbraced named expansion is unsafe beside non-ASCII text on Bash 3.2: %q", match)
 	}
-	if !strings.Contains(runner, "export COMPOSE_PROJECT_NAME=macchannel-local") {
-		t.Fatal("runner ownership checks are not bound to the exact Compose project volume names")
+	if !strings.Contains(runner, `export COMPOSE_PROJECT_NAME="${MACCHANNEL_COMPOSE_PROJECT_NAME:-macchannel-local}"`) ||
+		!strings.Contains(runner, `stack_secret_volume="${COMPOSE_PROJECT_NAME}_stack_secrets"`) {
+		t.Fatal("runner ownership checks are not bound to the selected Compose project volume names")
 	}
 	if !strings.Contains(runner, `printf '%s' "${COMPOSE_PROJECT_NAME}"`) ||
 		strings.Contains(runner, `printf '%s' "${compose_file}" | openssl dgst`) {
 		t.Fatal("runner lock must be global to the fixed Compose project, not scoped to one checkout path")
+	}
+}
+
+func TestVerifyE2EUsesAndRemovesAnIsolatedComposeProject(t *testing.T) {
+	verifier := readContractFile(t, filepath.Join(repositoryRoot(t), "Scripts", "verify-e2e.sh"))
+	for _, required := range []string{
+		"MACCHANNEL_COMPOSE_PROJECT_NAME", "COMPOSE_PROJECT_NAME", "down --volumes --remove-orphans",
+	} {
+		if !strings.Contains(verifier, required) {
+			t.Errorf("verify-e2e isolation contract missing %q", required)
+		}
 	}
 }
 
@@ -476,7 +488,7 @@ esac
 	if readError != nil {
 		t.Fatalf("read rollback events: %v; runner: %s", readError, output)
 	}
-	if got := strings.Fields(string(eventData)); strings.Join(got, ",") != "docker-init,trust-add,docker-up,docker-down,volume-secret-rm,volume-postgres-rm,trust-delete" {
+	if got := strings.Fields(string(eventData)); strings.Join(got, ",") != "docker-init,trust-add,docker-up,docker-up,docker-down,volume-secret-rm,volume-postgres-rm,trust-delete" {
 		t.Fatalf("rollback events = %v; runner: %s", got, output)
 	}
 }
@@ -719,7 +731,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(strings.Fields(string(eventData)), ","); got != "docker-init,docker-up,docker-down" {
+	if got := strings.Join(strings.Fields(string(eventData)), ","); got != "docker-init,docker-up,docker-up,docker-down" {
 		t.Fatalf("ownership replacement rollback events = %s, output=%s", got, output)
 	}
 }

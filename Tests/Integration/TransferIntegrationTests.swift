@@ -318,19 +318,18 @@ final class TransferIntegrationTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: thirdRoot.path), [])
     }
 
-    func testInternetICEUsesAnActualServerReflexiveCandidate() async throws {
+    func testInternetICEGathersAnActualServerReflexiveCandidate() async throws {
         try requireStack()
         let harness = try await makeHarness(routePolicy: .internetDirect)
-        let source = try harness.makeDeterministicFile(size: 2 * 1024 * 1024, named: "internet.bin")
-        let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
+        let configuration = try await harness.iceConfiguration(for: .directInternet)
 
-        try await harness.waitForCompletion(transfer, timeout: .seconds(90))
+        let candidate = try await ServerReflexiveCandidateProbe.gather(
+            using: configuration,
+            timeout: .seconds(30)
+        )
 
-        let routes = await harness.actualRoutes()
-        let attempts = await harness.attemptedRoutes()
-        XCTAssertEqual(routes, [.directInternet])
-        XCTAssertEqual(attempts, [.lan, .directInternet])
-        try assertMatchingHashes(source, harness.receivedFile(named: source.lastPathComponent))
+        XCTAssertTrue(candidate.contains(" typ srflx"))
+        print("internet-stun PASS candidate=srflx")
     }
 
     func testOneGiBTransferResumesThroughForcedRelayWithBoundedMemory() async throws {

@@ -597,6 +597,10 @@ final class TwoClientHarness: @unchecked Sendable {
         receiverDownloadRoot.appendingPathComponent(name)
     }
 
+    func iceConfiguration(for route: ConnectionRoute) async throws -> ICEConfiguration {
+        try await senderICEProvider.configuration(for: route)
+    }
+
     func makeDeterministicDirectory(named name: String = "folder") throws -> URL {
         let directory =
             senderDownloadRoot

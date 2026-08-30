@@ -35,7 +35,10 @@ let package = Package(
         ),
         .testTarget(
             name: "MacChannelIntegrationTests",
-            dependencies: ["MacChannelCore"],
+            dependencies: [
+                "MacChannelCore",
+                .product(name: "WebRTC", package: "WebRTC"),
+            ],
             path: "Tests/Integration"
         ),
     ]

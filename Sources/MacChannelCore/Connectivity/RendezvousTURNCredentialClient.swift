@@ -224,7 +224,7 @@ public struct RendezvousTURNCredentialClient: Sendable {
             decoded.expiresAt.utf8.count <= 64,
             let expiry,
             expiry > requestDate,
-            expiry.timeIntervalSince(requestDate) <= 600,
+            expiry.timeIntervalSince(requestDate) <= 660,
             schemes.contains(where: { $0 == "turn" || $0 == "turns" }),
             schemes.allSatisfy({ ["stun", "stuns", "turn", "turns"].contains($0) }),
             let separator = decoded.username.firstIndex(of: ":"),

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -129,18 +130,42 @@ func configuredDatabaseURL() (string, error) {
 	if sslMode != "disable" && sslMode != "require" && sslMode != "verify-ca" && sslMode != "verify-full" {
 		return "", errors.New("invalid POSTGRES_SSLMODE")
 	}
+	sslRootCertificate := strings.TrimSpace(os.Getenv("POSTGRES_SSLROOTCERT_FILE"))
+	if sslMode == "verify-ca" || sslMode == "verify-full" {
+		if err := validateCertificateFile(sslRootCertificate); err != nil {
+			return "", fmt.Errorf("PostgreSQL root certificate: %w", err)
+		}
+	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65_535 {
 		return "", errors.New("invalid POSTGRES_PORT")
+	}
+	query := url.Values{"sslmode": []string{sslMode}}
+	if sslRootCertificate != "" {
+		query.Set("sslrootcert", sslRootCertificate)
 	}
 	result := url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(user, string(password)),
 		Host:     net.JoinHostPort(host, port),
 		Path:     database,
-		RawQuery: url.Values{"sslmode": []string{sslMode}}.Encode(),
+		RawQuery: query.Encode(),
 	}
 	return result.String(), nil
+}
+
+func validateCertificateFile(path string) error {
+	if path == "" || !filepath.IsAbs(path) {
+		return errors.New("absolute file path is required")
+	}
+	information, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !information.Mode().IsRegular() || information.Size() <= 0 || information.Size() > 1024*1024 {
+		return errors.New("file must be a non-empty regular file no larger than 1 MiB")
+	}
+	return nil
 }
 
 func secretFromEnvironmentOrFile(valueName, fileName string) ([]byte, error) {

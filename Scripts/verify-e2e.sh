@@ -25,7 +25,7 @@ cleanup() {
   trap - EXIT INT TERM
   set +e
   if [[ "${stack_started}" == true ]]; then
-    docker compose -f "${compose_file}" down --remove-orphans >/dev/null 2>&1
+    docker compose -f "${compose_file}" down --volumes --remove-orphans >/dev/null 2>&1
   fi
   local temporary_file
   if ((${#temporary_files[@]} > 0)); then
@@ -82,6 +82,8 @@ fi
 
 state_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-e2e.XXXXXX")"
 export MACCHANNEL_LOCAL_STATE_ROOT="${state_root}"
+export MACCHANNEL_COMPOSE_PROJECT_NAME="macchannel-e2e-$$"
+export COMPOSE_PROJECT_NAME="${MACCHANNEL_COMPOSE_PROJECT_NAME}"
 stack_arguments=(--no-trust)
 if [[ -n "${MACCHANNEL_TURN_EXTERNAL_IP:-}" ]]; then
   stack_arguments+=(--turn-external-ip "${MACCHANNEL_TURN_EXTERNAL_IP}")
@@ -112,6 +114,7 @@ temporary_files+=("${e2e_output}")
 ) | tee "${e2e_output}"
 
 grep -F "direct-lan PASS" "${e2e_output}" >/dev/null
+grep -F "internet-stun PASS" "${e2e_output}" >/dev/null
 grep -F "relay PASS" "${e2e_output}" >/dev/null
 grep -F "resume PASS" "${e2e_output}" >/dev/null
 rm -f "${e2e_output}"

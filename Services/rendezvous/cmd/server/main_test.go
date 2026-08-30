@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,40 @@ func TestDatabaseURLCanBeComposedFromPasswordFileWithoutSecretEnvironmentValue(t
 	}
 	if !strings.Contains(got, "macchannel:p%40ss%20word@postgres:5432/macchannel") || !strings.HasSuffix(got, "?sslmode=disable") {
 		t.Fatalf("database URL did not safely encode file secret: %q", got)
+	}
+}
+
+func TestDatabaseURLVerifyFullRequiresAndIncludesRootCertificate(t *testing.T) {
+	directory := t.TempDir()
+	passwordPath := filepath.Join(directory, "postgres-password")
+	rootCertificatePath := filepath.Join(directory, "postgres-root-ca.pem")
+	if err := os.WriteFile(passwordPath, []byte("strong-password\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rootCertificatePath, []byte("test root certificate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("POSTGRES_HOST", "database.internal")
+	t.Setenv("POSTGRES_PORT", "5432")
+	t.Setenv("POSTGRES_DB", "macchannel")
+	t.Setenv("POSTGRES_USER", "macchannel")
+	t.Setenv("POSTGRES_PASSWORD_FILE", passwordPath)
+	t.Setenv("POSTGRES_SSLMODE", "verify-full")
+	t.Setenv("POSTGRES_SSLROOTCERT_FILE", "")
+
+	if _, err := configuredDatabaseURL(); err == nil {
+		t.Fatal("verify-full accepted a missing PostgreSQL root certificate")
+	}
+
+	t.Setenv("POSTGRES_SSLROOTCERT_FILE", rootCertificatePath)
+	got, err := configuredDatabaseURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "sslmode=verify-full") ||
+		!strings.Contains(got, "sslrootcert="+url.QueryEscape(rootCertificatePath)) {
+		t.Fatalf("database URL omitted TLS trust material: %q", got)
 	}
 }
 
