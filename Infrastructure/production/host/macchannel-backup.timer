@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily MacChannel metadata backup
+
+[Timer]
+OnCalendar=*-*-* 02:20:00 UTC
+RandomizedDelaySec=20m
+Persistent=true
+Unit=macchannel-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=MacChannel production service
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/macchannel/Infrastructure/production
+EnvironmentFile=/etc/macchannel/production.env
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.single-host.yml up -d --remove-orphans
+ExecReload=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.single-host.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.single-host.yml down
+TimeoutStartSec=300
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

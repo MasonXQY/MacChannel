@@ -1,0 +1,70 @@
+name: macchannel-production
+
+services:
+  postgres:
+    image: postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_DB: ${MACCHANNEL_POSTGRES_DB:-macchannel}
+      POSTGRES_USER: ${MACCHANNEL_POSTGRES_USER:-macchannel}
+      POSTGRES_PASSWORD_FILE: /stack-secrets/postgres-password
+    volumes:
+      - ${MACCHANNEL_SECRET_DIRECTORY:?set the protected secret directory}:/stack-secrets:ro
+      - postgres_data:/var/lib/postgresql/data
+      - ../../Services/migrations:/docker-entrypoint-initdb.d:ro
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        install -d -m 0700 -o postgres -g postgres /run/postgresql/tls
+        install -m 0644 -o postgres -g postgres /stack-secrets/postgres-root-ca.pem /run/postgresql/tls/ca.pem
+        install -m 0644 -o postgres -g postgres /stack-secrets/postgres.pem /run/postgresql/tls/server.pem
+        install -m 0600 -o postgres -g postgres /stack-secrets/postgres-key.pem /run/postgresql/tls/server-key.pem
+        exec /usr/local/bin/docker-entrypoint.sh postgres \
+          -c ssl=on \
+          -c ssl_ca_file=/run/postgresql/tls/ca.pem \
+          -c ssl_cert_file=/run/postgresql/tls/server.pem \
+          -c ssl_key_file=/run/postgresql/tls/server-key.pem \
+          -c password_encryption=scram-sha-256 \
+          -c log_statement=none \
+          -c log_connections=off \
+          -c log_disconnections=off
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /run/postgresql:size=2m,uid=70,gid=70,mode=0755
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks: [backend]
+
+  migrate-v1-1:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  rendezvous:
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate-v1-1:
+        condition: service_completed_successfully
+    networks: [backend, edge]
+
+  coturn:
+    networks: [relay]
+
+volumes:
+  postgres_data:
+
+networks:
+  backend:
+    internal: true
+  edge:
+  relay:

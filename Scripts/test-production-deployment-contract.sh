@@ -5,10 +5,12 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 compose="$root/Infrastructure/production/docker-compose.yml"
 example="$root/Infrastructure/production/env.example"
 workflow="$root/.github/workflows/publish-service-images.yml"
+single_host="$root/Infrastructure/production/docker-compose.single-host.yml"
 
 test -f "$compose"
 test -f "$example"
 test -f "$workflow"
+test -f "$single_host"
 rg -q 'MACCHANNEL_RENDEZVOUS_IMAGE=.*@sha256' "$example"
 rg -q 'MACCHANNEL_COTURN_IMAGE=.*@sha256' "$example"
 rg -q 'MACCHANNEL_POSTGRES_MIGRATION_IMAGE=.*@sha256' "$example"
@@ -33,6 +35,16 @@ if rg -n 'POSTGRES_PASSWORD=|TURN_SHARED_SECRET=' "$compose"; then
     exit 1
 fi
 
+rg -q '^  postgres:' "$single_host"
+rg -q 'postgres:17\.11-alpine3\.24@sha256:' "$single_host"
+rg -q 'ssl=on' "$single_host"
+rg -q 'ssl_ca_file=/run/postgresql/tls/ca\.pem' "$single_host"
+rg -q '^    internal: true$' "$single_host"
+if rg -n '5432:5432|0\.0\.0\.0:5432|ports:.*5432' "$single_host"; then
+    echo "single-host PostgreSQL must not publish a host port" >&2
+    exit 1
+fi
+
 rg -q 'docker compose run --rm migrate-v1-1' "$root/Infrastructure/production/README.md"
 
 rg -q 'packages: write' "$workflow"
@@ -45,5 +57,12 @@ if rg -n 'uses: [^@[:space:]]+@v[0-9]' "$workflow"; then
     echo "service image workflow contains a mutable major-version action reference" >&2
     exit 1
 fi
+
+rg -q 'PasswordAuthentication no' "$root/Infrastructure/production/host/99-macchannel-ssh.conf"
+rg -q 'live-restore' "$root/Infrastructure/production/host/docker-daemon.json"
+rg -q 'EnvironmentFile=/etc/macchannel/production.env' "$root/Infrastructure/production/host/macchannel.service"
+rg -q 'gzip -t' "$root/Infrastructure/production/host/macchannel-backup.sh"
+rg -q 'OnCalendar=' "$root/Infrastructure/production/host/macchannel-backup.timer"
+rg -q 'systemctl try-reload-or-restart macchannel.service' "$root/Infrastructure/production/host/macchannel-certificate-deploy.sh"
 
 echo "production deployment contract PASS"
