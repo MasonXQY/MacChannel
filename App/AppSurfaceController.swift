@@ -16,6 +16,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private let pairingService: any PairingSurfaceServicing
     private let settingsService: any DeviceSettingsServicing
     private let directorySelector: any DirectorySelecting
+    private let onRetryRuntime: () -> Void
     private let now: () -> Date
 
     private var activePopover: NSPopover?
@@ -45,6 +46,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         transferModel: TransferSurfaceModel = TransferSurfaceModel(),
         pairingModel: PairingSurfaceModel = PairingSurfaceModel(),
         settingsModel: SettingsSurfaceModel = SettingsSurfaceModel(),
+        onRetryRuntime: @escaping () -> Void = {},
         now: @escaping () -> Date = Date.init
     ) {
         self.fanPanel = fanPanel
@@ -55,6 +57,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         self.transferModel = transferModel
         self.pairingModel = pairingModel
         self.settingsModel = settingsModel
+        self.onRetryRuntime = onRetryRuntime
         self.now = now
     }
 
@@ -198,6 +201,10 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         settingsModel.autoReceive = snapshot.autoReceive
         settingsModel.launchAtLogin = snapshot.launchAtLogin
         updateDeviceSettings(snapshot.devices)
+    }
+
+    func updateRuntimeStatus(_ status: AppRuntimeStatus) {
+        settingsModel.runtimeStatus = status
     }
 
     func updateTransferSnapshots(_ snapshots: [TransferSnapshot]) {
@@ -404,6 +411,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 model: settingsModel,
                 service: settingsService,
                 directorySelector: directorySelector,
+                onRetryRuntime: onRetryRuntime,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
             )
         )

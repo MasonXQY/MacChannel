@@ -72,6 +72,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
                 self.completeProductionLaunchTestIfRequested(status: status, container: container)
             } else {
                 self.statusItemController?.setRuntimeStatus(status)
+                self.surfaceController?.updateRuntimeStatus(status)
             }
         }
         bootstrapTask = Task { await runtimeHost.bootstrap() }
@@ -108,10 +109,17 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
             ),
             pairingService: container.pairingSurfaceService,
             settingsService: container.settingsSurfaceService,
-            directorySelector: container.directorySelector
+            directorySelector: container.directorySelector,
+            onRetryRuntime: { [weak runtimeHost] in
+                Task { await runtimeHost?.bootstrap() }
+            }
         )
+        statusController.onRetryRuntime = { [weak runtimeHost] in
+            Task { await runtimeHost?.bootstrap() }
+        }
         surfaces.bind(to: statusController)
         statusController.setRuntimeStatus(status)
+        surfaces.updateRuntimeStatus(status)
         surfaces.observe(container.deviceDirectory)
         if let transferSnapshots = container.transferSnapshots {
             surfaces.observeTransferSnapshots(transferSnapshots)
@@ -188,7 +196,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         switch status {
         case .ready: statusName = "ready"
         case .offline: statusName = "offline"
-        case .loading, .error: return
+        case .loading, .startupError, .error: return
         }
         productionLaunchDiagnostics = ProductionLaunchDiagnostics(
             marker: URL(fileURLWithPath: arguments[flag + 1]),

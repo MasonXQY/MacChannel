@@ -91,6 +91,21 @@ final class TransferSurfaceTests: XCTestCase {
         }
     }
 
+    func testUnavailableSettingsOffersActionableRuntimeRecovery() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let settings = try String(
+            contentsOf: root.appendingPathComponent("App/SettingsView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(settings.contains("switch model.runtimeStatus"))
+        XCTAssertTrue(settings.contains("正在启动 Mac 通道"))
+        XCTAssertTrue(settings.contains("重试启动"))
+    }
+
     @MainActor
     func testSettingsRenameFailureDoesNotCommitAndPublishesActionableError() async {
         let id = DeviceID(rawValue: UUID())

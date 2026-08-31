@@ -124,6 +124,7 @@ final class SettingsSurfaceModel: ObservableObject {
     @Published var autoReceive: Bool
     @Published var launchAtLogin: Bool
     @Published var devices: [DeviceSetting]
+    @Published var runtimeStatus: AppRuntimeStatus
     @Published var actionError: String?
     @Published var actionNotice: String?
     private let announcer: any AccessibilityAnnouncing
@@ -134,6 +135,7 @@ final class SettingsSurfaceModel: ObservableObject {
         autoReceive: Bool = true,
         launchAtLogin: Bool = false,
         devices: [DeviceSetting] = [],
+        runtimeStatus: AppRuntimeStatus = .loading,
         actionError: String? = nil,
         announcer: (any AccessibilityAnnouncing)? = nil
     ) {
@@ -142,6 +144,7 @@ final class SettingsSurfaceModel: ObservableObject {
         self.autoReceive = autoReceive
         self.launchAtLogin = launchAtLogin
         self.devices = devices
+        self.runtimeStatus = runtimeStatus
         self.actionError = actionError
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
     }
@@ -310,6 +313,7 @@ struct SettingsView: View {
     let service: any DeviceSettingsServicing
     let directorySelector: any DirectorySelecting
     let loginItems: any LoginItemRegistering
+    let onRetryRuntime: () -> Void
     let onDismiss: () -> Void
     @State private var draftLocalName: String
 
@@ -318,12 +322,14 @@ struct SettingsView: View {
         service: any DeviceSettingsServicing,
         directorySelector: any DirectorySelecting,
         loginItems: any LoginItemRegistering = LoginItemController.shared,
+        onRetryRuntime: @escaping () -> Void = {},
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
         self.service = service
         self.directorySelector = directorySelector
         self.loginItems = loginItems
+        self.onRetryRuntime = onRetryRuntime
         self.onDismiss = onDismiss
         _draftLocalName = State(initialValue: model.localDisplayName)
     }
@@ -415,10 +421,35 @@ struct SettingsView: View {
     @ViewBuilder
     private var statusMessages: some View {
         if !service.isAvailable {
-            Label("设置暂时不可用", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+            switch model.runtimeStatus {
+            case .loading:
+                Label("正在启动 Mac 通道…", systemImage: "hourglass")
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+            case let .startupError(message, canRetry):
+                HStack(alignment: .center, spacing: 12) {
+                    Label(message, systemImage: "key")
+                        .foregroundStyle(.orange)
+                    if canRetry {
+                        Spacer()
+                        Button("重试启动", action: onRetryRuntime)
+                            .frame(minHeight: 40)
+                    }
+                }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 12)
+            case let .error(message), let .offline(message):
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+            case .ready:
+                Label("设置正在准备，请稍后再试。", systemImage: "hourglass")
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+            }
         }
         if let error = model.actionError {
             Label(error, systemImage: "exclamationmark.triangle")

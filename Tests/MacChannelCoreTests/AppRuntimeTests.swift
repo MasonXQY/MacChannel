@@ -1,4 +1,5 @@
 import AppKit
+import Security
 import XCTest
 
 @testable import MacChannelAppKit
@@ -216,11 +217,78 @@ final class AppRuntimeTests: XCTestCase {
 
         await host.bootstrap()
 
-        guard case let .error(message) = host.status else {
+        guard case let .startupError(message, canRetry) = host.status else {
             return XCTFail("expected error state")
         }
         XCTAssertTrue(message.contains("无法启动"))
+        XCTAssertTrue(canRetry)
         XCTAssertFalse(receivedContainer)
+    }
+
+    @MainActor
+    func testRuntimeHostRetriesAFailedBootstrapWithoutReplacingStoredIdentity() async {
+        let runtime = RuntimeLifecycleSpy()
+        let builder = SequencedRuntimeBuilder(
+            results: [
+                .failure(KeychainStoreError.operationFailed(errSecAuthFailed)),
+                .success(AppRuntimeLaunch(runtime: runtime, status: .ready)),
+            ]
+        )
+        let host = AppRuntimeHost(builder: builder)
+        var installedContainer: AppContainer?
+        host.onChange = { _, container in
+            if let container { installedContainer = container }
+        }
+
+        await host.bootstrap()
+        guard case let .startupError(message, canRetry) = host.status else {
+            return XCTFail("expected recoverable keychain error")
+        }
+        XCTAssertTrue(message.contains("钥匙串"))
+        XCTAssertTrue(canRetry)
+
+        await host.bootstrap()
+
+        XCTAssertEqual(host.status, .ready)
+        XCTAssertEqual(builder.buildCount, 2)
+        XCTAssertTrue(installedContainer === runtime.container)
+    }
+
+    @MainActor
+    func testLiveRuntimeErrorDoesNotOfferABootstrapRetryThatCannotRun() {
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24)),
+            devices: [],
+            transferCoordinator: RuntimeTransferCoordinatorStub()
+        )
+
+        controller.setRuntimeStatus(.error("请允许钥匙串访问，然后重试。"))
+
+        let retry = controller.statusMenu.items.first { $0.title == "重试启动" }
+        XCTAssertEqual(retry?.isHidden, true)
+        XCTAssertTrue(retry?.isEnabled == false)
+    }
+
+    @MainActor
+    func testMalformedStoredIdentityDoesNotOfferAFutileAuthorizationRetry() async {
+        let host = AppRuntimeHost(
+            builder: RuntimeBuilderStub(
+                result: .failure(KeychainStoreError.unexpectedAttributes)
+            )
+        )
+        await host.bootstrap()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24)),
+            devices: [],
+            transferCoordinator: RuntimeTransferCoordinatorStub()
+        )
+
+        controller.setRuntimeStatus(host.status)
+
+        let retry = controller.statusMenu.items.first { $0.title == "重试启动" }
+        XCTAssertEqual(retry?.isHidden, true)
+        XCTAssertTrue(retry?.isEnabled == false)
+        XCTAssertFalse(host.status.localizedText.contains("允许钥匙串访问"))
     }
 
     @MainActor
@@ -355,6 +423,48 @@ final class AppRuntimeTests: XCTestCase {
 
         let retained = await locator.outputURL(for: transfer)
         XCTAssertEqual(retained, actualOutput)
+    }
+
+    func testKeychainDenialThenRetryPreservesIdentityTrustAndSettings() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let secrets = IntermittentRuntimeSecretStore()
+        let identity = try DeviceIdentity.loadOrCreate(keychain: secrets)
+        let peer = try DeviceIdentity.ephemeral()
+        let trustURL = root.appendingPathComponent("trust.json")
+        let trustStore = AuthenticatedTrustSnapshotStore(url: trustURL, secrets: secrets)
+        let repository = try await trustStore.load(identity: identity)
+        _ = try await repository.issueAuthorization(
+            subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+        try await trustStore.persistLatest(from: repository)
+        let settingsURL = root.appendingPathComponent("settings.json")
+        let settings = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [peer.id])
+        try await settings.updateLocalDisplayName("工作室 Mac")
+        try await settings.updateAutoReceive(false)
+        let storesBeforeDenial = secrets.storeCount
+
+        secrets.denyNextRead()
+        XCTAssertThrowsError(try DeviceIdentity.loadOrCreate(keychain: secrets))
+
+        let reloadedIdentity = try DeviceIdentity.loadOrCreate(keychain: secrets)
+        let reloadedTrust = try await trustStore.load(identity: reloadedIdentity)
+        let reloadedSettings = try RuntimeSettingsStore(
+            url: settingsURL,
+            trustedDevices: [peer.id]
+        )
+        let settingsSnapshot = await reloadedSettings.current()
+        let reloadedPeerKey = await reloadedTrust.publicKey(for: peer.id)
+
+        XCTAssertEqual(reloadedIdentity.id, identity.id)
+        XCTAssertEqual(reloadedPeerKey, peer.publicKey.rawRepresentation)
+        XCTAssertEqual(settingsSnapshot.localDisplayName, "工作室 Mac")
+        XCTAssertFalse(settingsSnapshot.autoReceive)
+        XCTAssertEqual(secrets.storeCount, storesBeforeDenial)
     }
 
     @MainActor
@@ -608,6 +718,22 @@ private final class RuntimeBuilderStub: AppRuntimeBuilding {
 }
 
 @MainActor
+private final class SequencedRuntimeBuilder: AppRuntimeBuilding {
+    private var results: [Result<AppRuntimeLaunch, Error>]
+    private(set) var buildCount = 0
+
+    init(results: [Result<AppRuntimeLaunch, Error>]) {
+        self.results = results
+    }
+
+    func build() async throws -> AppRuntimeLaunch {
+        buildCount += 1
+        guard !results.isEmpty else { throw RuntimeTestError.failed }
+        return try results.removeFirst().get()
+    }
+}
+
+@MainActor
 private final class DelayedRuntimeBuilder: AppRuntimeBuilding {
     private let runtime: RuntimeLifecycleSpy
     private var startedContinuation: CheckedContinuation<Void, Never>?
@@ -652,6 +778,36 @@ private actor AsyncCompletionProbe {
 }
 
 private enum RuntimeTestError: Error { case failed }
+
+private final class IntermittentRuntimeSecretStore: SecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var secrets: [String: Data] = [:]
+    private var shouldDenyNextRead = false
+    private var stores = 0
+
+    var storeCount: Int { lock.withLock { stores } }
+
+    func denyNextRead() {
+        lock.withLock { shouldDenyNextRead = true }
+    }
+
+    func data(for account: String, policy: KeychainPolicy) throws -> Data? {
+        try lock.withLock {
+            if shouldDenyNextRead {
+                shouldDenyNextRead = false
+                throw KeychainStoreError.operationFailed(errSecAuthFailed)
+            }
+            return secrets[account]
+        }
+    }
+
+    func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
+        lock.withLock {
+            secrets[account] = data
+            stores += 1
+        }
+    }
+}
 
 private actor SequencedPublicServiceConnector {
     private var connectResults: [Bool]

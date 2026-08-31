@@ -25,6 +25,7 @@ final class StatusItemController: NSObject {
     var onShowTransfers: (() -> Void)?
     var onShowPairing: (() -> Void)?
     var onShowSettings: (() -> Void)?
+    var onRetryRuntime: (() -> Void)?
 
     var phase: StatusItemPhase { state.phase }
     var nativeButton: NSStatusBarButton? { statusItem?.button }
@@ -42,6 +43,7 @@ final class StatusItemController: NSObject {
     private var deviceTask: Task<Void, Never>?
     private var runtimeStatus: AppRuntimeStatus?
     private var runtimeStatusItem: NSMenuItem?
+    private var runtimeRetryItem: NSMenuItem?
 
     init(
         button: StatusItemButton,
@@ -234,6 +236,8 @@ final class StatusItemController: NSObject {
             systemSymbolName: status.symbolName,
             accessibilityDescription: status.localizedText
         )
+        runtimeRetryItem?.isHidden = !status.canRetry
+        runtimeRetryItem?.isEnabled = status.canRetry
         renderPhase()
     }
 
@@ -306,6 +310,17 @@ final class StatusItemController: NSObject {
         )
         runtimeStatusItem = runtime
         statusMenu.addItem(runtime)
+
+        let retry = NSMenuItem(
+            title: "重试启动",
+            action: #selector(retryRuntime(_:)),
+            keyEquivalent: ""
+        )
+        retry.target = self
+        retry.isHidden = !initialRuntimeStatus.canRetry
+        retry.isEnabled = initialRuntimeStatus.canRetry
+        runtimeRetryItem = retry
+        statusMenu.addItem(retry)
         statusMenu.addItem(.separator())
 
         let send = NSMenuItem(
@@ -433,14 +448,24 @@ final class StatusItemController: NSObject {
     @objc private func showSettings(_ sender: Any?) {
         onShowSettings?()
     }
+
+    @objc private func retryRuntime(_ sender: Any?) {
+        onRetryRuntime?()
+    }
 }
 
 private extension AppRuntimeStatus {
+    var canRetry: Bool {
+        if case let .startupError(_, canRetry) = self { return canRetry }
+        return false
+    }
+
     var symbolName: String {
         switch self {
         case .loading: "hourglass"
         case .ready: "checkmark.shield"
         case .offline: "network.slash"
+        case .startupError: "exclamationmark.triangle"
         case .error: "exclamationmark.triangle"
         }
     }

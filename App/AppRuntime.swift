@@ -1,4 +1,5 @@
 import Foundation
+import MacChannelCore
 
 enum AppLaunchMode: Equatable {
     case production
@@ -19,6 +20,7 @@ enum AppRuntimeStatus: Equatable {
     case loading
     case ready
     case offline(String)
+    case startupError(String, canRetry: Bool)
     case error(String)
 
     var localizedText: String {
@@ -26,6 +28,7 @@ enum AppRuntimeStatus: Equatable {
         case .loading: "正在启动安全服务…"
         case .ready: "安全服务已连接"
         case let .offline(message): message
+        case let .startupError(message, _): message
         case let .error(message): message
         }
     }
@@ -71,7 +74,7 @@ final class AppRuntimeHost {
     }
 
     func bootstrap() async {
-        guard !isShuttingDown else { return }
+        guard !isShuttingDown, runtime == nil else { return }
         status = .loading
         onChange?(.loading, nil)
         if buildTask == nil {
@@ -83,6 +86,7 @@ final class AppRuntimeHost {
     }
 
     private func performBuild() async {
+        defer { buildTask = nil }
         do {
             let launch = try await builder.build()
             guard !isShuttingDown else {
@@ -103,9 +107,23 @@ final class AppRuntimeHost {
             }
         } catch {
             guard !isShuttingDown else { return }
-            status = .error("无法启动 Mac 通道。请检查本地存储权限后重试。")
+            let presentation = Self.failurePresentation(for: error)
+            status = .startupError(presentation.message, canRetry: presentation.canRetry)
             onChange?(status, nil)
         }
+    }
+
+    private static func failurePresentation(for error: Error) -> (message: String, canRetry: Bool) {
+        if case .operationFailed = error as? KeychainStoreError {
+            return (
+                "无法启动 Mac 通道。请先允许钥匙串访问，然后点“重试启动”。",
+                true
+            )
+        }
+        if error is KeychainStoreError || error is DeviceIdentityError {
+            return ("无法读取这台 Mac 的安全身份。现有身份和配对数据没有被更改。", false)
+        }
+        return ("无法启动 Mac 通道。请检查本地存储权限，然后点“重试启动”。", true)
     }
 
     func shutdown() async {
