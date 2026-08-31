@@ -376,6 +376,60 @@ final class ConnectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(bufferedOffer, offer)
     }
 
+    func testFallbackOfferForSameTransferReplacesUnacceptedRouteAttempt() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let connectionID = UUID()
+        let session = MemoryRendezvousSignalSession()
+        let signaling = RendezvousWebRTCSignaling(session: session)
+        let incoming = await signaling.incomingOffers()
+        var incomingIterator = incoming.makeAsyncIterator()
+
+        let lanOffer = WebRTCSignalMessage.offer(sdp: "lan-offer", route: .lan)
+        try await signaling.send(lanOffer, to: peer, connectionID: connectionID)
+        let lastLANPayload = await session.lastSentPayload()
+        let lanPayload = try XCTUnwrap(lastLANPayload)
+        await session.deliver(RendezvousSignalFrame(
+            from: peer,
+            payload: lanPayload
+        ))
+        let publishedLANOffer = await incomingIterator.next()
+        XCTAssertEqual(
+            publishedLANOffer,
+            IncomingWebRTCOffer(remoteDevice: peer, connectionID: connectionID, route: .lan)
+        )
+
+        // The production listener can reject an asymmetric Bonjour route before
+        // subscribing to its messages. A later relay attempt for the same
+        // transfer must still be surfaced and must not inherit the stale offer.
+        let relayOffer = WebRTCSignalMessage.offer(sdp: "relay-offer", route: .relay)
+        try await signaling.send(relayOffer, to: peer, connectionID: connectionID)
+        let lastRelayPayload = await session.lastSentPayload()
+        let relayPayload = try XCTUnwrap(lastRelayPayload)
+        await session.deliver(RendezvousSignalFrame(
+            from: peer,
+            payload: relayPayload
+        ))
+
+        let republished = expectation(description: "fallback offer republished")
+        var fallbackOffer: IncomingWebRTCOffer?
+        Task {
+            fallbackOffer = await incomingIterator.next()
+            republished.fulfill()
+        }
+        await fulfillment(of: [republished], timeout: 1)
+        XCTAssertEqual(
+            fallbackOffer,
+            IncomingWebRTCOffer(remoteDevice: peer, connectionID: connectionID, route: .relay)
+        )
+
+        var messages = await signaling.messages(
+            from: peer,
+            connectionID: connectionID
+        ).makeAsyncIterator()
+        let bufferedFallbackOffer = try await messages.next()
+        XCTAssertEqual(bufferedFallbackOffer, relayOffer)
+    }
+
     func testExactly128SignalsBufferedBeforeSubscribePreserveOrder() async throws {
         let peer = DeviceID(rawValue: UUID())
         let connectionID = UUID()

@@ -262,21 +262,22 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
         guard let envelope = try? JSONDecoder().decode(Envelope.self, from: frame.payload) else { return }
         if receivedFrameCount < Int.max { receivedFrameCount += 1 }
         let key = Key(device: frame.from, connectionID: envelope.connectionID)
-        if let subscriber = subscribers[key], let mailbox = subscriber.mailbox {
-            guard await mailbox.push(
-                envelope.message,
-                bytes: estimatedBytes(of: envelope.message)
-            ) else {
-                subscribers.removeValue(forKey: key)
-                await failPendingConnection(key, with: .signalingOverflow)
-                return
+
+        if case let .offer(_, route) = envelope.message {
+            // Route fallback deliberately keeps the transfer ID stable. If an
+            // earlier offer was announced but rejected before the answerer
+            // subscribed (for example, asymmetric Bonjour discovery), the new
+            // offer begins a fresh peer attempt for that same transfer.
+            let replacesAttempt = subscribers[key] != nil || announcedOffers.contains(key)
+            if replacesAttempt {
+                if let mailbox = subscribers.removeValue(forKey: key)?.mailbox {
+                    await mailbox.finish(.signalingEnded)
+                }
+                removePendingMessages(for: key)
+                announcedOffers.remove(key)
             }
-            return
-        } else if subscribers.removeValue(forKey: key) != nil {
-            // The consumer released its stream before the lease cleanup ran.
-        }
-        guard await buffer(envelope.message, for: key) else { return }
-        if case let .offer(_, route) = envelope.message, announcedOffers.insert(key).inserted {
+            guard await buffer(envelope.message, for: key) else { return }
+            guard announcedOffers.insert(key).inserted else { return }
             let offer = IncomingWebRTCOffer(
                 remoteDevice: frame.from,
                 connectionID: envelope.connectionID,
@@ -292,7 +293,23 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
             @unknown default:
                 await failRouter(with: .signalingOverflow)
             }
+            return
         }
+
+        if let subscriber = subscribers[key], let mailbox = subscriber.mailbox {
+            guard await mailbox.push(
+                envelope.message,
+                bytes: estimatedBytes(of: envelope.message)
+            ) else {
+                subscribers.removeValue(forKey: key)
+                await failPendingConnection(key, with: .signalingOverflow)
+                return
+            }
+            return
+        } else if subscribers.removeValue(forKey: key) != nil {
+            // The consumer released its stream before the lease cleanup ran.
+        }
+        guard await buffer(envelope.message, for: key) else { return }
     }
 
     private func buffer(_ message: WebRTCSignalMessage, for key: Key) async -> Bool {
