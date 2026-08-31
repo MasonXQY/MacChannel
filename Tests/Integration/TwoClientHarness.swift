@@ -35,7 +35,7 @@ struct HarnessTimeoutProfile: Equatable, Sendable {
     static let stack = HarnessTimeoutProfile(
         connection: .seconds(30),
         inactivity: .seconds(60),
-        interruption: .seconds(180),
+        interruption: .seconds(600),
         largeTransferCompletion: .seconds(1_800)
     )
 

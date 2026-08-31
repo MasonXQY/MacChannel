@@ -94,7 +94,7 @@ final class TransferIntegrationTests: XCTestCase {
 
         XCTAssertEqual(profile.connection, .seconds(30))
         XCTAssertEqual(profile.inactivity, .seconds(60))
-        XCTAssertEqual(profile.interruption, .seconds(180))
+        XCTAssertEqual(profile.interruption, .seconds(600))
         XCTAssertEqual(profile.largeTransferCompletion, .seconds(1_800))
     }
 
