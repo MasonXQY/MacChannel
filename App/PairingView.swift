@@ -139,11 +139,22 @@ final class PairingSurfaceModel: ObservableObject {
         approvalTask = nil
         do {
             try await service.cancel()
+            resetToIdle()
             return true
         } catch {
             publishError("无法取消配对，请稍后重试。")
             return false
         }
+    }
+
+    func resetToIdle() {
+        approvalTask?.cancel()
+        approvalTask = nil
+        state = .idle
+        hostedCode = nil
+        entryCode = ""
+        pendingPeer = nil
+        actionError = nil
     }
 
     private func publishError(_ message: String) {
@@ -227,9 +238,14 @@ struct PairingView: View {
                 Label("正在更新旧配对会话…", systemImage: "arrow.triangle.2.circlepath")
                     .frame(maxWidth: .infinity, minHeight: 80)
             case let .confirmed(device):
-                Label("已与 \(device.displayName) 建立信任", systemImage: "checkmark.shield.fill")
-                    .foregroundStyle(.green)
-                    .frame(maxWidth: .infinity, minHeight: 80)
+                VStack(spacing: 8) {
+                    Label("本机已信任 \(device.displayName)", systemImage: "checkmark.shield.fill")
+                        .foregroundStyle(.green)
+                    Text("请确认另一台 Mac 也显示配对成功。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 80)
             case let .failed(error):
                 failedContent(error)
             }

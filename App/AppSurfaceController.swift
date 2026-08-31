@@ -201,6 +201,11 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         settingsModel.autoReceive = snapshot.autoReceive
         settingsModel.launchAtLogin = snapshot.launchAtLogin
         updateDeviceSettings(snapshot.devices)
+        if case let .confirmed(peer) = pairingModel.state,
+           !snapshot.devices.contains(where: { $0.id == peer.id })
+        {
+            pairingModel.resetToIdle()
+        }
     }
 
     func updateRuntimeStatus(_ status: AppRuntimeStatus) {
@@ -314,13 +319,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 break
             }
         }
-        if case let .confirmed(device) = state,
-           !settingsModel.devices.contains(where: { $0.id == device.id })
-        {
-            settingsModel.devices.append(DeviceSetting(device: device))
-            if !device.displayName.isEmpty {
-                deviceNames[device.id] = device.displayName
-            }
+        if case let .confirmed(device) = state, !device.displayName.isEmpty {
+            deviceNames[device.id] = device.displayName
         }
         switch state {
         case let .approvalRequested(peer), let .awaitingHostApproval(peer),

@@ -56,6 +56,92 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testClosingConfirmedPairingClearsCompletedPresentation() async {
+        let peer = DeviceSummary(
+            id: DeviceID(rawValue: UUID()),
+            displayName: "书房 Mac",
+            availability: .internet
+        )
+        let service = HostApprovalPairingSurfaceService(peer: peer)
+        let model = PairingSurfaceModel(
+            state: .confirmed(peer),
+            hostedCode: "123456",
+            entryCode: "654321",
+            pendingPeer: peer,
+            actionError: "旧提示"
+        )
+
+        let didClose = await model.cancel(using: service)
+
+        XCTAssertTrue(didClose)
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertNil(model.hostedCode)
+        XCTAssertTrue(model.entryCode.isEmpty)
+        XCTAssertNil(model.pendingPeer)
+        XCTAssertNil(model.actionError)
+    }
+
+    @MainActor
+    func testConfirmedPairingDoesNotInventAnAuthoritativeSettingsDevice() {
+        let peer = DeviceSummary(
+            id: DeviceID(rawValue: UUID()),
+            displayName: "书房 Mac",
+            availability: .internet
+        )
+        let pairing = PairingSurfaceModel()
+        let settings = SettingsSurfaceModel()
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: SurfaceTransferCoordinator()
+            ),
+            pairingService: HostApprovalPairingSurfaceService(peer: peer),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            pairingModel: pairing,
+            settingsModel: settings
+        )
+
+        surfaces.updatePairingState(.confirmed(peer))
+
+        XCTAssertEqual(pairing.state, .confirmed(peer))
+        XCTAssertTrue(settings.devices.isEmpty)
+    }
+
+    @MainActor
+    func testAuthoritativeDeviceRemovalClearsMatchingPairingSuccess() {
+        let peer = DeviceSummary(
+            id: DeviceID(rawValue: UUID()),
+            displayName: "书房 Mac",
+            availability: .offline
+        )
+        let pairing = PairingSurfaceModel(state: .confirmed(peer))
+        let settings = SettingsSurfaceModel(devices: [DeviceSetting(device: peer)])
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: SurfaceTransferCoordinator()
+            ),
+            pairingService: HostApprovalPairingSurfaceService(peer: peer),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            pairingModel: pairing,
+            settingsModel: settings
+        )
+
+        surfaces.updateSettings(
+            SettingsSurfaceSnapshot(
+                localDisplayName: "本机",
+                defaultDirectory: nil,
+                autoReceive: true,
+                launchAtLogin: false,
+                devices: []
+            )
+        )
+
+        XCTAssertTrue(settings.devices.isEmpty)
+        XCTAssertEqual(pairing.state, .idle)
+    }
+
+    @MainActor
     func testLoginItemRegistrationFailureRollsBackVisibleSetting() async {
         let loginItems = StubLoginItemRegistration(error: SurfaceActionFailure.expected)
         let service = RecordingEssentialSettingsService()
@@ -89,6 +175,21 @@ final class TransferSurfaceTests: XCTestCase {
         for forbidden in ["Tailscale", "连接方式", "安全中继地址", "rendezvousURL"] {
             XCTAssertFalse(settings.contains(forbidden), "unexpected ordinary setting: \(forbidden)")
         }
+    }
+
+    func testPairingSuccessCopyStatesTheLocalGuaranteeAndRemoteCheck() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let pairing = try String(
+            contentsOf: root.appendingPathComponent("App/PairingView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(pairing.contains("本机已信任"))
+        XCTAssertTrue(pairing.contains("请确认另一台 Mac 也显示配对成功"))
+        XCTAssertFalse(pairing.contains("已与 \\(device.displayName) 建立信任"))
     }
 
     func testUnavailableSettingsOffersActionableRuntimeRecovery() throws {
