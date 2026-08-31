@@ -1146,13 +1146,9 @@ final class TwoClientHarness: @unchecked Sendable {
     }
 
     private static func stackSession() throws -> URLSession {
-        guard let path = ProcessInfo.processInfo.environment["MACCHANNEL_E2E_CA_FILE"],
-            !path.isEmpty
-        else { throw TwoClientHarnessError.stackConfigurationRequired }
-        let delegate = try PinnedLocalCASessionDelegate(certificateURL: URL(fileURLWithPath: path))
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        try StackSessionFactory.make(
+            certificatePath: ProcessInfo.processInfo.environment["MACCHANNEL_E2E_CA_FILE"]
+        )
     }
 
     private static func keyFingerprint(_ identity: DeviceIdentity) -> String {
@@ -1162,7 +1158,21 @@ final class TwoClientHarness: @unchecked Sendable {
     }
 }
 
-private final class PinnedLocalCASessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked
+enum StackSessionFactory {
+    static func make(certificatePath: String?) throws -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        guard let certificatePath, !certificatePath.isEmpty else {
+            return URLSession(configuration: configuration)
+        }
+        let delegate = try PinnedLocalCASessionDelegate(
+            certificateURL: URL(fileURLWithPath: certificatePath)
+        )
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
+}
+
+final class PinnedLocalCASessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked
     Sendable
 {
     private let certificate: SecCertificate

@@ -5,6 +5,16 @@ import Foundation
 import XCTest
 
 final class TransferIntegrationTests: XCTestCase {
+    func testPublicStackSessionUsesSystemTrustWhenNoLocalCAIsConfigured() throws {
+        let session = try StackSessionFactory.make(certificatePath: nil)
+
+        XCTAssertEqual(session.configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+    }
+
+    func testStackSessionRejectsAMalformedConfiguredLocalCA() {
+        XCTAssertThrowsError(try StackSessionFactory.make(certificatePath: "/does/not/exist.pem"))
+    }
+
     func testConstructionRollbackRunsEveryActionAndReportsFailure() async {
         let cleanup = HarnessConstructionCleanup()
         let events = CleanupEventRecorder()
