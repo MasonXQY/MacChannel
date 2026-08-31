@@ -181,7 +181,11 @@ struct OutgoingTransferPackage: Sendable {
         try recoverAll(from: outgoingDirectory).packages
     }
 
-    static func recoverAll(from outgoingDirectory: URL) throws -> Recovery {
+    static func recoverAll(
+        from outgoingDirectory: URL,
+        beforeLegacyQuarantineRename: ((URL) throws -> Void)? = nil,
+        afterLegacyQuarantineRename: ((URL) throws -> Void)? = nil
+    ) throws -> Recovery {
         let outgoing = outgoingDirectory.standardizedFileURL
         try preparePrivateDirectory(outgoing)
         try reclaimAuthenticationKeyTemps(in: outgoing)
@@ -207,8 +211,19 @@ struct OutgoingTransferPackage: Sendable {
             } else if let id = conflictCleanupMarkerID(child.lastPathComponent) {
                 try validateConflictCleanupMarker(child, in: outgoing)
                 completedConflictCleanupIDs.insert(id)
+            } else if let id = legacyQuarantineID(child.lastPathComponent) {
+                try validateExistingLegacyQuarantine(child, identifier: id, in: outgoing)
             } else if !child.lastPathComponent.hasPrefix(".") {
-                packages.append(child)
+                if try quarantineLegacyVersionOnePackage(
+                    child,
+                    in: outgoing,
+                    beforeRename: beforeLegacyQuarantineRename,
+                    afterRename: afterLegacyQuarantineRename
+                ) {
+                    removedTemporary = true
+                } else {
+                    packages.append(child)
+                }
             }
         }
         if removedTemporary { try synchronize(outgoing, isDirectory: true) }
@@ -353,8 +368,12 @@ struct OutgoingTransferPackage: Sendable {
     }
 
     private func rootURL() throws -> URL {
-        let root = directory.appendingPathComponent(metadata.rootRelativePath).standardizedFileURL
-        let prefix = directory.path.hasSuffix("/") ? directory.path : directory.path + "/"
+        let canonicalDirectory = directory.resolvingSymlinksInPath().standardizedFileURL
+        let root = canonicalDirectory.appendingPathComponent(metadata.rootRelativePath)
+            .standardizedFileURL
+        let prefix = canonicalDirectory.path.hasSuffix("/")
+            ? canonicalDirectory.path
+            : canonicalDirectory.path + "/"
         guard root.path.hasPrefix(prefix) else { throw TransferProtocolError.sourceChanged }
         return root
     }
@@ -577,6 +596,276 @@ struct OutgoingTransferPackage: Sendable {
             status.st_mode & 0o077 == 0,
             status.st_mode & 0o7000 == 0
         else { throw TransferProtocolError.unsupportedSource }
+    }
+
+    private static func quarantineLegacyVersionOnePackage(
+        _ directory: URL,
+        in outgoing: URL,
+        beforeRename: ((URL) throws -> Void)?,
+        afterRename: ((URL) throws -> Void)?
+    ) throws -> Bool {
+        let name = directory.lastPathComponent
+        guard let identifier = UUID(uuidString: name),
+            name == identifier.uuidString.lowercased()
+        else { return false }
+
+        let parent = Darwin.open(
+            outgoing.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard parent >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(parent) }
+
+        var named = stat()
+        guard fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            named.st_mode & S_IFMT == S_IFDIR,
+            named.st_uid == geteuid(),
+            named.st_mode & 0o777 == S_IRWXU
+        else { return false }
+        let package = Darwin.openat(
+            parent,
+            name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard package >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(package) }
+        var opened = stat()
+        guard fstat(package, &opened) == 0,
+            opened.st_dev == named.st_dev,
+            opened.st_ino == named.st_ino
+        else { throw TransferProtocolError.unsupportedSource }
+
+        guard try validatedLegacyMetadata(
+            directory: directory,
+            expectedIdentifier: name,
+            packageDescriptor: package,
+            recognizingCandidate: true
+        ) != nil else { return false }
+
+        try beforeRename?(directory)
+        var immediatelyBeforeRename = stat()
+        guard fstatat(parent, name, &immediatelyBeforeRename, AT_SYMLINK_NOFOLLOW) == 0,
+            immediatelyBeforeRename.st_dev == opened.st_dev,
+            immediatelyBeforeRename.st_ino == opened.st_ino
+        else { throw TransferProtocolError.sourceChanged }
+
+        let quarantineName = ".legacy-v1.\(name)"
+        guard renameatx_np(
+            parent,
+            name,
+            parent,
+            quarantineName,
+            UInt32(RENAME_EXCL)
+        ) == 0 else { throw TransferProtocolError.sourceChanged }
+        let quarantined = Darwin.openat(
+            parent,
+            quarantineName,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard quarantined >= 0 else { throw TransferProtocolError.sourceChanged }
+        defer { Darwin.close(quarantined) }
+        var quarantinedStatus = stat()
+        guard fstat(quarantined, &quarantinedStatus) == 0,
+            quarantinedStatus.st_dev == opened.st_dev,
+            quarantinedStatus.st_ino == opened.st_ino
+        else { throw TransferProtocolError.sourceChanged }
+        let quarantineURL = outgoing.appendingPathComponent(quarantineName, isDirectory: true)
+        try afterRename?(quarantineURL)
+        guard try validatedLegacyMetadata(
+            directory: quarantineURL,
+            expectedIdentifier: name,
+            packageDescriptor: quarantined,
+            recognizingCandidate: false
+        ) != nil else { throw TransferProtocolError.sourceChanged }
+        var stillQuarantined = stat()
+        guard fstatat(parent, quarantineName, &stillQuarantined, AT_SYMLINK_NOFOLLOW) == 0,
+            stillQuarantined.st_dev == quarantinedStatus.st_dev,
+            stillQuarantined.st_ino == quarantinedStatus.st_ino
+        else { throw TransferProtocolError.sourceChanged }
+        try synchronizeDescriptor(parent)
+        return true
+    }
+
+    private static func validateExistingLegacyQuarantine(
+        _ directory: URL,
+        identifier: String,
+        in outgoing: URL
+    ) throws {
+        let parent = Darwin.open(
+            outgoing.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard parent >= 0 else { throw TransferProtocolError.unsupportedSource }
+        defer { Darwin.close(parent) }
+        let name = directory.lastPathComponent
+        var named = stat()
+        guard fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            named.st_mode & S_IFMT == S_IFDIR,
+            named.st_uid == geteuid(),
+            named.st_mode & 0o777 == S_IRWXU
+        else { throw TransferProtocolError.sourceChanged }
+        let package = Darwin.openat(
+            parent,
+            name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard package >= 0 else { throw TransferProtocolError.sourceChanged }
+        defer { Darwin.close(package) }
+        var opened = stat()
+        guard fstat(package, &opened) == 0,
+            opened.st_dev == named.st_dev,
+            opened.st_ino == named.st_ino
+        else { throw TransferProtocolError.sourceChanged }
+        guard try validatedLegacyMetadata(
+            directory: directory,
+            expectedIdentifier: identifier,
+            packageDescriptor: package,
+            recognizingCandidate: false
+        ) != nil else { throw TransferProtocolError.sourceChanged }
+        var stillNamed = stat()
+        guard fstatat(parent, name, &stillNamed, AT_SYMLINK_NOFOLLOW) == 0,
+            stillNamed.st_dev == opened.st_dev,
+            stillNamed.st_ino == opened.st_ino
+        else { throw TransferProtocolError.sourceChanged }
+    }
+
+    private static func validatedLegacyMetadata(
+        directory: URL,
+        expectedIdentifier: String,
+        packageDescriptor: Int32,
+        recognizingCandidate: Bool
+    ) throws -> Metadata? {
+        var authentication = stat()
+        if fstatat(
+            packageDescriptor,
+            "metadata.hmac",
+            &authentication,
+            AT_SYMLINK_NOFOLLOW
+        ) == 0 {
+            if recognizingCandidate { return nil }
+            throw TransferProtocolError.sourceChanged
+        }
+        guard errno == ENOENT else { throw TransferProtocolError.sourceChanged }
+
+        var checksumStatus = stat()
+        guard fstatat(
+            packageDescriptor,
+            "metadata.sha256",
+            &checksumStatus,
+            AT_SYMLINK_NOFOLLOW
+        ) == 0 else {
+            if errno == ENOENT, recognizingCandidate { return nil }
+            throw TransferProtocolError.sourceChanged
+        }
+        let encoded = try readPrivateRegularFile(
+            named: "metadata.json",
+            in: packageDescriptor,
+            maximumSize: 1_048_576
+        )
+        let storedChecksum = try readPrivateRegularFile(
+            named: "metadata.sha256",
+            in: packageDescriptor,
+            exactSize: 32,
+            maximumSize: 32
+        )
+        guard Data(SHA256.hash(data: encoded)) == storedChecksum else {
+            throw TransferProtocolError.sourceChanged
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        let metadata: Metadata
+        do {
+            metadata = try decoder.decode(Metadata.self, from: encoded)
+        } catch {
+            throw TransferProtocolError.sourceChanged
+        }
+        guard metadata.version == 1 else {
+            if recognizingCandidate { return nil }
+            throw TransferProtocolError.sourceChanged
+        }
+        guard let transferUUID = UUID(uuidString: metadata.transferID),
+            let peerUUID = UUID(uuidString: metadata.peerID),
+            metadata.transferID == transferUUID.uuidString.lowercased(),
+            metadata.peerID == peerUUID.uuidString.lowercased(),
+            metadata.transferID == expectedIdentifier,
+            metadata.totalBytes >= 0,
+            Data(base64Encoded: metadata.manifestFingerprint)?.count == 32,
+            metadata.displayFilename == metadata.displayFilename
+                .precomposedStringWithCanonicalMapping,
+            !metadata.displayFilename.isEmpty,
+            let relativeRoot = try? RelativePath(metadata.rootRelativePath),
+            relativeRoot.components == ["payload", metadata.displayFilename],
+            metadata.createdAt.timeIntervalSinceReferenceDate.isFinite
+        else { throw TransferProtocolError.sourceChanged }
+        let legacyPackage = OutgoingTransferPackage(directory: directory, metadata: metadata)
+        _ = try legacyPackage.openManifest()
+        return metadata
+    }
+
+    private static func legacyQuarantineID(_ name: String) -> String? {
+        let prefix = ".legacy-v1."
+        guard name.hasPrefix(prefix) else { return nil }
+        let identifier = String(name.dropFirst(prefix.count))
+        guard let uuid = UUID(uuidString: identifier),
+            identifier == uuid.uuidString.lowercased()
+        else { return nil }
+        return identifier
+    }
+
+    private static func readPrivateRegularFile(
+        named name: String,
+        in directoryDescriptor: Int32,
+        exactSize: off_t? = nil,
+        maximumSize: off_t
+    ) throws -> Data {
+        var named = stat()
+        guard fstatat(directoryDescriptor, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+            named.st_mode & S_IFMT == S_IFREG,
+            named.st_uid == geteuid(),
+            named.st_nlink == 1,
+            named.st_mode & 0o777 == S_IRUSR,
+            named.st_size > 0,
+            named.st_size <= maximumSize,
+            exactSize.map({ named.st_size == $0 }) ?? true
+        else { throw TransferProtocolError.sourceChanged }
+        let descriptor = Darwin.openat(
+            directoryDescriptor,
+            name,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard descriptor >= 0 else { throw TransferProtocolError.sourceChanged }
+        defer { Darwin.close(descriptor) }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0,
+            opened.st_dev == named.st_dev,
+            opened.st_ino == named.st_ino,
+            opened.st_uid == named.st_uid,
+            opened.st_nlink == 1,
+            opened.st_mode & 0o777 == S_IRUSR,
+            opened.st_size == named.st_size
+        else { throw TransferProtocolError.sourceChanged }
+        var data = Data(count: Int(opened.st_size))
+        var offset = 0
+        while offset < data.count {
+            let count = data.withUnsafeMutableBytes { bytes in
+                Darwin.read(
+                    descriptor,
+                    bytes.baseAddress!.advanced(by: offset),
+                    bytes.count - offset
+                )
+            }
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { throw TransferProtocolError.sourceChanged }
+            offset += count
+        }
+        var afterRead = stat()
+        guard fstat(descriptor, &afterRead) == 0,
+            afterRead.st_dev == opened.st_dev,
+            afterRead.st_ino == opened.st_ino,
+            afterRead.st_size == opened.st_size,
+            afterRead.st_mode & 0o777 == S_IRUSR
+        else { throw TransferProtocolError.sourceChanged }
+        return data
     }
 
     private static func makeTreeRemovable(_ root: URL) throws {

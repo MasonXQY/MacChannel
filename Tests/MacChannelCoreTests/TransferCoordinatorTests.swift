@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import XCTest
@@ -2467,6 +2468,226 @@ final class TransferCoordinatorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: interrupted.path))
     }
 
+    func testRestartQuarantinesLegacyVersionOnePackageWithoutBlockingStartup() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+        let fixture = try makeLegacyOutgoingPackage(in: outgoing)
+
+        _ = try await TransferCoordinator.restoring(
+            connector: CountingBlockingConnector(),
+            database: TransferDatabase(url: root.appendingPathComponent("history.sqlite")),
+            outgoingDirectory: outgoing
+        )
+
+        let quarantine = outgoing.appendingPathComponent(
+            ".legacy-v1.\(fixture.identifier)",
+            isDirectory: true
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.package.path))
+        XCTAssertEqual(
+            try Data(contentsOf: quarantine.appendingPathComponent("payload/legacy.txt")),
+            Data("legacy package remains recoverable".utf8)
+        )
+
+        XCTAssertNoThrow(try OutgoingTransferPackage.loadAll(from: outgoing))
+    }
+
+    func testLegacyPackageRecoveryRejectsCorruptChecksum() throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+        let fixture = try makeLegacyOutgoingPackage(in: outgoing)
+        try replaceReadOnlyFile(fixture.checksum, with: Data(repeating: 0, count: 32))
+
+        XCTAssertThrowsError(try OutgoingTransferPackage.loadAll(from: outgoing)) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .sourceChanged)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.package.path))
+    }
+
+    func testLegacyPackageRecoveryRejectsMalformedMetadataEvenWithMatchingChecksum() throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+        let fixture = try makeLegacyOutgoingPackage(in: outgoing)
+        let malformed = Data("{not-json".utf8)
+        try replaceReadOnlyFile(fixture.metadata, with: malformed)
+        try replaceReadOnlyFile(fixture.checksum, with: Data(SHA256.hash(data: malformed)))
+
+        XCTAssertThrowsError(try OutgoingTransferPackage.loadAll(from: outgoing))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.package.path))
+    }
+
+    func testLegacyPackageRecoveryDoesNotQuarantineVersionTwoWithoutAuthentication() throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+        let fixture = try makeLegacyOutgoingPackage(in: outgoing, version: 2)
+
+        XCTAssertThrowsError(try OutgoingTransferPackage.loadAll(from: outgoing))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.package.path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: outgoing.appendingPathComponent(".legacy-v1.\(fixture.identifier)").path
+            )
+        )
+    }
+
+    func testLegacyPackageRecoveryRejectsNoncanonicalTransferIdentity() throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+        let fixture = try makeLegacyOutgoingPackage(in: outgoing)
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: fixture.metadata))
+                as? [String: Any]
+        )
+        object["transferID"] = UUID().uuidString.lowercased()
+        let encoded = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try replaceReadOnlyFile(fixture.metadata, with: encoded)
+        try replaceReadOnlyFile(fixture.checksum, with: Data(SHA256.hash(data: encoded)))
+
+        XCTAssertThrowsError(try OutgoingTransferPackage.loadAll(from: outgoing)) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .sourceChanged)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.package.path))
+    }
+
+    func testLegacyPackageRecoveryRejectsPayloadTampering() throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+        let fixture = try makeLegacyOutgoingPackage(in: outgoing)
+        try replaceReadOnlyFile(fixture.payloadFile, with: Data("changed payload".utf8))
+
+        XCTAssertThrowsError(try OutgoingTransferPackage.loadAll(from: outgoing)) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .sourceChanged)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.package.path))
+    }
+
+    func testAuthenticatedVersionTwoPackageWithLegacyChecksumIsNotQuarantined() throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let payload = root.appendingPathComponent("authenticated.txt")
+        try Data("authenticated v2".utf8).write(to: payload)
+        let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+        let package = try OutgoingTransferPackage.create(
+            items: [payload],
+            peer: DeviceID(rawValue: UUID()),
+            in: outgoing
+        )
+        let encoded = try Data(contentsOf: package.directory.appendingPathComponent("metadata.json"))
+        let legacyChecksum = package.directory.appendingPathComponent("metadata.sha256")
+        try Data(SHA256.hash(data: encoded)).write(to: legacyChecksum)
+        XCTAssertEqual(chmod(legacyChecksum.path, S_IRUSR), 0)
+
+        XCTAssertEqual(try OutgoingTransferPackage.loadAll(from: outgoing).map(\.id), [package.id])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: package.directory.path))
+    }
+
+    func testLegacyPackageRecoveryRejectsDirectoryReplacementBeforeQuarantineRename() throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+        let fixture = try makeLegacyOutgoingPackage(in: outgoing)
+        let displaced = outgoing.appendingPathComponent("displaced", isDirectory: true)
+
+        XCTAssertThrowsError(
+            try OutgoingTransferPackage.recoverAll(
+                from: outgoing,
+                beforeLegacyQuarantineRename: { candidate in
+                    XCTAssertEqual(
+                        candidate.resolvingSymlinksInPath(),
+                        fixture.package.resolvingSymlinksInPath()
+                    )
+                    try FileManager.default.moveItem(at: fixture.package, to: displaced)
+                    try FileManager.default.createDirectory(
+                        at: fixture.package,
+                        withIntermediateDirectories: false
+                    )
+                    XCTAssertEqual(chmod(fixture.package.path, S_IRWXU), 0)
+                }
+            )
+        ) { error in
+            XCTAssertEqual(error as? TransferProtocolError, .sourceChanged)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: displaced.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.package.path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: outgoing.appendingPathComponent(".legacy-v1.\(fixture.identifier)").path
+            )
+        )
+    }
+
+    func testLegacyPackageRecoveryRejectsPackageObjectChangesAfterQuarantineRename() throws {
+        enum Mutation: CaseIterable {
+            case metadata
+            case checksumHardLink
+            case authentication
+            case payload
+            case directory
+        }
+
+        for mutation in Mutation.allCases {
+            let root = try makeCoordinatorTemporaryDirectory()
+            defer { removeCoordinatorTemporaryDirectory(root) }
+            let outgoing = root.appendingPathComponent("outgoing", isDirectory: true)
+            let fixture = try makeLegacyOutgoingPackage(in: outgoing)
+            let externalLink = root.appendingPathComponent("linked-checksum")
+
+            XCTAssertThrowsError(
+                try OutgoingTransferPackage.recoverAll(
+                    from: outgoing,
+                    afterLegacyQuarantineRename: { quarantined in
+                        switch mutation {
+                        case .metadata:
+                            let url = quarantined.appendingPathComponent("metadata.json")
+                            var bytes = try Data(contentsOf: url)
+                            bytes.append(0x20)
+                            try replaceReadOnlyFile(url, with: bytes)
+                        case .checksumHardLink:
+                            XCTAssertEqual(
+                                Darwin.link(
+                                    quarantined.appendingPathComponent("metadata.sha256").path,
+                                    externalLink.path
+                                ),
+                                0
+                            )
+                        case .authentication:
+                            let url = quarantined.appendingPathComponent("metadata.hmac")
+                            try Data(repeating: 3, count: 32).write(to: url)
+                            XCTAssertEqual(chmod(url.path, S_IRUSR), 0)
+                        case .payload:
+                            try replaceReadOnlyFile(
+                                quarantined.appendingPathComponent("payload/legacy.txt"),
+                                with: Data("changed after quarantine".utf8)
+                            )
+                        case .directory:
+                            let displaced = root.appendingPathComponent(
+                                "displaced-quarantine",
+                                isDirectory: true
+                            )
+                            try FileManager.default.moveItem(at: quarantined, to: displaced)
+                            try FileManager.default.copyItem(at: displaced, to: quarantined)
+                        }
+                    }
+                )
+            )
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.package.path))
+            let quarantined = outgoing.appendingPathComponent(
+                ".legacy-v1.\(fixture.identifier)",
+                isDirectory: true
+            )
+            XCTAssertTrue(FileManager.default.fileExists(atPath: quarantined.path))
+            if mutation != .directory {
+                XCTAssertThrowsError(try OutgoingTransferPackage.loadAll(from: outgoing))
+            }
+        }
+    }
+
     func testOutgoingPackageCreationModesAndAuthenticationKeyCrashRecovery() throws {
         let root = try makeCoordinatorTemporaryDirectory()
         defer { removeCoordinatorTemporaryDirectory(root) }
@@ -2773,6 +2994,84 @@ private func makeCoordinatorTemporaryDirectory() throws -> URL {
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     return root
+}
+
+private struct LegacyOutgoingPackageFixture {
+    let identifier: String
+    let package: URL
+    let payloadFile: URL
+    let metadata: URL
+    let checksum: URL
+}
+
+private func makeLegacyOutgoingPackage(
+    in outgoing: URL,
+    version: Int = 1
+) throws -> LegacyOutgoingPackageFixture {
+    if !FileManager.default.fileExists(atPath: outgoing.path) {
+        try FileManager.default.createDirectory(at: outgoing, withIntermediateDirectories: false)
+    }
+    guard chmod(outgoing.path, S_IRWXU) == 0 else {
+        throw TransferProtocolError.unsupportedSource
+    }
+    let transferID = TransferID(rawValue: UUID())
+    let identifier = transferID.rawValue.uuidString.lowercased()
+    let package = outgoing.appendingPathComponent(identifier, isDirectory: true)
+    try FileManager.default.createDirectory(at: package, withIntermediateDirectories: false)
+    guard chmod(package.path, S_IRWXU) == 0 else {
+        throw TransferProtocolError.unsupportedSource
+    }
+    let payload = package.appendingPathComponent("payload", isDirectory: true)
+    try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false)
+    let payloadFile = payload.appendingPathComponent("legacy.txt")
+    let payloadBytes = Data("legacy package remains recoverable".utf8)
+    try payloadBytes.write(to: payloadFile)
+    guard chmod(payloadFile.path, S_IRUSR) == 0,
+        chmod(payload.path, S_IRUSR | S_IXUSR) == 0
+    else { throw TransferProtocolError.unsupportedSource }
+    let manifest = try TransferManifest.build(
+        from: payloadFile,
+        transferID: transferID,
+        immutablePackageSource: true
+    )
+    let metadata = OutgoingTransferPackage.Metadata(
+        version: version,
+        transferID: identifier,
+        peerID: UUID().uuidString.lowercased(),
+        displayFilename: "legacy.txt",
+        rootRelativePath: "payload/legacy.txt",
+        totalBytes: Int64(payloadBytes.count),
+        manifestFingerprint: try manifestFingerprint(manifest).base64EncodedString(),
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .millisecondsSince1970
+    encoder.outputFormatting = [.sortedKeys]
+    let encoded = try encoder.encode(metadata)
+    let metadataURL = package.appendingPathComponent("metadata.json")
+    let checksumURL = package.appendingPathComponent("metadata.sha256")
+    try encoded.write(to: metadataURL)
+    try Data(SHA256.hash(data: encoded)).write(to: checksumURL)
+    guard chmod(metadataURL.path, S_IRUSR) == 0,
+        chmod(checksumURL.path, S_IRUSR) == 0
+    else { throw TransferProtocolError.unsupportedSource }
+    return LegacyOutgoingPackageFixture(
+        identifier: identifier,
+        package: package,
+        payloadFile: payloadFile,
+        metadata: metadataURL,
+        checksum: checksumURL
+    )
+}
+
+private func replaceReadOnlyFile(_ url: URL, with data: Data) throws {
+    guard chmod(url.path, S_IRUSR | S_IWUSR) == 0 else {
+        throw TransferProtocolError.unsupportedSource
+    }
+    try data.write(to: url)
+    guard chmod(url.path, S_IRUSR) == 0 else {
+        throw TransferProtocolError.unsupportedSource
+    }
 }
 
 private func removeCoordinatorTemporaryDirectory(_ root: URL) {
