@@ -27,7 +27,7 @@ trap cleanup EXIT
 
 test "$(plutil -extract LSUIElement raw .build/MacChannel.app/Contents/Info.plist)" = "true"
 test "$(plutil -extract CFBundlePackageType raw .build/MacChannel.app/Contents/Info.plist)" = "APPL"
-test "$(plutil -extract CFBundleShortVersionString raw .build/MacChannel.app/Contents/Info.plist)" = "1.1.5"
+test "$(plutil -extract CFBundleShortVersionString raw .build/MacChannel.app/Contents/Info.plist)" = "1.1.6"
 
 if rg -n 'Tailscale|个人网络|连接方式|安全中继地址|rendezvousURL' \
     App/SettingsView.swift App/PairingView.swift; then

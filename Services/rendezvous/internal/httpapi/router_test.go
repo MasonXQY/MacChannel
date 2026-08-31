@@ -814,6 +814,42 @@ func TestSwiftPairingTransportStateSequence(t *testing.T) {
 	if string(authorization.AuthorizationEnvelope) != "swift-host-signed-authorization-and-channel-tag" {
 		t.Fatalf("authorization=%q", authorization.AuthorizationEnvelope)
 	}
+
+	peerDeliverPath := "/v1/pairing/sessions/" + joined.SessionID + "/peer-authorization"
+	post(outsider, peerDeliverPath, map[string]any{
+		"sessionID": joined.SessionID, "authorizationEnvelope": []byte("forged"),
+	}, http.StatusForbidden)
+	post(joiner, peerDeliverPath, map[string]any{
+		"sessionID": joined.SessionID,
+		"authorizationEnvelope": []byte("swift-joiner-signed-authorization-and-channel-tag"),
+	}, http.StatusNoContent)
+
+	peerRetrievePath := peerDeliverPath + "/retrieve"
+	post(outsider, peerRetrievePath, map[string]any{"sessionID": joined.SessionID}, http.StatusForbidden)
+	peerBody := post(host, peerRetrievePath, map[string]any{"sessionID": joined.SessionID}, http.StatusOK)
+	var peerAuthorization struct {
+		AuthorizationEnvelope []byte `json:"authorizationEnvelope"`
+	}
+	if err := json.Unmarshal(peerBody, &peerAuthorization); err != nil {
+		t.Fatal(err)
+	}
+	if string(peerAuthorization.AuthorizationEnvelope) != "swift-joiner-signed-authorization-and-channel-tag" {
+		t.Fatalf("peer authorization=%q", peerAuthorization.AuthorizationEnvelope)
+	}
+
+	peerStatusPath := peerDeliverPath + "/status"
+	post(joiner, peerStatusPath, map[string]any{"sessionID": joined.SessionID}, http.StatusTooEarly)
+	peerResolvePath := peerDeliverPath + "/resolve"
+	post(outsider, peerResolvePath, map[string]any{
+		"sessionID": joined.SessionID, "accepted": true,
+	}, http.StatusForbidden)
+	post(host, peerResolvePath, map[string]any{
+		"sessionID": joined.SessionID, "accepted": true,
+	}, http.StatusNoContent)
+	peerStatus := post(joiner, peerStatusPath, map[string]any{"sessionID": joined.SessionID}, http.StatusOK)
+	if !bytes.Contains(peerStatus, []byte(`"accepted":true`)) {
+		t.Fatalf("peer resolution=%s", peerStatus)
+	}
 	post(joiner, retrievePath, map[string]any{"sessionID": joined.SessionID}, http.StatusGone)
 }
 

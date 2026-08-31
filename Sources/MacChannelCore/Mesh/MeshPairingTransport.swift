@@ -26,6 +26,7 @@ public actor MeshPairingTransport: BilateralPairingTransport {
         let sourceKey: Data
         var reservation: PairingDeliveryReservation?
         var authorization: PairingAuthorizationEnvelope?
+        var authorizationRejected: Bool
         var peerAuthorization: PairingAuthorizationEnvelope?
         var peerAuthorizationAccepted: Bool?
     }
@@ -159,6 +160,7 @@ public actor MeshPairingTransport: BilateralPairingTransport {
             var session = sessions[reservation.sessionID],
             session.reservation == reservation
         else { throw PairingError.invalidHandshake }
+        guard !session.authorizationRejected else { throw PairingError.authorizationRejected }
         if let existing = session.authorization {
             guard existing.authorization.signature == envelope.authorization.signature,
                 existing.channelTag == envelope.channelTag
@@ -176,6 +178,13 @@ public actor MeshPairingTransport: BilateralPairingTransport {
         else { return }
         session.reservation = nil
         sessions[reservation.sessionID] = session
+    }
+
+    public func rejectAuthorization(for sessionID: PairingSessionID) async throws {
+        guard var session = sessions[sessionID] else { throw PairingError.sessionExpired }
+        guard session.authorization == nil else { throw PairingError.operationInProgress }
+        session.authorizationRejected = true
+        sessions[sessionID] = session
     }
 
     public func authorization(for sessionID: PairingSessionID) async throws
@@ -228,8 +237,8 @@ public actor MeshPairingTransport: BilateralPairingTransport {
         }
     }
 
-    public func resolvePeerAuthorization(for sessionID: PairingSessionID, accepted: Bool) async {
-        guard var session = sessions[sessionID], session.peerAuthorization != nil else { return }
+    public func resolvePeerAuthorization(for sessionID: PairingSessionID, accepted: Bool) async throws {
+        guard var session = sessions[sessionID] else { throw PairingError.sessionExpired }
         if let existing = session.peerAuthorizationAccepted {
             guard existing == accepted else { return }
         } else {
@@ -347,6 +356,7 @@ public actor MeshPairingTransport: BilateralPairingTransport {
                     sourceKey: sourceKey,
                     reservation: nil,
                     authorization: nil,
+                    authorizationRejected: false,
                     peerAuthorization: nil,
                     peerAuthorizationAccepted: nil
                 )
@@ -355,6 +365,9 @@ public actor MeshPairingTransport: BilateralPairingTransport {
                 let sessionID = PairingSessionID(rawValue: try request.requiredSessionID())
                 guard let session = sessions[sessionID], session.sourceKey == sourceKey else {
                     throw PairingError.invalidHandshake
+                }
+                guard !session.authorizationRejected else {
+                    throw PairingError.authorizationRejected
                 }
                 guard let envelope = session.authorization else {
                     throw PairingError.authorizationPending
@@ -380,7 +393,7 @@ public actor MeshPairingTransport: BilateralPairingTransport {
                     }
                 }
                 guard await waitForPeerResolution(envelope.sessionID) else {
-                    throw PairingError.invalidHandshake
+                    throw PairingError.authorizationRejected
                 }
                 return .acknowledged()
             }
@@ -743,6 +756,7 @@ private enum MeshPairingErrorWire {
         case .codeAlreadyUsed: "code_used"
         case .rateLimited: "rate_limited"
         case .authorizationPending: "authorization_pending"
+        case .authorizationRejected: "authorization_rejected"
         case .sessionExpired: "session_expired"
         case .resourceExhausted: "resource_exhausted"
         case .operationInProgress: "operation_in_progress"
@@ -757,6 +771,7 @@ private enum MeshPairingErrorWire {
         case "code_used": .codeAlreadyUsed
         case "rate_limited": .rateLimited
         case "authorization_pending": .authorizationPending
+        case "authorization_rejected": .authorizationRejected
         case "session_expired": .sessionExpired
         case "resource_exhausted": .resourceExhausted
         case "operation_in_progress": .operationInProgress

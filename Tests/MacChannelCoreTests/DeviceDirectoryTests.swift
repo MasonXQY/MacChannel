@@ -607,7 +607,7 @@ final class DeviceDirectoryTests: XCTestCase {
             name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
         let record = BonjourPeerBrowser.txtRecord(for: peer)
 
-        browser.start()
+        browser.startWithoutSystemBrowserForTesting()
         browser.accept(endpoint: endpoint, txtRecord: record)
         try await Task.sleep(for: .milliseconds(30))
         let firstEndpoint = await directory.endpoint(for: peer)
@@ -615,7 +615,11 @@ final class DeviceDirectoryTests: XCTestCase {
         clock.advance(by: 14)
         try await Task.sleep(for: .milliseconds(120))
         clock.advance(by: 2)
-        let renewedSnapshot = await directory.snapshot()
+        var renewedSnapshot = await directory.snapshot()
+        for _ in 0..<20 where renewedSnapshot.first?.availability != .lan {
+            try await Task.sleep(for: .milliseconds(10))
+            renewedSnapshot = await directory.snapshot()
+        }
         XCTAssertEqual(renewedSnapshot.first?.availability, .lan)
 
         await browser.stop()

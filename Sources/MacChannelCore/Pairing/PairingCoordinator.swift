@@ -451,11 +451,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
         guard case .host = pending.role else {
             throw PairingError.operationInProgress
         }
-        if let bilateral = transport as? any BilateralPairingTransport {
-            await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
-        } else {
-            try await transport.rejectAuthorization(for: pending.sessionID)
-        }
+        try await transport.rejectAuthorization(for: pending.sessionID)
         if let reservation = pending.deliveryReservation {
             await transport.cancelAuthorizationDelivery(reservation)
         }
@@ -489,8 +485,10 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
         if let task = bilateralCompletionTasks.removeValue(forKey: pending.sessionID) {
             task.cancel()
         }
-        if let bilateral {
-            await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
+        if pending.issuedAuthorization == nil {
+            try? await transport.rejectAuthorization(for: pending.sessionID)
+        } else if let bilateral {
+            try? await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
         }
         if let reservation = pending.deliveryReservation {
             await transport.cancelAuthorizationDelivery(reservation)
@@ -719,12 +717,12 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
             guard let bilateral = transport as? any BilateralPairingTransport else {
                 throw PairingError.invalidHandshake
             }
-            await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: true)
+            try await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: true)
             clearPendingIfMatching(pending)
             transition(to: .confirmed(pending.peer))
         } catch {
             if let bilateral = transport as? any BilateralPairingTransport {
-                await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
+                try? await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
             }
             if pendingMatches(pending) { transitionToFailure(error) }
         }
@@ -733,7 +731,7 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
     private func failBilateralHostPairing(pending: PendingConfirmation, error: Error) async {
         bilateralCompletionTasks.removeValue(forKey: pending.sessionID)
         if let bilateral = transport as? any BilateralPairingTransport {
-            await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
+            try? await bilateral.resolvePeerAuthorization(for: pending.sessionID, accepted: false)
         }
         if pendingMatches(pending) { transitionToFailure(error) }
     }

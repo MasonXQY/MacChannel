@@ -20,7 +20,8 @@ services:
         umask 077;
         printf '%s:%s:%s:%s:%s\n' "$${PGHOST}" "$${PGPORT}" "$${PGDATABASE}" "$${PGUSER}"
         "$$(cat /stack-secrets/postgres-password)" > "$${PGPASSFILE}";
-        exec psql -v ON_ERROR_STOP=1 -f /migrations/006_pairing_rejection.sql
+        psql -v ON_ERROR_STOP=1 -f /migrations/006_pairing_rejection.sql;
+        exec psql -v ON_ERROR_STOP=1 -f /migrations/007_bilateral_pairing.sql
     read_only: true
     tmpfs:
       - /run/macchannel:size=1m,uid=0,gid=0,mode=0700

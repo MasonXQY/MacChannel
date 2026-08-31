@@ -35,7 +35,7 @@ public protocol BilateralPairingTransport: PairingTransport {
     func deliverPeerAuthorization(_ envelope: PairingAuthorizationEnvelope) async throws
     func peerAuthorization(for sessionID: PairingSessionID) async throws
         -> PairingAuthorizationEnvelope
-    func resolvePeerAuthorization(for sessionID: PairingSessionID, accepted: Bool) async
+    func resolvePeerAuthorization(for sessionID: PairingSessionID, accepted: Bool) async throws
 }
 
 struct PairingSourceContext: Hashable, Sendable {

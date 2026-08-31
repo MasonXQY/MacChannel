@@ -582,6 +582,56 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(snapshot.devices.first?.id, peer.id)
     }
 
+    @MainActor
+    func testHostSettingsRecordPeerWhenBilateralTrustCommitsAfterApprovalReturns() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let owner = try DeviceIdentity.ephemeral()
+        let peerIdentity = try DeviceIdentity.ephemeral()
+        let peer = DeviceSummary(
+            id: peerIdentity.id,
+            displayName: "远端 Mac",
+            availability: .internet
+        )
+        let repository = try TrustRepository(
+            ownerIdentity: owner,
+            trustStore: TrustStore(owner: owner.id),
+            persistedGeneration: 0
+        )
+        let settings = try RuntimeSettingsStore(
+            url: root.appendingPathComponent("settings.json"),
+            trustedDevices: []
+        )
+        let service = PersistingPairingSurfaceService(
+            coordinator: DeferredProductionPairingCoordinator(
+                repository: repository,
+                peerIdentity: peerIdentity,
+                peer: peer
+            ),
+            settings: settings,
+            trustStore: RecordingTrustSnapshotPersister(),
+            trustRepository: repository
+        )
+
+        _ = try await service.approve()
+        let beforeCommit = await settings.current()
+        XCTAssertTrue(beforeCommit.devices.isEmpty)
+
+        _ = try await repository.issueAuthorization(
+            subject: peer.id,
+            subjectPublicKey: peerIdentity.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+        for _ in 0..<100 {
+            if !(await settings.current()).devices.isEmpty { break }
+            await Task.yield()
+        }
+
+        let afterCommit = await settings.current()
+        XCTAssertEqual(afterCommit.devices.first?.displayName, "远端 Mac")
+    }
+
     private func makeTrustedRuntimeFixture() throws -> TrustedRuntimeFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -621,6 +671,36 @@ private actor FailingTrustSnapshotPersister: TrustSnapshotPersisting {
     func persistLatest(from repository: TrustRepository) async throws {
         throw RuntimeTestError.failed
     }
+}
+
+private actor RecordingTrustSnapshotPersister: TrustSnapshotPersisting {
+    func persistLatest(from repository: TrustRepository) async throws {}
+}
+
+private actor DeferredProductionPairingCoordinator: ProductionPairingCoordinating {
+    private let repository: TrustRepository
+    private let peerIdentity: DeviceIdentity
+    private let peer: DeviceSummary
+
+    init(repository: TrustRepository, peerIdentity: DeviceIdentity, peer: DeviceSummary) {
+        self.repository = repository
+        self.peerIdentity = peerIdentity
+        self.peer = peer
+    }
+
+    func createCode() async throws -> String { throw RuntimeTestError.failed }
+    func join(code: String) async throws -> PairingJoinResult { throw RuntimeTestError.failed }
+    func approvePendingPairing() async throws -> SignedTrustRecord {
+        try await repository.prepareAuthorization(
+            subject: peer.id,
+            subjectPublicKey: peerIdentity.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
+    }
+    func rejectPendingPairing() async throws {}
+    func awaitHostApproval() async throws -> SignedTrustRecord { throw RuntimeTestError.failed }
+    func cancelPendingPairing() async throws {}
+    func pendingPeerSummary() async -> DeviceSummary? { peer }
 }
 
 private actor MutatingProductionPairingCoordinator: ProductionPairingCoordinating {

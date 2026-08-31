@@ -915,6 +915,8 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
             } catch {
                 warnings.append("设备信任已建立，但设备设置未保存；请检查存储权限后重试。")
             }
+        } else if let device = pendingPeer {
+            persistWhenBilateralTrustCommits(device)
         }
         await onReceiveConfigurationChanged?()
         guard !warnings.isEmpty else { return .committed }
@@ -943,6 +945,24 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     }
     func cancel() async throws { try await coordinator.cancelPendingPairing() }
     func pendingPeer() async -> DeviceSummary? { await coordinator.pendingPeerSummary() }
+
+    private func persistWhenBilateralTrustCommits(_ device: DeviceSummary) {
+        let settings = self.settings
+        let trustStore = self.trustStore
+        let trustRepository = self.trustRepository
+        let onReceiveConfigurationChanged = self.onReceiveConfigurationChanged
+        Task {
+            let updates = await trustRepository.updates()
+            for await trust in updates {
+                guard !Task.isCancelled else { return }
+                guard trust.isTrusted(device.id) else { continue }
+                try? await trustStore.persistLatest(from: trustRepository)
+                try? await settings.recordPaired(device)
+                await onReceiveConfigurationChanged?()
+                return
+            }
+        }
+    }
 }
 
 enum RuntimeReceivePolicy {

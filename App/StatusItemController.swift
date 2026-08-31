@@ -95,6 +95,11 @@ final class StatusItemController: NSObject {
             pasteboardChangeCount: 0
         )
     ) -> StatusItemDragToken? {
+        let onlineDevices = devices.filter { $0.availability != .offline }
+        guard !onlineDevices.isEmpty else {
+            announce("没有在线接收设备，请先完成配对并确认对方 Mac 已启动。")
+            return nil
+        }
         let staleFan = currentFanToken
         guard let token = state.begin(intent: intent) else { return nil }
         dragRegionSession.begin(token: token, fingerprint: fingerprint, in: .icon)
@@ -110,7 +115,7 @@ final class StatusItemController: NSObject {
             DeviceFanRequest(
                 token: token,
                 intent: intent,
-                devices: devices.filter { $0.availability != .offline },
+                devices: onlineDevices,
                 fingerprint: fingerprint,
                 dragEntered: { [weak self] observedFingerprint in
                     self?.dragEnteredFan(token, fingerprint: observedFingerprint) ?? false

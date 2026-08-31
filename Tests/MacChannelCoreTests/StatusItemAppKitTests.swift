@@ -103,6 +103,34 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testDraggedFileWithNoOnlineDeviceNeverEntersReadyOrPresentsEmptyFan() throws {
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [
+                DeviceSummary(
+                    id: DeviceID(rawValue: UUID()),
+                    displayName: "Offline Mac",
+                    availability: .offline
+                )
+            ],
+            transferCoordinator: RecordingTransferCoordinator()
+        )
+        var requests: [DeviceFanRequest] = []
+        var announcements: [String] = []
+        controller.onPresentDeviceFan = { requests.append($0) }
+        controller.onAnnouncement = { announcements.append($0) }
+
+        let token = controller.beginDrop(
+            try DropIntent(items: [.fileURL(URL(fileURLWithPath: "/tmp/no-target.txt"))])
+        )
+
+        XCTAssertNil(token)
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(announcements, ["没有在线接收设备，请先完成配对并确认对方 Mac 已启动。"])
+    }
+
+    @MainActor
     func testFailedSendReturnsIdleAndAnnouncesActionableError() async throws {
         let target = DeviceID(rawValue: UUID())
         let menu = RecordingStatusItemDeviceMenuPresenter()
@@ -228,12 +256,18 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
-    func testFanSelectionSynchronouslyRejectsOfflineTarget() async throws {
+    func testFanSelectionSynchronouslyRejectsUnavailableTarget() async throws {
         let transfer = RecordingTransferCoordinator()
         let target = DeviceID(rawValue: UUID())
         let controller = StatusItemController(
             button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
-            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .offline)],
+            devices: [
+                DeviceSummary(
+                    id: DeviceID(rawValue: UUID()),
+                    displayName: "Online Mac",
+                    availability: .lan
+                )
+            ],
             transferCoordinator: transfer
         )
         var request: DeviceFanRequest?
@@ -261,7 +295,13 @@ final class StatusItemAppKitTests: XCTestCase {
         let scheduler = ManualDragRegionScheduler()
         let controller = StatusItemController(
             button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
-            devices: [],
+            devices: [
+                DeviceSummary(
+                    id: DeviceID(rawValue: UUID()),
+                    displayName: "Online Mac",
+                    availability: .lan
+                )
+            ],
             transferCoordinator: RecordingTransferCoordinator(),
             dragRegionSchedule: scheduler.schedule
         )
@@ -290,7 +330,13 @@ final class StatusItemAppKitTests: XCTestCase {
         let scheduler = ManualDragRegionScheduler()
         let controller = StatusItemController(
             button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
-            devices: [],
+            devices: [
+                DeviceSummary(
+                    id: DeviceID(rawValue: UUID()),
+                    displayName: "Online Mac",
+                    availability: .lan
+                )
+            ],
             transferCoordinator: RecordingTransferCoordinator(),
             dragRegionSchedule: scheduler.schedule
         )

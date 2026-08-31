@@ -374,11 +374,11 @@ func TestRunnerMissingDockerOrGoFailsWithoutCreatingState(t *testing.T) {
 	}
 }
 
-func TestLocalStackMatchesPackagedSecureRendezvousDefault(t *testing.T) {
+func TestProductionPackageAndLocalSecureStackKeepExplicitEndpoints(t *testing.T) {
 	root := repositoryRoot(t)
 	runtimeConfig := readContractFile(t, filepath.Join(root, "App", "Resources", "RuntimeConfig.json"))
-	if !strings.Contains(runtimeConfig, `"rendezvousURL": "wss://localhost:8443/v1/ws"`) {
-		t.Fatal("packaged runtime default changed away from the local secure stack")
+	if !strings.Contains(runtimeConfig, `"rendezvousURL": "wss://channel.zensys-tech.com/v1/ws"`) {
+		t.Fatal("packaged runtime default changed away from the official public service")
 	}
 	compose := readContractFile(t, filepath.Join(root, "Infrastructure", "docker-compose.yml"))
 	if !strings.Contains(compose, "8443:8443") || !strings.Contains(compose, `RENDEZVOUS_TLS_ADDR: ":8443"`) {

@@ -52,6 +52,10 @@ type Store interface {
 	CancelAuthorization(ctx context.Context, sessionID, hostDeviceID, reservationID string, now time.Time) error
 	RejectAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) error
 	Authorization(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) ([]byte, error)
+	CommitPeerAuthorization(ctx context.Context, sessionID, joinerDeviceID string, encryptedAuthorization []byte, now time.Time) error
+	PeerAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) ([]byte, error)
+	ResolvePeerAuthorization(ctx context.Context, sessionID, hostDeviceID string, accepted bool, now time.Time) error
+	PeerAuthorizationResolution(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) (bool, error)
 	Cleanup(ctx context.Context, now time.Time) error
 }
 
@@ -75,29 +79,34 @@ type StoreConfig struct {
 }
 
 type storedSession struct {
-	codeHash                 [32]byte
-	sessionID                string
-	hostDeviceID             string
-	joinerDeviceID           string
-	encryptedSessionPayload  []byte
-	encryptedJoinPayload     []byte
-	expiresAt                time.Time
-	handshakeExpiresAt       *time.Time
-	sessionExpiresAt         *time.Time
-	consumedAt               *time.Time
-	removedAt                *time.Time
-	attemptCount             int
-	encryptedJoinResponse    []byte
-	joinResponseCommittedAt  *time.Time
-	reservationID            string
-	canceledReservationID    string
-	reservedAt               *time.Time
-	reservationExpiresAt     *time.Time
-	encryptedAuthorization   []byte
-	authorizationCommittedAt *time.Time
-	authorizationRetrievedAt *time.Time
-	authorizationExpiresAt   *time.Time
-	authorizationRejectedAt  *time.Time
+	codeHash                     [32]byte
+	sessionID                    string
+	hostDeviceID                 string
+	joinerDeviceID               string
+	encryptedSessionPayload      []byte
+	encryptedJoinPayload         []byte
+	expiresAt                    time.Time
+	handshakeExpiresAt           *time.Time
+	sessionExpiresAt             *time.Time
+	consumedAt                   *time.Time
+	removedAt                    *time.Time
+	attemptCount                 int
+	encryptedJoinResponse        []byte
+	joinResponseCommittedAt      *time.Time
+	reservationID                string
+	canceledReservationID        string
+	reservedAt                   *time.Time
+	reservationExpiresAt         *time.Time
+	encryptedAuthorization       []byte
+	authorizationCommittedAt     *time.Time
+	authorizationRetrievedAt     *time.Time
+	authorizationExpiresAt       *time.Time
+	authorizationRejectedAt      *time.Time
+	encryptedPeerAuthorization   []byte
+	peerAuthorizationCommittedAt *time.Time
+	peerAuthorizationExpiresAt   *time.Time
+	peerAuthorizationResolvedAt  *time.Time
+	peerAuthorizationAccepted    *bool
 }
 
 type AttemptLimiter struct {
@@ -615,6 +624,132 @@ func (s *MemoryStore) Authorization(_ context.Context, sessionID, joinerDeviceID
 	return append([]byte(nil), session.encryptedAuthorization...), nil
 }
 
+func (s *MemoryStore) CommitPeerAuthorization(_ context.Context, sessionID, joinerDeviceID string, encryptedAuthorization []byte, now time.Time) error {
+	if len(encryptedAuthorization) == 0 || len(encryptedAuthorization) > maximumEncryptedPayload {
+		return ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return ErrNotFound
+	}
+	if session.joinerDeviceID != strings.ToLower(joinerDeviceID) {
+		return ErrForbidden
+	}
+	if session.removedAt != nil || session.authorizationRejectedAt != nil {
+		return ErrGone
+	}
+	if session.authorizationCommittedAt == nil || session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+		return ErrPending
+	}
+	if session.peerAuthorizationAccepted != nil {
+		if !*session.peerAuthorizationAccepted {
+			return ErrRejected
+		}
+		return ErrConflict
+	}
+	if session.peerAuthorizationCommittedAt != nil {
+		if session.peerAuthorizationExpiresAt == nil || !now.Before(*session.peerAuthorizationExpiresAt) {
+			return ErrGone
+		}
+		if !equalBytes(session.encryptedPeerAuthorization, encryptedAuthorization) {
+			return ErrConflict
+		}
+		return nil
+	}
+	expiresAt := now.Add(authorizationMailboxTTL)
+	session.encryptedPeerAuthorization = append([]byte(nil), encryptedAuthorization...)
+	session.peerAuthorizationCommittedAt = timePointer(now)
+	session.peerAuthorizationExpiresAt = &expiresAt
+	return nil
+}
+
+func (s *MemoryStore) PeerAuthorization(_ context.Context, sessionID, hostDeviceID string, now time.Time) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return nil, ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
+		return nil, ErrForbidden
+	}
+	if session.removedAt != nil {
+		return nil, ErrGone
+	}
+	if session.peerAuthorizationCommittedAt == nil {
+		if session.sessionExpiresAt != nil && now.Before(*session.sessionExpiresAt) {
+			return nil, ErrPending
+		}
+		return nil, ErrGone
+	}
+	if session.peerAuthorizationExpiresAt == nil || !now.Before(*session.peerAuthorizationExpiresAt) {
+		return nil, ErrGone
+	}
+	return append([]byte(nil), session.encryptedPeerAuthorization...), nil
+}
+
+func (s *MemoryStore) ResolvePeerAuthorization(_ context.Context, sessionID, hostDeviceID string, accepted bool, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return ErrNotFound
+	}
+	if session.hostDeviceID != strings.ToLower(hostDeviceID) {
+		return ErrForbidden
+	}
+	if session.peerAuthorizationCommittedAt == nil {
+		if accepted {
+			return ErrPending
+		}
+		if session.authorizationCommittedAt == nil || session.authorizationExpiresAt == nil || !now.Before(*session.authorizationExpiresAt) {
+			return ErrGone
+		}
+		if session.peerAuthorizationAccepted != nil {
+			if *session.peerAuthorizationAccepted != accepted {
+				return ErrConflict
+			}
+			return nil
+		}
+		session.peerAuthorizationAccepted = boolPointer(false)
+		session.peerAuthorizationResolvedAt = timePointer(now)
+		return nil
+	}
+	if session.peerAuthorizationExpiresAt == nil || !now.Before(*session.peerAuthorizationExpiresAt) {
+		return ErrGone
+	}
+	if session.peerAuthorizationAccepted != nil {
+		if *session.peerAuthorizationAccepted != accepted {
+			return ErrConflict
+		}
+		return nil
+	}
+	session.peerAuthorizationAccepted = boolPointer(accepted)
+	session.peerAuthorizationResolvedAt = timePointer(now)
+	return nil
+}
+
+func (s *MemoryStore) PeerAuthorizationResolution(_ context.Context, sessionID, joinerDeviceID string, now time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessionByIDLocked(sessionID)
+	if session == nil {
+		return false, ErrNotFound
+	}
+	if session.joinerDeviceID != strings.ToLower(joinerDeviceID) {
+		return false, ErrForbidden
+	}
+	if session.peerAuthorizationExpiresAt == nil || !now.Before(*session.peerAuthorizationExpiresAt) {
+		return false, ErrGone
+	}
+	if session.peerAuthorizationAccepted == nil {
+		return false, ErrPending
+	}
+	return *session.peerAuthorizationAccepted, nil
+}
+
 func (s *MemoryStore) Cleanup(_ context.Context, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -772,7 +907,8 @@ func (s *PostgresStore) CreateSession(ctx context.Context, code, hostDeviceID, o
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE GREATEST(expires_at,
 		COALESCE(handshake_expires_at, '-infinity'), COALESCE(session_expires_at, '-infinity'),
 		COALESCE(authorization_reservation_expires_at, '-infinity'),
-		COALESCE(authorization_expires_at, '-infinity')) <= $1`, now); err != nil {
+		COALESCE(authorization_expires_at, '-infinity'),
+		COALESCE(peer_authorization_expires_at, '-infinity')) <= $1`, now); err != nil {
 		return err
 	}
 	var sourceCreates, deviceCreates int
@@ -1456,6 +1592,191 @@ func (s *PostgresStore) Authorization(ctx context.Context, sessionID, joinerDevi
 	return payload, nil
 }
 
+func (s *PostgresStore) CommitPeerAuthorization(ctx context.Context, sessionID, joinerDeviceID string, encryptedAuthorization []byte, now time.Time) error {
+	if len(encryptedAuthorization) == 0 || len(encryptedAuthorization) > maximumEncryptedPayload {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedJoiner string
+	var hostAuthorizationCommitted, hostAuthorizationExpires, committedAt, peerExpires, resolvedAt, rejectedAt, removedAt sql.NullTime
+	var storedAccepted sql.NullBool
+	var storedPayload []byte
+	err = tx.QueryRowContext(ctx, `SELECT joiner_device_id, authorization_committed_at,
+		authorization_expires_at, peer_authorization_committed_at,
+		peer_authorization_expires_at, encrypted_peer_authorization,
+		peer_authorization_resolved_at, peer_authorization_accepted,
+		authorization_rejected_at, removed_at
+		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
+		&storedJoiner, &hostAuthorizationCommitted, &hostAuthorizationExpires, &committedAt,
+		&peerExpires, &storedPayload, &resolvedAt, &storedAccepted, &rejectedAt, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if storedJoiner != strings.ToLower(joinerDeviceID) {
+		return ErrForbidden
+	}
+	if removedAt.Valid || rejectedAt.Valid {
+		return ErrGone
+	}
+	if !hostAuthorizationCommitted.Valid || !hostAuthorizationExpires.Valid || !now.Before(hostAuthorizationExpires.Time) {
+		return ErrPending
+	}
+	if resolvedAt.Valid {
+		if storedAccepted.Valid && !storedAccepted.Bool {
+			return ErrRejected
+		}
+		return ErrConflict
+	}
+	if committedAt.Valid {
+		if !peerExpires.Valid || !now.Before(peerExpires.Time) {
+			return ErrGone
+		}
+		if !equalBytes(storedPayload, encryptedAuthorization) {
+			return ErrConflict
+		}
+		return tx.Commit()
+	}
+	expiresAt := now.Add(authorizationMailboxTTL)
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET
+		encrypted_peer_authorization = $2, peer_authorization_committed_at = $3,
+		peer_authorization_expires_at = $4 WHERE session_id = $1`,
+		sessionID, encryptedAuthorization, now.UTC(), expiresAt.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresStore) PeerAuthorization(ctx context.Context, sessionID, hostDeviceID string, now time.Time) ([]byte, error) {
+	var storedHost string
+	var sessionExpires, committedAt, peerExpires, removedAt sql.NullTime
+	var payload []byte
+	err := s.db.QueryRowContext(ctx, `SELECT host_device_id, session_expires_at,
+		peer_authorization_committed_at, peer_authorization_expires_at,
+		encrypted_peer_authorization, removed_at
+		FROM pairing_sessions WHERE session_id = $1`, sessionID).Scan(
+		&storedHost, &sessionExpires, &committedAt, &peerExpires, &payload, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) {
+		return nil, ErrForbidden
+	}
+	if removedAt.Valid {
+		return nil, ErrGone
+	}
+	if !committedAt.Valid {
+		if sessionExpires.Valid && now.Before(sessionExpires.Time) {
+			return nil, ErrPending
+		}
+		return nil, ErrGone
+	}
+	if !peerExpires.Valid || !now.Before(peerExpires.Time) {
+		return nil, ErrGone
+	}
+	return payload, nil
+}
+
+func (s *PostgresStore) ResolvePeerAuthorization(ctx context.Context, sessionID, hostDeviceID string, accepted bool, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var storedHost string
+	var hostAuthorizationCommitted, hostAuthorizationExpires, committedAt, peerExpires, resolvedAt, removedAt sql.NullTime
+	var storedAccepted sql.NullBool
+	err = tx.QueryRowContext(ctx, `SELECT host_device_id, authorization_committed_at,
+		authorization_expires_at, peer_authorization_committed_at,
+		peer_authorization_expires_at, peer_authorization_resolved_at,
+		peer_authorization_accepted, removed_at
+		FROM pairing_sessions WHERE session_id = $1 FOR UPDATE`, sessionID).Scan(
+		&storedHost, &hostAuthorizationCommitted, &hostAuthorizationExpires, &committedAt,
+		&peerExpires, &resolvedAt, &storedAccepted, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if storedHost != strings.ToLower(hostDeviceID) {
+		return ErrForbidden
+	}
+	if removedAt.Valid {
+		return ErrGone
+	}
+	if !committedAt.Valid {
+		if accepted {
+			return ErrPending
+		}
+		if !hostAuthorizationCommitted.Valid || !hostAuthorizationExpires.Valid || !now.Before(hostAuthorizationExpires.Time) {
+			return ErrGone
+		}
+		if resolvedAt.Valid {
+			if !storedAccepted.Valid || storedAccepted.Bool != accepted {
+				return ErrConflict
+			}
+			return tx.Commit()
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET
+			peer_authorization_resolved_at = $2, peer_authorization_accepted = FALSE
+			WHERE session_id = $1`, sessionID, now.UTC()); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if !peerExpires.Valid || !now.Before(peerExpires.Time) {
+		return ErrGone
+	}
+	if resolvedAt.Valid {
+		if !storedAccepted.Valid || storedAccepted.Bool != accepted {
+			return ErrConflict
+		}
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pairing_sessions SET
+		peer_authorization_resolved_at = $2, peer_authorization_accepted = $3
+		WHERE session_id = $1`, sessionID, now.UTC(), accepted); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresStore) PeerAuthorizationResolution(ctx context.Context, sessionID, joinerDeviceID string, now time.Time) (bool, error) {
+	var storedJoiner string
+	var peerExpires, resolvedAt, removedAt sql.NullTime
+	var accepted sql.NullBool
+	err := s.db.QueryRowContext(ctx, `SELECT joiner_device_id, peer_authorization_expires_at,
+		peer_authorization_resolved_at, peer_authorization_accepted, removed_at
+		FROM pairing_sessions WHERE session_id = $1`, sessionID).Scan(
+		&storedJoiner, &peerExpires, &resolvedAt, &accepted, &removedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	if storedJoiner != strings.ToLower(joinerDeviceID) {
+		return false, ErrForbidden
+	}
+	if removedAt.Valid || !peerExpires.Valid || !now.Before(peerExpires.Time) {
+		return false, ErrGone
+	}
+	if !resolvedAt.Valid || !accepted.Valid {
+		return false, ErrPending
+	}
+	return accepted.Bool, nil
+}
+
 func (s *PostgresStore) Cleanup(ctx context.Context, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1465,7 +1786,8 @@ func (s *PostgresStore) Cleanup(ctx context.Context, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE GREATEST(expires_at,
 		COALESCE(handshake_expires_at, '-infinity'), COALESCE(session_expires_at, '-infinity'),
 		COALESCE(authorization_reservation_expires_at, '-infinity'),
-		COALESCE(authorization_expires_at, '-infinity')) <= $1`, now.UTC()); err != nil {
+		COALESCE(authorization_expires_at, '-infinity'),
+		COALESCE(peer_authorization_expires_at, '-infinity')) <= $1`, now.UTC()); err != nil {
 		return err
 	}
 	cutoff := now.Add(-failureWindow).UTC()
@@ -1525,6 +1847,8 @@ func newUUID() string {
 }
 
 func timePointer(value time.Time) *time.Time { return &value }
+
+func boolPointer(value bool) *bool { return &value }
 
 func equalBytes(left, right []byte) bool {
 	if len(left) != len(right) {

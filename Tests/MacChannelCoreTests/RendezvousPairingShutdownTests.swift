@@ -4,6 +4,16 @@ import XCTest
 @testable import MacChannelCore
 
 final class RendezvousPairingShutdownTests: XCTestCase {
+    func testPublicRendezvousTransportRequiresBilateralAuthorization() async throws {
+        let transport = try RendezvousPairingTransport(
+            identity: try DeviceIdentity.ephemeral(),
+            origin: URL(string: "https://pairing.test")!
+        )
+        defer { Task { await transport.stop() } }
+
+        let _: any BilateralPairingTransport = transport
+    }
+
     func testStopCancelsAndAwaitsCancellationInsensitiveHostAccept() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [PairingTransportURLProtocol.self]

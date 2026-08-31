@@ -76,6 +76,25 @@ final class MeshPairingTests: XCTestCase {
         await fixture.stop()
     }
 
+    func testHostRejectionNotifiesMeshJoinerWithoutWaitingForExpiry() async throws {
+        let fixture = try await MeshPairingFixture.make()
+        let joined = try await fixture.joiner.join(code: try await fixture.host.createCode())
+
+        try await fixture.host.rejectPendingPairing()
+
+        do {
+            _ = try await fixture.joiner.confirmFingerprint(joined.fingerprint)
+            XCTFail("Rejected mesh pairing must fail immediately")
+        } catch {
+            XCTAssertEqual(error as? PairingError, .authorizationRejected)
+        }
+        let hostTrusted = await fixture.host.isTrusted(fixture.joinerIdentity.id)
+        let joinerTrusted = await fixture.joiner.isTrusted(fixture.hostIdentity.id)
+        XCTAssertFalse(hostTrusted)
+        XCTAssertFalse(joinerTrusted)
+        await fixture.stop()
+    }
+
     func testLookupDoesNotRevealWhetherSixDigitGuessIsCorrectBeforeProof() async throws {
         let fixture = try await MeshPairingFixture.make()
         let code = try await fixture.host.createCode()
@@ -180,7 +199,7 @@ final class MeshPairingTests: XCTestCase {
             _ = try await fixture.joiner.confirmFingerprint(joined.fingerprint)
             XCTFail("Cancelled host must not authorize")
         } catch {
-            XCTAssertEqual(error as? PairingError, .authorizationPending)
+            XCTAssertEqual(error as? PairingError, .authorizationRejected)
         }
         let hostTrusted = await fixture.host.isTrusted(fixture.joinerIdentity.id)
         let joinerTrusted = await fixture.joiner.isTrusted(fixture.hostIdentity.id)
@@ -292,7 +311,7 @@ final class MeshPairingTests: XCTestCase {
             )
             XCTFail("Direction-swapped record must not commit")
         } catch {
-            XCTAssertEqual(error as? PairingError, .invalidHandshake)
+            XCTAssertEqual(error as? PairingError, .authorizationRejected)
         }
         try await waitUntil {
             if case .failed = await fixture.host.currentState() { return true }

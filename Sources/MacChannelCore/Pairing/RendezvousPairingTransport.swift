@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-public actor RendezvousPairingTransport: PairingTransport {
+public actor RendezvousPairingTransport: BilateralPairingTransport {
     private static let maximumHostTasks = 8
     private let identity: DeviceIdentity
     private let origin: URL
@@ -204,6 +204,62 @@ public actor RendezvousPairingTransport: PairingTransport {
             .value
     }
 
+    public func deliverPeerAuthorization(
+        _ envelope: PairingAuthorizationEnvelope
+    ) async throws {
+        let encoded = try Self.encoder.encode(AuthorizationWire(envelope))
+        let payload = PeerAuthorizationPayload(
+            sessionID: envelope.sessionID.rawValue.uuidString.lowercased(),
+            authorizationEnvelope: encoded
+        )
+        _ = try await request(
+            method: "POST",
+            path: payload.path,
+            payload: payload,
+            expected: [204]
+        )
+        let resolutionData = try await poll(
+            path: payload.path + "/status",
+            payload: SessionPayload(sessionID: payload.sessionID),
+            deadline: Date().addingTimeInterval(900)
+        )
+        guard try Self.decoder.decode(PeerAuthorizationResolution.self, from: resolutionData)
+            .accepted
+        else {
+            throw PairingError.authorizationRejected
+        }
+    }
+
+    public func peerAuthorization(
+        for sessionID: PairingSessionID
+    ) async throws -> PairingAuthorizationEnvelope {
+        let session = sessionID.rawValue.uuidString.lowercased()
+        let data = try await poll(
+            path: "/v1/pairing/sessions/\(escaped(session))/peer-authorization/retrieve",
+            payload: SessionPayload(sessionID: session),
+            deadline: Date().addingTimeInterval(900)
+        )
+        let response = try Self.decoder.decode(AuthorizationResponse.self, from: data)
+        return try Self.decoder.decode(AuthorizationWire.self, from: response.authorizationEnvelope)
+            .value
+    }
+
+    public func resolvePeerAuthorization(
+        for sessionID: PairingSessionID,
+        accepted: Bool
+    ) async throws {
+        let session = sessionID.rawValue.uuidString.lowercased()
+        _ = try await request(
+            method: "POST",
+            path: "/v1/pairing/sessions/\(escaped(session))/peer-authorization/resolve",
+            payload: PeerAuthorizationResolutionPayload(
+                sessionID: session,
+                accepted: accepted
+            ),
+            expected: [204]
+        )
+    }
+
     public func stop() async {
         isStopped = true
         let tasks = Array(hostTasks.values)
@@ -398,6 +454,18 @@ private struct ReservationResponse: Codable {
 }
 private struct StatusResponse: Codable { let status: String }
 private struct AuthorizationResponse: Codable { let authorizationEnvelope: Data }
+private struct PeerAuthorizationResolution: Codable { let accepted: Bool }
+
+private struct PeerAuthorizationPayload: Codable {
+    let sessionID: String
+    let authorizationEnvelope: Data
+    var path: String { "/v1/pairing/sessions/\(sessionID)/peer-authorization" }
+}
+
+private struct PeerAuthorizationResolutionPayload: Codable {
+    let sessionID: String
+    let accepted: Bool
+}
 
 private struct ReservationPayload: Codable {
     let sessionID: String

@@ -303,6 +303,8 @@ docker compose -f "${compose_file}" up -d --build --wait postgres
 docker compose -f "${compose_file}" exec -T postgres \
   psql -v ON_ERROR_STOP=1 -U macchannel -d macchannel \
   -f /docker-entrypoint-initdb.d/006_pairing_rejection.sql >/dev/null
+docker compose -f "${compose_file}" exec -T postgres psql -v ON_ERROR_STOP=1 -U macchannel -d macchannel \
+  -f /docker-entrypoint-initdb.d/007_bilateral_pairing.sql >/dev/null
 docker compose -f "${compose_file}" up -d --build --wait
 
 # The launchers copy the root-readable named-volume files to private tmpfs,

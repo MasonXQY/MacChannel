@@ -151,7 +151,12 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
             }
         }
     }
-    public func start() { queue.async { [weak self] in self?.startOnQueue() } }
+    public func start() { queue.async { [weak self] in self?.startOnQueue(launchSystemBrowser: true) } }
+    /// Starts the same renewal and directory lifecycle without allowing a real
+    /// NWBrowser result callback to overwrite synthetic test sightings.
+    func startWithoutSystemBrowserForTesting() {
+        queue.async { [weak self] in self?.startOnQueue(launchSystemBrowser: false) }
+    }
     /// Ordered lifecycle boundary: all future discovery applications carry an
     /// ended token before this returns, and earlier token sightings are purged.
     public func stop() async {
@@ -178,8 +183,8 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
         queue.async { [weak self] in guard let self else { return }; self.acceptOnQueue(endpoint: endpoint, txtRecord: txtRecord, generation: generation ?? self.generation) }
     }
 
-    private func startOnQueue() {
-        guard browser == nil else { return }
+    private func startOnQueue(launchSystemBrowser: Bool) {
+        guard browser == nil, directorySessionTask == nil else { return }
         generation &+= 1; let activeGeneration = generation; lifecycleState = .starting
         let directory = self.directory
         let sessionTask: Task<DeviceDirectory.LANDiscoverySessionToken?, Never> = Task { [weak self, directory] in
@@ -187,11 +192,15 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
             return await directory.beginLANDiscoverySession()
         }
         directorySessionTask = sessionTask
+        installRenewalTimer(generation: activeGeneration)
+        guard launchSystemBrowser else {
+            lifecycleState = .ready
+            return
+        }
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil), using: .tcp)
         browser.browseResultsChangedHandler = { [weak self] results, _ in self?.consume(results, generation: activeGeneration) }
         browser.stateUpdateHandler = { [weak self] state in self?.record(state: state, generation: activeGeneration) }
         self.browser = browser
-        installRenewalTimer(generation: activeGeneration)
         browser.start(queue: queue)
     }
 
