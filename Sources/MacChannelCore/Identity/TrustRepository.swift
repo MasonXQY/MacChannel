@@ -40,7 +40,9 @@ public actor TrustRepository {
         self.store = trustStore
         var records: [RecordKey: SignedTrustRecord] = [:]
         for record in authenticationRecords {
-            try record.validated()
+            // The owner-signed snapshot is authoritative. Auxiliary proofs can
+            // be safely discarded when an older app persisted them out of sync.
+            guard (try? record.validated()) != nil else { continue }
             guard
                 Self.isAuthenticationRecord(
                     record,
@@ -48,7 +50,7 @@ public actor TrustRepository {
                     ownerIdentity: ownerIdentity
                 )
             else {
-                throw TrustRepositoryError.invalidOwner
+                continue
             }
             let key = RecordKey(issuer: record.issuer, subject: record.subject)
             if let current = records[key], current.issuerSequence >= record.issuerSequence {
@@ -232,6 +234,12 @@ public actor TrustRepository {
                 key.issuer != record.subject && key.subject != record.subject
             }
         }
+        if record.action == .authorize, record.subject == ownerID {
+            let contradictoryRevocation = RecordKey(issuer: ownerID, subject: record.issuer)
+            if authenticationRecordsByPair[contradictoryRevocation]?.action == .revoke {
+                authenticationRecordsByPair.removeValue(forKey: contradictoryRevocation)
+            }
+        }
         authenticationRecordsByPair[
             RecordKey(issuer: record.issuer, subject: record.subject)
         ] = record
@@ -265,6 +273,16 @@ public actor TrustRepository {
             throw TrustRepositoryError.noPersistedSnapshot
         }
         return latestSnapshot
+    }
+
+    func persistenceState() throws -> (
+        snapshot: TrustStoreSnapshot,
+        authenticationRecords: [SignedTrustRecord]
+    ) {
+        guard let latestSnapshot else {
+            throw TrustRepositoryError.noPersistedSnapshot
+        }
+        return (latestSnapshot, authenticationRecords())
     }
 
     private func removeUpdateSubscriber(_ id: UUID) {

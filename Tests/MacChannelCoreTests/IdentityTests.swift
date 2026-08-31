@@ -83,7 +83,7 @@ final class IdentityTests: XCTestCase {
         XCTAssertEqual(authenticationRecords.first?.subject, peer.id)
     }
 
-    func testAuthenticatedTrustSnapshotStoreRejectsStaleAuthorizationForRevokedPeer() async throws {
+    func testAuthenticatedTrustSnapshotStoreDropsStaleAuthorizationForRevokedPeer() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -92,6 +92,7 @@ final class IdentityTests: XCTestCase {
         let secrets = MemorySecretStore()
         let identity = try DeviceIdentity.loadOrCreate(keychain: secrets)
         let peer = try DeviceIdentity.ephemeral()
+        let validPeer = try DeviceIdentity.ephemeral()
         let store = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
         let repository = try await store.load(identity: identity)
         let staleAuthorization = try await repository.issueAuthorization(
@@ -100,24 +101,114 @@ final class IdentityTests: XCTestCase {
             timestamp: Date()
         )
         _ = try await repository.revoke(peer.id)
+        _ = try await repository.issueAuthorization(
+            subject: validPeer.id,
+            subjectPublicKey: validPeer.publicKey.rawRepresentation,
+            timestamp: Date()
+        )
         try await store.persistLatest(from: repository)
 
         var persisted = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         )
-        persisted["authenticationRecords"] = [
-            try JSONSerialization.jsonObject(with: JSONEncoder().encode(staleAuthorization))
-        ]
+        var authenticationRecords = try XCTUnwrap(
+            persisted["authenticationRecords"] as? [[String: Any]]
+        )
+        authenticationRecords.append(
+            try XCTUnwrap(
+                try JSONSerialization.jsonObject(
+                    with: JSONEncoder().encode(staleAuthorization)
+                ) as? [String: Any]
+            )
+        )
+        persisted["authenticationRecords"] = authenticationRecords
         try JSONSerialization.data(withJSONObject: persisted, options: [.sortedKeys])
             .write(to: url, options: .atomic)
 
         let reopened = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
-        do {
-            _ = try await reopened.load(identity: identity)
-            XCTFail("A revoked snapshot must not accept an older signed authorization proof")
-        } catch {
-            XCTAssertEqual(error as? TrustRepositoryError, .invalidOwner)
-        }
+        let recoveredRepository = try await reopened.load(identity: identity)
+        let isTrusted = await recoveredRepository.isTrusted(peer.id)
+        let validPeerIsTrusted = await recoveredRepository.isTrusted(validPeer.id)
+        let recoveredRecords = await recoveredRepository.authenticationRecords()
+
+        XCTAssertFalse(isTrusted)
+        XCTAssertTrue(validPeerIsTrusted)
+        XCTAssertEqual(Set(recoveredRecords.map(\.subject)), [peer.id, validPeer.id])
+    }
+
+    func testLegacyReauthorizationRemovesContradictoryOwnerRevocationProof() async throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        let repository = try TrustRepository(
+            ownerIdentity: owner,
+            trustStore: TrustStore(owner: owner.id),
+            persistedGeneration: 0
+        )
+        try await repository.bootstrapFromConfirmedPairing(
+            SignedTrustRecord.authorizing(owner, signedBy: peer, sequence: 1)
+        )
+        _ = try await repository.revoke(peer.id)
+        let renewedPeerProof = try SignedTrustRecord.authorizing(
+            owner,
+            signedBy: peer,
+            sequence: 2
+        )
+
+        try await repository.bootstrapFromConfirmedPairing(renewedPeerProof)
+        let records = await repository.authenticationRecords()
+
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.signature, renewedPeerProof.signature)
+    }
+
+    func testAuthenticatedTrustSnapshotStoreRecoversLegacyReauthorizationState() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("trust.json")
+        let secrets = MemorySecretStore()
+        let owner = try DeviceIdentity.loadOrCreate(keychain: secrets)
+        let peer = try DeviceIdentity.ephemeral()
+        let store = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
+        let repository = try await store.load(identity: owner)
+        try await repository.bootstrapFromConfirmedPairing(
+            SignedTrustRecord.authorizing(owner, signedBy: peer, sequence: 1)
+        )
+        let staleRevocation = try await repository.revoke(peer.id)
+        let renewedPeerProof = try SignedTrustRecord.authorizing(
+            owner,
+            signedBy: peer,
+            sequence: 2
+        )
+        try await repository.bootstrapFromConfirmedPairing(renewedPeerProof)
+        try await store.persistLatest(from: repository)
+
+        var persisted = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        var authenticationRecords = try XCTUnwrap(
+            persisted["authenticationRecords"] as? [[String: Any]]
+        )
+        authenticationRecords.append(
+            try XCTUnwrap(
+                try JSONSerialization.jsonObject(
+                    with: JSONEncoder().encode(staleRevocation)
+                ) as? [String: Any]
+            )
+        )
+        persisted["authenticationRecords"] = authenticationRecords
+        try JSONSerialization.data(withJSONObject: persisted, options: [.sortedKeys])
+            .write(to: url, options: .atomic)
+
+        let reopened = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
+        let recoveredRepository = try await reopened.load(identity: owner)
+        let recoveredRecords = await recoveredRepository.authenticationRecords()
+        let peerIsTrusted = await recoveredRepository.isTrusted(peer.id)
+
+        XCTAssertTrue(peerIsTrusted)
+        XCTAssertEqual(recoveredRecords.count, 1)
+        XCTAssertEqual(recoveredRecords.first?.signature, renewedPeerProof.signature)
     }
 
     func testRevokedDeviceIsNoLongerTrusted() throws {
