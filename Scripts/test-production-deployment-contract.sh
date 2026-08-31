@@ -6,11 +6,13 @@ compose="$root/Infrastructure/production/docker-compose.yml"
 example="$root/Infrastructure/production/env.example"
 workflow="$root/.github/workflows/publish-service-images.yml"
 single_host="$root/Infrastructure/production/docker-compose.single-host.yml"
+official_environment="$root/Infrastructure/production/official.env"
 
 test -f "$compose"
 test -f "$example"
 test -f "$workflow"
 test -f "$single_host"
+test -f "$official_environment"
 rg -q 'MACCHANNEL_RENDEZVOUS_IMAGE=.*@sha256' "$example"
 rg -q 'MACCHANNEL_COTURN_IMAGE=.*@sha256' "$example"
 rg -q 'MACCHANNEL_POSTGRES_MIGRATION_IMAGE=.*@sha256' "$example"
@@ -32,6 +34,12 @@ if rg -n 'https?://localhost|wss?://localhost|localhost:[0-9]|example\.com|chang
 fi
 if rg -n 'POSTGRES_PASSWORD=|TURN_SHARED_SECRET=' "$compose"; then
     echo "production deployment embeds a secret in the environment" >&2
+    exit 1
+fi
+rg -q '^MACCHANNEL_ALLOWED_WS_ORIGINS=https://channel\.zensys-tech\.com$' "$official_environment"
+rg -q '^MACCHANNEL_TURN_REALM=turn\.zensys-tech\.com$' "$official_environment"
+if rg -n 'PASSWORD=|SECRET=|TOKEN=|0000000000000000|your-domain|\.invalid' "$official_environment"; then
+    echo "official production environment contains a secret or placeholder" >&2
     exit 1
 fi
 
