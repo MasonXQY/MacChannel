@@ -95,6 +95,7 @@ final class TransferIntegrationTests: XCTestCase {
         XCTAssertEqual(profile.connection, .seconds(30))
         XCTAssertEqual(profile.inactivity, .seconds(60))
         XCTAssertEqual(profile.interruption, .seconds(180))
+        XCTAssertEqual(profile.largeTransferCompletion, .seconds(1_800))
     }
 
     func testRepeatedParallelLANTransfersRemainStable() async throws {
@@ -366,7 +367,10 @@ final class TransferIntegrationTests: XCTestCase {
             resume.bytesSentOnNewConnection,
             1_073_741_824 - interruption.receiverDurableOffset
         )
-        try await harness.waitForCompletion(transfer, timeout: .seconds(900))
+        try await harness.waitForCompletion(
+            transfer,
+            timeout: HarnessTimeoutProfile.stack.largeTransferCompletion
+        )
         let transmission = try await harness.resumeTransmissionEvidence(
             after: interruption,
             totalPayloadBytes: 1_073_741_824

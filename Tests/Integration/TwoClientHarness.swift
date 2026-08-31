@@ -24,16 +24,19 @@ struct HarnessTimeoutProfile: Equatable, Sendable {
     let connection: Duration
     let inactivity: Duration
     let interruption: Duration
+    let largeTransferCompletion: Duration
 
     static let local = HarnessTimeoutProfile(
         connection: .seconds(15),
         inactivity: .seconds(30),
-        interruption: .seconds(120)
+        interruption: .seconds(120),
+        largeTransferCompletion: .seconds(900)
     )
     static let stack = HarnessTimeoutProfile(
         connection: .seconds(30),
         inactivity: .seconds(60),
-        interruption: .seconds(180)
+        interruption: .seconds(180),
+        largeTransferCompletion: .seconds(1_800)
     )
 
     static func profile(for policy: IntegrationRoutePolicy) -> HarnessTimeoutProfile {
