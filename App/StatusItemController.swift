@@ -35,6 +35,7 @@ final class StatusItemController: NSObject {
     private let deviceMenuPresenter: any StatusItemDeviceMenuPresenting
     private var state = StatusItemDropStateMachine()
     private var devices: [DeviceSummary]
+    private var preferredDeviceNames: [DeviceID: String]
     private var currentFanToken: StatusItemDragToken?
     private var activeSelectionToken: StatusItemDragToken?
     private var announcedOfflineToken: StatusItemDragToken?
@@ -54,7 +55,16 @@ final class StatusItemController: NSObject {
         dragRegionSchedule: DragRegionSchedule? = nil
     ) {
         self.button = button
-        self.devices = devices
+        preferredDeviceNames = Dictionary(
+            uniqueKeysWithValues: devices.compactMap { device in
+                let name = device.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                return name.isEmpty ? nil : (device.id, name)
+            }
+        )
+        self.devices = devices.map { device in
+            let name = device.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return device.replacingDisplayName(name)
+        }
         self.transferCoordinator = transferCoordinator
         self.filePicker = filePicker ?? NativeStatusItemFilePicker()
         self.deviceMenuPresenter = deviceMenuPresenter ?? NativeStatusItemDeviceMenuPresenter()
@@ -194,7 +204,10 @@ final class StatusItemController: NSObject {
 
         let onlineDevices = devices
             .filter { $0.availability != .offline }
-            .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+            .sorted {
+                $0.userFacingDisplayName.localizedStandardCompare($1.userFacingDisplayName)
+                    == .orderedAscending
+            }
         guard !onlineDevices.isEmpty else {
             announce("没有在线设备。")
             return
@@ -244,6 +257,16 @@ final class StatusItemController: NSObject {
         runtimeRetryItem?.isHidden = !status.canRetry
         runtimeRetryItem?.isEnabled = status.canRetry
         renderPhase()
+    }
+
+    func updateDeviceNames(_ names: [DeviceID: String]) {
+        for (id, rawName) in names {
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                preferredDeviceNames[id] = name
+            }
+        }
+        devices = resolvedDevices(devices)
     }
 
     private func selectTarget(_ device: DeviceID, token: StatusItemDragToken) -> Bool {
@@ -400,8 +423,24 @@ final class StatusItemController: NSObject {
             let updates = await directory.devices()
             for await devices in updates {
                 guard !Task.isCancelled else { return }
-                self?.devices = devices
+                self?.replaceDiscoveredDevices(devices)
             }
+        }
+    }
+
+    private func replaceDiscoveredDevices(_ discovered: [DeviceSummary]) {
+        devices = resolvedDevices(discovered)
+    }
+
+    private func resolvedDevices(_ discovered: [DeviceSummary]) -> [DeviceSummary] {
+        discovered.map { device in
+            let discoveredName = device.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !discoveredName.isEmpty {
+                preferredDeviceNames[device.id] = discoveredName
+            }
+            return device.replacingDisplayName(
+                preferredDeviceNames[device.id] ?? discoveredName
+            )
         }
     }
 

@@ -5,6 +5,30 @@ import XCTest
 @testable import MacChannelCore
 
 final class TransferSurfaceTests: XCTestCase {
+    func testFailedTransferExplainsReceiverMustBeConnected() {
+        let item = TransferSurfaceItem(
+            snapshot: TransferSnapshot(
+                id: TransferID(rawValue: UUID()),
+                peer: DeviceID(rawValue: UUID()),
+                phase: .failed,
+                completedBytes: 0,
+                totalBytes: 10,
+                route: .lan
+            ),
+            peerName: "书房 Mac",
+            displayName: "文件.txt",
+            bytesPerSecond: nil,
+            estimatedTimeRemaining: nil,
+            outputURL: nil,
+            updatedAt: Date()
+        )
+
+        XCTAssertEqual(
+            item.failureHelpText,
+            "请确认对方 Mac 通道已打开并显示“安全服务已连接”，然后重试。"
+        )
+    }
+
     @MainActor
     func testUnavailableShellServicesDeclareThatActionsAreDisabled() {
         XCTAssertFalse(UnavailablePairingSurfaceService().isAvailable)

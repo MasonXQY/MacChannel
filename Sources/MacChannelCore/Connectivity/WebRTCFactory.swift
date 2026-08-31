@@ -85,6 +85,8 @@ public enum WebRTCFactoryError: Error, Equatable, Sendable {
     case signalingEnded
     case signalingOverflow
     case remoteCandidateOverflow
+    case peerUnavailable
+    case trustForbidden
     case timeout
 }
 

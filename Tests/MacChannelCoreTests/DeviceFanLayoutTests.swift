@@ -4,6 +4,16 @@ import XCTest
 @testable import MacChannelCore
 
 final class DeviceFanLayoutTests: XCTestCase {
+    func testBlankDiscoveredDeviceNameHasStableVisibleFallback() {
+        let id = DeviceID(rawValue: UUID(uuidString: "12345678-1234-1234-1234-123456789ABC")!)
+        let target = DeviceFanTarget.device(
+            DeviceSummary(id: id, displayName: "  \n", availability: .lan)
+        )
+
+        XCTAssertEqual(target.title, "已配对 Mac 1234")
+        XCTAssertEqual(target.accessibilityLabel, "发送到已配对 Mac 1234，局域网在线")
+    }
+
     func testSixTargetsRemainOnScreenAndDoNotOverlap() {
         let screen = CGRect(x: 0, y: 0, width: 1_000, height: 900)
         let frames = DeviceFanLayout.frames(

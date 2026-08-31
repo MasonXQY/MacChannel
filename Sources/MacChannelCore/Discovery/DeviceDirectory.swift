@@ -268,8 +268,12 @@ public actor DeviceDirectory {
     }
 
     private func makeSnapshot() -> [DeviceSummary] {
-        let devices = Set(lanSightings.keys).union(internetSightings.keys)
-        return devices.compactMap { device in
+        // Every production route uses the authenticated rendezvous socket for
+        // WebRTC signaling. Bonjour proves only that the app is visible on the
+        // LAN; it must not advertise a peer as send-ready when that socket is
+        // offline. A fresh LAN sighting still selects the preferred ICE route
+        // once authenticated presence confirms the peer is reachable.
+        return internetSightings.keys.compactMap { device in
             guard isEligible(device) else { return nil }
             let availability: DeviceAvailability = lanSightings[device] == nil ? .internet : .lan
             // Discovery carries no display name. A paired-device UI may join this

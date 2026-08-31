@@ -19,7 +19,15 @@ public struct RendezvousSignalFrame: Equatable, Sendable {
 }
 
 public enum RendezvousTrustResult: Equatable, Sendable { case accepted, rejected }
-public struct RendezvousProtocolError: Equatable, Sendable { public let code: String }
+public struct RendezvousProtocolError: Equatable, Sendable {
+    public let code: String
+    public let device: DeviceID?
+
+    public init(code: String, device: DeviceID? = nil) {
+        self.code = code
+        self.device = device
+    }
+}
 
 /// Narrow transport seam for URLSessionWebSocketTask and deterministic tests.
 public protocol PresenceWebSocket: Sendable {
@@ -346,7 +354,12 @@ public actor AuthenticatedPresenceSession {
                     guard let code = frame.code else {
                         throw AuthenticatedPresenceError.invalidFrame
                     }
-                    protocolErrorContinuation.yield(RendezvousProtocolError(code: code))
+                    let target = frame.to
+                        .flatMap(UUID.init(uuidString:))
+                        .map(DeviceID.init(rawValue:))
+                    protocolErrorContinuation.yield(
+                        RendezvousProtocolError(code: code, device: target)
+                    )
                 case "trust-ok": trustResultContinuation.yield(.accepted)
                 case "trust-error": trustResultContinuation.yield(.rejected)
                 case "protocol-error":
@@ -469,6 +482,7 @@ public actor AuthenticatedPresenceSession {
         let availability: String?
         let record: [String: Any]?
         let from: String?
+        let to: String?
         let payload: Data?
         let code: String?
     }
@@ -484,7 +498,7 @@ public actor AuthenticatedPresenceSession {
 
     private func decodeFrame(_ data: Data) throws -> Frame {
         let object = try strictObject(
-            data, keys: ["type", "deviceID", "availability", "code", "from", "payload", "record"])
+            data, keys: ["type", "deviceID", "availability", "code", "from", "to", "payload", "record"])
         guard let type = object["type"] as? String else {
             throw AuthenticatedPresenceError.invalidFrame
         }
@@ -493,7 +507,8 @@ public actor AuthenticatedPresenceSession {
             type: type, deviceID: object["deviceID"] as? String,
             availability: object["availability"] as? String,
             record: object["record"] as? [String: Any],
-            from: object["from"] as? String, payload: payload, code: object["code"] as? String)
+            from: object["from"] as? String, to: object["to"] as? String,
+            payload: payload, code: object["code"] as? String)
     }
 
     private func strictObject(_ data: Data, keys: Set<String>) throws -> [String: Any] {

@@ -5,6 +5,30 @@ import XCTest
 @testable import MacChannelCore
 
 final class DeviceDirectoryTests: XCTestCase {
+    func testLANDiscoveryAloneDoesNotClaimPeerIsReadyToTransfer() async {
+        let peer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer))
+
+        await directory.apply(.lan(peer, host: "peer.local", port: 7_443))
+
+        let snapshot = await directory.snapshot()
+        let endpoint = await directory.endpoint(for: peer)
+        XCTAssertTrue(snapshot.isEmpty)
+        XCTAssertNotNil(endpoint)
+    }
+
+    func testAuthenticatedOfflineRemovesPeerEvenWhileBonjourIsVisible() async {
+        let peer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer))
+
+        await directory.apply(.internet(peer, online: true))
+        await directory.apply(.lan(peer, host: "peer.local", port: 7_443))
+        await directory.apply(.internet(peer, online: false))
+
+        let snapshot = await directory.snapshot()
+        XCTAssertTrue(snapshot.isEmpty)
+    }
+
     func testLANPresenceWinsOverInternet() async {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))
@@ -251,6 +275,38 @@ final class DeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(signal, RendezvousSignalFrame(from: peer, payload: Data("offer".utf8)))
         XCTAssertEqual(presence, .availability(device: peer, isOnline: true))
         await session.stop()
+    }
+
+    func testRendezvousSessionAssociatesSignalErrorWithTargetDevice() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = DeviceID(rawValue: UUID())
+        let socket = MemoryPresenceSocket(incoming: [
+            try frame([
+                "type": "challenge", "nonce": Data(repeating: 9, count: 32).base64EncodedString(),
+                "expiresAt": 1,
+            ]),
+            try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]),
+            try frame([
+                "type": "signal-error",
+                "code": "unavailable",
+                "to": peer.rawValue.uuidString.lowercased(),
+            ]),
+        ], blocksWhenEmpty: true)
+        let session = try AuthenticatedPresenceSession(
+            identity: identity,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: PresenceClient(directory: DeviceDirectory(trust: .allowing(peer)))
+        )
+        let errors = await session.protocolErrors()
+        var iterator = errors.makeAsyncIterator()
+
+        try await session.connect()
+        let runTask = Task { try await session.run() }
+        let error = await iterator.next()
+        XCTAssertEqual(error, RendezvousProtocolError(code: "unavailable", device: peer))
+        await session.stop()
+        _ = try? await runTask.value
     }
 
     func testRendezvousSessionSendsSignalThroughItsAuthenticatedSocket() async throws {
@@ -607,6 +663,7 @@ final class DeviceDirectoryTests: XCTestCase {
             name: "opaque", type: BonjourPeerBrowser.serviceType, domain: "local.", interface: nil)
         let record = BonjourPeerBrowser.txtRecord(for: peer)
 
+        await directory.apply(.internet(peer, online: true))
         browser.startWithoutSystemBrowserForTesting()
         browser.accept(endpoint: endpoint, txtRecord: record)
         try await Task.sleep(for: .milliseconds(30))
@@ -627,7 +684,7 @@ final class DeviceDirectoryTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(30))
         clock.advance(by: 16)
         let stoppedSnapshot = await directory.snapshot()
-        XCTAssertTrue(stoppedSnapshot.isEmpty)
+        XCTAssertEqual(stoppedSnapshot.first?.availability, .internet)
 
         browser.start()
         browser.accept(endpoint: endpoint, txtRecord: record)
@@ -742,14 +799,27 @@ final class DeviceDirectoryTests: XCTestCase {
 private actor MemoryPresenceSocket: PresenceWebSocket {
     private var incoming: [Data]
     private var sent: [Data] = []
+    private let blocksWhenEmpty: Bool
+    private var blockedReceiver: CheckedContinuation<Data, Error>?
 
-    init(incoming: [Data]) { self.incoming = incoming }
+    init(incoming: [Data], blocksWhenEmpty: Bool = false) {
+        self.incoming = incoming
+        self.blocksWhenEmpty = blocksWhenEmpty
+    }
     func send(_ data: Data) async throws { sent.append(data) }
     func receive() async throws -> Data {
-        guard !incoming.isEmpty else { throw AuthenticatedPresenceError.transport("no_frame") }
+        guard !incoming.isEmpty else {
+            if blocksWhenEmpty {
+                return try await withCheckedThrowingContinuation { blockedReceiver = $0 }
+            }
+            throw AuthenticatedPresenceError.transport("no_frame")
+        }
         return incoming.removeFirst()
     }
-    func close() async {}
+    func close() async {
+        blockedReceiver?.resume(throwing: AuthenticatedPresenceError.transport("closed"))
+        blockedReceiver = nil
+    }
     func sentFrame() throws -> Data { try XCTUnwrap(sent.first) }
     func sentFrames() -> [Data] { sent }
 }

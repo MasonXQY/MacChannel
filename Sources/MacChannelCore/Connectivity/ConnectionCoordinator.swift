@@ -2,6 +2,7 @@ import Foundation
 
 public protocol RendezvousSignalSession: Sendable {
     func signalFrames() async -> AsyncStream<RendezvousSignalFrame>
+    func protocolErrors() async -> AsyncStream<RendezvousProtocolError>
     func sendSignal(_ payload: Data, to device: DeviceID) async throws
 }
 
@@ -147,6 +148,7 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
     private var receivedFrameCount = 0
     private var routerTerminalError: WebRTCFactoryError?
     private var readerTask: Task<Void, Never>?
+    private var errorReaderTask: Task<Void, Never>?
     private let incomingOfferStream: AsyncStream<IncomingWebRTCOffer>
     private let incomingOfferContinuation: AsyncStream<IncomingWebRTCOffer>.Continuation
 
@@ -157,7 +159,10 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
         incomingOfferContinuation = continuation
     }
 
-    deinit { readerTask?.cancel() }
+    deinit {
+        readerTask?.cancel()
+        errorReaderTask?.cancel()
+    }
 
     public func messages(from remoteDevice: DeviceID, connectionID: UUID) async -> AsyncThrowingStream<WebRTCSignalMessage, Error> {
         await ensureReader()
@@ -212,14 +217,43 @@ public actor RendezvousWebRTCSignaling: WebRTCSignalTransport {
     }
 
     private func ensureReader() async {
-        guard readerTask == nil, routerTerminalError == nil else { return }
-        let frames = await session.signalFrames()
-        readerTask = Task { [weak self] in
-            for await frame in frames {
-                guard !Task.isCancelled else { return }
-                await self?.receive(frame)
+        guard routerTerminalError == nil else { return }
+        if readerTask == nil {
+            let frames = await session.signalFrames()
+            readerTask = Task { [weak self] in
+                for await frame in frames {
+                    guard !Task.isCancelled else { return }
+                    await self?.receive(frame)
+                }
+                await self?.finishSubscribers()
             }
-            await self?.finishSubscribers()
+        }
+        if errorReaderTask == nil {
+            let errors = await session.protocolErrors()
+            errorReaderTask = Task { [weak self] in
+                for await error in errors {
+                    guard !Task.isCancelled else { return }
+                    await self?.receive(error)
+                }
+            }
+        }
+    }
+
+    private func receive(_ protocolError: RendezvousProtocolError) async {
+        let signalingError: WebRTCFactoryError
+        switch protocolError.code {
+        case "unavailable": signalingError = .peerUnavailable
+        case "forbidden": signalingError = .trustForbidden
+        default: return
+        }
+        let keys = Set(subscribers.keys).union(pendingMessages.keys).filter { key in
+            protocolError.device == nil || key.device == protocolError.device
+        }
+        for key in keys {
+            if let mailbox = subscribers.removeValue(forKey: key)?.mailbox {
+                await mailbox.finish(signalingError)
+            }
+            await failPendingConnection(key, with: signalingError)
         }
     }
 
@@ -388,6 +422,8 @@ public protocol TransferAwareConnectionAttempting: ConnectionAttempting {
 
 public enum ConnectionCoordinatorError: Error, Equatable, Sendable {
     case allRoutesFailed
+    case peerUnavailable
+    case trustForbidden
 }
 
 /// Applies the product's fixed route policy. Each attempt owns a fresh peer
@@ -488,6 +524,10 @@ public struct ConnectionCoordinator: RouteEscalatingPeerConnector, Sendable {
                 throw ConnectionAttemptError.authenticationFailed
             } catch WebRTCSecureChannelError.authenticationFailed {
                 throw WebRTCSecureChannelError.authenticationFailed
+            } catch WebRTCFactoryError.peerUnavailable {
+                throw ConnectionCoordinatorError.peerUnavailable
+            } catch WebRTCFactoryError.trustForbidden {
+                throw ConnectionCoordinatorError.trustForbidden
             } catch {
                 continue
             }

@@ -1244,7 +1244,9 @@ public actor TransferCoordinator: TransferCoordinating {
     private func isRetryableConnectionLoss(_ error: Error) -> Bool {
         if (error as? TransferProtocolError) == .channelEnded { return true }
         if (error as? MacChannelError) == .connectionFailed { return true }
-        if error is ConnectionCoordinatorError { return true }
+        if let coordinator = error as? ConnectionCoordinatorError {
+            return coordinator == .allRoutesFailed
+        }
         if let attempt = error as? ConnectionAttemptError {
             return attempt != .authenticationFailed
         }

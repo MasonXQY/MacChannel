@@ -62,6 +62,11 @@ struct TransferSurfaceItem: Identifiable, Sendable {
         }
     }
 
+    var failureHelpText: String? {
+        guard snapshot.phase == .failed else { return nil }
+        return "请确认对方 Mac 通道已打开并显示“安全服务已连接”，然后重试。"
+    }
+
     var speedText: String {
         guard let bytesPerSecond, bytesPerSecond.isFinite, bytesPerSecond > 0 else {
             return "正在计算速度"
@@ -251,6 +256,14 @@ private struct TransferRow: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+
+            if let failureHelpText = item.failureHelpText {
+                Label(failureHelpText, systemImage: "network.slash")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(failureHelpText)
+            }
 
             HStack(spacing: 8) {
                 if item.canPause {

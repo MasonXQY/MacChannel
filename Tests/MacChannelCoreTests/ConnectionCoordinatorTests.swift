@@ -169,6 +169,20 @@ final class ConnectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(routes, [.lan])
     }
 
+    func testServerUnavailableDoesNotRetryThreeRoutes() async {
+        let attempts = UnavailableAttemptRecorder()
+        let connector = ConnectionCoordinator(attempts: attempts)
+
+        do {
+            _ = try await connector.connect(to: DeviceID(rawValue: UUID()))
+            XCTFail("An offline peer must fail immediately")
+        } catch {
+            XCTAssertEqual(error as? ConnectionCoordinatorError, .peerUnavailable)
+        }
+        let routes = await attempts.routes
+        XCTAssertEqual(routes, [.lan])
+    }
+
     func testRendezvousWebRTCSignalingUsesOneSharedSessionStream() async throws {
         let peer = DeviceID(rawValue: UUID())
         let connectionID = UUID()
@@ -194,6 +208,39 @@ final class ConnectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(received, message)
         XCTAssertEqual(streamRequests, 1)
         XCTAssertEqual(sentDevice, peer)
+    }
+
+    func testServerUnavailableFailsOnlyMatchingSignalSubscriberImmediately() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let otherPeer = DeviceID(rawValue: UUID())
+        let session = MemoryRendezvousSignalSession()
+        let signaling = RendezvousWebRTCSignaling(session: session)
+        var failed = await signaling.messages(from: peer, connectionID: UUID()).makeAsyncIterator()
+        let otherConnectionID = UUID()
+        var unaffected = await signaling.messages(
+            from: otherPeer,
+            connectionID: otherConnectionID
+        ).makeAsyncIterator()
+
+        await session.deliver(
+            RendezvousProtocolError(code: "unavailable", device: peer)
+        )
+
+        do {
+            _ = try await failed.next()
+            XCTFail("Unavailable peer must fail without waiting for ICE timeout")
+        } catch {
+            XCTAssertEqual(error as? WebRTCFactoryError, .peerUnavailable)
+        }
+        let answer = WebRTCSignalMessage.answer(sdp: "still-connected")
+        try await signaling.send(answer, to: otherPeer, connectionID: otherConnectionID)
+        let sentPayload = await session.lastSentPayload()
+        await session.deliver(RendezvousSignalFrame(
+            from: otherPeer,
+            payload: try XCTUnwrap(sentPayload)
+        ))
+        let received = try await unaffected.next()
+        XCTAssertEqual(received, answer)
     }
 
     func testEachFallbackRouteUsesOnlyItsAllowedICECandidates() {
@@ -574,6 +621,16 @@ private actor AttemptRecorder: ConnectionAttempting {
     }
 }
 
+private actor UnavailableAttemptRecorder: ConnectionAttempting {
+    private(set) var routes: [ConnectionRoute] = []
+
+    func connect(to device: DeviceID, route: ConnectionRoute) async throws -> any SecureChannel {
+        _ = device
+        routes.append(route)
+        throw WebRTCFactoryError.peerUnavailable
+    }
+}
+
 private final class TestSecureChannel: SecureChannel, @unchecked Sendable {
     let route: ConnectionRoute
 
@@ -592,6 +649,8 @@ private final class TestSecureChannel: SecureChannel, @unchecked Sendable {
 private actor MemoryRendezvousSignalSession: RendezvousSignalSession {
     private let stream: AsyncStream<RendezvousSignalFrame>
     private let continuation: AsyncStream<RendezvousSignalFrame>.Continuation
+    private let errorStream: AsyncStream<RendezvousProtocolError>
+    private let errorContinuation: AsyncStream<RendezvousProtocolError>.Continuation
     private(set) var streamRequests = 0
     private var sent: [(Data, DeviceID)] = []
 
@@ -599,6 +658,9 @@ private actor MemoryRendezvousSignalSession: RendezvousSignalSession {
         var continuation: AsyncStream<RendezvousSignalFrame>.Continuation!
         stream = AsyncStream { continuation = $0 }
         self.continuation = continuation
+        var errorContinuation: AsyncStream<RendezvousProtocolError>.Continuation!
+        errorStream = AsyncStream { errorContinuation = $0 }
+        self.errorContinuation = errorContinuation
     }
 
     func signalFrames() -> AsyncStream<RendezvousSignalFrame> {
@@ -606,11 +668,14 @@ private actor MemoryRendezvousSignalSession: RendezvousSignalSession {
         return stream
     }
 
+    func protocolErrors() -> AsyncStream<RendezvousProtocolError> { errorStream }
+
     func sendSignal(_ payload: Data, to device: DeviceID) async throws {
         sent.append((payload, device))
     }
 
     func deliver(_ frame: RendezvousSignalFrame) { continuation.yield(frame) }
+    func deliver(_ error: RendezvousProtocolError) { errorContinuation.yield(error) }
     func lastSentPayload() -> Data? { sent.last?.0 }
     func lastSentDevice() -> DeviceID? { sent.last?.1 }
 }

@@ -63,6 +63,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     func bind(to controller: StatusItemController) {
         statusController = controller
+        controller.updateDeviceNames(deviceNames)
         let previousTransferStarted = controller.onTransferStarted
         controller.onTransferStarted = { [weak self] id, token in
             if let self {
@@ -171,6 +172,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         for device in devices where !device.displayName.isEmpty {
             deviceNames[device.id] = device.displayName
         }
+        statusController?.updateDeviceNames(deviceNames)
         settingsModel.devices = settingsModel.devices.map { setting in
             var updated = setting
             updated.availability = online[setting.id]?.availability ?? .offline
@@ -193,6 +195,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         for setting in settings where !setting.displayName.isEmpty {
             deviceNames[setting.id] = setting.displayName
         }
+        statusController?.updateDeviceNames(deviceNames)
     }
 
     func updateSettings(_ snapshot: SettingsSurfaceSnapshot) {
@@ -321,6 +324,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         }
         if case let .confirmed(device) = state, !device.displayName.isEmpty {
             deviceNames[device.id] = device.displayName
+            statusController?.updateDeviceNames([device.id: device.displayName])
         }
         switch state {
         case let .approvalRequested(peer), let .awaitingHostApproval(peer),

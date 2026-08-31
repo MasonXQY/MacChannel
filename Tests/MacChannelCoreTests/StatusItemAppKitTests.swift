@@ -74,6 +74,44 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testSavedPairingNameFillsBlankDiscoveryNameInSendMenu() throws {
+        let target = DeviceID(rawValue: UUID())
+        let picker = StubStatusItemFilePicker(
+            result: [URL(fileURLWithPath: "/tmp/named-device.txt")]
+        )
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "", availability: .lan)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            filePicker: picker,
+            deviceMenuPresenter: menu
+        )
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: RecordingTransferCoordinator()
+            ),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector()
+        )
+        surfaces.bind(to: controller)
+        surfaces.updateDeviceSettings([
+            DeviceSetting(
+                device: DeviceSummary(
+                    id: target,
+                    displayName: "书房 Mac",
+                    availability: .offline
+                )
+            )
+        ])
+
+        controller.performKeyboardSend()
+
+        XCTAssertEqual(try XCTUnwrap(menu.presentedDevices.first).displayName, "书房 Mac")
+    }
+
+    @MainActor
     func testKeyboardFilePickerWithNoOnlineDeviceReturnsIdleAndAnnounces() {
         let picker = StubStatusItemFilePicker(
             result: [URL(fileURLWithPath: "/tmp/keyboard.txt")]

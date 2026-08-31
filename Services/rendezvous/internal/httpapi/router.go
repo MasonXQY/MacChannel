@@ -817,7 +817,9 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 				} else if errors.Is(err, signal.ErrFrameLarge) {
 					code = "invalid_frame"
 				}
-				_ = peer.SendJSON(map[string]string{"type": "signal-error", "code": code})
+				_ = peer.SendJSON(map[string]string{
+					"type": "signal-error", "code": code, "to": strings.ToLower(frame.To),
+				})
 			}
 		case "trust-update":
 			// Snapshot each record's pre-commit privacy boundary before the

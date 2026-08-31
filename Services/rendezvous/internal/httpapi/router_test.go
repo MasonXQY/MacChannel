@@ -1465,6 +1465,9 @@ func TestPresenceAndSignalsAreConfinedToTrustGraph(t *testing.T) {
 	if denied["code"] != "forbidden" {
 		t.Fatalf("signal error = %#v", denied)
 	}
+	if denied["to"] != outsider.id {
+		t.Fatalf("signal error target = %#v, want %s", denied["to"], outsider.id)
+	}
 	outsiderWS.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	var leaked map[string]any
 	if err := outsiderWS.ReadJSON(&leaked); err == nil {

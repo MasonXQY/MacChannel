@@ -283,6 +283,8 @@ final class TwoClientHarness: @unchecked Sendable {
         await senderDirectory.observeTrust(senderTrust)
         await receiverDirectory.observeTrust(receiverTrust)
         if routePolicy == .lanOnly {
+            await senderDirectory.apply(.internet(receiverIdentity.id, online: true))
+            await receiverDirectory.apply(.internet(senderIdentity.id, online: true))
             await senderDirectory.apply(
                 .lan(receiverIdentity.id, host: "127.0.0.1", port: 9_001)
             )
@@ -516,11 +518,13 @@ final class TwoClientHarness: @unchecked Sendable {
             try await senderTrustStore.persistLatest(from: senderTrust)
             try await thirdTrustStore.persistLatest(from: thirdTrust)
             await senderDirectory.waitForTrustUpdates()
+            await senderDirectory.apply(.internet(thirdIdentity.id, online: true))
             await senderDirectory.apply(
                 .lan(thirdIdentity.id, host: "127.0.0.1", port: 9_003)
             )
             let thirdDirectory = DeviceDirectory(trust: await thirdTrust.currentTrustStore())
             await thirdDirectory.observeTrust(thirdTrust)
+            await thirdDirectory.apply(.internet(senderIdentity.id, online: true))
             await thirdDirectory.apply(
                 .lan(senderIdentity.id, host: "127.0.0.1", port: 9_004)
             )
@@ -875,6 +879,7 @@ final class TwoClientHarness: @unchecked Sendable {
             trust: await reopenedTrust.currentTrustStore()
         )
         await reopenedDirectory.observeTrust(reopenedTrust)
+        await reopenedDirectory.apply(.internet(receiverID, online: true))
         await reopenedDirectory.apply(.lan(receiverID, host: "127.0.0.1", port: 9_001))
         let directoryRebuiltFromDurableTrust =
             await reopenedDirectory.endpoint(for: receiverID) != nil
@@ -1636,6 +1641,10 @@ private struct LocalRendezvousSignalSession: RendezvousSignalSession {
 
     func signalFrames() async -> AsyncStream<RendezvousSignalFrame> {
         await hub.stream(for: localDevice)
+    }
+
+    func protocolErrors() async -> AsyncStream<RendezvousProtocolError> {
+        AsyncStream { $0.finish() }
     }
 
     func sendSignal(_ payload: Data, to device: DeviceID) async throws {

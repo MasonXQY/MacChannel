@@ -213,9 +213,12 @@ private enum PublicServiceLifecycleError: Error { case sessionEnded }
 actor ReconnectableRendezvousSignalSession: RendezvousSignalSession {
     private let frameContinuation: AsyncStream<RendezvousSignalFrame>.Continuation
     private let frames: AsyncStream<RendezvousSignalFrame>
+    private let errorContinuation: AsyncStream<RendezvousProtocolError>.Continuation
+    private let errors: AsyncStream<RendezvousProtocolError>
     private var activeToken: UUID?
     private var activeSession: AuthenticatedPresenceSession?
     private var forwardingTask: Task<Void, Never>?
+    private var errorForwardingTask: Task<Void, Never>?
 
     init() {
         let stream = AsyncStream<RendezvousSignalFrame>.makeStream(
@@ -223,15 +226,23 @@ actor ReconnectableRendezvousSignalSession: RendezvousSignalSession {
         )
         frames = stream.stream
         frameContinuation = stream.continuation
+        let errorStream = AsyncStream<RendezvousProtocolError>.makeStream(
+            bufferingPolicy: .bufferingNewest(32)
+        )
+        errors = errorStream.stream
+        errorContinuation = errorStream.continuation
     }
 
     deinit {
         forwardingTask?.cancel()
+        errorForwardingTask?.cancel()
         frameContinuation.finish()
+        errorContinuation.finish()
     }
 
     func install(_ session: AuthenticatedPresenceSession, token: UUID) async {
         forwardingTask?.cancel()
+        errorForwardingTask?.cancel()
         activeToken = token
         activeSession = session
         let source = await session.signalFrames()
@@ -241,17 +252,27 @@ actor ReconnectableRendezvousSignalSession: RendezvousSignalSession {
                 self?.frameContinuation.yield(frame)
             }
         }
+        let errorSource = await session.protocolErrors()
+        errorForwardingTask = Task { [weak self] in
+            for await error in errorSource {
+                guard !Task.isCancelled else { return }
+                self?.errorContinuation.yield(error)
+            }
+        }
     }
 
     func remove(token: UUID) {
         guard activeToken == token else { return }
         forwardingTask?.cancel()
         forwardingTask = nil
+        errorForwardingTask?.cancel()
+        errorForwardingTask = nil
         activeToken = nil
         activeSession = nil
     }
 
     func signalFrames() -> AsyncStream<RendezvousSignalFrame> { frames }
+    func protocolErrors() -> AsyncStream<RendezvousProtocolError> { errors }
 
     func sendSignal(_ payload: Data, to device: DeviceID) async throws {
         guard let activeSession else {
@@ -270,8 +291,11 @@ actor ReconnectableRendezvousSignalSession: RendezvousSignalSession {
     func finish() {
         forwardingTask?.cancel()
         forwardingTask = nil
+        errorForwardingTask?.cancel()
+        errorForwardingTask = nil
         activeToken = nil
         activeSession = nil
         frameContinuation.finish()
+        errorContinuation.finish()
     }
 }

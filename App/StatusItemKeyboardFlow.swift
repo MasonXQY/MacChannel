@@ -48,19 +48,20 @@ final class NativeStatusItemDeviceMenuPresenter: StatusItemDeviceMenuPresenting 
         var admitted = false
         var actionTargets: [DeviceMenuActionTarget] = []
         for device in devices {
+            let displayName = device.userFacingDisplayName
             let target = DeviceMenuActionTarget {
                 admitted = select(device.id)
             }
             actionTargets.append(target)
 
             let item = NSMenuItem(
-                title: device.displayName,
+                title: displayName,
                 action: #selector(DeviceMenuActionTarget.choose(_:)),
                 keyEquivalent: ""
             )
             item.target = target
             item.setAccessibilityLabel(
-                "发送到\(device.displayName)，\(availabilityLabel(device.availability))"
+                "发送到\(displayName)，\(availabilityLabel(device.availability))"
             )
             menu.addItem(item)
         }

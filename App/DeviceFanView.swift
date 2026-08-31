@@ -61,7 +61,7 @@ enum DeviceFanTarget: Hashable {
 
     var title: String {
         switch self {
-        case let .device(device): device.displayName
+        case let .device(device): device.userFacingDisplayName
         case .more: "更多"
         }
     }
