@@ -5,12 +5,14 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 compose="$root/Infrastructure/production/docker-compose.yml"
 example="$root/Infrastructure/production/env.example"
 workflow="$root/.github/workflows/publish-service-images.yml"
+acceptance_workflow="$root/.github/workflows/public-service-acceptance.yml"
 single_host="$root/Infrastructure/production/docker-compose.single-host.yml"
 official_environment="$root/Infrastructure/production/official.env"
 
 test -f "$compose"
 test -f "$example"
 test -f "$workflow"
+test -f "$acceptance_workflow"
 test -f "$single_host"
 test -f "$official_environment"
 rg -q 'MACCHANNEL_RENDEZVOUS_IMAGE=.*@sha256' "$example"
@@ -63,6 +65,12 @@ rg -q 'sbom: true' "$workflow"
 rg -q 'provenance: mode=max' "$workflow"
 if rg -n 'uses: [^@[:space:]]+@v[0-9]' "$workflow"; then
     echo "service image workflow contains a mutable major-version action reference" >&2
+    exit 1
+fi
+rg -q 'MACCHANNEL_E2E_STACK_ORIGIN: https://channel\.zensys-tech\.com' "$acceptance_workflow"
+rg -q 'swift test --no-parallel --filter TransferIntegrationTests' "$acceptance_workflow"
+if rg -n 'uses: [^@[:space:]]+@v[0-9]' "$acceptance_workflow"; then
+    echo "public acceptance workflow contains a mutable major-version action reference" >&2
     exit 1
 fi
 

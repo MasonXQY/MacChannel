@@ -78,8 +78,14 @@ final class AppRuntimeTests: XCTestCase {
             ],
             arguments: ["MacChannel"]
         )
-        XCTAssertEqual(normal.rendezvousWebSocketURL?.absoluteString, "wss://localhost:8443/v1/ws")
-        XCTAssertEqual(normal.rendezvousHTTPOrigin?.absoluteString, "https://localhost:8443")
+        XCTAssertEqual(
+            normal.rendezvousWebSocketURL?.absoluteString,
+            "wss://channel.zensys-tech.com/v1/ws"
+        )
+        XCTAssertEqual(
+            normal.rendezvousHTTPOrigin?.absoluteString,
+            "https://channel.zensys-tech.com"
+        )
 
         let marker = "/tmp/macchannel-endpoint-\(UUID().uuidString)"
         let isolated = try ProductionRuntimeConfiguration.current(
@@ -117,20 +123,20 @@ final class AppRuntimeTests: XCTestCase {
         )
     }
 
-    func testPackagedConfigurationProvidesSecureLocalStackDefaultWithoutEnvironment() throws {
+    func testPackagedConfigurationProvidesFixedOfficialEndpointWithoutEnvironment() throws {
         let configuration = try ProductionRuntimeConfiguration.current(environment: [:])
 
         XCTAssertEqual(
             configuration.rendezvousWebSocketURL?.absoluteString,
-            "wss://localhost:8443/v1/ws"
+            "wss://channel.zensys-tech.com/v1/ws"
         )
         XCTAssertEqual(
             configuration.rendezvousHTTPOrigin?.absoluteString,
-            "https://localhost:8443"
+            "https://channel.zensys-tech.com"
         )
         XCTAssertEqual(
             try configuration.endpoints().webSocketURL.absoluteString,
-            "wss://localhost:8443/v1/ws"
+            "wss://channel.zensys-tech.com/v1/ws"
         )
     }
 

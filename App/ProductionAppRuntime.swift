@@ -94,7 +94,7 @@ enum ProductionRuntimeError: Error {
 }
 
 struct RendezvousEndpointConfiguration: Equatable {
-    static let packagedDefault = "wss://localhost:8443/v1/ws"
+    static let packagedDefault = "wss://channel.zensys-tech.com/v1/ws"
 
     let webSocketURL: URL
     let httpOrigin: URL

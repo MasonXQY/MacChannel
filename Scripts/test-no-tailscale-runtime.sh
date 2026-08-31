@@ -28,6 +28,14 @@ then
   exit 1
 fi
 
+if rg -n 'localhost|127\.0\.0\.1|://[^" ]+\.invalid' \
+  "$project_root/App/Resources/RuntimeConfig.json" \
+  "$project_root/App/ProductionAppRuntime.swift"
+then
+  echo "Release runtime still contains a development service endpoint" >&2
+  exit 1
+fi
+
 (
   cd "$project_root"
   swift build -c release --product MacChannelApp >/dev/null
