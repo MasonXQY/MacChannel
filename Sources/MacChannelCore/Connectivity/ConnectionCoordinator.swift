@@ -392,7 +392,7 @@ public enum ConnectionCoordinatorError: Error, Equatable, Sendable {
 
 /// Applies the product's fixed route policy. Each attempt owns a fresh peer
 /// connection so failed ICE state cannot leak into the next route.
-public struct ConnectionCoordinator: TransferAwarePeerConnector, Sendable {
+public struct ConnectionCoordinator: RouteEscalatingPeerConnector, Sendable {
     private let attempts: any ConnectionAttempting
 
     public init(attempts: any ConnectionAttempting) {
@@ -443,14 +443,34 @@ public struct ConnectionCoordinator: TransferAwarePeerConnector, Sendable {
         to device: DeviceID,
         transferID: TransferID
     ) async throws -> any SecureChannel {
-        try await connectAcrossRoutes(to: device, transferID: transferID)
+        try await connectAcrossRoutes(to: device, transferID: transferID, after: nil)
+    }
+
+    public func connect(
+        to device: DeviceID,
+        transferID: TransferID,
+        after failedRoute: ConnectionRoute?
+    ) async throws -> any SecureChannel {
+        try await connectAcrossRoutes(
+            to: device,
+            transferID: transferID,
+            after: failedRoute
+        )
     }
 
     private func connectAcrossRoutes(
         to device: DeviceID,
-        transferID: TransferID?
+        transferID: TransferID?,
+        after failedRoute: ConnectionRoute? = nil
     ) async throws -> any SecureChannel {
-        for route in [ConnectionRoute.lan, .directInternet, .relay] {
+        let plan = [ConnectionRoute.lan, .directInternet, .relay]
+        let routes: ArraySlice<ConnectionRoute>
+        if let failedRoute, let index = plan.firstIndex(of: failedRoute) {
+            routes = plan.suffix(from: plan.index(after: index))
+        } else {
+            routes = plan[...]
+        }
+        for route in routes {
             do {
                 if let transferID,
                     let transferAttempts = attempts as? any TransferAwareConnectionAttempting

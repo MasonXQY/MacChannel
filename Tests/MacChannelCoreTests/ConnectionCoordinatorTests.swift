@@ -108,6 +108,21 @@ final class ConnectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(routes, [.lan, .directInternet, .relay])
     }
 
+    func testTransferReconnectContinuesAfterTheFailedDataRoute() async throws {
+        let attempts = AttemptRecorder(results: [.success(.relay)])
+        let connector = ConnectionCoordinator(attempts: attempts)
+
+        let channel = try await connector.connect(
+            to: DeviceID(rawValue: UUID()),
+            transferID: TransferID(rawValue: UUID()),
+            after: .directInternet
+        )
+        let routes = await attempts.routes
+
+        XCTAssertEqual(channel.route, .relay)
+        XCTAssertEqual(routes, [.relay])
+    }
+
     func testStopsAfterFirstSuccessfulRoute() async throws {
         let attempts = AttemptRecorder(results: [.success(.lan), .success(.directInternet)])
         let connector = ConnectionCoordinator(attempts: attempts)

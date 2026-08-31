@@ -282,6 +282,9 @@ public actor TransferCoordinator: TransferCoordinating {
 
     private func run(_ id: TransferID, runnerToken: UUID) async {
         var attempt = 0
+        var failedDataRoute: ConnectionRoute?
+        var lastDataRoute: ConnectionRoute?
+        var consecutiveDataFailures = 0
         transferLoop: while attempt < maximumConnectionAttempts {
             var openedResource: (
                 channel: any SecureChannel,
@@ -304,6 +307,7 @@ public actor TransferCoordinator: TransferCoordinating {
                     connector: connector,
                     peer: lightweight.peer,
                     transferID: id,
+                    after: failedDataRoute,
                     resourceOwnership: TransferIOResourceOwnership(
                         registry: resources,
                         token: resourceToken
@@ -364,6 +368,19 @@ public actor TransferCoordinator: TransferCoordinating {
                 guard isRetryableConnectionLoss(error) else {
                     _ = try? claimTransition(id, to: .failed)
                     break transferLoop
+                }
+                if let route = openedResource?.channel.route {
+                    if route == lastDataRoute {
+                        consecutiveDataFailures += 1
+                    } else {
+                        lastDataRoute = route
+                        consecutiveDataFailures = 1
+                    }
+                    // A single data-plane interruption is often transient, so
+                    // retry the same route once to preserve fast LAN/direct
+                    // resume. Repeated failure means the route connected but is
+                    // not usable for this transfer; continue with the next one.
+                    failedDataRoute = consecutiveDataFailures >= 2 ? route : nil
                 }
                 attempt += 1
                 if attempt >= maximumConnectionAttempts {
@@ -1362,6 +1379,7 @@ private actor ConnectionAttemptRegistry {
         connector: any PeerConnector,
         peer: DeviceID,
         transferID: TransferID,
+        after failedRoute: ConnectionRoute?,
         resourceOwnership: TransferIOResourceOwnership
     ) async throws -> any SecureChannel {
         guard attempts.count < maximumRetainedAttempts else {
@@ -1375,7 +1393,13 @@ private actor ConnectionAttemptRegistry {
         let task = Task { [weak self, connector, gate, resourceOwnership] in
             do {
                 let channel: any SecureChannel
-                if let aware = connector as? any TransferAwarePeerConnector {
+                if let escalating = connector as? any RouteEscalatingPeerConnector {
+                    channel = try await escalating.connect(
+                        to: peer,
+                        transferID: transferID,
+                        after: failedRoute
+                    )
+                } else if let aware = connector as? any TransferAwarePeerConnector {
                     channel = try await aware.connect(to: peer, transferID: transferID)
                 } else {
                     channel = try await connector.connect(to: peer)

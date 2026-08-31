@@ -128,6 +128,41 @@ final class TransferCoordinatorTests: XCTestCase {
         )
     }
 
+    func testDataPlaneFailureEscalatesPastTheRouteThatAlreadyConnected() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let source = root.appendingPathComponent("route-escalation.bin")
+        let sourceData = Data(
+            (0..<(TransferProtocolLimits.maximumChunkBytes * 4)).map { UInt8($0 % 251) }
+        )
+        try sourceData.write(to: source)
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: destination,
+            withIntermediateDirectories: true
+        )
+        let peer = DeviceID(rawValue: UUID())
+        let connector = RouteEscalatingMemoryConnector(destination: destination)
+        let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
+        let coordinator = TransferCoordinator(
+            connector: connector,
+            database: database,
+            outgoingDirectory: root.appendingPathComponent("outgoing")
+        )
+
+        let id = try await coordinator.send(items: [source], to: peer)
+        try await waitForPhase(.completed, id: id, on: coordinator)
+
+        let failedRouteHints = await connector.failedRouteHints()
+        XCTAssertEqual(failedRouteHints, [nil, nil, .directInternet])
+        let records = try await database.history()
+        XCTAssertEqual(records.first { $0.id == id }?.route, .relay)
+        XCTAssertEqual(
+            try Data(contentsOf: destination.appendingPathComponent(source.lastPathComponent)),
+            sourceData
+        )
+    }
+
     func testIncomingListenerAutoReceivesTrustedTransferThroughReceiveStore() async throws {
         let root = try makeCoordinatorTemporaryDirectory()
         defer { removeCoordinatorTemporaryDirectory(root) }
@@ -3214,6 +3249,49 @@ private actor ReconnectingMemoryConnector: TransferAwarePeerConnector {
 
     func connectedTransferIDs() -> [TransferID] {
         ids
+    }
+}
+
+private actor RouteEscalatingMemoryConnector: RouteEscalatingPeerConnector {
+    private let destination: URL
+    private var hints: [ConnectionRoute?] = []
+    private var previousReceive: Task<TransferReceiveResult?, Never>?
+
+    init(destination: URL) {
+        self.destination = destination
+    }
+
+    func connect(to device: DeviceID) async throws -> any SecureChannel {
+        throw MacChannelError.connectionFailed
+    }
+
+    func connect(to device: DeviceID, transferID: TransferID) async throws -> any SecureChannel {
+        try await connect(to: device, transferID: transferID, after: nil)
+    }
+
+    func connect(
+        to device: DeviceID,
+        transferID: TransferID,
+        after failedRoute: ConnectionRoute?
+    ) async throws -> any SecureChannel {
+        if let previousReceive { _ = await previousReceive.value }
+        hints.append(failedRoute)
+        let shouldRelay = failedRoute == .directInternet
+        let pair = CoordinatorMemoryChannelPair.make(
+            route: shouldRelay ? .relay : .directInternet,
+            failSenderAfter: shouldRelay ? nil : 3
+        )
+        previousReceive = Task {
+            try? await ReceiveSession(
+                transferID: transferID,
+                destinationDirectory: destination
+            ).run(on: pair.receiver)
+        }
+        return pair.sender
+    }
+
+    func failedRouteHints() -> [ConnectionRoute?] {
+        hints
     }
 }
 

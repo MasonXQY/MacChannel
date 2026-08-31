@@ -2,8 +2,8 @@
 set -euo pipefail
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-version="${MACCHANNEL_VERSION:-1.1.3}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-5}"
+version="${MACCHANNEL_VERSION:-1.1.4}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-6}"
 if [[ -z "$identity" ]]; then
     echo "MACCHANNEL_CODESIGN_IDENTITY is required" >&2
     exit 2

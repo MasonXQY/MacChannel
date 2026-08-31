@@ -26,6 +26,16 @@ public protocol TransferAwarePeerConnector: PeerConnector {
     func connect(to device: DeviceID, transferID: TransferID) async throws -> any SecureChannel
 }
 
+/// A transfer-aware connector that can continue the fixed route plan after a
+/// channel that connected successfully later failed during transfer I/O.
+public protocol RouteEscalatingPeerConnector: TransferAwarePeerConnector {
+    func connect(
+        to device: DeviceID,
+        transferID: TransferID,
+        after failedRoute: ConnectionRoute?
+    ) async throws -> any SecureChannel
+}
+
 public protocol TransferCoordinating: Sendable {
     func send(items: [URL], to device: DeviceID) async throws -> TransferID
     func pause(_ id: TransferID) async throws
