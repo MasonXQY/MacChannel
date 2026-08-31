@@ -103,12 +103,12 @@ printf '%s\n' Applications MacChannel.app README.txt | LC_ALL=C sort >"$test_roo
 cmp "$test_root/expected-entries.txt" "$mapfile_path"
 test -L "$mounted_path/Applications"
 test "$(readlink "$mounted_path/Applications")" = /Applications
-grep -F "版本 1.1.1 (3)" "$mounted_path/README.txt" >/dev/null
+grep -F "版本 1.1.2 (4)" "$mounted_path/README.txt" >/dev/null
 codesign --verify --deep --strict --verbose=2 "$mounted_path/MacChannel.app"
 
 plist="$mounted_path/MacChannel.app/Contents/Info.plist"
-test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.1.1
-test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 3
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.1.2
+test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 4
 test "$(plutil -extract CFBundlePackageType raw -o - "$plist")" = APPL
 
 mutated_app="$test_root/Mutated.app"
@@ -123,8 +123,8 @@ manifest_sha="$(plutil -extract dmgSHA256 raw -o - dist/MacChannel.manifest.json
 actual_sha="$(shasum -a 256 dist/MacChannel.dmg | awk '{print $1}')"
 test "$manifest_sha" = "$actual_sha"
 test "$(plutil -extract gitCommit raw -o - dist/MacChannel.manifest.json)" = "$(git rev-parse HEAD)"
-test "$(plutil -extract version raw -o - dist/MacChannel.manifest.json)" = 1.1.1
-test "$(plutil -extract build raw -o - dist/MacChannel.manifest.json)" = 3
+test "$(plutil -extract version raw -o - dist/MacChannel.manifest.json)" = 1.1.2
+test "$(plutil -extract build raw -o - dist/MacChannel.manifest.json)" = 4
 test "$(plutil -extract releaseState raw -o - dist/MacChannel.manifest.json)" = internalSignedNotNotarized
 test "$(plutil -extract teamID raw -o - dist/MacChannel.manifest.json)" = "$expected_team_id"
 

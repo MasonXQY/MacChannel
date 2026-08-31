@@ -286,6 +286,8 @@ public struct ReceiveSession: Sendable {
                     if chunksSinceAcknowledgement > 0,
                         lastAcknowledgement.duration(to: clock.now) >= .milliseconds(250)
                     {
+                        try await storage.checkpoint()
+                        receiveStorage = storage
                         try await send(
                             .ackRanges(verified.map),
                             transferID: transferID,
@@ -343,6 +345,8 @@ public struct ReceiveSession: Sendable {
                         >= TransferProtocolLimits.acknowledgementChunkInterval
                         || following == nil
                     {
+                        try await storage.checkpoint()
+                        receiveStorage = storage
                         try await send(
                             .ackRanges(verified.map),
                             transferID: transferID,
@@ -359,6 +363,8 @@ public struct ReceiveSession: Sendable {
                 case .complete:
                     guard expected == nil else { throw TransferProtocolError.invalidChunk }
                     if chunksSinceAcknowledgement > 0 {
+                        try await storage.checkpoint()
+                        receiveStorage = storage
                         try await send(
                             .ackRanges(verified.map),
                             transferID: transferID,
@@ -416,7 +422,11 @@ public struct ReceiveSession: Sendable {
             if cancelled {
                 await receiveStorage?.cancel()
             } else {
-                await receiveStorage?.markFailed()
+                if var storage = receiveStorage {
+                    try? await storage.checkpoint()
+                    receiveStorage = storage
+                    await storage.markFailed()
+                }
             }
             if let crypto = terminationCrypto {
                 let terminalFrame: TransferFrame?
@@ -536,15 +546,24 @@ private enum ReceiveSessionStorage: Sendable {
     mutating func write(_ chunk: TransferChunk, manifest: TransferManifest) async throws {
         switch self {
         case .legacy(var preparation):
-            let digest = try preparation.writeAndVerify(chunk, manifest: manifest)
-            try preparation.resumeStore.append(chunk.coordinate, digest: digest)
+            _ = try preparation.writeAndVerify(chunk, manifest: manifest)
             self = .legacy(preparation)
         case .durable(let store):
-            try await store.write(
+            try await store.writePending(
                 chunk.data,
                 index: chunk.coordinate.chunkIndex,
                 entry: chunk.coordinate.entryIndex
             )
+        }
+    }
+
+    mutating func checkpoint() async throws {
+        switch self {
+        case .legacy(var preparation):
+            try preparation.checkpoint()
+            self = .legacy(preparation)
+        case .durable(let store):
+            try await store.checkpoint()
         }
     }
 
@@ -553,14 +572,17 @@ private enum ReceiveSessionStorage: Sendable {
         onMetadataValidated: (@Sendable (String) -> Void)?
     ) async throws -> [URL] {
         switch self {
-        case .legacy(let preparation):
+        case .legacy(var preparation):
+            try preparation.checkpoint()
             try preparation.verifyCompletedFiles(manifest)
             let urls = try preparation.finalize(
                 manifest,
                 onMetadataValidated: onMetadataValidated
             )
+            self = .legacy(preparation)
             return urls
         case .durable(let store):
+            try await store.checkpoint()
             return [try await store.finalize()]
         }
     }
@@ -961,6 +983,7 @@ private struct ResumePreparation {
     let files: [UInt32: StagedFile]
     var resumeStore: ResumeStateStore
     let verified: Set<ChunkCoordinate>
+    var pendingFileEntries: Set<UInt32> = []
 
     init(
         manifest: TransferManifest,
@@ -1033,7 +1056,22 @@ private struct ResumePreparation {
         guard let file = files[chunk.coordinate.entryIndex] else {
             throw TransferProtocolError.destinationEscape
         }
-        return try file.writeAndVerify(chunk.data, offset: chunk.offset)
+        let digest = try file.writeAndVerify(chunk.data, offset: chunk.offset)
+        try resumeStore.append(chunk.coordinate, digest: digest)
+        pendingFileEntries.insert(chunk.coordinate.entryIndex)
+        return digest
+    }
+
+    mutating func checkpoint() throws {
+        guard !pendingFileEntries.isEmpty else { return }
+        for entry in pendingFileEntries.sorted() {
+            guard let file = files[entry] else {
+                throw TransferProtocolError.destinationEscape
+            }
+            try file.synchronize()
+        }
+        try resumeStore.synchronize()
+        pendingFileEntries.removeAll(keepingCapacity: true)
     }
 
     func verifyCompletedFiles(_ manifest: TransferManifest) throws {
@@ -1045,10 +1083,11 @@ private struct ResumePreparation {
         }
     }
 
-    func finalize(
+    mutating func finalize(
         _ manifest: TransferManifest,
         onMetadataValidated: (@Sendable (String) -> Void)?
     ) throws -> [URL] {
+        try checkpoint()
         for (index, entry) in manifest.entries.enumerated() where entry.kind == .file {
             guard let file = files[UInt32(index)] else {
                 throw TransferProtocolError.destinationEscape
@@ -1627,10 +1666,13 @@ final class StagedFile: @unchecked Sendable {
 
     func writeAndVerify(_ data: Data, offset: UInt64) throws -> Data {
         try writeAll(data, to: descriptor, offset: offset)
-        guard fsync(descriptor) == 0 else { throw TransferProtocolError.destinationEscape }
         let written = try readExact(from: descriptor, offset: offset, length: data.count)
         guard written == data else { throw TransferProtocolError.digestMismatch }
         return Data(SHA256.hash(data: written))
+    }
+
+    func synchronize() throws {
+        guard fsync(descriptor) == 0 else { throw TransferProtocolError.destinationEscape }
     }
 
     func currentSize() throws -> UInt64 {
@@ -1854,6 +1896,9 @@ final class ResumeStateStore: @unchecked Sendable {
         record.append(digest)
         record.append(Self.recordChecksum(fingerprint: fingerprint, body: record))
         try writeAll(record, to: descriptor, offset: offset)
+    }
+
+    func synchronize() throws {
         guard fsync(descriptor) == 0 else { throw TransferProtocolError.destinationEscape }
     }
 

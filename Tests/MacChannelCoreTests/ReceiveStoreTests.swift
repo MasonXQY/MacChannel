@@ -7,6 +7,61 @@ import XCTest
 @testable import MacChannelCore
 
 final class ReceiveStoreTests: XCTestCase {
+    func testPendingChunksBecomeDurableInOneExplicitCheckpoint() async throws {
+        let fixture = try StorageFixture()
+        let first = Data(repeating: 0x31, count: TransferProtocolLimits.maximumChunkBytes)
+        let second = Data(repeating: 0x32, count: TransferProtocolLimits.maximumChunkBytes)
+        let bytes = first + second
+        let manifest = try makeManifest(name: "batched.bin", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+
+        try await store.writePending(first, index: 0, entry: 0)
+        try await store.writePending(second, index: 1, entry: 0)
+
+        let beforeCheckpoint = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(beforeCheckpoint.first?.completedBytes, 0)
+
+        try await store.checkpoint()
+
+        let afterCheckpoint = try await fixture.database.history(limit: 1)
+        let resumeRanges = try await store.resumeMap().ranges
+        XCTAssertEqual(afterCheckpoint.first?.completedBytes, UInt64(bytes.count))
+        XCTAssertEqual(
+            resumeRanges,
+            [try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 2)]
+        )
+    }
+
+    func testOverlappingCheckpointsSettleCoordinatesIdempotentlyWithoutProgressRegression()
+        async throws
+    {
+        let fixture = try StorageFixture()
+        let first = Data(repeating: 0x41, count: TransferProtocolLimits.maximumChunkBytes)
+        let second = Data(repeating: 0x42, count: TransferProtocolLimits.maximumChunkBytes)
+        let manifest = try makeManifest(name: "reentrant-checkpoint.bin", bytes: first + second)
+        let store = try await fixture.prepare(manifest: manifest)
+
+        try await store.writePending(first, index: 0, entry: 0)
+        try await store.checkpoint(onBatchFrozen: {
+            try await store.writePending(second, index: 1, entry: 0)
+            try await store.checkpoint()
+        })
+
+        let afterOverlappingCheckpoints = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(
+            afterOverlappingCheckpoints.first?.completedBytes,
+            UInt64(first.count + second.count)
+        )
+
+        try await store.checkpoint()
+
+        let afterNoOpCheckpoint = try await fixture.database.history(limit: 1)
+        XCTAssertEqual(
+            afterNoOpCheckpoint.first?.completedBytes,
+            UInt64(first.count + second.count)
+        )
+    }
+
     func testFinalizeNeverOverwritesAndPublishesOnlyAfterVerification() async throws {
         let fixture = try StorageFixture()
         let old = Data("old".utf8)

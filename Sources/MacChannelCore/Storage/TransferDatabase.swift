@@ -678,64 +678,97 @@ public actor TransferDatabase {
     func recordVerified(_ coordinate: ChunkCoordinate, for transfer: TransferID) throws {
         try transaction {
             try requireWritablePhase(transfer)
-            let query = try statement(
-                """
-                SELECT lower_bound, upper_bound
-                FROM verified_ranges
-                WHERE transfer_id = ? AND entry_index = ?
-                    AND lower_bound <= ? AND upper_bound >= ?
-                ORDER BY lower_bound
-                """
-            )
-            defer { sqlite3_finalize(query) }
-            try bind(transfer.rawValue.uuidString.lowercased(), to: query, at: 1)
-            try bind(Int64(coordinate.entryIndex), to: query, at: 2)
-            try bind(Int64(coordinate.chunkIndex) + 1, to: query, at: 3)
-            try bind(Int64(coordinate.chunkIndex), to: query, at: 4)
-            var lower = coordinate.chunkIndex
-            var upper = coordinate.chunkIndex + 1
-            var result = sqlite3_step(query)
-            while result == SQLITE_ROW {
-                let foundLower = sqlite3_column_int64(query, 0)
-                let foundUpper = sqlite3_column_int64(query, 1)
-                guard foundLower >= 0, foundUpper > foundLower,
-                    foundUpper <= Int64(UInt32.max)
-                else { throw ReceiveStoreError.databaseFailure }
-                lower = min(lower, UInt32(foundLower))
-                upper = max(upper, UInt32(foundUpper))
-                result = sqlite3_step(query)
-            }
-            guard result == SQLITE_DONE else { throw ReceiveStoreError.databaseFailure }
+            try recordVerifiedWithoutTransaction(coordinate, for: transfer)
+        }
+    }
 
-            let delete = try statement(
-                """
-                DELETE FROM verified_ranges
-                WHERE transfer_id = ? AND entry_index = ?
-                    AND lower_bound <= ? AND upper_bound >= ?
-                """
-            )
-            defer { sqlite3_finalize(delete) }
-            try bind(transfer.rawValue.uuidString.lowercased(), to: delete, at: 1)
-            try bind(Int64(coordinate.entryIndex), to: delete, at: 2)
-            try bind(Int64(coordinate.chunkIndex) + 1, to: delete, at: 3)
-            try bind(Int64(coordinate.chunkIndex), to: delete, at: 4)
-            try stepDone(delete)
-            try insert(
-                range: ChunkRange(
-                    entryIndex: coordinate.entryIndex,
-                    lowerBound: lower,
-                    upperBound: upper
-                ),
-                transfer: transfer
-            )
+    func checkpointVerified(
+        _ coordinates: [ChunkCoordinate],
+        completedBytes: UInt64,
+        for transfer: TransferID,
+        at date: Date
+    ) throws {
+        guard !coordinates.isEmpty, completedBytes <= UInt64(Int64.max) else {
+            throw ReceiveStoreError.databaseFailure
+        }
+        try transaction {
+            try requireWritablePhase(transfer)
+            for coordinate in coordinates {
+                try recordVerifiedWithoutTransaction(coordinate, for: transfer)
+            }
+            try updateProgressWithoutTransaction(completedBytes, for: transfer, at: date)
         }
     }
 
     func updateProgress(_ bytes: UInt64, for transfer: TransferID, at date: Date) throws {
         guard bytes <= UInt64(Int64.max) else { throw ReceiveStoreError.databaseFailure }
+        try updateProgressWithoutTransaction(bytes, for: transfer, at: date)
+    }
+
+    private func recordVerifiedWithoutTransaction(
+        _ coordinate: ChunkCoordinate,
+        for transfer: TransferID
+    ) throws {
+        let query = try statement(
+            """
+            SELECT lower_bound, upper_bound
+            FROM verified_ranges
+            WHERE transfer_id = ? AND entry_index = ?
+                AND lower_bound <= ? AND upper_bound >= ?
+            ORDER BY lower_bound
+            """
+        )
+        defer { sqlite3_finalize(query) }
+        try bind(transfer.rawValue.uuidString.lowercased(), to: query, at: 1)
+        try bind(Int64(coordinate.entryIndex), to: query, at: 2)
+        try bind(Int64(coordinate.chunkIndex) + 1, to: query, at: 3)
+        try bind(Int64(coordinate.chunkIndex), to: query, at: 4)
+        var lower = coordinate.chunkIndex
+        var upper = coordinate.chunkIndex + 1
+        var result = sqlite3_step(query)
+        while result == SQLITE_ROW {
+            let foundLower = sqlite3_column_int64(query, 0)
+            let foundUpper = sqlite3_column_int64(query, 1)
+            guard foundLower >= 0, foundUpper > foundLower,
+                foundUpper <= Int64(UInt32.max)
+            else { throw ReceiveStoreError.databaseFailure }
+            lower = min(lower, UInt32(foundLower))
+            upper = max(upper, UInt32(foundUpper))
+            result = sqlite3_step(query)
+        }
+        guard result == SQLITE_DONE else { throw ReceiveStoreError.databaseFailure }
+
+        let delete = try statement(
+            """
+            DELETE FROM verified_ranges
+            WHERE transfer_id = ? AND entry_index = ?
+                AND lower_bound <= ? AND upper_bound >= ?
+            """
+        )
+        defer { sqlite3_finalize(delete) }
+        try bind(transfer.rawValue.uuidString.lowercased(), to: delete, at: 1)
+        try bind(Int64(coordinate.entryIndex), to: delete, at: 2)
+        try bind(Int64(coordinate.chunkIndex) + 1, to: delete, at: 3)
+        try bind(Int64(coordinate.chunkIndex), to: delete, at: 4)
+        try stepDone(delete)
+        try insert(
+            range: ChunkRange(
+                entryIndex: coordinate.entryIndex,
+                lowerBound: lower,
+                upperBound: upper
+            ),
+            transfer: transfer
+        )
+    }
+
+    private func updateProgressWithoutTransaction(
+        _ bytes: UInt64,
+        for transfer: TransferID,
+        at date: Date
+    ) throws {
         let update = try statement(
             """
-            UPDATE transfers SET completed_bytes = ?, updated_at = ?
+            UPDATE transfers SET completed_bytes = MAX(completed_bytes, ?), updated_at = ?
             WHERE id = ? AND direction = 'inbound'
               AND phase IN ('preparing', 'connecting', 'transferring', 'paused')
             """

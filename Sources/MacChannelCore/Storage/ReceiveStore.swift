@@ -699,6 +699,10 @@ public actor ReceiveStore {
     private let files: [UInt32: StagedFile]
     private var resumeStore: ResumeStateStore?
     private var verified: Set<ChunkCoordinate>
+    private var completedByteCount: UInt64
+    private var pendingCoordinates: [ChunkCoordinate] = []
+    private var pendingFileEntries: Set<UInt32> = []
+    private var publicWriteInProgress = false
     private let preparedFingerprint: Data
     private var state = State.receiving
     private var operationEpoch: UInt64 = 0
@@ -718,7 +722,7 @@ public actor ReceiveStore {
         verified: Set<ChunkCoordinate>,
         preparedFingerprint: Data,
         state: State = .receiving
-    ) {
+    ) throws {
         self.manifest = manifest
         self.source = source
         self.destinationDirectory = destinationDirectory
@@ -731,6 +735,7 @@ public actor ReceiveStore {
         self.files = files
         self.resumeStore = resumeStore
         self.verified = verified
+        completedByteCount = try Self.completedBytes(in: verified, manifest: manifest)
         self.preparedFingerprint = preparedFingerprint
         self.state = state
     }
@@ -1094,7 +1099,7 @@ public actor ReceiveStore {
                     }
                     try tree.discard()
                     try lease.removeAfterTerminalState()
-                    return ReceiveStore(
+                    return try ReceiveStore(
                         manifest: manifest,
                         source: source,
                         destinationDirectory: destination,
@@ -1124,7 +1129,7 @@ public actor ReceiveStore {
                 throw ReceiveStoreError.alreadyFinished
             }
             guard let loaded else { throw ReceiveStoreError.stagingUnavailable }
-            let store = ReceiveStore(
+            let store = try ReceiveStore(
                 manifest: manifest,
                 source: source,
                 destinationDirectory: destination,
@@ -1182,6 +1187,14 @@ public actor ReceiveStore {
     }
 
     public func write(_ data: Data, index: UInt32, entry: UInt32) async throws {
+        guard !publicWriteInProgress else { throw ReceiveStoreError.transferBusy }
+        publicWriteInProgress = true
+        defer { publicWriteInProgress = false }
+        try await writePending(data, index: index, entry: entry)
+        try await checkpoint()
+    }
+
+    func writePending(_ data: Data, index: UInt32, entry: UInt32) async throws {
         guard case .receiving = state else { throw ReceiveStoreError.alreadyFinished }
         try lease.requireHeld()
         do {
@@ -1216,12 +1229,51 @@ public actor ReceiveStore {
             guard let resumeStore else { throw ReceiveStoreError.stagingUnavailable }
             try resumeStore.append(coordinate, digest: digest)
             verified.insert(coordinate)
-            try await database.recordVerified(coordinate, for: manifest.id)
-            try await database.updateProgress(
-                try completedBytes(),
+            guard completedByteCount <= UInt64.max - UInt64(data.count) else {
+                throw ReceiveStoreError.invalidManifest
+            }
+            completedByteCount += UInt64(data.count)
+            pendingCoordinates.append(coordinate)
+            pendingFileEntries.insert(entry)
+        } catch let error as ReceiveStoreError {
+            throw error
+        } catch let error as TransferProtocolError {
+            if error == .digestMismatch { throw ReceiveStoreError.digestMismatch }
+            throw ReceiveStoreError.stagingUnavailable
+        } catch {
+            throw ReceiveStoreError.stagingUnavailable
+        }
+    }
+
+    func checkpoint() async throws {
+        try await checkpoint(onBatchFrozen: nil)
+    }
+
+    func checkpoint(
+        onBatchFrozen: (@Sendable () async throws -> Void)?
+    ) async throws {
+        guard case .receiving = state else { throw ReceiveStoreError.alreadyFinished }
+        guard !pendingCoordinates.isEmpty else { return }
+        do {
+            let checkpointCoordinates = pendingCoordinates
+            let checkpointFileEntries = pendingFileEntries
+            let checkpointCompletedBytes = completedByteCount
+            for entry in checkpointFileEntries.sorted() {
+                guard let file = files[entry] else { throw ReceiveStoreError.invalidManifest }
+                try file.synchronize()
+            }
+            guard let resumeStore else { throw ReceiveStoreError.stagingUnavailable }
+            try resumeStore.synchronize()
+            if let onBatchFrozen { try await onBatchFrozen() }
+            try await database.checkpointVerified(
+                checkpointCoordinates,
+                completedBytes: checkpointCompletedBytes,
                 for: manifest.id,
                 at: Date()
             )
+            let checkpointCoordinateSet = Set(checkpointCoordinates)
+            pendingCoordinates.removeAll { checkpointCoordinateSet.contains($0) }
+            pendingFileEntries = Set(pendingCoordinates.map(\.entryIndex))
         } catch let error as ReceiveStoreError {
             throw error
         } catch let error as TransferProtocolError {
@@ -1703,8 +1755,15 @@ public actor ReceiveStore {
     }
 
     private func completedBytes() throws -> UInt64 {
+        completedByteCount
+    }
+
+    private static func completedBytes(
+        in coordinates: Set<ChunkCoordinate>,
+        manifest: TransferManifest
+    ) throws -> UInt64 {
         var total: UInt64 = 0
-        for coordinate in verified {
+        for coordinate in coordinates {
             guard Int(coordinate.entryIndex) < manifest.entries.count else {
                 throw ReceiveStoreError.invalidManifest
             }
