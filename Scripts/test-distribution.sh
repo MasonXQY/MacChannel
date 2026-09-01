@@ -25,6 +25,7 @@ expected_team_id="$(sed -E 's/^.*\(([A-Z0-9]{10})\)$/\1/' <<<"$identity")"
     exit 2
 }
 signing_home="${HOME:?}"
+signing_tmp="${TMPDIR:-/tmp}"
 unset MACCHANNEL_NOTARY_PROFILE MACCHANNEL_RELEASE_NOTES MACCHANNEL_VERSION \
     MACCHANNEL_BUILD_NUMBER MACCHANNEL_DISTRIBUTION_TESTING \
     MACCHANNEL_DISTRIBUTION_FAIL_AT MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT \
@@ -65,9 +66,13 @@ snapshot_dist() {
         done
 }
 formal_dist_before="$(snapshot_dist "$repo_root/dist")"
-export MACCHANNEL_UPDATE_TESTING=1
-export MACCHANNEL_UPDATE_TEST_ROOT="$test_root"
-export MACCHANNEL_UPDATE_TEST_DIST_ROOT="$test_dist"
+clean_test_environment=(env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" \
+    LANG=C LC_ALL=C MACCHANNEL_UPDATE_TESTING=1 \
+    MACCHANNEL_UPDATE_TEST_ROOT="$test_root" MACCHANNEL_UPDATE_TEST_DIST_ROOT="$test_dist")
+clean_codesign() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        /usr/bin/codesign "$@"
+}
 mounted_path=""
 cleanup() {
     local status=$?
@@ -106,50 +111,50 @@ expect_failure() {
 }
 
 expect_distribution_failure() {
-    mkdir -p dist
-    printf '%s\n' stale-feed >$test_dist/appcast.xml
-    printf '%s\n' stale-pending >$test_dist/.appcast.xml.new
+    printf '%s\n' stale-feed >"$test_dist/appcast.xml"
+    printf '%s\n' stale-pending >"$test_dist/.appcast.xml.new"
     expect_failure "$@"
     test ! -e $test_dist/appcast.xml
     test ! -e $test_dist/.appcast.xml.new
 }
 
-expect_distribution_failure 2 env -u MACCHANNEL_CODESIGN_IDENTITY bash Scripts/build-distribution.sh
-expect_distribution_failure 2 env MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: Missing (AAAAAAAAAA)" \
+expect_distribution_failure 2 "${clean_test_environment[@]}" bash Scripts/build-distribution.sh
+expect_distribution_failure 2 "${clean_test_environment[@]}" \
+    MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: Missing (AAAAAAAAAA)" \
     bash Scripts/build-distribution.sh
-expect_failure 2 env -u MACCHANNEL_UPDATE_TEST_ROOT -u MACCHANNEL_UPDATE_TEST_DIST_ROOT \
+expect_failure 2 env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
     MACCHANNEL_UPDATE_TESTING=0 MACCHANNEL_VERSION=1.0 bash Scripts/build-app.sh
-expect_failure 2 env -u MACCHANNEL_UPDATE_TEST_ROOT -u MACCHANNEL_UPDATE_TEST_DIST_ROOT \
+expect_failure 2 env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
     MACCHANNEL_UPDATE_TESTING=0 MACCHANNEL_BUILD_NUMBER=0 bash Scripts/build-app.sh
 
 dirty_marker="distribution-contract-dirty-marker"
 trap 'rm -f "$dirty_marker"; cleanup' EXIT
 : >"$dirty_marker"
-expect_distribution_failure 2 env MACCHANNEL_CODESIGN_IDENTITY="$identity" \
+expect_distribution_failure 2 "${clean_test_environment[@]}" MACCHANNEL_CODESIGN_IDENTITY="$identity" \
     bash Scripts/build-distribution.sh
 rm -f "$dirty_marker"
 trap cleanup EXIT
 
 for fail_at in app-built app-verified stage-ready image-created image-verified manifest-ready; do
-    expect_distribution_failure 70 env \
+    expect_distribution_failure 70 "${clean_test_environment[@]}" \
         MACCHANNEL_CODESIGN_IDENTITY="$identity" \
         MACCHANNEL_DISTRIBUTION_TESTING=1 \
         MACCHANNEL_DISTRIBUTION_FAIL_AT="$fail_at" \
         bash Scripts/build-distribution.sh
 done
 
-MACCHANNEL_CODESIGN_IDENTITY="$identity" \
+"${clean_test_environment[@]}" MACCHANNEL_CODESIGN_IDENTITY="$identity" \
 MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
     bash Scripts/build-distribution.sh
 
-test -f $test_dist/MacChannel.dmg
-test -f $test_dist/MacChannel.manifest.json
-test ! -e $test_dist/appcast.xml
-codesign --verify --strict --verbose=2 $test_dist/MacChannel.dmg
+test -f "$test_dist/MacChannel.dmg"
+test -f "$test_dist/MacChannel.manifest.json"
+test ! -e "$test_dist/appcast.xml"
+clean_codesign --verify --strict --verbose=2 "$test_dist/MacChannel.dmg"
 
 cp $test_dist/MacChannel.manifest.json "$test_root/first-manifest.json"
 first_dmg_sha="$(shasum -a 256 $test_dist/MacChannel.dmg | awk '{print $1}')"
-MACCHANNEL_CODESIGN_IDENTITY="$identity" \
+"${clean_test_environment[@]}" MACCHANNEL_CODESIGN_IDENTITY="$identity" \
 MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
     bash Scripts/build-distribution.sh
 
@@ -165,7 +170,7 @@ if [[ "$first_dmg_sha" != "$second_dmg_sha" ]]; then
     grep -F "Developer ID timestamps and UDIF metadata may change raw DMG bytes" \
         $test_dist/MacChannel.manifest.json >/dev/null
 fi
-test -z "$(find dist -mindepth 1 -maxdepth 1 ! -name MacChannel.dmg \
+test -z "$(find "$test_dist" -mindepth 1 -maxdepth 1 ! -name MacChannel.dmg \
     ! -name MacChannel.manifest.json -print -quit)"
 
 mounted_path="$test_root/mounted"
@@ -179,7 +184,7 @@ cmp "$test_root/expected-entries.txt" "$mapfile_path"
 test -L "$mounted_path/Applications"
 test "$(readlink "$mounted_path/Applications")" = /Applications
 grep -F "版本 1.2.0 (13)" "$mounted_path/README.txt" >/dev/null
-codesign --verify --deep --strict --verbose=2 "$mounted_path/MacChannel.app"
+clean_codesign --verify --deep --strict --verbose=2 "$mounted_path/MacChannel.app"
 
 plist="$mounted_path/MacChannel.app/Contents/Info.plist"
 sparkle="$mounted_path/MacChannel.app/Contents/Frameworks/Sparkle.framework"
@@ -202,7 +207,7 @@ test -n "$(plutil -extract SUPublicEDKey raw -o - "$plist")"
 mutated_app="$test_root/Mutated.app"
 ditto "$mounted_path/MacChannel.app" "$mutated_app"
 printf '\nmutation\n' >>"$mutated_app/Contents/Info.plist"
-if codesign --verify --deep --strict "$mutated_app" >/dev/null 2>&1; then
+if clean_codesign --verify --deep --strict "$mutated_app" >/dev/null 2>&1; then
     echo "mutated application unexpectedly verified" >&2
     exit 1
 fi
@@ -215,7 +220,7 @@ test "$(plutil -extract version raw -o - $test_dist/MacChannel.manifest.json)" =
 test "$(plutil -extract build raw -o - $test_dist/MacChannel.manifest.json)" = 13
 test "$(plutil -extract releaseState raw -o - $test_dist/MacChannel.manifest.json)" = internalSignedNotNotarized
 test "$(plutil -extract teamID raw -o - $test_dist/MacChannel.manifest.json)" = "$expected_team_id"
-actual_requirement="$(codesign -d -r- "$mounted_path/MacChannel.app" 2>&1 | \
+actual_requirement="$(clean_codesign -d -r- "$mounted_path/MacChannel.app" 2>&1 | \
     sed -n 's/^designated => //p')"
 test "$(plutil -extract designatedRequirement raw -o - $test_dist/MacChannel.manifest.json)" = \
     "$actual_requirement"

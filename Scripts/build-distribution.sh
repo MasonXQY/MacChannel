@@ -9,8 +9,24 @@ version="${MACCHANNEL_VERSION:-1.2.0}"
 build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
 notary_profile="${MACCHANNEL_NOTARY_PROFILE:-}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
+signing_home="${HOME:?}"
+signing_tmp="${TMPDIR:-/tmp}"
 volume_name="Mac 通道"
 source "$repo_root/Scripts/update-test-paths.sh"
+[[ "$signing_home" == /* && -d "$signing_home" && ! -L "$signing_home" ]] || exit 2
+
+clean_codesign() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        /usr/bin/codesign "$@"
+}
+clean_security() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        /usr/bin/security "$@"
+}
+clean_xcrun() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        /usr/bin/xcrun "$@"
+}
 
 fail_usage() {
     echo "$1" >&2
@@ -65,7 +81,8 @@ if [[ "$update_testing" == 1 && -n "$update_fixture_root" ]]; then
     cp "$fixture_manifest" "$dist_root/.MacChannel.manifest.json.new"
     mv "$dist_root/.MacChannel.dmg.new" "$dist_root/MacChannel.dmg"
     mv "$dist_root/.MacChannel.manifest.json.new" "$dist_root/MacChannel.manifest.json"
-    if ! MACCHANNEL_VERSION="$version" \
+    if ! env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        MACCHANNEL_VERSION="$version" \
         MACCHANNEL_BUILD_NUMBER="$build_number" \
         MACCHANNEL_RELEASE_NOTES="$release_notes" \
         MACCHANNEL_UPDATE_TESTING=1 \
@@ -75,7 +92,21 @@ if [[ "$update_testing" == 1 && -n "$update_fixture_root" ]]; then
         MACCHANNEL_UPDATE_CODESIGN_COMMAND="${MACCHANNEL_UPDATE_CODESIGN_COMMAND:-}" \
         MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="${MACCHANNEL_UPDATE_TEST_ED_KEY_FILE:-}" \
         MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}" \
+        MACCHANNEL_UPDATE_TEST_FAIL_STAGE="${MACCHANNEL_UPDATE_TEST_FAIL_STAGE:-}" \
+        MACCHANNEL_UPDATE_TEST_MUTATION="${MACCHANNEL_UPDATE_TEST_MUTATION:-}" \
         MACCHANNEL_SPARKLE_GENERATE_APPCAST="${MACCHANNEL_SPARKLE_GENERATE_APPCAST:-}" \
+        MACCHANNEL_SPARKLE_ACCOUNT="${MACCHANNEL_SPARKLE_ACCOUNT:-}" \
+        MACCHANNEL_SECURITY_SHIM_MARKER="${MACCHANNEL_SECURITY_SHIM_MARKER:-}" \
+        MACCHANNEL_SECURITY_SHIM_NOISE="${MACCHANNEL_SECURITY_SHIM_NOISE:-}" \
+        MACCHANNEL_SECURITY_SHIM_LOGIN_KEYCHAIN="${MACCHANNEL_SECURITY_SHIM_LOGIN_KEYCHAIN:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_VERIFY="${MACCHANNEL_CODESIGN_FIXTURE_VERIFY:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MATCH="${MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MATCH:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_CERT_CLASS="${MACCHANNEL_CODESIGN_FIXTURE_CERT_CLASS:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MARKER="${MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MARKER:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_POST_MOUNT_MARKER="${MACCHANNEL_CODESIGN_FIXTURE_POST_MOUNT_MARKER:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID="${MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_TEAM_ID="${MACCHANNEL_CODESIGN_FIXTURE_TEAM_ID:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT="${MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT:-}" \
         bash Scripts/build-update-feed.sh; then
         rm -f "$dist_root/appcast.xml" "$dist_root/.appcast.xml.new"
         exit 1
@@ -91,7 +122,7 @@ if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
     fail_usage "distribution builds require a clean Git worktree"
 fi
 
-if ! security find-identity -v -p codesigning | grep -F "\"$identity\"" >/dev/null; then
+if ! clean_security find-identity -v -p codesigning | grep -F "\"$identity\"" >/dev/null; then
     fail_usage "the requested Developer ID identity is not installed"
 fi
 [[ "$identity" == "Developer ID Application: "* ]] || \
@@ -107,7 +138,10 @@ anchor_bundle_id="$(plutil -extract bundleIdentifier raw -o - "$anchor_path")" |
     fail_usage "production signing anchor is invalid"
 anchor_requirement="$(plutil -extract designatedRequirement raw -o - "$anchor_path")" || \
     fail_usage "production signing anchor is invalid"
+expected_anchor_requirement='anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"'
 [[ "$anchor_team_id" == XKAZ67HN45 && "$anchor_bundle_id" == com.mason.macchannel ]] || \
+    fail_usage "production signing anchor is invalid"
+[[ "$anchor_requirement" == "$expected_anchor_requirement" ]] || \
     fail_usage "production signing anchor is invalid"
 [[ "$team_id" == "$anchor_team_id" ]] || fail_usage "signing identity does not match the production Team ID anchor"
 
@@ -153,20 +187,7 @@ inject_failure() {
     fi
 }
 
-env -u MACCHANNEL_UPDATE_TEST_ROOT \
-    -u MACCHANNEL_UPDATE_TEST_DIST_ROOT \
-    -u MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT \
-    -u MACCHANNEL_UPDATE_TEST_FAIL_STAGE \
-    -u MACCHANNEL_UPDATE_TEST_MUTATION \
-    -u MACCHANNEL_UPDATE_SECURITY_COMMAND \
-    -u MACCHANNEL_UPDATE_CODESIGN_COMMAND \
-    -u MACCHANNEL_UPDATE_TEST_ED_KEY_FILE \
-    -u MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH \
-    -u MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN \
-    -u MACCHANNEL_UPDATE_TEST_BUNDLE_ID \
-    -u MACCHANNEL_UPDATE_TEST_FEED_URL \
-    -u MACCHANNEL_UPDATE_TEST_EMBED_HARNESS \
-    -u MACCHANNEL_UPDATE_TEST_SIGNER_VARIANT \
+env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
     MACCHANNEL_UPDATE_TESTING=0 \
     MACCHANNEL_BUILD_CONFIGURATION=release \
     MACCHANNEL_CODESIGN_IDENTITY="$identity" \
@@ -176,12 +197,12 @@ env -u MACCHANNEL_UPDATE_TEST_ROOT \
     bash Scripts/build-app.sh
 inject_failure app-built
 
-codesign --verify --deep --strict --verbose=2 "$app_path"
-codesign --verify --deep --strict --test-requirement "=$anchor_requirement" "$app_path"
-app_details="$(codesign -dvvv "$app_path" 2>&1)"
+clean_codesign --verify --deep --strict --verbose=2 "$app_path"
+clean_codesign --verify --deep --strict --test-requirement "=$anchor_requirement" "$app_path"
+app_details="$(clean_codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$app_details" >/dev/null
 grep -F "TeamIdentifier=$team_id" <<<"$app_details" >/dev/null
-designated_requirement="$(codesign -d -r- "$app_path" 2>&1 | sed -n 's/^designated => //p')"
+designated_requirement="$(clean_codesign -d -r- "$app_path" 2>&1 | sed -n 's/^designated => //p')"
 test -n "$designated_requirement"
 grep -E 'flags=.*runtime' <<<"$app_details" >/dev/null
 test "$(plutil -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" = \
@@ -210,21 +231,21 @@ done < <(find "$stage_path" -depth -print | LC_ALL=C sort)
 normalized_stage="$build_root/normalized-stage"
 ditto --noextattr --noqtn "$stage_path" "$normalized_stage"
 sparkle_path="$normalized_stage/MacChannel.app/Contents/Frameworks/Sparkle.framework"
-codesign --remove-signature "$sparkle_path" >/dev/null 2>&1
+clean_codesign --remove-signature "$sparkle_path" >/dev/null 2>&1
 for nested_sparkle_code in \
     "$sparkle_path/Versions/Current/XPCServices/Downloader.xpc" \
     "$sparkle_path/Versions/Current/XPCServices/Installer.xpc" \
     "$sparkle_path/Versions/Current/Updater.app" \
     "$sparkle_path/Versions/Current/Autoupdate"; do
     if [[ -e "$nested_sparkle_code" ]]; then
-        codesign --remove-signature "$nested_sparkle_code" >/dev/null 2>&1
+        clean_codesign --remove-signature "$nested_sparkle_code" >/dev/null 2>&1
     fi
 done
-codesign --remove-signature \
+clean_codesign --remove-signature \
     "$normalized_stage/MacChannel.app/Contents/MacOS/WebRTC.framework" >/dev/null 2>&1
-codesign --remove-signature \
+clean_codesign --remove-signature \
     "$normalized_stage/MacChannel.app/Contents/MacOS/MacChannelApp" >/dev/null 2>&1
-codesign --remove-signature "$normalized_stage/MacChannel.app" >/dev/null 2>&1
+clean_codesign --remove-signature "$normalized_stage/MacChannel.app" >/dev/null 2>&1
 
 stage_listing="$build_root/stage.list"
 : >"$stage_listing"
@@ -254,10 +275,10 @@ hdiutil create \
     -imagekey zlib-level=9 \
     -ov \
     "$image_path" >/dev/null
-codesign --force --sign "$identity" --timestamp "$image_path"
+clean_codesign --force --sign "$identity" --timestamp "$image_path"
 inject_failure image-created
 
-codesign --verify --strict --verbose=2 "$image_path"
+clean_codesign --verify --strict --verbose=2 "$image_path"
 mkdir -p "$mount_path"
 hdiutil attach "$image_path" -nobrowse -readonly -mountpoint "$mount_path" -quiet
 mounted=1
@@ -269,7 +290,7 @@ printf '%s\n' Applications MacChannel.app README.txt | LC_ALL=C sort \
 cmp "$build_root/expected-entries" "$build_root/actual-entries"
 test -L "$mount_path/Applications"
 test "$(readlink "$mount_path/Applications")" = /Applications
-codesign --verify --deep --strict --verbose=2 "$mount_path/MacChannel.app"
+clean_codesign --verify --deep --strict --verbose=2 "$mount_path/MacChannel.app"
 hdiutil detach "$mount_path" -quiet
 mounted=0
 inject_failure image-verified
@@ -277,14 +298,15 @@ inject_failure image-verified
 release_state=internalSignedNotNotarized
 if [[ -n "$notary_profile" ]]; then
     notary_result="$build_root/notary-result.json"
-    xcrun notarytool submit "$image_path" \
+    clean_xcrun notarytool submit "$image_path" \
         --keychain-profile "$notary_profile" \
         --wait \
         --output-format json >"$notary_result"
     test "$(plutil -extract status raw -o - "$notary_result")" = Accepted
-    xcrun stapler staple "$image_path"
-    xcrun stapler validate "$image_path"
-    spctl --assess --type open --context context:primary-signature --verbose=2 "$image_path"
+    clean_xcrun stapler staple "$image_path"
+    clean_xcrun stapler validate "$image_path"
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "$image_path"
     release_state=notarized
 fi
 
@@ -322,6 +344,7 @@ fi
 base_assets_published=1
 
 if [[ -n "$release_notes" && "$release_state" == notarized ]]; then
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
     MACCHANNEL_VERSION="$version" \
     MACCHANNEL_BUILD_NUMBER="$build_number" \
     MACCHANNEL_RELEASE_NOTES="$release_notes" \

@@ -9,6 +9,9 @@ release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 account="${MACCHANNEL_SPARKLE_ACCOUNT:-com.mason.macchannel.updates}"
 generate_appcast="${MACCHANNEL_SPARKLE_GENERATE_APPCAST:-$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast}"
 update_testing="${MACCHANNEL_UPDATE_TESTING:-0}"
+signing_home="${HOME:?}"
+signing_tmp="${TMPDIR:-/tmp}"
+[[ "$signing_home" == /* && -d "$signing_home" && ! -L "$signing_home" ]]
 case "$update_testing" in
     0|1) ;;
     *)
@@ -77,6 +80,29 @@ fail_feed() {
     exit "${2:-1}"
 }
 
+clean_security_tool() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        MACCHANNEL_SECURITY_SHIM_MARKER="${MACCHANNEL_SECURITY_SHIM_MARKER:-}" \
+        MACCHANNEL_SECURITY_SHIM_NOISE="${MACCHANNEL_SECURITY_SHIM_NOISE:-}" \
+        MACCHANNEL_SECURITY_SHIM_LOGIN_KEYCHAIN="${MACCHANNEL_SECURITY_SHIM_LOGIN_KEYCHAIN:-}" \
+        "$@"
+}
+clean_codesign_tool() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        MACCHANNEL_CODESIGN_FIXTURE_VERIFY="${MACCHANNEL_CODESIGN_FIXTURE_VERIFY:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MATCH="${MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MATCH:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_CERT_CLASS="${MACCHANNEL_CODESIGN_FIXTURE_CERT_CLASS:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MARKER="${MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MARKER:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_POST_MOUNT_MARKER="${MACCHANNEL_CODESIGN_FIXTURE_POST_MOUNT_MARKER:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID="${MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_TEAM_ID="${MACCHANNEL_CODESIGN_FIXTURE_TEAM_ID:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT="${MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT:-}" \
+        "$@"
+}
+clean_update_tool() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C "$@"
+}
+
 if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || \
     ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
     fail_feed input 2
@@ -105,11 +131,20 @@ if [[ -n "$requested_codesign_command" ]]; then
 fi
 test_ed_key_file="${MACCHANNEL_UPDATE_TEST_ED_KEY_FILE:-}"
 test_public_key_path="${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}"
-if [[ -n "$test_ed_key_file" || -n "$test_public_key_path" ]]; then
-    [[ "$update_testing" == 1 ]] || fail_feed test 2
-    [[ "$test_ed_key_file" == /* && -f "$test_ed_key_file" && ! -L "$test_ed_key_file" && \
-        "$test_public_key_path" == /* && -f "$test_public_key_path" && \
-        ! -L "$test_public_key_path" ]] || fail_feed test 2
+if [[ "$update_testing" == 1 ]]; then
+    [[ -n "$requested_security_command" && -n "$test_ed_key_file" && \
+        -n "$test_public_key_path" ]] || fail_feed test 2
+    macchannel_require_contained_regular_file "${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
+        "$requested_security_command" || fail_feed test 2
+    macchannel_require_contained_regular_file "${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
+        "$test_ed_key_file" || fail_feed test 2
+    macchannel_require_contained_regular_file "${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
+        "$test_public_key_path" || fail_feed test 2
+    [[ -z "$requested_codesign_command" ]] || \
+        macchannel_require_contained_regular_file "${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
+            "$requested_codesign_command" || fail_feed test 2
+elif [[ -n "$test_ed_key_file" || -n "$test_public_key_path" ]]; then
+    fail_feed test 2
 fi
 [[ -f "$dmg_path" && ! -L "$dmg_path" ]] || fail_feed assets
 [[ -f "$manifest_path" && ! -L "$manifest_path" ]] || fail_feed assets
@@ -132,8 +167,9 @@ anchor_path="$repo_root/Distribution/ProductionSigningAnchor.plist"
 anchor_team_id="$(plutil -extract teamID raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
 anchor_bundle_id="$(plutil -extract bundleIdentifier raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
 anchor_requirement="$(plutil -extract designatedRequirement raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
+expected_anchor_requirement='anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"'
 [[ "$anchor_team_id" == XKAZ67HN45 && "$anchor_bundle_id" == com.mason.macchannel && \
-    "$anchor_requirement" == *'certificate leaf[subject.OU] = "XKAZ67HN45"'* ]] || fail_feed identity
+    "$anchor_requirement" == "$expected_anchor_requirement" ]] || fail_feed identity
 [[ "$manifest_version" == "$version" && "$manifest_build" == "$build_number" && \
     "$release_state" == notarized && "$manifest_dmg_sha" =~ ^[0-9a-f]{64}$ && \
     "$manifest_team_id" =~ ^[A-Z0-9]{10}$ && -n "$manifest_requirement" ]] || fail_feed manifest
@@ -157,13 +193,13 @@ fi
 identity_mounted=1
 mounted_app="$identity_mount_root/MacChannel.app"
 if [[ ! -d "$mounted_app" || -L "$mounted_app" ]] || \
-    ! "$codesign_command" --verify --deep --strict --verbose=2 "$mounted_app" || \
-    ! "$codesign_command" --verify --deep --strict \
+    ! clean_codesign_tool "$codesign_command" --verify --deep --strict --verbose=2 "$mounted_app" || \
+    ! clean_codesign_tool "$codesign_command" --verify --deep --strict \
         --test-requirement "=$anchor_requirement" "$mounted_app"; then
     cleanup_identity_mount
     fail_feed identity
 fi
-if ! app_identity="$("$codesign_command" -d --verbose=4 --requirements - "$mounted_app" 2>&1)"; then
+if ! app_identity="$(clean_codesign_tool "$codesign_command" -d --verbose=4 --requirements - "$mounted_app" 2>&1)"; then
     cleanup_identity_mount
     fail_feed identity
 fi
@@ -195,15 +231,15 @@ public_key="$(tr -d '\r\n' <"$public_key_source")"
 [[ "$public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || fail_feed key
 public_key_length="$(printf '%s' "$public_key" | base64 -D 2>/dev/null | wc -c | tr -d ' ')"
 [[ "$public_key_length" == 32 ]] || fail_feed key
-signing_key_arguments=(--account "$account")
-if [[ -n "$test_ed_key_file" ]]; then
+if [[ "$update_testing" == 1 ]]; then
     [[ "$(stat -f %Lp "$test_ed_key_file")" =~ ^[0-7]*00$ ]] || fail_feed key
     signing_key_arguments=(--ed-key-file "$test_ed_key_file")
 else
-    login_keychain="$("$security_command" login-keychain 2>/dev/null | \
+    signing_key_arguments=(--account "$account")
+    login_keychain="$(clean_security_tool "$security_command" login-keychain 2>/dev/null | \
         sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
     [[ -f "$login_keychain" ]] || fail_feed key
-    if ! keychain_metadata="$("$security_command" find-generic-password -a "$account" \
+    if ! keychain_metadata="$(clean_security_tool "$security_command" find-generic-password -a "$account" \
         -s https://sparkle-project.org "$login_keychain" 2>/dev/null)"; then
         fail_feed key
     fi
@@ -219,7 +255,7 @@ chmod 600 "$updates_root/MacChannel.dmg" "$updates_root/MacChannel.md"
 tool_log="$updates_root/tool.log"
 if ! (
     cd "$updates_root"
-    "$generate_appcast" "${signing_key_arguments[@]}" \
+    clean_update_tool "$generate_appcast" "${signing_key_arguments[@]}" \
         --download-url-prefix "https://github.com/MasonXQY/MacChannel/releases/download/v$version/" \
         --embed-release-notes --maximum-versions 1 --maximum-deltas 0 \
         -o appcast.xml "$updates_root"
@@ -265,8 +301,8 @@ expected_url="https://github.com/MasonXQY/MacChannel/releases/download/v$version
 [[ -n "$enclosure_signature" && -n "$embedded_release_notes" ]] || fail_feed verify
 grep -F '<!-- sparkle-signatures:' "$generated_feed" >/dev/null || fail_feed verify
 grep -F 'edSignature: ' "$generated_feed" >/dev/null || fail_feed verify
-"$sign_update" "${signing_key_arguments[@]}" --verify "$dmg_path" "$enclosure_signature" >>"$tool_log" 2>&1 || fail_feed verify
-"$sign_update" "${signing_key_arguments[@]}" --verify "$generated_feed" >>"$tool_log" 2>&1 || fail_feed verify
+clean_update_tool "$sign_update" "${signing_key_arguments[@]}" --verify "$dmg_path" "$enclosure_signature" >>"$tool_log" 2>&1 || fail_feed verify
+clean_update_tool "$sign_update" "${signing_key_arguments[@]}" --verify "$generated_feed" >>"$tool_log" 2>&1 || fail_feed verify
 [[ "${MACCHANNEL_UPDATE_TESTING:-0}" != 1 || \
     "${MACCHANNEL_UPDATE_TEST_FAIL_STAGE:-}" != after-verify ]] || fail_feed test
 

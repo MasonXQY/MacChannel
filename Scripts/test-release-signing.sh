@@ -4,10 +4,16 @@ set -euo pipefail
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 version="${MACCHANNEL_VERSION:-1.2.0}"
 build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
+signing_home="${HOME:?}"
+signing_tmp="${TMPDIR:-/tmp}"
 if [[ -z "$identity" ]]; then
     echo "MACCHANNEL_CODESIGN_IDENTITY is required" >&2
     exit 2
 fi
+clean_codesign() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        /usr/bin/codesign "$@"
+}
 
 release_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-release-test.XXXXXX")"
 app_path="$release_root/MacChannel.app"
@@ -45,6 +51,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
 MACCHANNEL_BUILD_CONFIGURATION=release \
 MACCHANNEL_CODESIGN_IDENTITY="$identity" \
 MACCHANNEL_VERSION="$version" \
@@ -52,7 +59,7 @@ MACCHANNEL_BUILD_NUMBER="$build_number" \
 MACCHANNEL_APP_OUTPUT="$app_path" \
     bash Scripts/build-app.sh
 
-codesign --verify --deep --strict --verbose=2 "$app_path"
+clean_codesign --verify --deep --strict --verbose=2 "$app_path"
 
 sparkle="$app_path/Contents/Frameworks/Sparkle.framework"
 plist="$app_path/Contents/Info.plist"
@@ -70,10 +77,10 @@ test -n "$(plutil -extract SUPublicEDKey raw -o - "$plist")"
 test ! -e "$app_path/Contents/MacOS/MacChannelUpdateAcceptance"
 test ! -e "$app_path/Contents/MacOS/MacChannelUpdateLoadProbe"
 ! plutil -extract MacChannelUpdateTestSigner raw -o - "$plist" >/dev/null 2>&1
-! codesign -d --entitlements - "$app_executable" 2>&1 | \
+! clean_codesign -d --entitlements - "$app_executable" 2>&1 | \
     grep -F 'com.apple.security.cs.disable-library-validation' >/dev/null
 
-details="$(codesign -dvvv "$app_path" 2>&1)"
+details="$(clean_codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$details" >/dev/null
 grep -E 'flags=.*runtime' <<<"$details" >/dev/null
 team_id="$(sed -E 's/^.*\(([A-Z0-9]{10})\)$/\1/' <<<"$identity")"

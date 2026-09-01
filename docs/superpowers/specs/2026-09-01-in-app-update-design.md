@@ -133,7 +133,7 @@ v1.1.10 本身没有更新器，因此不能远程获得本功能。包含更新
 
 Sparkle 2.9.6 对应用更新采用官方双认证策略：有效的 Ed25519 archive 签名或与宿主匹配的代码签名身份任一成立即可继续，因此有效 Ed25519 更新允许轮换 Developer ID。MacChannel 不 fork 或弱化这一运行时策略。
 
-作为发布侧补强，仓库提交 `Distribution/ProductionSigningAnchor.plist` 作为独立生产信任锚；权威值固定为 bundle ID `com.mason.macchannel`、Team ID `XKAZ67HN45`，designated requirement 使用 bundle ID 与 Team ID 约束而不固定叶证书，从而允许同 Team 证书轮换。`build-distribution.sh` 和 `build-update-feed.sh` 必须把候选 App/DMG 与该锚直接比较，并在 appcast 签名或发布前失败关闭。manifest 中的 Team ID 和 designated requirement 仅记录实际观察值用于审计，绝不能作为候选自身的信任依据。错误 Team/requirement 时必须在访问 Sparkle 私钥之前失败，并清理正式及 pending feed 输出。
+作为发布侧补强，仓库提交 `Distribution/ProductionSigningAnchor.plist` 作为独立生产信任锚；权威值固定为 bundle ID `com.mason.macchannel`、Team ID `XKAZ67HN45`，designated requirement 同时要求 Apple generic anchor、Developer ID intermediate OID `1.2.840.113635.100.6.2.6`、Developer ID Application leaf OID `1.2.840.113635.100.6.1.13` 和 Team ID，但不固定叶证书，从而允许同 Team 的 Developer ID Application 证书轮换。同 Team 的 Apple Development 证书不满足该锚。`build-distribution.sh` 和 `build-update-feed.sh` 必须把候选 App/DMG 与该锚直接比较，并在 appcast 签名或发布前失败关闭。manifest 中的 Team ID 和 designated requirement 仅记录实际观察值用于审计，绝不能作为候选自身的信任依据。错误 Team、证书类别或 requirement 时必须在访问 Sparkle 私钥之前失败，并清理正式及 pending feed 输出。
 
 Sparkle 私钥只保存于发布机钥匙串，不写入仓库、环境文件、CI 日志或 GitHub Release。公钥编入应用。发布脚本通过 Sparkle 官方 `generate_appcast`/`sign_update` 工具访问钥匙串生成签名，禁止把私钥作为命令行参数传入。
 
@@ -176,7 +176,11 @@ Sparkle 私钥只保存于发布机钥匙串，不写入仓库、环境文件、
 7. 发布时用错误 Team ID/designated requirement 的 DMG 验证在 appcast 生成前失败且两个 feed 输出都被清理；同 Team ID/designated requirement 必须通过。
 8. 从公开 GitHub Release 重新下载最终资产，核对 appcast、SHA-256、Apple 公证票据和 Gatekeeper，再执行一轮真实升级。
 
-本机自动化 fixture 必须走实际打包的 Sparkle updater，并使用进程内证书摘要与 `localhost` hostname 双重 pin。非 HTTPS、非本机 URL、外部重定向、外部 enclosure 和外部 release notes 均不得产生外网请求。每个拒绝案例必须断言实际的 sanitized nested error chain，并证明 build 13 的签名、Team/requirement、payload digest、Sparkle load 和 App launch 仍有效；接受案例对 build 14 做同等后置检查。server、updater、helper 和后代进程使用独立进程组与有界 TERM/KILL/reap，任何新残留进程都阻止继续。
+本机自动化 fixture 必须走实际打包的 Sparkle updater，并使用进程内证书摘要与 `localhost` hostname 双重 pin。缺失或畸形 pin、错误证书 pin、hostname 不匹配、非 HTTPS、非本机 URL、外部重定向、外部 enclosure 和外部 release notes 均必须在进程内拒绝且不得产生外网请求。每个拒绝案例必须断言实际的 sanitized nested error chain，并证明 build 13 的签名、Team/requirement、payload digest、Sparkle load 和 App launch 仍有效；接受案例对 build 14 做同等后置检查。server、updater、helper 和后代进程使用独立进程组与有界 TERM/KILL/reap，leader 先退出也不得遗留后代，任何新残留进程都阻止继续。
+
+自动化仅在用户明确授权的本机签名例外中访问登录钥匙串，并只允许两条完整身份：primary `Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)` 与 alternate `Apple Development: Qianyao Xu (H33N6G5622)`。它们只用于隔离验收 App 的内到外签名；所有构建、签名和 Sparkle 工具子进程使用 `env -i` 明确 allowlist，不继承 ambient identity、notary、keychain、feed 或测试变量。Ed25519 与 TLS 密钥始终在 owner-only 临时根中一次性生成，测试 feed 模式必须同时收到该根内的 disposable private/public key 与访问 shim，不能回落到生产 Sparkle account/keychain。
+
+`verify-e2e.sh --local-only` 必须主动清除 ambient `MACCHANNEL_UPDATE_TEST_STATIC_ONLY`，并且只在真实验收输出恰好出现一次 `update-acceptance full-matrix-complete cases=17` 时成功；静态门禁、缺失 marker 或重复 marker 均不能冒充完整矩阵。
 
 只有第 8 步成功后，才能把应用内更新标记为可公开使用。
 

@@ -16,8 +16,18 @@ update_test_codesign_keychain="${MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN:-}"
 update_test_embed_harness="${MACCHANNEL_UPDATE_TEST_EMBED_HARNESS:-0}"
 update_test_signer_variant="${MACCHANNEL_UPDATE_TEST_SIGNER_VARIANT:-}"
 update_test_root="${MACCHANNEL_UPDATE_TEST_ROOT:-}"
+signing_home="${HOME:?}"
+signing_tmp="${TMPDIR:-/tmp}"
 
 source "$repo_root/Scripts/update-test-paths.sh"
+
+clean_build_tool() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C "$@"
+}
+clean_codesign() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        /usr/bin/codesign "$@"
+}
 
 case "$update_testing" in
     0|1) ;;
@@ -132,6 +142,10 @@ case "$app_path" in
         ;;
 esac
 if [[ "$update_testing" == 1 ]]; then
+    if ! macchannel_require_isolated_test_root "$repo_root" "$update_test_root"; then
+        echo "update acceptance root must be canonical, owner-only, and outside the repository" >&2
+        exit 2
+    fi
     if ! macchannel_require_direct_child_path "$update_test_root" "$app_path" MacChannel.app; then
         echo "update acceptance output must be the canonical direct child of its owner-only test root" >&2
         exit 2
@@ -143,8 +157,8 @@ if [[ "$build_configuration" == release ]]; then
 else
     build_arguments=(-c debug)
 fi
-swift build "${build_arguments[@]}"
-product_path="$(swift build "${build_arguments[@]}" --show-bin-path)"
+clean_build_tool swift build "${build_arguments[@]}"
+product_path="$(clean_build_tool swift build "${build_arguments[@]}" --show-bin-path)"
 
 mkdir -p "$(dirname "$app_path")"
 rm -rf "$app_path"
@@ -202,7 +216,7 @@ if [[ "$update_testing" == 1 ]]; then
     perl -0pi -e \
         's/fprintf\(stderr, "Error: Update has failed due to error %ld \(%s\)\. %s\\n", \(long\)error\.code, error\.domain\.UTF8String, error\.localizedDescription\.UTF8String\);/for (NSError *cursor = error; cursor != nil; cursor = cursor.userInfo[NSUnderlyingErrorKey]) { fprintf(stderr, "macchannel-update-acceptance state=failed domain=%s code=%ld\\n", cursor.domain.UTF8String, (long)cursor.code); }/' \
         "$harness_driver_source"
-    xcrun clang \
+    clean_build_tool xcrun clang \
         -fobjc-arc \
         -fmodules \
         -DSPU_OBJC_DIRECT_MEMBERS= \
@@ -220,7 +234,7 @@ if [[ "$update_testing" == 1 ]]; then
         "$repo_root/Tests/Fixtures/UpdateAcceptanceTLSProtocol.m" \
         -Wl,-rpath,@executable_path/../Frameworks \
         -o "$contents_path/MacOS/MacChannelUpdateAcceptance"
-    xcrun clang \
+    clean_build_tool xcrun clang \
         -fobjc-arc \
         -fmodules \
         -framework Foundation \
@@ -304,26 +318,26 @@ if [[ -n "$codesign_identity" ]]; then
         "$sparkle_path/Versions/Current/Updater.app" \
         "$sparkle_path/Versions/Current/Autoupdate"; do
         if [[ -e "$nested_sparkle_code" ]]; then
-            codesign "${signing_args[@]}" "$nested_sparkle_code"
+            clean_codesign "${signing_args[@]}" "$nested_sparkle_code"
         fi
     done
 
-    codesign "${signing_args[@]}" "$sparkle_path"
-    codesign "${signing_args[@]}" "$working_app/Contents/MacOS/WebRTC.framework"
+    clean_codesign "${signing_args[@]}" "$sparkle_path"
+    clean_codesign "${signing_args[@]}" "$working_app/Contents/MacOS/WebRTC.framework"
     if [[ "$update_testing" == 1 ]]; then
-        codesign "${signing_args[@]}" \
+        clean_codesign "${signing_args[@]}" \
             --entitlements "$repo_root/Tests/Fixtures/UpdateAcceptance.entitlements" \
             "$working_app/Contents/MacOS/MacChannelUpdateAcceptance"
-        codesign "${signing_args[@]}" \
+        clean_codesign "${signing_args[@]}" \
             --entitlements "$repo_root/Tests/Fixtures/UpdateAcceptance.entitlements" \
             "$working_app/Contents/MacOS/MacChannelUpdateLoadProbe"
     fi
-    codesign "${signing_args[@]}" "$working_app/Contents/MacOS/MacChannelApp"
+    clean_codesign "${signing_args[@]}" "$working_app/Contents/MacOS/MacChannelApp"
     if [[ "$update_testing" == 1 ]]; then
         acceptance_requirement="=designated => identifier \"$bundle_identifier\" and info[MacChannelUpdateTestSigner] = \"$update_test_signer_variant\""
-        codesign "${signing_args[@]}" --requirements "$acceptance_requirement" "$working_app"
+        clean_codesign "${signing_args[@]}" --requirements "$acceptance_requirement" "$working_app"
     else
-        codesign "${signing_args[@]}" "$working_app"
+        clean_codesign "${signing_args[@]}" "$working_app"
     fi
 
     mv "$working_app" "$app_path"

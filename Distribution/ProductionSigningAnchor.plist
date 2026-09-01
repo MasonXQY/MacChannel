@@ -5,7 +5,7 @@
     <key>bundleIdentifier</key>
     <string>com.mason.macchannel</string>
     <key>designatedRequirement</key>
-    <string>anchor apple generic and identifier "com.mason.macchannel" and certificate leaf[subject.OU] = "XKAZ67HN45"</string>
+    <string>anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"</string>
     <key>teamID</key>
     <string>XKAZ67HN45</string>
 </dict>

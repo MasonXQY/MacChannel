@@ -31,7 +31,7 @@ cleanup() {
   if ((${#temporary_files[@]} > 0)); then
     for temporary_file in "${temporary_files[@]}"; do
       case "${temporary_file}" in
-        "${TMPDIR:-/tmp}"/macchannel-local-e2e.*|"${TMPDIR:-/tmp}"/macchannel-stack-e2e.*)
+        "${TMPDIR:-/tmp}"/macchannel-local-e2e.*|"${TMPDIR:-/tmp}"/macchannel-stack-e2e.*|"${TMPDIR:-/tmp}"/macchannel-update-e2e.*)
           rm -f "${temporary_file}"
           ;;
         *) echo "拒绝清理未验证的临时日志：${temporary_file}" >&2 ;;
@@ -65,10 +65,17 @@ if [[ "${local_only}" == true ]]; then
   temporary_files+=("${local_output}")
   run_local_integration "${local_output}"
   rm -f "${local_output}"
+  update_output="$(mktemp "${TMPDIR:-/tmp}/macchannel-update-e2e.XXXXXX")"
+  temporary_files+=("${update_output}")
   (
     cd "${repository_root}"
-    bash Scripts/test-update-acceptance.sh
-  )
+    env -u MACCHANNEL_UPDATE_TEST_STATIC_ONLY bash Scripts/test-update-acceptance.sh
+  ) | tee "${update_output}"
+  if [[ "$(grep -Fxc 'update-acceptance full-matrix-complete cases=17' "${update_output}")" -ne 1 ]]; then
+    echo "local update acceptance did not emit exactly one full-matrix completion marker" >&2
+    exit 1
+  fi
+  rm -f "${update_output}"
   echo "local direct integration PASS；Internet/TURN 未运行。"
   exit 0
 fi

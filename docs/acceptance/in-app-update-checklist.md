@@ -40,6 +40,8 @@
 | 有效 Ed25519 加 signer 轮换 | 按 Sparkle 2.9.6 官方双认证策略接受，仅作 characterization | NOT RUN |
 | 发布包 Team ID / designated requirement 不匹配 | appcast 发布前失败且两个 feed 输出清理 | NOT RUN |
 | manifest 与错误候选 Team/requirement 自洽 | 仍按独立生产锚拒绝，且私钥未访问 | NOT RUN |
+| 同 Team ID 但 Apple Development 证书 | Developer ID Application 类别锚拒绝，且私钥未访问 | NOT RUN |
+| 缺失、畸形或错误 TLS pin / hostname 不匹配 | 进程内拒绝，不访问外部网络，旧 App 可用 | NOT RUN |
 
 ## 最终发布复核
 
@@ -50,4 +52,4 @@
 | 两台 Mac 均从应用内完成最终公开版本升级 | NOT RUN |
 | 验收人、时间与备注 | NOT RUN |
 
-发布复核时以 `Distribution/ProductionSigningAnchor.plist` 为 Team/requirement 权威；manifest 只记录候选包的观察值。Task 7 的隔离本机自动化会覆盖相同安全边界，但不能替代本表中的真实公证、公开 Release 与双机验收。
+发布复核时以 `Distribution/ProductionSigningAnchor.plist` 的 production bundle ID、Team ID、Developer ID Application certificate-class OID 与轮换兼容 requirement 为权威；manifest 只记录候选包的观察值。Task 7 的隔离本机自动化只证明本地打包 updater、拒绝/恢复和发布门禁，不能证明公证、公开 Release 或两台真实 Mac 的升级结果；本表全部现场项在 Task 8 实际执行前必须保持 `NOT RUN`。

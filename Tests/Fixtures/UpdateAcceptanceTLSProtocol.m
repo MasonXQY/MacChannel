@@ -42,11 +42,7 @@
 
 + (BOOL)canInitWithRequest:(NSURLRequest *)request
 {
-    NSString *pin = NSProcessInfo.processInfo.environment[@"MACCHANNEL_UPDATE_TEST_TLS_CERT_SHA256"];
-    NSString *allowedHost = NSProcessInfo.processInfo.environment[@"MACCHANNEL_UPDATE_TEST_TLS_HOSTNAME"];
-    return pin.length == CC_SHA256_DIGEST_LENGTH * 2 &&
-        [allowedHost isEqualToString:@"localhost"] &&
-        [NSURLProtocol propertyForKey:@"MCUpdateAcceptanceHandled" inRequest:request] == nil;
+    return [NSURLProtocol propertyForKey:@"MCUpdateAcceptanceHandled" inRequest:request] == nil;
 }
 
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request
@@ -56,7 +52,18 @@
 
 - (void)startLoading
 {
+    NSString *pin = NSProcessInfo.processInfo.environment[@"MACCHANNEL_UPDATE_TEST_TLS_CERT_SHA256"];
     NSString *allowedHost = NSProcessInfo.processInfo.environment[@"MACCHANNEL_UPDATE_TEST_TLS_HOSTNAME"];
+    NSRegularExpression *pinPattern = [NSRegularExpression
+        regularExpressionWithPattern:@"^[0-9A-Fa-f]{64}$" options:0 error:nil];
+    NSRange fullPinRange = NSMakeRange(0, pin.length);
+    NSTextCheckingResult *pinMatch = pin == nil ? nil :
+        [pinPattern firstMatchInString:pin options:0 range:fullPinRange];
+    BOOL pinValid = pinMatch != nil && NSEqualRanges(pinMatch.range, fullPinRange);
+    if (!pinValid || ![allowedHost isEqualToString:@"localhost"]) {
+        [self failPolicyWithReason:@"invalid-pinning-configuration"];
+        return;
+    }
     if (![self.request.URL.scheme.lowercaseString isEqualToString:@"https"]) {
         [self failPolicyWithReason:@"non-https"];
         return;
@@ -98,7 +105,10 @@
 {
     SecTrustRef trust = challenge.protectionSpace.serverTrust;
     NSString *allowedHost = NSProcessInfo.processInfo.environment[@"MACCHANNEL_UPDATE_TEST_TLS_HOSTNAME"];
-    SecCertificateRef certificate = trust == NULL ? NULL : SecTrustGetCertificateAtIndex(trust, 0);
+    NSArray *certificateChain = trust == NULL ? @[] :
+        CFBridgingRelease(SecTrustCopyCertificateChain(trust));
+    SecCertificateRef certificate = certificateChain.count == 0 ? NULL :
+        (__bridge SecCertificateRef)certificateChain.firstObject;
     NSData *certificateData = certificate == NULL ? nil : CFBridgingRelease(SecCertificateCopyData(certificate));
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256(certificateData.bytes, (CC_LONG)certificateData.length, digest);

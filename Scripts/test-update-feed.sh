@@ -31,7 +31,7 @@ test_private_pem="$test_root/sparkle-private.pem"
 test_private_key="$test_root/sparkle-private.key"
 test_public_key="$test_root/sparkle-public.key"
 fixture_team_id=XKAZ67HN45
-fixture_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate leaf[subject.OU] = "XKAZ67HN45"'
+fixture_requirement='anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"'
 
 snapshot_dist() {
     local root="$1"
@@ -77,6 +77,9 @@ trap cleanup EXIT
 
 mkdir -p "$fixture_root/app" "$test_dist" "$test_root/home"
 chmod 700 "$test_root" "$fixture_root" "$test_dist"
+clean_fixture_tool() {
+    env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$test_root/" LANG=C LC_ALL=C "$@"
+}
 
 # Characterize the shared resolver against a synthetic repository that already
 # contains uploadable-looking formal assets. Test output must resolve elsewhere.
@@ -122,10 +125,10 @@ chmod 700 "$security_shim"
 chmod 700 "$codesign_shim"
 : >"$fake_login_keychain"
 chmod 600 "$fake_login_keychain"
-openssl genpkey -algorithm Ed25519 -out "$test_private_pem" >/dev/null 2>&1
-openssl pkey -in "$test_private_pem" -outform DER 2>/dev/null | tail -c 32 | \
+clean_fixture_tool openssl genpkey -algorithm Ed25519 -out "$test_private_pem" >/dev/null 2>&1
+clean_fixture_tool openssl pkey -in "$test_private_pem" -outform DER 2>/dev/null | tail -c 32 | \
     base64 >"$test_private_key"
-openssl pkey -in "$test_private_pem" -pubout -outform DER 2>/dev/null | tail -c 32 | \
+clean_fixture_tool openssl pkey -in "$test_private_pem" -pubout -outform DER 2>/dev/null | tail -c 32 | \
     base64 >"$test_public_key"
 chmod 600 "$test_private_pem" "$test_private_key" "$test_public_key"
 public_key="$(tr -d '\r\n' <"$test_public_key")"
@@ -137,8 +140,8 @@ plutil -replace CFBundleShortVersionString -string "$version" "$fixture_plist"
 plutil -replace CFBundleVersion -string "$build_number" "$fixture_plist"
 plutil -replace SUPublicEDKey -string "$public_key" "$fixture_plist"
 plutil -replace SURequireSignedFeed -bool true "$fixture_plist"
-codesign --remove-signature "$fixture_root/app/MacChannel.app" >/dev/null 2>&1 || true
-hdiutil create \
+clean_fixture_tool codesign --remove-signature "$fixture_root/app/MacChannel.app" >/dev/null 2>&1 || true
+clean_fixture_tool hdiutil create \
     -srcfolder "$fixture_root/app" \
     -volname "Mac 通道" \
     -fs HFS+ \
@@ -180,6 +183,12 @@ run_feed_builder() {
         ed_key_file="$test_private_key"
         public_key_path="$test_public_key"
     fi
+    if [[ -n "${MACCHANNEL_TEST_ED_KEY_FILE_OVERRIDE+x}" ]]; then
+        ed_key_file="$MACCHANNEL_TEST_ED_KEY_FILE_OVERRIDE"
+    fi
+    if [[ -n "${MACCHANNEL_TEST_PUBLIC_KEY_PATH_OVERRIDE+x}" ]]; then
+        public_key_path="$MACCHANNEL_TEST_PUBLIC_KEY_PATH_OVERRIDE"
+    fi
     if [[ "$testing" == 1 ]]; then
         test_root_value="$test_root"
         test_dist_value="$test_dist"
@@ -195,7 +204,7 @@ run_feed_builder() {
         MACCHANNEL_UPDATE_TEST_DIST_ROOT="$test_dist_value" \
         MACCHANNEL_UPDATE_TEST_FAIL_STAGE="${MACCHANNEL_TEST_FAIL_STAGE:-}" \
         MACCHANNEL_UPDATE_TEST_MUTATION="${MACCHANNEL_TEST_MUTATION:-}" \
-        MACCHANNEL_UPDATE_SECURITY_COMMAND="${MACCHANNEL_TEST_SECURITY_COMMAND:-}" \
+        MACCHANNEL_UPDATE_SECURITY_COMMAND="${MACCHANNEL_TEST_SECURITY_COMMAND:-$security_shim}" \
         MACCHANNEL_UPDATE_CODESIGN_COMMAND="${MACCHANNEL_TEST_CODESIGN_COMMAND:-$codesign_shim}" \
         MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$ed_key_file" \
         MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$public_key_path" \
@@ -204,6 +213,9 @@ run_feed_builder() {
         MACCHANNEL_SECURITY_SHIM_LOGIN_KEYCHAIN="$fake_login_keychain" \
         MACCHANNEL_CODESIGN_FIXTURE_VERIFY="${MACCHANNEL_TEST_CODESIGN_VERIFY:-pass}" \
         MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MATCH="${MACCHANNEL_TEST_CODESIGN_ANCHOR_MATCH:-pass}" \
+        MACCHANNEL_CODESIGN_FIXTURE_CERT_CLASS="${MACCHANNEL_TEST_CODESIGN_CERT_CLASS:-developer-id-application}" \
+        MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MARKER="${MACCHANNEL_TEST_ANCHOR_MARKER:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_POST_MOUNT_MARKER="${MACCHANNEL_TEST_POST_MOUNT_MARKER:-}" \
         MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID="${MACCHANNEL_TEST_CODESIGN_BUNDLE_ID:-com.mason.macchannel}" \
         MACCHANNEL_CODESIGN_FIXTURE_TEAM_ID="${MACCHANNEL_TEST_CODESIGN_TEAM_ID:-$fixture_team_id}" \
         MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT="${MACCHANNEL_TEST_CODESIGN_REQUIREMENT:-$fixture_requirement}" \
@@ -261,7 +273,7 @@ expect_failure() {
     local actual_status=$?
     set -e
     if [[ "$actual_status" -eq 0 ]]; then
-        echo "expected feed build to fail" >&2
+        echo "expected feed build to fail at stage $expected_stage case=${MACCHANNEL_EXPECT_LABEL:-unspecified}" >&2
         exit 1
     fi
     if [[ -e "$test_dist/appcast.xml" || -L "$test_dist/appcast.xml" || \
@@ -326,8 +338,20 @@ MACCHANNEL_TEST_USE_DISPOSABLE_KEY=0 \
 MACCHANNEL_TEST_SECURITY_COMMAND="$security_shim" \
 MACCHANNEL_TEST_SECURITY_MARKER="$security_marker" \
 MACCHANNEL_TEST_SECURITY_NOISE="$security_noise" \
-    expect_failure key run_feed_builder
-test -f "$security_marker"
+MACCHANNEL_EXPECT_LABEL=missing-test-key \
+    expect_failure test run_feed_builder
+[[ ! -e "$security_marker" ]]
+
+prepare_fixture
+MACCHANNEL_TEST_ED_KEY_FILE_OVERRIDE="$repo_root/Distribution/SparklePublicKey.txt" \
+MACCHANNEL_TEST_PUBLIC_KEY_PATH_OVERRIDE="$repo_root/Distribution/SparklePublicKey.txt" \
+MACCHANNEL_EXPECT_LABEL=external-test-key \
+    expect_failure test run_feed_builder
+
+prepare_fixture
+MACCHANNEL_TEST_SECURITY_COMMAND="$repo_root/Tests/Fixtures/security-missing-key.sh" \
+MACCHANNEL_EXPECT_LABEL=external-security-shim \
+    expect_failure test run_feed_builder
 
 prepare_fixture
 wrong_team=WRONGTEAM2
@@ -336,7 +360,6 @@ plutil -replace teamID -string "$wrong_team" "$test_dist/MacChannel.manifest.jso
 plutil -replace designatedRequirement -string "$wrong_requirement" \
     "$test_dist/MacChannel.manifest.json"
 pre_key_marker="$test_root/wrong-team-key-accessed"
-MACCHANNEL_TEST_USE_DISPOSABLE_KEY=0 \
 MACCHANNEL_TEST_SECURITY_COMMAND="$security_shim" \
 MACCHANNEL_TEST_SECURITY_MARKER="$pre_key_marker" \
 MACCHANNEL_TEST_CODESIGN_TEAM_ID="$wrong_team" \
@@ -348,6 +371,68 @@ prepare_fixture
 MACCHANNEL_TEST_CODESIGN_REQUIREMENT='identifier "com.mason.macchannel" and anchor apple generic and certificate leaf[subject.OU] = "TESTTEAM01" and true' \
 MACCHANNEL_TEST_CODESIGN_ANCHOR_MATCH=fail \
     expect_failure identity run_feed_builder
+
+prepare_fixture
+development_anchor_marker="$test_root/apple-development-anchor-checked"
+development_key_marker="$test_root/apple-development-key-accessed"
+MACCHANNEL_TEST_CODESIGN_CERT_CLASS=apple-development \
+MACCHANNEL_TEST_ANCHOR_MARKER="$development_anchor_marker" \
+MACCHANNEL_TEST_SECURITY_MARKER="$development_key_marker" \
+    expect_failure identity run_feed_builder
+test -f "$development_anchor_marker"
+[[ ! -e "$development_key_marker" ]]
+
+rebuild_fixture_dmg() {
+    local field=${1:-} value=${2:-}
+    local variant_root="$test_root/post-mount-variant"
+    if [[ -d "$variant_root" ]]; then
+        find "$variant_root" -depth -delete
+    fi
+    mkdir -p "$variant_root/app"
+    ditto "$fixture_root/app/MacChannel.app" "$variant_root/app/MacChannel.app"
+    local variant_plist="$variant_root/app/MacChannel.app/Contents/Info.plist"
+    case "$field" in
+        '') ;;
+        bundle) plutil -replace CFBundleIdentifier -string "$value" "$variant_plist" ;;
+        version) plutil -replace CFBundleShortVersionString -string "$value" "$variant_plist" ;;
+        build) plutil -replace CFBundleVersion -string "$value" "$variant_plist" ;;
+        *) return 64 ;;
+    esac
+    clean_fixture_tool hdiutil create -srcfolder "$variant_root/app" -volname "Mac 通道" -fs HFS+ \
+        -format UDZO -ov "$fixture_dmg" >/dev/null
+    plutil -replace dmgSHA256 -string \
+        "$(shasum -a 256 "$fixture_dmg" | awk '{print $1}')" "$fixture_manifest"
+}
+
+expect_post_mount_identity_failure() {
+    local name=$1 field=$2 value=$3 actual_bundle=$4 actual_team=$5 actual_requirement=$6
+    rebuild_fixture_dmg "$field" "$value"
+    prepare_fixture
+    local post_mount_marker="$test_root/post-mount-$name-reached"
+    local key_marker="$test_root/post-mount-$name-key-accessed"
+    MACCHANNEL_TEST_POST_MOUNT_MARKER="$post_mount_marker" \
+    MACCHANNEL_TEST_SECURITY_MARKER="$key_marker" \
+    MACCHANNEL_TEST_CODESIGN_BUNDLE_ID="$actual_bundle" \
+    MACCHANNEL_TEST_CODESIGN_TEAM_ID="$actual_team" \
+    MACCHANNEL_TEST_CODESIGN_REQUIREMENT="$actual_requirement" \
+        expect_failure identity run_feed_builder
+    test -f "$post_mount_marker"
+    [[ ! -e "$key_marker" ]]
+    test -z "$(find "$test_root" -maxdepth 1 -type d -name 'macchannel-update-identity.*' -print -quit)"
+}
+
+expect_post_mount_identity_failure bundle bundle com.mason.macchannel.wrong \
+    com.mason.macchannel.wrong "$fixture_team_id" "$fixture_requirement"
+expect_post_mount_identity_failure version version 9.9.9 \
+    com.mason.macchannel "$fixture_team_id" "$fixture_requirement"
+expect_post_mount_identity_failure build build 999 \
+    com.mason.macchannel "$fixture_team_id" "$fixture_requirement"
+expect_post_mount_identity_failure team '' '' \
+    com.mason.macchannel WRONGTEAM2 "$fixture_requirement"
+expect_post_mount_identity_failure requirement '' '' \
+    com.mason.macchannel "$fixture_team_id" "$fixture_requirement and true"
+rebuild_fixture_dmg
+
 prepare_fixture
 MACCHANNEL_TEST_CODESIGN_TEAM_ID="$fixture_team_id" \
 MACCHANNEL_TEST_CODESIGN_REQUIREMENT="$fixture_requirement" \
@@ -468,6 +553,7 @@ env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$test_root/" LANG=C LC_ALL=C 
     MACCHANNEL_UPDATE_TEST_ROOT="$test_root" \
     MACCHANNEL_UPDATE_TEST_DIST_ROOT="$test_dist" \
     MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
+    MACCHANNEL_UPDATE_SECURITY_COMMAND="$security_shim" \
     MACCHANNEL_UPDATE_CODESIGN_COMMAND="$codesign_shim" \
     MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$test_private_key" \
     MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$test_public_key" \
@@ -497,6 +583,7 @@ env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$test_root/" LANG=C LC_ALL=C 
     MACCHANNEL_UPDATE_TEST_ROOT="$test_root" \
     MACCHANNEL_UPDATE_TEST_DIST_ROOT="$test_dist" \
     MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
+    MACCHANNEL_UPDATE_SECURITY_COMMAND="$security_shim" \
     MACCHANNEL_UPDATE_CODESIGN_COMMAND="$codesign_shim" \
     MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$test_private_key" \
     MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$test_public_key" \

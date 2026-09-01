@@ -211,6 +211,7 @@ final class SoftwareUpdateTests: XCTestCase {
     @MainActor
     func testNestedSparkleValidationAndDowngradeChainsAreSecurityFailures() {
         let observedChains: [[Int]] = [
+            [1000, 3002],
             [4005, 4005, 3002],
             [4005, 10, 4006],
         ]
@@ -238,6 +239,47 @@ final class SoftwareUpdateTests: XCTestCase {
                 controller.snapshot.phase,
                 .securityFailure,
                 "Expected observed Sparkle chain \(codes) to fail closed"
+            )
+        }
+    }
+
+    @MainActor
+    func testObservedNestedNetworkFailureChainsRemainRetryableNotSecurityFailures() {
+        let observedChains: [[(String, Int)]] = [
+            [
+                ("SUSparkleErrorDomain", 2001),
+                ("SUSparkleErrorDomain", 2001),
+                ("SUSparkleErrorDomain", 2001),
+                (NSURLErrorDomain, NSURLErrorUnsupportedURL),
+            ],
+            [
+                ("SUSparkleErrorDomain", 2001),
+                ("SUSparkleErrorDomain", 2001),
+                ("SUSparkleErrorDomain", 2001),
+                (NSURLErrorDomain, NSURLErrorCannotConnectToHost),
+                (kCFErrorDomainCFNetwork as String, NSURLErrorCannotConnectToHost),
+            ],
+        ]
+
+        for chain in observedChains {
+            let controller = SparkleUpdateController(
+                driver: RecordingUpdateDriver(),
+                installedVersion: InstalledAppVersion(info: [:])
+            )
+            let rootError = chain.reversed().reduce(nil as NSError?) { underlying, component in
+                var userInfo: [String: Any] = [:]
+                if let underlying {
+                    userInfo[NSUnderlyingErrorKey] = underlying
+                }
+                return NSError(domain: component.0, code: component.1, userInfo: userInfo)
+            }!
+
+            controller.didAbort(with: rootError, userInitiated: true)
+
+            XCTAssertEqual(
+                controller.snapshot.phase,
+                .failed,
+                "Expected observed network chain \(chain) to remain retryable"
             )
         }
     }
