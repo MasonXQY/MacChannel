@@ -1,7 +1,7 @@
 # Mac 通道应用内更新设计
 
 日期：2026-09-01  
-状态：待用户书面复核  
+状态：用户已批准
 目标平台：macOS 14 或更高版本
 
 ## 1. 目标
@@ -99,12 +99,13 @@ Sparkle 官方建议普通应用使用标准更新控制器，定时检查默认
 
 `https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml`
 
-每个带自动更新能力的正式 GitHub Release 必须同时发布：
+每个带自动更新能力的正式 GitHub Release 必须同时发布三个资产：
 
 - `MacChannel.dmg`
 - `MacChannel.manifest.json`
 - `appcast.xml`
-- 中文 Markdown 发布说明（可嵌入 appcast 或作为签名资源）
+
+中文 Markdown 发布说明保存在仓库的发布目录中，并由 `generate_appcast` 以签名内容嵌入 `appcast.xml`，不作为第四个公开资产。
 
 应用 Info.plist 增加：
 
