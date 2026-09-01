@@ -3,8 +3,8 @@ set -euo pipefail
 
 build_configuration="${MACCHANNEL_BUILD_CONFIGURATION:-debug}"
 codesign_identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-app_version="${MACCHANNEL_VERSION:-1.1.9}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-11}"
+app_version="${MACCHANNEL_VERSION:-1.1.10}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-12}"
 
 case "$build_configuration" in
     debug|release) ;;
@@ -89,6 +89,8 @@ cat > "$contents_path/Info.plist" <<PLIST
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>用于将来自已配对 Mac 的文件自动保存到“下载”文件夹。</string>
 </dict>
 </plist>
 PLIST

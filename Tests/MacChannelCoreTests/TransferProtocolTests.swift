@@ -1602,6 +1602,25 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertNil(frameAfterClose)
     }
 
+    func testSuccessfulTerminalFrameFlushesBeforeReturning() async throws {
+        let transferID = TransferID(rawValue: UUID())
+        let channels = TestSecureChannelPair.make()
+        let cipher = try ChunkCipher(key: Data(repeating: 0x5a, count: 32))
+
+        let outcome = await sendTerminalFrameBestEffort(
+            .error(.destinationUnavailable),
+            transferID: transferID,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: cipher,
+            sequence: 0
+        )
+
+        XCTAssertEqual(outcome, .sent)
+        let flushCount = await channels.receiver.flushCount()
+        XCTAssertEqual(flushCount, 1)
+    }
+
     func testControlCancelWakesReceiverWaitingForPeerFrame() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -2155,6 +2174,7 @@ private final class TestSecureChannel: SecureChannel, @unchecked Sendable {
     private let blockReturnAfterDeliveryAfter: Int?
     private let blocker = TestSendBlocker()
     private let returnBlocker = TestSendBlocker()
+    private let flushCounter = TestFlushCounter()
     private weak var peer: TestSecureChannel?
 
     init(
@@ -2205,6 +2225,10 @@ private final class TestSecureChannel: SecureChannel, @unchecked Sendable {
         return key
     }
 
+    func flush() async {
+        await flushCounter.increment()
+    }
+
     func close() async {
         await blocker.close()
         await returnBlocker.close()
@@ -2215,10 +2239,17 @@ private final class TestSecureChannel: SecureChannel, @unchecked Sendable {
     }
 
     func sentCount() async -> Int { await sendGate.count }
+    func flushCount() async -> Int { await flushCounter.value }
 
     func waitUntilSentCount(_ count: Int) async {
         await sendGate.waitUntilCount(count)
     }
+}
+
+private actor TestFlushCounter {
+    private(set) var value = 0
+
+    func increment() { value += 1 }
 }
 
 private struct ManualSenderWaitFixture {

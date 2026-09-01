@@ -83,6 +83,10 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
         try await state.sendApplication(frame)
     }
 
+    public func flush() async {
+        await state.flushPendingSends()
+    }
+
     public func frames() -> AsyncThrowingStream<Data, Error> { frameStream }
 
     public func exportKey(label: String, context: Data, length: Int) async throws -> Data {
@@ -333,6 +337,14 @@ private actor State {
         backpressureWaiters.removeAll()
         suspendedFrameBytes = 0
         waiters.forEach { $0.continuation.resume() }
+    }
+
+    func flushPendingSends() async {
+        let clock = ContinuousClock()
+        let deadline = clock.now + .milliseconds(250)
+        while !closed, channel.value.bufferedAmount > 0, clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     func callbackQueueOverflowed() {

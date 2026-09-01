@@ -793,6 +793,9 @@ func sendTerminalFrameBestEffort(
         await completion.finish(.timedOut)
     }
     let outcome = await completion.wait()
+    if case .sent = outcome {
+        await channel.flush()
+    }
     sendTask.cancel()
     if case .timedOut = outcome,
         let ownership = TransferIOResourceContext.ownership,

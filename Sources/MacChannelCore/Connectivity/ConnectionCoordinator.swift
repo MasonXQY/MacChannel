@@ -1,4 +1,10 @@
 import Foundation
+import OSLog
+
+private let connectionDiagnostics = Logger(
+    subsystem: "com.mason.macchannel",
+    category: "Connection"
+)
 
 public protocol RendezvousSignalSession: Sendable {
     func signalFrames() async -> AsyncStream<RendezvousSignalFrame>
@@ -546,6 +552,9 @@ public struct ConnectionCoordinator: RouteEscalatingPeerConnector, Sendable {
             } catch WebRTCFactoryError.trustForbidden {
                 throw ConnectionCoordinatorError.trustForbidden
             } catch {
+                connectionDiagnostics.error(
+                    "Outbound route \(String(describing: route), privacy: .public) failed: \(String(describing: error), privacy: .public)"
+                )
                 continue
             }
         }
@@ -837,6 +846,9 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
                 await channel.close()
             }
         } catch {
+            connectionDiagnostics.error(
+                "Inbound route \(String(describing: offer.route), privacy: .public) from \(offer.remoteDevice.rawValue.uuidString, privacy: .public) failed: \(String(describing: error), privacy: .public)"
+            )
             // A failed inbound attempt is isolated; later route offers remain usable.
         }
     }

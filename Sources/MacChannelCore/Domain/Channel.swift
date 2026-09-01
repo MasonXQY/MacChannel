@@ -10,9 +10,14 @@ public protocol SecureChannel: Sendable {
     var route: ConnectionRoute { get }
 
     func send(_ frame: Data) async throws
+    func flush() async
     func frames() -> AsyncThrowingStream<Data, Error>
     func exportKey(label: String, context: Data, length: Int) async throws -> Data
     func close() async
+}
+
+public extension SecureChannel {
+    func flush() async {}
 }
 
 public protocol PeerConnector: Sendable {

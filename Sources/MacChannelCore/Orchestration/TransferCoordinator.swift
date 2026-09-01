@@ -1,4 +1,10 @@
 import Foundation
+import OSLog
+
+private let transferDiagnostics = Logger(
+    subsystem: "com.mason.macchannel",
+    category: "Transfer"
+)
 
 public actor TransferCoordinator: TransferCoordinating {
     private struct PersistenceIntent: Sendable {
@@ -348,6 +354,9 @@ public actor TransferCoordinator: TransferCoordinating {
                 for completion in completions { try await completion.wait() }
                 break transferLoop
             } catch {
+                transferDiagnostics.error(
+                    "Outbound transfer \(id.rawValue.uuidString, privacy: .public) on \(String(describing: openedResource?.channel.route), privacy: .public) failed: \(String(describing: error), privacy: .public)"
+                )
                 transfers[id]?.channel = nil
                 if let openedResource {
                     await beginBoundedClose(
