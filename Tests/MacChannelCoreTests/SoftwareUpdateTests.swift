@@ -160,6 +160,51 @@ final class SoftwareUpdateTests: XCTestCase {
     }
 
     @MainActor
+    func testAvailabilityObservationRepublishesAvailableSnapshotWhenDriverBecomesReady() async {
+        let driver = RecordingUpdateDriver()
+        driver.canCheckForUpdates = false
+        let controller = SparkleUpdateController(
+            driver: driver,
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        controller.didFindUpdate(version: "1.3.0")
+        var iterator = controller.snapshots().makeAsyncIterator()
+        let available = await iterator.next()
+        XCTAssertEqual(available?.phase, .available(version: "1.3.0"))
+        XCTAssertFalse(controller.snapshot.canCheck)
+
+        driver.canCheckForUpdates = true
+        var refreshed: SoftwareUpdateSnapshot?
+        while let next = await iterator.next() {
+            if next.canCheck {
+                refreshed = next
+                break
+            }
+        }
+
+        XCTAssertEqual(refreshed?.phase, .available(version: "1.3.0"))
+        XCTAssertTrue(refreshed?.canCheck == true)
+    }
+
+    @MainActor
+    func testStoppingControllerCancelsAvailabilityObservation() async {
+        let driver = RecordingUpdateDriver()
+        driver.canCheckForUpdates = false
+        let controller = SparkleUpdateController(
+            driver: driver,
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        controller.didFindUpdate(version: "1.3.0")
+
+        controller.stop()
+        driver.canCheckForUpdates = true
+        await drainMainActorTasks()
+
+        XCTAssertEqual(controller.snapshot.phase, .available(version: "1.3.0"))
+        XCTAssertFalse(controller.snapshot.canCheck)
+    }
+
+    @MainActor
     func testSignatureVerificationFailurePublishesSecurityFailure() {
         let controller = SparkleUpdateController(
             driver: RecordingUpdateDriver(),
@@ -213,6 +258,85 @@ final class SoftwareUpdateTests: XCTestCase {
 
         XCTAssertEqual(installs, 0)
         continuation.finish()
+    }
+
+    @MainActor
+    func testReplacingTransferStreamRejectsTerminalEventsFromOldContinuation() async {
+        let controller = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        let (oldStream, oldContinuation) = AsyncStream<[TransferSnapshot]>.makeStream()
+        controller.observeTransfers { oldStream }
+        oldContinuation.yield([snapshot(phase: .transferring)])
+        await drainMainActorTasks()
+        var installs = 0
+        XCTAssertTrue(controller.postponeRelaunch { installs += 1 })
+
+        let (newStream, newContinuation) = AsyncStream<[TransferSnapshot]>.makeStream()
+        controller.observeTransfers { newStream }
+        newContinuation.yield([snapshot(phase: .verifying)])
+        await drainMainActorTasks()
+
+        oldContinuation.yield([snapshot(phase: .completed)])
+        await drainMainActorTasks()
+        XCTAssertEqual(installs, 0)
+
+        newContinuation.yield([snapshot(phase: .completed)])
+        await drainMainActorTasks()
+        XCTAssertEqual(installs, 1)
+        oldContinuation.finish()
+        newContinuation.finish()
+    }
+
+    @MainActor
+    func testUpdateStartupWaitsForRealTransferSnapshotBeforeStarting() async {
+        let updates = RecordingUpdateLaunchController()
+        let startup = SoftwareUpdateLaunchCoordinator(controller: updates)
+        let active = [snapshot(phase: .transferring)]
+        let stream = AsyncStream<[TransferSnapshot]> { continuation in
+            continuation.yield(active)
+            continuation.finish()
+        }
+
+        startup.prepare(transfers: { stream })
+
+        XCTAssertEqual(updates.events, [.observing])
+        let firstSnapshot = await updates.firstTransferSnapshot()
+        XCTAssertEqual(firstSnapshot, active)
+        updates.signalReady()
+        XCTAssertEqual(updates.events, [.observing, .started])
+    }
+
+    @MainActor
+    func testUpdateStartupUsesKnownEmptyTransferStateAfterBootstrapFailure() async {
+        let updates = RecordingUpdateLaunchController()
+        let startup = SoftwareUpdateLaunchCoordinator(controller: updates)
+
+        startup.prepare(transfers: nil)
+
+        XCTAssertEqual(updates.events, [.observing])
+        let firstSnapshot = await updates.firstTransferSnapshot()
+        XCTAssertEqual(firstSnapshot, [])
+        updates.signalReady()
+        updates.signalReady()
+        XCTAssertEqual(updates.events, [.observing, .started])
+    }
+
+    func testAppLifecycleRoutesSuccessfulAndFailedBootstrapThroughUpdateReadiness() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("App/MacChannelApp.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("updateLaunch.prepare(transfers: container.transferSnapshots)"))
+        XCTAssertTrue(source.contains("if case .startupError = status"))
+        XCTAssertGreaterThanOrEqual(source.components(separatedBy: "updateLaunch.prepare(transfers: nil)").count - 1, 2)
+        XCTAssertFalse(source.contains("updateController.start()"))
     }
 
     @MainActor
@@ -380,13 +504,66 @@ private final class UpdateServiceStub: SoftwareUpdateServicing {
 }
 
 @MainActor
-private final class RecordingUpdateDriver: UpdateDriving {
-    var canCheckForUpdates = true
+private final class RecordingUpdateDriver: UpdateDriving, UpdateAvailabilityDriving {
+    var canCheckForUpdates = true {
+        didSet {
+            availabilityContinuations.values.forEach { $0.yield(canCheckForUpdates) }
+        }
+    }
     var onCheck: (() -> Void)?
     private(set) var checkCount = 0
+    private var availabilityContinuations: [UUID: AsyncStream<Bool>.Continuation] = [:]
 
     func checkForUpdates() {
         checkCount += 1
         onCheck?()
+    }
+
+    func canCheckForUpdatesUpdates() -> AsyncStream<Bool> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            availabilityContinuations[id] = continuation
+            continuation.yield(canCheckForUpdates)
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in
+                    self?.availabilityContinuations[id] = nil
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private final class RecordingUpdateLaunchController: SoftwareUpdateLaunchControlling {
+    enum Event: Equatable {
+        case observing
+        case started
+    }
+
+    private(set) var events: [Event] = []
+    private var transfers: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)?
+    private var onReady: (@MainActor () -> Void)?
+
+    func observeTransfers(
+        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>,
+        onReady: @escaping @MainActor () -> Void
+    ) {
+        events.append(.observing)
+        transfers = snapshots
+        self.onReady = onReady
+    }
+
+    func start() {
+        events.append(.started)
+    }
+
+    func firstTransferSnapshot() async -> [TransferSnapshot]? {
+        guard let transfers else { return nil }
+        var iterator = await transfers().makeAsyncIterator()
+        return await iterator.next()
+    }
+
+    func signalReady() {
+        onReady?()
     }
 }

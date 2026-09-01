@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MacChannelCore
 import Network
 
 @MainActor
@@ -35,6 +36,50 @@ public enum MacChannelApplication {
 }
 
 @MainActor
+protocol SoftwareUpdateLaunchControlling: AnyObject {
+    func observeTransfers(
+        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>,
+        onReady: @escaping @MainActor () -> Void
+    )
+    func start()
+}
+
+extension SparkleUpdateController: SoftwareUpdateLaunchControlling {}
+
+@MainActor
+final class SoftwareUpdateLaunchCoordinator {
+    typealias TransferSnapshots = @Sendable () async -> AsyncStream<[TransferSnapshot]>
+
+    private let controller: any SoftwareUpdateLaunchControlling
+    private var hasStarted = false
+
+    init(controller: any SoftwareUpdateLaunchControlling) {
+        self.controller = controller
+    }
+
+    func prepare(
+        transfers: TransferSnapshots?,
+        afterStart: @escaping @MainActor () -> Void = {}
+    ) {
+        controller.observeTransfers(transfers ?? Self.knownEmptyTransfers) { [weak self] in
+            guard let self else { return }
+            if !hasStarted {
+                hasStarted = true
+                controller.start()
+            }
+            afterStart()
+        }
+    }
+
+    private static func knownEmptyTransfers() async -> AsyncStream<[TransferSnapshot]> {
+        AsyncStream { continuation in
+            continuation.yield([])
+            continuation.finish()
+        }
+    }
+}
+
+@MainActor
 private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private var container: AppContainer
     private let initialStatus: AppRuntimeStatus
@@ -48,6 +93,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
     private var networkMonitor: NWPathMonitor?
     private var networkWasAvailable = false
     private let updateController = SparkleUpdateController()
+    private lazy var updateLaunch = SoftwareUpdateLaunchCoordinator(controller: updateController)
 
     init(
         initialContainer: AppContainer,
@@ -67,10 +113,18 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
                 if let container {
                     self.container = container
                     self.install(container, status: status)
-                    self.completeProductionLaunchTestIfRequested(status: status, container: container)
+                    self.updateLaunch.prepare(transfers: container.transferSnapshots) { [weak self] in
+                        self?.completeProductionLaunchTestIfRequested(
+                            status: status,
+                            container: container
+                        )
+                    }
                 } else {
                     self.statusItemController?.setRuntimeStatus(status)
                     self.surfaceController?.updateRuntimeStatus(status)
+                    if case .startupError = status {
+                        self.updateLaunch.prepare(transfers: nil)
+                    }
                 }
             }
             bootstrapTask = Task { await runtimeHost.bootstrap() }
@@ -92,10 +146,10 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
             }
             monitor.start(queue: DispatchQueue(label: "app.macchannel.network-monitor"))
             networkMonitor = monitor
-        }
-        updateController.start()
-        if runtimeHost == nil {
-            completeLaunchSmokeTestIfRequested()
+        } else {
+            updateLaunch.prepare(transfers: nil) { [weak self] in
+                self?.completeLaunchSmokeTestIfRequested()
+            }
         }
     }
 
@@ -126,7 +180,6 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         surfaces.updateRuntimeStatus(status)
         surfaces.observe(container.deviceDirectory)
         if let transferSnapshots = container.transferSnapshots {
-            updateController.observeTransfers(transferSnapshots)
             surfaces.observeTransferSnapshots(transferSnapshots)
         }
         if let pairingStates = container.pairingStates {

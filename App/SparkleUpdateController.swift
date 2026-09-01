@@ -9,6 +9,11 @@ protocol UpdateDriving: AnyObject {
 }
 
 @MainActor
+protocol UpdateAvailabilityDriving: AnyObject {
+    func canCheckForUpdatesUpdates() -> AsyncStream<Bool>
+}
+
+@MainActor
 final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
     private static let sparkleErrorDomain = "SUSparkleErrorDomain"
     private static let noUpdateError = 1001
@@ -31,6 +36,10 @@ final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
     private let installationGate: UpdateInstallationGate
     private var continuations: [UUID: AsyncStream<SoftwareUpdateSnapshot>.Continuation] = [:]
     private var transferObservationTask: Task<Void, Never>?
+    private var transferObservationID: UUID?
+    private var availabilityObservationTask: Task<Void, Never>?
+    private var updaterAvailabilityObservation: NSKeyValueObservation?
+    private var availabilityObservationID: UUID?
     private var manualCheckInProgress = false
     private var hasStarted = false
 
@@ -83,11 +92,15 @@ final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
             lastCheckedAt: nil
         )
         super.init()
+        if let availabilityDriver = driver as? any UpdateAvailabilityDriving {
+            observeAvailability(availabilityDriver.canCheckForUpdatesUpdates())
+        }
     }
 
     func start() {
         guard !hasStarted, injectedDriver == nil else { return }
         hasStarted = true
+        observeUpdaterAvailability()
         updaterController.startUpdater()
         publish(phase: snapshot.phase, canCheck: updaterController.updater.canCheckForUpdates)
     }
@@ -95,6 +108,12 @@ final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
     func stop() {
         transferObservationTask?.cancel()
         transferObservationTask = nil
+        transferObservationID = nil
+        availabilityObservationTask?.cancel()
+        availabilityObservationTask = nil
+        updaterAvailabilityObservation?.invalidate()
+        updaterAvailabilityObservation = nil
+        availabilityObservationID = nil
         installationGate.cancelPendingInstall()
         manualCheckInProgress = false
         continuations.values.forEach { $0.finish() }
@@ -137,14 +156,25 @@ final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
     }
 
     func observeTransfers(
-        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>
+        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>,
+        onReady: @escaping @MainActor () -> Void = {}
     ) {
         transferObservationTask?.cancel()
+        let observationID = UUID()
+        transferObservationID = observationID
         transferObservationTask = Task { [weak self] in
             let updates = await snapshots()
-            for await snapshots in updates {
-                guard !Task.isCancelled else { return }
+            var iterator = updates.makeAsyncIterator()
+            var isFirstSnapshot = true
+            while let snapshots = await iterator.next() {
+                guard !Task.isCancelled,
+                      self?.transferObservationID == observationID
+                else { return }
                 self?.installationGate.updateTransfers(snapshots)
+                if isFirstSnapshot {
+                    isFirstSnapshot = false
+                    onReady()
+                }
             }
         }
     }
@@ -209,6 +239,38 @@ final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
             injectedDriver.checkForUpdates()
         } else {
             updaterController.checkForUpdates(nil)
+        }
+    }
+
+    private func observeAvailability(_ updates: AsyncStream<Bool>) {
+        availabilityObservationTask?.cancel()
+        let observationID = UUID()
+        availabilityObservationID = observationID
+        availabilityObservationTask = Task { [weak self] in
+            for await canCheck in updates {
+                guard !Task.isCancelled,
+                      self?.availabilityObservationID == observationID
+                else { return }
+                self?.publish(phase: self?.snapshot.phase ?? .idle, canCheck: canCheck)
+            }
+        }
+    }
+
+    private func observeUpdaterAvailability() {
+        updaterAvailabilityObservation?.invalidate()
+        let observationID = UUID()
+        availabilityObservationID = observationID
+        updaterAvailabilityObservation = updaterController.updater.observe(
+            \.canCheckForUpdates,
+            options: [.initial, .new]
+        ) { [weak self] _, change in
+            guard let canCheck = change.newValue else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.availabilityObservationID == observationID
+                else { return }
+                self.publish(phase: self.snapshot.phase, canCheck: canCheck)
+            }
         }
     }
 
