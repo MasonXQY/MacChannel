@@ -8,7 +8,32 @@ build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 account="${MACCHANNEL_SPARKLE_ACCOUNT:-com.mason.macchannel.updates}"
 generate_appcast="${MACCHANNEL_SPARKLE_GENERATE_APPCAST:-$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast}"
-dist_root="$repo_root/dist"
+update_testing="${MACCHANNEL_UPDATE_TESTING:-0}"
+case "$update_testing" in
+    0|1) ;;
+    *)
+        printf 'update-feed failure stage=test version=unvalidated build=unvalidated\n' >&2
+        exit 2
+        ;;
+esac
+if [[ "$update_testing" != 1 && \
+    ( -n "${MACCHANNEL_UPDATE_TEST_ROOT:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_DIST_ROOT:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_FAIL_STAGE:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_MUTATION:-}" || \
+      -n "${MACCHANNEL_UPDATE_SECURITY_COMMAND:-}" || \
+      -n "${MACCHANNEL_UPDATE_CODESIGN_COMMAND:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_ED_KEY_FILE:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}" ) ]]; then
+    printf 'update-feed failure stage=test version=%s build=%s\n' \
+        "$version" "$build_number" >&2
+    exit 2
+fi
+source "$repo_root/Scripts/update-test-paths.sh"
+if ! dist_root="$(macchannel_resolve_dist_root "$repo_root")"; then
+    echo "update-feed failure stage=test version=unvalidated build=unvalidated" >&2
+    exit 2
+fi
 dmg_path="$dist_root/MacChannel.dmg"
 manifest_path="$dist_root/MacChannel.manifest.json"
 feed_path="$dist_root/appcast.xml"
@@ -63,7 +88,7 @@ release_identity_validated=1
 security_command=/usr/bin/security
 requested_security_command="${MACCHANNEL_UPDATE_SECURITY_COMMAND:-}"
 if [[ -n "$requested_security_command" ]]; then
-    [[ "${MACCHANNEL_UPDATE_TESTING:-0}" == 1 ]] || fail_feed test 2
+    [[ "$update_testing" == 1 ]] || fail_feed test 2
     [[ "$requested_security_command" == /* && -f "$requested_security_command" && \
         ! -L "$requested_security_command" && -x "$requested_security_command" ]] || \
         fail_feed test 2
@@ -72,7 +97,7 @@ fi
 codesign_command=/usr/bin/codesign
 requested_codesign_command="${MACCHANNEL_UPDATE_CODESIGN_COMMAND:-}"
 if [[ -n "$requested_codesign_command" ]]; then
-    [[ "${MACCHANNEL_UPDATE_TESTING:-0}" == 1 ]] || fail_feed test 2
+    [[ "$update_testing" == 1 ]] || fail_feed test 2
     [[ "$requested_codesign_command" == /* && -f "$requested_codesign_command" && \
         ! -L "$requested_codesign_command" && -x "$requested_codesign_command" ]] || \
         fail_feed test 2
@@ -81,7 +106,7 @@ fi
 test_ed_key_file="${MACCHANNEL_UPDATE_TEST_ED_KEY_FILE:-}"
 test_public_key_path="${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}"
 if [[ -n "$test_ed_key_file" || -n "$test_public_key_path" ]]; then
-    [[ "${MACCHANNEL_UPDATE_TESTING:-0}" == 1 ]] || fail_feed test 2
+    [[ "$update_testing" == 1 ]] || fail_feed test 2
     [[ "$test_ed_key_file" == /* && -f "$test_ed_key_file" && ! -L "$test_ed_key_file" && \
         "$test_public_key_path" == /* && -f "$test_public_key_path" && \
         ! -L "$test_public_key_path" ]] || fail_feed test 2
@@ -102,6 +127,13 @@ release_state="$(plutil -extract releaseState raw -o - "$manifest_path" 2>/dev/n
 manifest_dmg_sha="$(plutil -extract dmgSHA256 raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_team_id="$(plutil -extract teamID raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_requirement="$(plutil -extract designatedRequirement raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
+anchor_path="$repo_root/Distribution/ProductionSigningAnchor.plist"
+[[ -f "$anchor_path" && ! -L "$anchor_path" ]] || fail_feed identity
+anchor_team_id="$(plutil -extract teamID raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
+anchor_bundle_id="$(plutil -extract bundleIdentifier raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
+anchor_requirement="$(plutil -extract designatedRequirement raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
+[[ "$anchor_team_id" == XKAZ67HN45 && "$anchor_bundle_id" == com.mason.macchannel && \
+    "$anchor_requirement" == *'certificate leaf[subject.OU] = "XKAZ67HN45"'* ]] || fail_feed identity
 [[ "$manifest_version" == "$version" && "$manifest_build" == "$build_number" && \
     "$release_state" == notarized && "$manifest_dmg_sha" =~ ^[0-9a-f]{64}$ && \
     "$manifest_team_id" =~ ^[A-Z0-9]{10}$ && -n "$manifest_requirement" ]] || fail_feed manifest
@@ -125,7 +157,9 @@ fi
 identity_mounted=1
 mounted_app="$identity_mount_root/MacChannel.app"
 if [[ ! -d "$mounted_app" || -L "$mounted_app" ]] || \
-    ! "$codesign_command" --verify --deep --strict --verbose=2 "$mounted_app"; then
+    ! "$codesign_command" --verify --deep --strict --verbose=2 "$mounted_app" || \
+    ! "$codesign_command" --verify --deep --strict \
+        --test-requirement "=$anchor_requirement" "$mounted_app"; then
     cleanup_identity_mount
     fail_feed identity
 fi
@@ -140,9 +174,10 @@ actual_version="$(plutil -extract CFBundleShortVersionString raw -o - "$mounted_
 actual_build="$(plutil -extract CFBundleVersion raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 unset app_identity
 cleanup_identity_mount
-[[ "$actual_team_id" == "$manifest_team_id" && \
+[[ "$actual_team_id" == "$anchor_team_id" && \
     "$actual_requirement" == "$manifest_requirement" && \
-    "$actual_bundle_id" == com.mason.macchannel && \
+    "$manifest_team_id" == "$actual_team_id" && \
+    "$actual_bundle_id" == "$anchor_bundle_id" && \
     "$actual_version" == "$version" && "$actual_build" == "$build_number" ]] || \
     fail_feed identity
 

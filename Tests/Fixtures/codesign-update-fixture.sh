@@ -3,7 +3,11 @@ set -euo pipefail
 
 case "${1:-}" in
     --verify)
-        [[ "${MACCHANNEL_CODESIGN_FIXTURE_VERIFY:-pass}" == pass ]]
+        if [[ " $* " == *" --test-requirement "* ]]; then
+            [[ "${MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MATCH:-pass}" == pass ]]
+        else
+            [[ "${MACCHANNEL_CODESIGN_FIXTURE_VERIFY:-pass}" == pass ]]
+        fi
         ;;
     -d)
         printf 'Executable=%s\n' "${*: -1}" >&2

@@ -15,6 +15,9 @@ update_test_public_key_path="${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}"
 update_test_codesign_keychain="${MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN:-}"
 update_test_embed_harness="${MACCHANNEL_UPDATE_TEST_EMBED_HARNESS:-0}"
 update_test_signer_variant="${MACCHANNEL_UPDATE_TEST_SIGNER_VARIANT:-}"
+update_test_root="${MACCHANNEL_UPDATE_TEST_ROOT:-}"
+
+source "$repo_root/Scripts/update-test-paths.sh"
 
 case "$update_testing" in
     0|1) ;;
@@ -31,6 +34,8 @@ update_override_names=(
     MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN
     MACCHANNEL_UPDATE_TEST_EMBED_HARNESS
     MACCHANNEL_UPDATE_TEST_SIGNER_VARIANT
+    MACCHANNEL_UPDATE_TEST_ROOT
+    MACCHANNEL_UPDATE_TEST_DIST_ROOT
 )
 if [[ "$update_testing" != 1 ]]; then
     for override_name in "${update_override_names[@]}"; do
@@ -81,7 +86,15 @@ if [[ "$update_testing" == 1 ]]; then
         echo "MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN must be an absolute regular file when provided" >&2
         exit 2
     fi
-    if [[ "$update_test_embed_harness" != 1 || "$codesign_identity" != - ]]; then
+    primary_test_identity='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)'
+    alternate_test_identity='Apple Development: Qianyao Xu (H33N6G5622)'
+    expected_test_identity=""
+    case "$update_test_signer_variant" in
+        primary) expected_test_identity="$primary_test_identity" ;;
+        alternate) expected_test_identity="$alternate_test_identity" ;;
+    esac
+    if [[ "$update_test_embed_harness" != 1 || \
+        "$codesign_identity" != "$expected_test_identity" ]]; then
         echo "update acceptance builds require the signed packaged updater harness" >&2
         exit 2
     fi
@@ -110,14 +123,6 @@ if [[ ! "$sparkle_public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
     exit 2
 fi
 
-if [[ "$build_configuration" == release ]]; then
-    build_arguments=(-c release --arch arm64 --arch x86_64)
-else
-    build_arguments=(-c debug)
-fi
-swift build "${build_arguments[@]}"
-product_path="$(swift build "${build_arguments[@]}" --show-bin-path)"
-
 app_path="${MACCHANNEL_APP_OUTPUT:-.build/MacChannel.app}"
 case "$app_path" in
     */MacChannel.app|MacChannel.app) ;;
@@ -127,16 +132,20 @@ case "$app_path" in
         ;;
 esac
 if [[ "$update_testing" == 1 ]]; then
-    update_test_temp_base="${TMPDIR:-/tmp}"
-    update_test_temp_base="${update_test_temp_base%/}"
-    case "$app_path" in
-        "$update_test_temp_base"/macchannel-update-acceptance.*/MacChannel.app) ;;
-        *)
-            echo "update acceptance output must remain in its isolated temporary root" >&2
-            exit 2
-            ;;
-    esac
+    if ! macchannel_require_direct_child_path "$update_test_root" "$app_path" MacChannel.app; then
+        echo "update acceptance output must be the canonical direct child of its owner-only test root" >&2
+        exit 2
+    fi
 fi
+
+if [[ "$build_configuration" == release ]]; then
+    build_arguments=(-c release --arch arm64 --arch x86_64)
+else
+    build_arguments=(-c debug)
+fi
+swift build "${build_arguments[@]}"
+product_path="$(swift build "${build_arguments[@]}" --show-bin-path)"
+
 mkdir -p "$(dirname "$app_path")"
 rm -rf "$app_path"
 
@@ -183,6 +192,9 @@ if [[ "$update_testing" == 1 ]]; then
     cp -p "$sparkle_cli_source/SPUCommandLineDriver.m" "$harness_driver_source"
     perl -0pi -e \
         's/installUpdateHandler\(SPUUserUpdateChoiceDismiss\);/fprintf(stdout, "macchannel-update-acceptance state=validated\\n"); fflush(stdout); installUpdateHandler(SPUUserUpdateChoiceSkip);/' \
+        "$harness_source"
+    perl -0pi -e \
+        's/fprintf\(stderr, "Error: Unable to download release notes: %s\\n", error\.localizedDescription\.UTF8String\);/for (NSError *cursor = error; cursor != nil; cursor = cursor.userInfo[NSUnderlyingErrorKey]) { fprintf(stderr, "macchannel-update-acceptance state=release-notes-failed domain=%s code=%ld\\n", cursor.domain.UTF8String, (long)cursor.code); }/' \
         "$harness_source"
     perl -0pi -e \
         's/if \(_probingForUpdates\) \{/if (_probingForUpdates) { fprintf(stdout, "macchannel-update-acceptance state=available build=%s\\n", item.versionString.UTF8String); fflush(stdout);/' \

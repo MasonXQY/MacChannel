@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>bundleIdentifier</key>
+    <string>com.mason.macchannel</string>
+    <key>designatedRequirement</key>
+    <string>anchor apple generic and identifier "com.mason.macchannel" and certificate leaf[subject.OU] = "XKAZ67HN45"</string>
+    <key>teamID</key>
+    <string>XKAZ67HN45</string>
+</dict>
+</plist>

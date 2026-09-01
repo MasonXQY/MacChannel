@@ -20,17 +20,72 @@ if [[ -z "$identity" ]]; then
     exit 2
 fi
 expected_team_id="$(sed -E 's/^.*\(([A-Z0-9]{10})\)$/\1/' <<<"$identity")"
-unset MACCHANNEL_NOTARY_PROFILE
+[[ "$expected_team_id" == XKAZ67HN45 ]] || {
+    echo "distribution tests require the anchored production Team identity" >&2
+    exit 2
+}
+signing_home="${HOME:?}"
+unset MACCHANNEL_NOTARY_PROFILE MACCHANNEL_RELEASE_NOTES MACCHANNEL_VERSION \
+    MACCHANNEL_BUILD_NUMBER MACCHANNEL_DISTRIBUTION_TESTING \
+    MACCHANNEL_DISTRIBUTION_FAIL_AT MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT \
+    MACCHANNEL_UPDATE_SECURITY_COMMAND MACCHANNEL_UPDATE_CODESIGN_COMMAND \
+    MACCHANNEL_UPDATE_TEST_ED_KEY_FILE MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH \
+    MACCHANNEL_SPARKLE_GENERATE_APPCAST MACCHANNEL_SPARKLE_ACCOUNT
 
-test_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-distribution-test.XXXXXX")"
+raw_test_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-distribution-test.XXXXXX")"
+chmod 700 "$raw_test_root"
+test_root="$(cd "$raw_test_root" && pwd -P)"
+test_dist="$test_root/dist"
+mkdir -p "$test_dist"
+chmod 700 "$test_dist"
+source Scripts/update-test-paths.sh
+macchannel_require_canonical_test_root "$test_root"
+test "$(MACCHANNEL_UPDATE_TESTING=1 MACCHANNEL_UPDATE_TEST_ROOT="$test_root" \
+    MACCHANNEL_UPDATE_TEST_DIST_ROOT="$test_dist" \
+    macchannel_resolve_dist_root "$repo_root")" = "$test_dist"
+
+snapshot_dist() {
+    local root=$1
+    if [[ ! -e "$root" && ! -L "$root" ]]; then
+        printf 'absent\n'
+        return
+    fi
+    find "$root" -mindepth 0 -maxdepth 1 -print0 | LC_ALL=C sort -z | \
+        while IFS= read -r -d '' entry; do
+            if [[ -L "$entry" ]]; then
+                printf 'link\t%s\t%s\n' "$(basename "$entry")" "$(readlink "$entry")"
+            elif [[ -f "$entry" ]]; then
+                printf 'file\t%s\t%s\n' "$(basename "$entry")" \
+                    "$(shasum -a 256 "$entry" | awk '{print $1}')"
+            elif [[ -d "$entry" ]]; then
+                printf 'dir\t%s\n' "$(basename "$entry")"
+            else
+                printf 'other\t%s\n' "$(basename "$entry")"
+            fi
+        done
+}
+formal_dist_before="$(snapshot_dist "$repo_root/dist")"
+export MACCHANNEL_UPDATE_TESTING=1
+export MACCHANNEL_UPDATE_TEST_ROOT="$test_root"
+export MACCHANNEL_UPDATE_TEST_DIST_ROOT="$test_dist"
 mounted_path=""
 cleanup() {
+    local status=$?
+    trap - EXIT
     if [[ -n "$mounted_path" ]] && mount | grep -F " on $mounted_path " >/dev/null; then
         hdiutil detach "$mounted_path" -quiet || true
     fi
-    rm -rf "$test_root"
-    rm -f dist/MacChannel.dmg dist/MacChannel.manifest.json dist/appcast.xml \
-        dist/.appcast.xml.new
+    if [[ "$(snapshot_dist "$repo_root/dist")" != "$formal_dist_before" ]]; then
+        echo "formal repository dist changed during distribution fixture test" >&2
+        status=1
+    fi
+    if macchannel_require_canonical_test_root "$test_root"; then
+        rm -rf "$test_root"
+    else
+        echo "refusing cleanup of a non-canonical distribution test root" >&2
+        status=1
+    fi
+    exit "$status"
 }
 trap cleanup EXIT
 
@@ -46,24 +101,26 @@ expect_failure() {
         sed -n '1,120p' "$test_root/expected-failure.log" >&2
         exit 1
     fi
-    test ! -e dist/MacChannel.dmg
-    test ! -e dist/MacChannel.manifest.json
+    test ! -e $test_dist/MacChannel.dmg
+    test ! -e $test_dist/MacChannel.manifest.json
 }
 
 expect_distribution_failure() {
     mkdir -p dist
-    printf '%s\n' stale-feed >dist/appcast.xml
-    printf '%s\n' stale-pending >dist/.appcast.xml.new
+    printf '%s\n' stale-feed >$test_dist/appcast.xml
+    printf '%s\n' stale-pending >$test_dist/.appcast.xml.new
     expect_failure "$@"
-    test ! -e dist/appcast.xml
-    test ! -e dist/.appcast.xml.new
+    test ! -e $test_dist/appcast.xml
+    test ! -e $test_dist/.appcast.xml.new
 }
 
 expect_distribution_failure 2 env -u MACCHANNEL_CODESIGN_IDENTITY bash Scripts/build-distribution.sh
 expect_distribution_failure 2 env MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: Missing (AAAAAAAAAA)" \
     bash Scripts/build-distribution.sh
-expect_failure 2 env MACCHANNEL_VERSION=1.0 bash Scripts/build-app.sh
-expect_failure 2 env MACCHANNEL_BUILD_NUMBER=0 bash Scripts/build-app.sh
+expect_failure 2 env -u MACCHANNEL_UPDATE_TEST_ROOT -u MACCHANNEL_UPDATE_TEST_DIST_ROOT \
+    MACCHANNEL_UPDATE_TESTING=0 MACCHANNEL_VERSION=1.0 bash Scripts/build-app.sh
+expect_failure 2 env -u MACCHANNEL_UPDATE_TEST_ROOT -u MACCHANNEL_UPDATE_TEST_DIST_ROOT \
+    MACCHANNEL_UPDATE_TESTING=0 MACCHANNEL_BUILD_NUMBER=0 bash Scripts/build-app.sh
 
 dirty_marker="distribution-contract-dirty-marker"
 trap 'rm -f "$dirty_marker"; cleanup' EXIT
@@ -85,13 +142,13 @@ MACCHANNEL_CODESIGN_IDENTITY="$identity" \
 MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
     bash Scripts/build-distribution.sh
 
-test -f dist/MacChannel.dmg
-test -f dist/MacChannel.manifest.json
-test ! -e dist/appcast.xml
-codesign --verify --strict --verbose=2 dist/MacChannel.dmg
+test -f $test_dist/MacChannel.dmg
+test -f $test_dist/MacChannel.manifest.json
+test ! -e $test_dist/appcast.xml
+codesign --verify --strict --verbose=2 $test_dist/MacChannel.dmg
 
-cp dist/MacChannel.manifest.json "$test_root/first-manifest.json"
-first_dmg_sha="$(shasum -a 256 dist/MacChannel.dmg | awk '{print $1}')"
+cp $test_dist/MacChannel.manifest.json "$test_root/first-manifest.json"
+first_dmg_sha="$(shasum -a 256 $test_dist/MacChannel.dmg | awk '{print $1}')"
 MACCHANNEL_CODESIGN_IDENTITY="$identity" \
 MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
     bash Scripts/build-distribution.sh
@@ -100,20 +157,20 @@ for manifest_key in \
     product bundleIdentifier version build gitCommit teamID designatedRequirement releaseState volumeName \
     stagedFilesystemSHA256 sourceDateEpoch createdAt; do
     first_value="$(plutil -extract "$manifest_key" raw -o - "$test_root/first-manifest.json")"
-    second_value="$(plutil -extract "$manifest_key" raw -o - dist/MacChannel.manifest.json)"
+    second_value="$(plutil -extract "$manifest_key" raw -o - $test_dist/MacChannel.manifest.json)"
     test "$first_value" = "$second_value"
 done
-second_dmg_sha="$(shasum -a 256 dist/MacChannel.dmg | awk '{print $1}')"
+second_dmg_sha="$(shasum -a 256 $test_dist/MacChannel.dmg | awk '{print $1}')"
 if [[ "$first_dmg_sha" != "$second_dmg_sha" ]]; then
     grep -F "Developer ID timestamps and UDIF metadata may change raw DMG bytes" \
-        dist/MacChannel.manifest.json >/dev/null
+        $test_dist/MacChannel.manifest.json >/dev/null
 fi
 test -z "$(find dist -mindepth 1 -maxdepth 1 ! -name MacChannel.dmg \
     ! -name MacChannel.manifest.json -print -quit)"
 
 mounted_path="$test_root/mounted"
 mkdir -p "$mounted_path"
-hdiutil attach dist/MacChannel.dmg -nobrowse -readonly -mountpoint "$mounted_path" -quiet
+hdiutil attach $test_dist/MacChannel.dmg -nobrowse -readonly -mountpoint "$mounted_path" -quiet
 
 mapfile_path="$test_root/entries.txt"
 find "$mounted_path" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort >"$mapfile_path"
@@ -150,17 +207,17 @@ if codesign --verify --deep --strict "$mutated_app" >/dev/null 2>&1; then
     exit 1
 fi
 
-manifest_sha="$(plutil -extract dmgSHA256 raw -o - dist/MacChannel.manifest.json)"
-actual_sha="$(shasum -a 256 dist/MacChannel.dmg | awk '{print $1}')"
+manifest_sha="$(plutil -extract dmgSHA256 raw -o - $test_dist/MacChannel.manifest.json)"
+actual_sha="$(shasum -a 256 $test_dist/MacChannel.dmg | awk '{print $1}')"
 test "$manifest_sha" = "$actual_sha"
-test "$(plutil -extract gitCommit raw -o - dist/MacChannel.manifest.json)" = "$(git rev-parse HEAD)"
-test "$(plutil -extract version raw -o - dist/MacChannel.manifest.json)" = 1.2.0
-test "$(plutil -extract build raw -o - dist/MacChannel.manifest.json)" = 13
-test "$(plutil -extract releaseState raw -o - dist/MacChannel.manifest.json)" = internalSignedNotNotarized
-test "$(plutil -extract teamID raw -o - dist/MacChannel.manifest.json)" = "$expected_team_id"
+test "$(plutil -extract gitCommit raw -o - $test_dist/MacChannel.manifest.json)" = "$(git rev-parse HEAD)"
+test "$(plutil -extract version raw -o - $test_dist/MacChannel.manifest.json)" = 1.2.0
+test "$(plutil -extract build raw -o - $test_dist/MacChannel.manifest.json)" = 13
+test "$(plutil -extract releaseState raw -o - $test_dist/MacChannel.manifest.json)" = internalSignedNotNotarized
+test "$(plutil -extract teamID raw -o - $test_dist/MacChannel.manifest.json)" = "$expected_team_id"
 actual_requirement="$(codesign -d -r- "$mounted_path/MacChannel.app" 2>&1 | \
     sed -n 's/^designated => //p')"
-test "$(plutil -extract designatedRequirement raw -o - dist/MacChannel.manifest.json)" = \
+test "$(plutil -extract designatedRequirement raw -o - $test_dist/MacChannel.manifest.json)" = \
     "$actual_requirement"
 
 hdiutil detach "$mounted_path" -quiet
@@ -170,7 +227,7 @@ install_root="$test_root/Applications"
 mkdir -p "$install_root"
 mounted_path="$test_root/install-source"
 mkdir -p "$mounted_path"
-hdiutil attach dist/MacChannel.dmg -nobrowse -readonly -mountpoint "$mounted_path" -quiet
+hdiutil attach $test_dist/MacChannel.dmg -nobrowse -readonly -mountpoint "$mounted_path" -quiet
 ditto "$mounted_path/MacChannel.app" "$install_root/MacChannel.app"
 hdiutil detach "$mounted_path" -quiet
 mounted_path=""

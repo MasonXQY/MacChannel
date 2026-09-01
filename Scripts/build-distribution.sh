@@ -10,7 +10,34 @@ build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
 notary_profile="${MACCHANNEL_NOTARY_PROFILE:-}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 volume_name="Mac 通道"
-dist_root="$repo_root/dist"
+source "$repo_root/Scripts/update-test-paths.sh"
+
+fail_usage() {
+    echo "$1" >&2
+    exit 2
+}
+
+update_testing="${MACCHANNEL_UPDATE_TESTING:-0}"
+case "$update_testing" in
+    0|1) ;;
+    *) fail_usage "MACCHANNEL_UPDATE_TESTING must be 0 or 1" ;;
+esac
+if [[ "$update_testing" != 1 && \
+    ( -n "${MACCHANNEL_UPDATE_TEST_ROOT:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_DIST_ROOT:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_FAIL_STAGE:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_MUTATION:-}" || \
+      -n "${MACCHANNEL_UPDATE_SECURITY_COMMAND:-}" || \
+      -n "${MACCHANNEL_UPDATE_CODESIGN_COMMAND:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_ED_KEY_FILE:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}" ) ]]; then
+    fail_usage "update fixture seams require MACCHANNEL_UPDATE_TESTING=1"
+fi
+
+if ! dist_root="$(macchannel_resolve_dist_root "$repo_root")"; then
+    fail_usage "test distribution output requires a canonical owner-only direct-child dist root"
+fi
 
 mkdir -p "$dist_root"
 chmod 700 "$dist_root"
@@ -22,21 +49,13 @@ rm -f \
     "$dist_root/.MacChannel.manifest.json.new" \
     "$dist_root/.appcast.xml.new"
 
-fail_usage() {
-    echo "$1" >&2
-    exit 2
-}
-
 [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
     fail_usage "MACCHANNEL_VERSION must be a release SemVer such as 1.2.3"
 [[ "$build_number" =~ ^[1-9][0-9]*$ ]] || \
     fail_usage "MACCHANNEL_BUILD_NUMBER must be a positive integer"
 
 update_fixture_root="${MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT:-}"
-if [[ -n "$update_fixture_root" && "${MACCHANNEL_UPDATE_TESTING:-0}" != 1 ]]; then
-    fail_usage "update fixture seam requires MACCHANNEL_UPDATE_TESTING=1"
-fi
-if [[ "${MACCHANNEL_UPDATE_TESTING:-0}" == 1 && -n "$update_fixture_root" ]]; then
+if [[ "$update_testing" == 1 && -n "$update_fixture_root" ]]; then
     [[ -n "$release_notes" ]] || fail_usage "MACCHANNEL_RELEASE_NOTES is required"
     fixture_dmg="$update_fixture_root/MacChannel.dmg"
     fixture_manifest="$update_fixture_root/MacChannel.manifest.json"
@@ -49,6 +68,14 @@ if [[ "${MACCHANNEL_UPDATE_TESTING:-0}" == 1 && -n "$update_fixture_root" ]]; th
     if ! MACCHANNEL_VERSION="$version" \
         MACCHANNEL_BUILD_NUMBER="$build_number" \
         MACCHANNEL_RELEASE_NOTES="$release_notes" \
+        MACCHANNEL_UPDATE_TESTING=1 \
+        MACCHANNEL_UPDATE_TEST_ROOT="${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
+        MACCHANNEL_UPDATE_TEST_DIST_ROOT="$dist_root" \
+        MACCHANNEL_UPDATE_SECURITY_COMMAND="${MACCHANNEL_UPDATE_SECURITY_COMMAND:-}" \
+        MACCHANNEL_UPDATE_CODESIGN_COMMAND="${MACCHANNEL_UPDATE_CODESIGN_COMMAND:-}" \
+        MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="${MACCHANNEL_UPDATE_TEST_ED_KEY_FILE:-}" \
+        MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}" \
+        MACCHANNEL_SPARKLE_GENERATE_APPCAST="${MACCHANNEL_SPARKLE_GENERATE_APPCAST:-}" \
         bash Scripts/build-update-feed.sh; then
         rm -f "$dist_root/appcast.xml" "$dist_root/.appcast.xml.new"
         exit 1
@@ -72,6 +99,17 @@ fi
 
 team_id="$(sed -E 's/^.*\(([A-Z0-9]{10})\)$/\1/' <<<"$identity")"
 [[ "$team_id" =~ ^[A-Z0-9]{10}$ ]] || fail_usage "could not derive the signing Team ID"
+
+anchor_path="$repo_root/Distribution/ProductionSigningAnchor.plist"
+anchor_team_id="$(plutil -extract teamID raw -o - "$anchor_path")" || \
+    fail_usage "production signing anchor is invalid"
+anchor_bundle_id="$(plutil -extract bundleIdentifier raw -o - "$anchor_path")" || \
+    fail_usage "production signing anchor is invalid"
+anchor_requirement="$(plutil -extract designatedRequirement raw -o - "$anchor_path")" || \
+    fail_usage "production signing anchor is invalid"
+[[ "$anchor_team_id" == XKAZ67HN45 && "$anchor_bundle_id" == com.mason.macchannel ]] || \
+    fail_usage "production signing anchor is invalid"
+[[ "$team_id" == "$anchor_team_id" ]] || fail_usage "signing identity does not match the production Team ID anchor"
 
 build_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-distribution.XXXXXX")"
 chmod 700 "$build_root"
@@ -115,15 +153,31 @@ inject_failure() {
     fi
 }
 
-MACCHANNEL_BUILD_CONFIGURATION=release \
-MACCHANNEL_CODESIGN_IDENTITY="$identity" \
-MACCHANNEL_VERSION="$version" \
-MACCHANNEL_BUILD_NUMBER="$build_number" \
-MACCHANNEL_APP_OUTPUT="$app_path" \
+env -u MACCHANNEL_UPDATE_TEST_ROOT \
+    -u MACCHANNEL_UPDATE_TEST_DIST_ROOT \
+    -u MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT \
+    -u MACCHANNEL_UPDATE_TEST_FAIL_STAGE \
+    -u MACCHANNEL_UPDATE_TEST_MUTATION \
+    -u MACCHANNEL_UPDATE_SECURITY_COMMAND \
+    -u MACCHANNEL_UPDATE_CODESIGN_COMMAND \
+    -u MACCHANNEL_UPDATE_TEST_ED_KEY_FILE \
+    -u MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH \
+    -u MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN \
+    -u MACCHANNEL_UPDATE_TEST_BUNDLE_ID \
+    -u MACCHANNEL_UPDATE_TEST_FEED_URL \
+    -u MACCHANNEL_UPDATE_TEST_EMBED_HARNESS \
+    -u MACCHANNEL_UPDATE_TEST_SIGNER_VARIANT \
+    MACCHANNEL_UPDATE_TESTING=0 \
+    MACCHANNEL_BUILD_CONFIGURATION=release \
+    MACCHANNEL_CODESIGN_IDENTITY="$identity" \
+    MACCHANNEL_VERSION="$version" \
+    MACCHANNEL_BUILD_NUMBER="$build_number" \
+    MACCHANNEL_APP_OUTPUT="$app_path" \
     bash Scripts/build-app.sh
 inject_failure app-built
 
 codesign --verify --deep --strict --verbose=2 "$app_path"
+codesign --verify --deep --strict --test-requirement "=$anchor_requirement" "$app_path"
 app_details="$(codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$app_details" >/dev/null
 grep -F "TeamIdentifier=$team_id" <<<"$app_details" >/dev/null
@@ -131,7 +185,7 @@ designated_requirement="$(codesign -d -r- "$app_path" 2>&1 | sed -n 's/^designat
 test -n "$designated_requirement"
 grep -E 'flags=.*runtime' <<<"$app_details" >/dev/null
 test "$(plutil -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" = \
-    com.mason.macchannel
+    "$anchor_bundle_id"
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = \
     "$version"
 test "$(plutil -extract CFBundleVersion raw -o - "$app_path/Contents/Info.plist")" = \

@@ -131,7 +131,9 @@ v1.1.10 本身没有更新器，因此不能远程获得本功能。包含更新
 1. Apple Developer ID 签名、公证和 Gatekeeper 验证。
 2. Sparkle Ed25519 更新包签名；启用签名 appcast 后，更新清单和发布说明也必须经过验证。
 
-Sparkle 2.9.6 对应用更新采用官方双认证策略：有效的 Ed25519 archive 签名或与宿主匹配的代码签名身份任一成立即可继续，因此有效 Ed25519 更新允许轮换 Developer ID。MacChannel 不 fork 或弱化这一运行时策略。作为发布侧补强，`build-update-feed.sh` 必须在签名/发布 appcast 前挂载 DMG，并把实际 Team ID、designated requirement、bundle ID、版本和 build 与分发 manifest 精确比对；任一不符即删除正式和 pending feed 输出并失败关闭。
+Sparkle 2.9.6 对应用更新采用官方双认证策略：有效的 Ed25519 archive 签名或与宿主匹配的代码签名身份任一成立即可继续，因此有效 Ed25519 更新允许轮换 Developer ID。MacChannel 不 fork 或弱化这一运行时策略。
+
+作为发布侧补强，仓库提交 `Distribution/ProductionSigningAnchor.plist` 作为独立生产信任锚；权威值固定为 bundle ID `com.mason.macchannel`、Team ID `XKAZ67HN45`，designated requirement 使用 bundle ID 与 Team ID 约束而不固定叶证书，从而允许同 Team 证书轮换。`build-distribution.sh` 和 `build-update-feed.sh` 必须把候选 App/DMG 与该锚直接比较，并在 appcast 签名或发布前失败关闭。manifest 中的 Team ID 和 designated requirement 仅记录实际观察值用于审计，绝不能作为候选自身的信任依据。错误 Team/requirement 时必须在访问 Sparkle 私钥之前失败，并清理正式及 pending feed 输出。
 
 Sparkle 私钥只保存于发布机钥匙串，不写入仓库、环境文件、CI 日志或 GitHub Release。公钥编入应用。发布脚本通过 Sparkle 官方 `generate_appcast`/`sign_update` 工具访问钥匙串生成签名，禁止把私钥作为命令行参数传入。
 
@@ -163,7 +165,7 @@ Sparkle 私钥只保存于发布机钥匙串，不写入仓库、环境文件、
 
 ### 8.2 真实升级验收
 
-建立一个仅用于验收的独立 bundle ID、独立 feed URL 和已签名测试 appcast，完成以下路径，测试 feed 不得写入正式产物：
+建立一个仅用于验收的独立 bundle ID、独立 feed URL 和已签名测试 appcast，完成以下路径。所有 fixture 的 dist、App、DMG、密钥、证书、日志、HOME/defaults 和 server root 都必须位于唯一、owner-only、可规范化验证的临时根；测试不得读写仓库正式 `dist/`、`/Applications/MacChannel.app`、正式 feed、正式 Sparkle 私钥、真实配对或历史：
 
 1. 在两台 Mac 安装包含更新器的旧测试构建。
 2. 后台检查在无更新时不打扰；手动检查明确显示最新版。
@@ -173,6 +175,8 @@ Sparkle 私钥只保存于发布机钥匙串，不写入仓库、环境文件、
 6. 使用被修改的 feed、被修改的 DMG、无法由代码签名身份补救的错误 Ed25519 key、错误 signer 加无效 Ed25519、较低构建号和离线网络分别验证拒绝或可恢复提示。另记录“有效 Ed25519 + 轮换 signer”按 Sparkle 官方策略被接受的 characterization，不得标成拒绝。
 7. 发布时用错误 Team ID/designated requirement 的 DMG 验证在 appcast 生成前失败且两个 feed 输出都被清理；同 Team ID/designated requirement 必须通过。
 8. 从公开 GitHub Release 重新下载最终资产，核对 appcast、SHA-256、Apple 公证票据和 Gatekeeper，再执行一轮真实升级。
+
+本机自动化 fixture 必须走实际打包的 Sparkle updater，并使用进程内证书摘要与 `localhost` hostname 双重 pin。非 HTTPS、非本机 URL、外部重定向、外部 enclosure 和外部 release notes 均不得产生外网请求。每个拒绝案例必须断言实际的 sanitized nested error chain，并证明 build 13 的签名、Team/requirement、payload digest、Sparkle load 和 App launch 仍有效；接受案例对 build 14 做同等后置检查。server、updater、helper 和后代进程使用独立进程组与有界 TERM/KILL/reap，任何新残留进程都阻止继续。
 
 只有第 8 步成功后，才能把应用内更新标记为可公开使用。
 

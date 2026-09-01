@@ -32,6 +32,7 @@
 - `App/StatusItemController.swift`、`App/StatusItemButton.swift`：菜单项和更新提示点。
 - `Package.swift`、`Package.resolved`：精确固定 Sparkle 2.9.6。
 - `Distribution/SparklePublicKey.txt`：可公开提交的 Base64 Ed25519 公钥。
+- `Distribution/ProductionSigningAnchor.plist`：独立提交的生产 bundle/Team/designated-requirement 锚。
 - `Scripts/build-app.sh`：嵌入、签名并验证 Sparkle framework 和 Info.plist 更新键。
 - `Scripts/fetch-sparkle-tools.sh`：只下载 SHA-256 固定的官方 2.9.6 发布工具。
 - `Scripts/build-update-feed.sh`、`Scripts/test-update-feed.sh`：生成和验证签名 appcast。
@@ -578,11 +579,15 @@ Expected: 每个新增测试先 RED，完成后全部 PASS。
 
 - [ ] **Step 2: 增加隔离 signed-feed 验收**
 
-在 `Scripts/verify-e2e.sh --local-only` 中构建 build 13 测试 App，生成指向 build 14 的本机 HTTPS fixture feed，使用独立 bundle ID 与测试 feed URL。只有显式 `MACCHANNEL_UPDATE_TESTING=1` 时 `build-app.sh` 才接受覆盖；正式构建若看到覆盖变量必须失败。
+在 `Scripts/verify-e2e.sh --local-only` 中构建 build 13 测试 App，生成指向 build 14 的本机 HTTPS fixture feed，使用独立 bundle ID 与测试 feed URL。只有显式 `MACCHANNEL_UPDATE_TESTING=1` 时 `build-app.sh` 才接受覆盖；正式构建若看到覆盖变量必须失败。所有 fixture 使用唯一 owner-only 临时根及其直接子目录 `dist`，规范化后拒绝 traversal、symlink、错误 basename 和 `/Applications` alias；仓库正式 `dist/` 的既有资产必须逐字节保持不变。
 
 fixture 必须通过实际打包进 App 的 Sparkle 2.9.6 updater 路径验证：有效 build 14 可下载、解压、验证并安装；篡改 signed feed 后拒绝；篡改 DMG 一个字节后拒绝；换另一 Ed25519 key 且代码签名身份也不认证时拒绝；错误 signer 加无效 Ed25519 时拒绝；降级 payload 拒绝；断网后 build 13 保持稳定并可重试恢复。所有 test override 仅在 `MACCHANNEL_UPDATE_TESTING=1` 下可用，TLS 仅允许进程内 pin，不修改系统信任。
 
-采用用户批准的 Sparkle 官方双认证边界：有效 Ed25519 archive 可以轮换 Developer ID；自动化必须把“有效 Ed25519 + 轮换 signer 被接受”记录为 characterization，禁止声称运行时拒绝。发布脚本另加同 Team ID/designated requirement 门禁，在 feed 签名/发布前拒绝错误签名身份，并验证正式与 pending feed 都已清理；同 Team ID/designated requirement 通过。
+采用用户批准的 Sparkle 官方双认证边界：有效 Ed25519 archive 可以轮换 Developer ID；自动化必须把“有效 Ed25519 + 轮换 signer 被接受”记录为 characterization，禁止声称运行时拒绝。发布脚本读取独立提交的 `Distribution/ProductionSigningAnchor.plist`，以 `com.mason.macchannel`、`XKAZ67HN45` 和支持同 Team 证书轮换的 requirement 为权威；manifest 只能记录候选观察值。自洽但错误的候选 manifest/Team/requirement 必须在读取私钥和 feed 发布前拒绝并清理正式与 pending 输出，锚定身份必须通过。
+
+验收子进程只接收 `env -i` allowlist；ambient signing、notary、keychain、feed/test 变量不得传入构建或签名。HTTPS server 绑定 OS 分配的 `127.0.0.1` 端口，客户端同时 pin 证书 SHA-256 和 hostname `localhost`，并明确拒绝非 HTTPS、非本机 URL、外部 redirect/enclosure/release notes。每案断言实际 sanitized error domain/code chain；dead-server/TLS 控制不得满足篡改或降级断言。server、host 和全部后代用有界进程组清理，keychain search list 前后 byte-equal。
+
+拒绝后必须证明 build 13 的 Team/DR/signer marker、唯一 payload digest、deep/strict 签名、Sparkle load 和主 App launch 均保持有效；接受 primary 或 rotated signer 后对 build 14 做同等后置证明。测试 fixture 的 base/primary 全嵌套代码使用 allowlist identity `XKAZ67HN45`，alternate 全嵌套代码使用 `H33N6G5622`，均从内到外签名且不使用 `--deep` 代替签名；主 App 不得带 disable-library-validation，只有 acceptance/load harness 可在 test-only 构建中带该 entitlement。
 
 - [ ] **Step 3: 写真实验收表**
 

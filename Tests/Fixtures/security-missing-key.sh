@@ -3,7 +3,7 @@ set -euo pipefail
 
 case "${1:-}" in
     login-keychain)
-        exec /usr/bin/security "$@"
+        printf '"%s"\n' "${MACCHANNEL_SECURITY_SHIM_LOGIN_KEYCHAIN:?}"
         ;;
     find-generic-password)
         [[ -z "${MACCHANNEL_SECURITY_SHIM_MARKER:-}" ]] || \

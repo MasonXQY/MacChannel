@@ -209,6 +209,40 @@ final class SoftwareUpdateTests: XCTestCase {
     }
 
     @MainActor
+    func testNestedSparkleValidationAndDowngradeChainsAreSecurityFailures() {
+        let observedChains: [[Int]] = [
+            [4005, 4005, 3002],
+            [4005, 10, 4006],
+        ]
+
+        for codes in observedChains {
+            let controller = SparkleUpdateController(
+                driver: RecordingUpdateDriver(),
+                installedVersion: InstalledAppVersion(info: [:])
+            )
+            let rootError = codes.reversed().reduce(nil as NSError?) { underlying, code in
+                var userInfo: [String: Any] = [:]
+                if let underlying {
+                    userInfo[NSUnderlyingErrorKey] = underlying
+                }
+                return NSError(
+                    domain: "SUSparkleErrorDomain",
+                    code: code,
+                    userInfo: userInfo
+                )
+            }!
+
+            controller.didAbort(with: rootError, userInitiated: false)
+
+            XCTAssertEqual(
+                controller.snapshot.phase,
+                .securityFailure,
+                "Expected observed Sparkle chain \(codes) to fail closed"
+            )
+        }
+    }
+
+    @MainActor
     func testManualUpdateSessionFailureRemainsVisibleAfterFindingAnUpdate() {
         let controller = SparkleUpdateController(
             driver: RecordingUpdateDriver(),

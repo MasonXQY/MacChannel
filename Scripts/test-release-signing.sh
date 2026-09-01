@@ -67,6 +67,11 @@ test "$(plutil -extract SUAllowsAutomaticUpdates raw -o - "$plist")" = false
 test "$(plutil -extract SUVerifyUpdateBeforeExtraction raw -o - "$plist")" = true
 test "$(plutil -extract SURequireSignedFeed raw -o - "$plist")" = true
 test -n "$(plutil -extract SUPublicEDKey raw -o - "$plist")"
+test ! -e "$app_path/Contents/MacOS/MacChannelUpdateAcceptance"
+test ! -e "$app_path/Contents/MacOS/MacChannelUpdateLoadProbe"
+! plutil -extract MacChannelUpdateTestSigner raw -o - "$plist" >/dev/null 2>&1
+! codesign -d --entitlements - "$app_executable" 2>&1 | \
+    grep -F 'com.apple.security.cs.disable-library-validation' >/dev/null
 
 details="$(codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$details" >/dev/null
