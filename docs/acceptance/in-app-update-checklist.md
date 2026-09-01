@@ -2,6 +2,22 @@
 
 本表用于 Task 8 的两台真实 Mac 最终验收。自动化本机 fixture 不能替代签名、公证、公开 Release 和真实双机升级；未现场执行的项目统一保留 `NOT RUN`。
 
+## 已自动验证的公开发布证据
+
+以下证据于 2026-09-02（Asia/Dubai）从无凭据的公开 GitHub Release URL 下载后验证。它只证明公开资产、签名与公证状态，不替代 Mac A / Mac B 的现场升级。
+
+| 项目 | 自动验证结果 |
+| --- | --- |
+| Release | [v1.2.0](https://github.com/MasonXQY/MacChannel/releases/tag/v1.2.0)，非草稿、非预发布，恰好包含 `MacChannel.dmg`、`MacChannel.manifest.json`、`appcast.xml` |
+| 发布 commit / annotated tag | `657fce2302b781c8b11e2a529736f80bda067545`；远端 `v1.2.0^{}` 指向该 commit |
+| 版本 / build | `1.2.0 (13)`；manifest、appcast 和挂载 App 一致 |
+| `MacChannel.dmg` SHA-256 | `89d97360142c9fdc75f3ad09a722f9108abb4081276ba75406e0d2a7fb4eed9e` |
+| `MacChannel.manifest.json` SHA-256 | `6e843ab3c5fe9fa1d6c081aefb122d76a0436894e1fafda60f81876be68cff08` |
+| `appcast.xml` SHA-256 | `2014db28f1aae3010267255676e33619f9ec4ab52eee9a4472b155ae6b834912` |
+| appcast enclosure | `https://github.com/MasonXQY/MacChannel/releases/download/v1.2.0/MacChannel.dmg`；版本、build、长度与公开 DMG 一致，Ed25519 signature 字段存在 |
+| Bundle / Team / designated requirement | `com.mason.macchannel` / `XKAZ67HN45`；挂载 App 通过 `Distribution/ProductionSigningAnchor.plist` 的 Developer ID Application requirement |
+| 签名与公证 | DMG 与嵌套 App 通过 strict code-sign；`stapler validate` 成功；DMG 与 App 均获 Gatekeeper `accepted`，来源为 `Notarized Developer ID` |
+
 ## 版本与资产
 
 | 项目 | Mac A | Mac B |
@@ -47,9 +63,9 @@
 
 | 检查项 | 结果 |
 | --- | --- |
-| 从公开 GitHub Release 重新下载 DMG、manifest、appcast | NOT RUN |
-| 三资产版本、build、URL、digest 与签名一致 | NOT RUN |
+| 从公开 GitHub Release 重新下载 DMG、manifest、appcast | PASS（2026-09-02，无凭据公开 URL，全新 owner-only trusted temp） |
+| 三资产版本、build、URL、digest 与签名一致 | PASS（见“已自动验证的公开发布证据”） |
 | 两台 Mac 均从应用内完成最终公开版本升级 | NOT RUN |
 | 验收人、时间与备注 | NOT RUN |
 
-发布复核时以 `Distribution/ProductionSigningAnchor.plist` 的 production bundle ID、Team ID、Developer ID Application certificate-class OID 与轮换兼容 requirement 为权威；manifest 只记录候选包的观察值。Task 7 的隔离本机自动化只证明本地打包 updater、拒绝/恢复和发布门禁，不能证明公证、公开 Release 或两台真实 Mac 的升级结果；本表全部现场项在 Task 8 实际执行前必须保持 `NOT RUN`。
+发布复核时以 `Distribution/ProductionSigningAnchor.plist` 的 production bundle ID、Team ID、Developer ID Application certificate-class OID 与轮换兼容 requirement 为权威；manifest 只记录候选包的观察值。Task 7 的隔离本机自动化只证明本地打包 updater、拒绝/恢复和发布门禁；上表的 Task 8 自动化证据证明本次公证与公开 Release。Mac A / Mac B 的安装、升级、传输延迟重启及状态保留仍未现场执行，所有对应项目继续保持 `NOT RUN`。
