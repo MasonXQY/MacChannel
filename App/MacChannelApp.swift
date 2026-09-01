@@ -47,6 +47,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
     private var productionLaunchDiagnostics: ProductionLaunchDiagnostics?
     private var networkMonitor: NWPathMonitor?
     private var networkWasAvailable = false
+    private let updateController = SparkleUpdateController()
 
     init(
         initialContainer: AppContainer,
@@ -60,40 +61,42 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         install(container, status: initialStatus)
-        guard let runtimeHost else {
-            completeLaunchSmokeTestIfRequested()
-            return
-        }
-        runtimeHost.onChange = { [weak self] status, container in
-            guard let self else { return }
-            if let container {
-                self.container = container
-                self.install(container, status: status)
-                self.completeProductionLaunchTestIfRequested(status: status, container: container)
-            } else {
-                self.statusItemController?.setRuntimeStatus(status)
-                self.surfaceController?.updateRuntimeStatus(status)
-            }
-        }
-        bootstrapTask = Task { await runtimeHost.bootstrap() }
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(workspaceDidWake),
-            name: NSWorkspace.didWakeNotification,
-            object: nil
-        )
-        let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in
-            guard path.status == .satisfied else { return }
-            Task { @MainActor [weak self] in
+        if let runtimeHost {
+            runtimeHost.onChange = { [weak self] status, container in
                 guard let self else { return }
-                let shouldReconnect = !self.networkWasAvailable
-                self.networkWasAvailable = true
-                if shouldReconnect { await runtimeHost.reconnectPublicService() }
+                if let container {
+                    self.container = container
+                    self.install(container, status: status)
+                    self.completeProductionLaunchTestIfRequested(status: status, container: container)
+                } else {
+                    self.statusItemController?.setRuntimeStatus(status)
+                    self.surfaceController?.updateRuntimeStatus(status)
+                }
             }
+            bootstrapTask = Task { await runtimeHost.bootstrap() }
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self,
+                selector: #selector(workspaceDidWake),
+                name: NSWorkspace.didWakeNotification,
+                object: nil
+            )
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] path in
+                guard path.status == .satisfied else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let shouldReconnect = !self.networkWasAvailable
+                    self.networkWasAvailable = true
+                    if shouldReconnect { await runtimeHost.reconnectPublicService() }
+                }
+            }
+            monitor.start(queue: DispatchQueue(label: "app.macchannel.network-monitor"))
+            networkMonitor = monitor
         }
-        monitor.start(queue: DispatchQueue(label: "app.macchannel.network-monitor"))
-        networkMonitor = monitor
+        updateController.start()
+        if runtimeHost == nil {
+            completeLaunchSmokeTestIfRequested()
+        }
     }
 
     private func install(_ container: AppContainer, status: AppRuntimeStatus) {
@@ -110,6 +113,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
             pairingService: container.pairingSurfaceService,
             settingsService: container.settingsSurfaceService,
             directorySelector: container.directorySelector,
+            updateService: updateController,
             onRetryRuntime: { [weak runtimeHost] in
                 Task { await runtimeHost?.bootstrap() }
             }
@@ -122,6 +126,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         surfaces.updateRuntimeStatus(status)
         surfaces.observe(container.deviceDirectory)
         if let transferSnapshots = container.transferSnapshots {
+            updateController.observeTransfers(transferSnapshots)
             surfaces.observeTransferSnapshots(transferSnapshots)
         }
         if let pairingStates = container.pairingStates {
@@ -142,6 +147,7 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         networkMonitor?.cancel()
         networkMonitor = nil
         bootstrapTask?.cancel()
+        updateController.stop()
         surfaceController?.invalidate()
         statusItemController?.invalidate()
     }

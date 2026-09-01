@@ -62,6 +62,160 @@ final class SoftwareUpdateTests: XCTestCase {
     }
 
     @MainActor
+    func testManualCheckPublishesCheckingBeforeCallingDriver() {
+        let driver = RecordingUpdateDriver()
+        let controller = SparkleUpdateController(
+            driver: driver,
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        var phaseObservedByDriver: SoftwareUpdatePhase?
+        driver.onCheck = { phaseObservedByDriver = controller.snapshot.phase }
+
+        controller.checkForUpdates()
+
+        XCTAssertEqual(phaseObservedByDriver, .checking)
+        XCTAssertEqual(driver.checkCount, 1)
+    }
+
+    @MainActor
+    func testNewSnapshotSubscriberImmediatelyReceivesCurrentValue() async {
+        let controller = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        var iterator = controller.snapshots().makeAsyncIterator()
+
+        let initial = await iterator.next()
+
+        XCTAssertEqual(initial, controller.snapshot)
+        XCTAssertEqual(initial?.phase, .idle)
+    }
+
+    @MainActor
+    func testNoUpdatePublishesUpToDate() {
+        let checkedAt = Date(timeIntervalSince1970: 123)
+        let controller = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:]),
+            now: { checkedAt }
+        )
+
+        controller.didNotFindUpdate(userInitiated: true)
+
+        XCTAssertEqual(controller.snapshot.phase, .upToDate)
+        XCTAssertEqual(controller.snapshot.lastCheckedAt, checkedAt)
+    }
+
+    @MainActor
+    func testBackgroundFailureReturnsIdleWhileManualFailureIsVisible() {
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet)
+        let backgroundController = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        let manualController = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+
+        backgroundController.didAbort(with: error, userInitiated: false)
+        manualController.didAbort(with: error, userInitiated: true)
+
+        XCTAssertEqual(backgroundController.snapshot.phase, .idle)
+        XCTAssertEqual(manualController.snapshot.phase, .failed)
+    }
+
+    @MainActor
+    func testManualUpdateSessionFailureRemainsVisibleAfterFindingAnUpdate() {
+        let controller = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        controller.checkForUpdates()
+        controller.didFindUpdate(version: "1.3.0")
+
+        controller.didAbort(
+            with: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost)
+        )
+
+        XCTAssertEqual(controller.snapshot.phase, .failed)
+    }
+
+    @MainActor
+    func testFinishingScheduledUpdateCycleRefreshesCheckAvailability() {
+        let driver = RecordingUpdateDriver()
+        let controller = SparkleUpdateController(
+            driver: driver,
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        driver.canCheckForUpdates = false
+        controller.didFindUpdate(version: "1.3.0")
+        XCTAssertFalse(controller.snapshot.canCheck)
+        driver.canCheckForUpdates = true
+
+        controller.didFinishUpdateCycle(canCheck: driver.canCheckForUpdates)
+
+        XCTAssertEqual(controller.snapshot.phase, .available(version: "1.3.0"))
+        XCTAssertTrue(controller.snapshot.canCheck)
+    }
+
+    @MainActor
+    func testSignatureVerificationFailurePublishesSecurityFailure() {
+        let controller = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        let signatureError = NSError(domain: "SUSparkleErrorDomain", code: 3001)
+
+        controller.didAbort(with: signatureError, userInitiated: false)
+
+        XCTAssertEqual(controller.snapshot.phase, .securityFailure)
+    }
+
+    @MainActor
+    func testObservedTransfersDeferInstallUntilTheStreamBecomesTerminal() async {
+        let controller = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        let (stream, continuation) = AsyncStream<[TransferSnapshot]>.makeStream()
+        controller.observeTransfers { stream }
+        continuation.yield([snapshot(phase: .verifying)])
+        await drainMainActorTasks()
+        var installs = 0
+
+        XCTAssertTrue(controller.postponeRelaunch { installs += 1 })
+        XCTAssertEqual(controller.snapshot.phase, .installDeferred)
+        XCTAssertEqual(installs, 0)
+
+        continuation.yield([snapshot(phase: .completed)])
+        await drainMainActorTasks()
+        XCTAssertEqual(installs, 1)
+        continuation.finish()
+    }
+
+    @MainActor
+    func testStoppingControllerCancelsPendingInstallAndTransferObservation() async {
+        let controller = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        let (stream, continuation) = AsyncStream<[TransferSnapshot]>.makeStream()
+        controller.observeTransfers { stream }
+        continuation.yield([snapshot(phase: .cancelling)])
+        await drainMainActorTasks()
+        var installs = 0
+        XCTAssertTrue(controller.postponeRelaunch { installs += 1 })
+
+        controller.stop()
+        continuation.yield([snapshot(phase: .cancelled)])
+        await drainMainActorTasks()
+
+        XCTAssertEqual(installs, 0)
+        continuation.finish()
+    }
+
+    @MainActor
     func testInstallationWaitsForLastActiveTransferAndRunsOnce() {
         let gate = UpdateInstallationGate()
         var installs = 0
@@ -206,6 +360,13 @@ final class SoftwareUpdateTests: XCTestCase {
             route: .lan
         )
     }
+
+    @MainActor
+    private func drainMainActorTasks() async {
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+    }
 }
 
 @MainActor
@@ -216,4 +377,16 @@ private final class UpdateServiceStub: SoftwareUpdateServicing {
 
     func checkForUpdates() { checkCount += 1 }
     func showAvailableUpdate() { showCount += 1 }
+}
+
+@MainActor
+private final class RecordingUpdateDriver: UpdateDriving {
+    var canCheckForUpdates = true
+    var onCheck: (() -> Void)?
+    private(set) var checkCount = 0
+
+    func checkForUpdates() {
+        checkCount += 1
+        onCheck?()
+    }
 }

@@ -11,6 +11,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     let transferModel: TransferSurfaceModel
     let pairingModel: PairingSurfaceModel
     let settingsModel: SettingsSurfaceModel
+    let updateService: any SoftwareUpdateServicing
 
     private let transferService: any TransferSurfaceServicing
     private let pairingService: any PairingSurfaceServicing
@@ -46,6 +47,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         transferModel: TransferSurfaceModel = TransferSurfaceModel(),
         pairingModel: PairingSurfaceModel = PairingSurfaceModel(),
         settingsModel: SettingsSurfaceModel = SettingsSurfaceModel(),
+        updateService: (any SoftwareUpdateServicing)? = nil,
         onRetryRuntime: @escaping () -> Void = {},
         now: @escaping () -> Date = Date.init
     ) {
@@ -57,6 +59,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         self.transferModel = transferModel
         self.pairingModel = pairingModel
         self.settingsModel = settingsModel
+        self.updateService = updateService ?? InactiveSoftwareUpdateService()
         self.onRetryRuntime = onRetryRuntime
         self.now = now
     }
@@ -551,4 +554,12 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
             }
         }
     }
+}
+
+@MainActor
+private final class InactiveSoftwareUpdateService: SoftwareUpdateServicing {
+    let isAvailable = false
+
+    func checkForUpdates() {}
+    func showAvailableUpdate() {}
 }

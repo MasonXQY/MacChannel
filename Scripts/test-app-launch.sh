@@ -51,7 +51,9 @@ if rg -n 'Tailscale|个人网络|连接方式|安全中继地址|rendezvousURL' 
     exit 1
 fi
 
-/usr/bin/open -n -W .build/MacChannel.app --args --smoke-test "$marker_path" &
+/usr/bin/open -n -W .build/MacChannel.app --args \
+    -SUEnableAutomaticChecks NO \
+    --smoke-test "$marker_path" &
 opener_pid=$!
 
 for _ in {1..50}; do
@@ -66,7 +68,9 @@ opener_pid=""
 ! pgrep -f "$app_executable" >/dev/null
 
 env -u MACCHANNEL_RENDEZVOUS_URL -u MACCHANNEL_RUNTIME \
-    /usr/bin/open -n -W .build/MacChannel.app --args --production-launch-test "$production_marker_path" &
+    /usr/bin/open -n -W .build/MacChannel.app --args \
+    -SUEnableAutomaticChecks NO \
+    --production-launch-test "$production_marker_path" &
 opener_pid=$!
 
 for _ in {1..150}; do
