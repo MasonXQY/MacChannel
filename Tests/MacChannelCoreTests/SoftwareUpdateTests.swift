@@ -1,5 +1,6 @@
 import XCTest
 
+@testable import MacChannelCore
 @testable import MacChannelAppKit
 
 final class SoftwareUpdateTests: XCTestCase {
@@ -58,6 +59,152 @@ final class SoftwareUpdateTests: XCTestCase {
         service.showAvailableUpdate()
         XCTAssertEqual(service.checkCount, 1)
         XCTAssertEqual(service.showCount, 1)
+    }
+
+    @MainActor
+    func testInstallationWaitsForLastActiveTransferAndRunsOnce() {
+        let gate = UpdateInstallationGate()
+        var installs = 0
+        gate.updateTransfers([snapshot(phase: .transferring)])
+
+        XCTAssertTrue(gate.postponeRelaunch { installs += 1 })
+        XCTAssertEqual(installs, 0)
+
+        gate.updateTransfers([snapshot(phase: .completed)])
+        gate.updateTransfers([snapshot(phase: .completed)])
+        XCTAssertEqual(installs, 1)
+    }
+
+    @MainActor
+    func testPostponeRelaunchReturnsFalseWithoutActiveTransfers() {
+        let gate = UpdateInstallationGate()
+        var installs = 0
+
+        XCTAssertFalse(gate.postponeRelaunch { installs += 1 })
+        XCTAssertEqual(installs, 0)
+    }
+
+    @MainActor
+    func testDuplicatePostponeKeepsOnlyFirstInstallCallback() {
+        let gate = UpdateInstallationGate()
+        var firstInstalls = 0
+        var duplicateInstalls = 0
+        gate.updateTransfers([snapshot(phase: .transferring)])
+
+        XCTAssertTrue(gate.postponeRelaunch { firstInstalls += 1 })
+        XCTAssertTrue(gate.postponeRelaunch { duplicateInstalls += 1 })
+        gate.updateTransfers([snapshot(phase: .completed)])
+
+        XCTAssertEqual(firstInstalls, 1)
+        XCTAssertEqual(duplicateInstalls, 0)
+    }
+
+    @MainActor
+    func testCancellingPendingInstallPreventsTerminalTransferFromInvokingIt() {
+        let gate = UpdateInstallationGate()
+        var installs = 0
+        gate.updateTransfers([snapshot(phase: .transferring)])
+        XCTAssertTrue(gate.postponeRelaunch { installs += 1 })
+
+        gate.cancelPendingInstall()
+        gate.updateTransfers([snapshot(phase: .completed)])
+
+        XCTAssertEqual(installs, 0)
+    }
+
+    @MainActor
+    func testAllNonterminalTransferPhasesPostponeRelaunch() {
+        let activePhases: [TransferPhase] = [
+            .preparing,
+            .connecting,
+            .transferring,
+            .paused,
+            .verifying,
+            .cancelling,
+        ]
+
+        for phase in activePhases {
+            let gate = UpdateInstallationGate()
+            var installs = 0
+            gate.updateTransfers([snapshot(phase: phase)])
+
+            XCTAssertTrue(gate.postponeRelaunch { installs += 1 }, "Expected \(phase) to remain active")
+            XCTAssertEqual(installs, 0)
+        }
+    }
+
+    @MainActor
+    func testAllTerminalTransferPhasesReleasePendingInstall() {
+        let terminalPhases: [TransferPhase] = [.completed, .failed, .cancelled]
+
+        for phase in terminalPhases {
+            let gate = UpdateInstallationGate()
+            var installs = 0
+            gate.updateTransfers([snapshot(phase: .transferring)])
+            XCTAssertTrue(gate.postponeRelaunch { installs += 1 })
+
+            gate.updateTransfers([snapshot(phase: phase)])
+
+            XCTAssertEqual(installs, 1, "Expected \(phase) to release the install")
+        }
+    }
+
+    @MainActor
+    func testPendingInstallWaitsUntilEveryTransferIsTerminal() {
+        let gate = UpdateInstallationGate()
+        let first = TransferID(rawValue: UUID())
+        let second = TransferID(rawValue: UUID())
+        var installs = 0
+        gate.updateTransfers([
+            snapshot(id: first, phase: .transferring),
+            snapshot(id: second, phase: .paused),
+        ])
+        XCTAssertTrue(gate.postponeRelaunch { installs += 1 })
+
+        gate.updateTransfers([
+            snapshot(id: first, phase: .completed),
+            snapshot(id: second, phase: .verifying),
+        ])
+        XCTAssertEqual(installs, 0)
+
+        gate.updateTransfers([
+            snapshot(id: first, phase: .completed),
+            snapshot(id: second, phase: .cancelled),
+        ])
+        XCTAssertEqual(installs, 1)
+    }
+
+    @MainActor
+    func testInstallCallbackCanReenterGateWithoutRunningAgain() {
+        let gate = UpdateInstallationGate()
+        var installs = 0
+        var nestedPostponeResult: Bool?
+        gate.updateTransfers([snapshot(phase: .transferring)])
+        XCTAssertTrue(gate.postponeRelaunch {
+            installs += 1
+            gate.updateTransfers([])
+            nestedPostponeResult = gate.postponeRelaunch { installs += 1 }
+        })
+
+        gate.updateTransfers([])
+        gate.updateTransfers([])
+
+        XCTAssertEqual(installs, 1)
+        XCTAssertEqual(nestedPostponeResult, false)
+    }
+
+    private func snapshot(
+        id: TransferID = TransferID(rawValue: UUID()),
+        phase: TransferPhase
+    ) -> TransferSnapshot {
+        TransferSnapshot(
+            id: id,
+            peer: DeviceID(rawValue: UUID()),
+            phase: phase,
+            completedBytes: 0,
+            totalBytes: 1,
+            route: .lan
+        )
     }
 }
 
