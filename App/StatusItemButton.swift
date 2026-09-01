@@ -155,7 +155,11 @@ final class StatusItemButton: NSStatusBarButton {
             symbol?.isTemplate = true
             return symbol
         }
-        contentTintColor = phase == .ready ? .controlAccentColor : .labelColor
+        // Keep status-bar symbols as untinted templates so AppKit can choose
+        // the correct contrasting color for the current menu-bar material and
+        // highlighted state. Semantic label colors can resolve to black even
+        // when the menu bar itself is dark.
+        contentTintColor = nil
         let accessibilityValue: String
         if updateAvailable {
             let updateValue = updateActionEnabled

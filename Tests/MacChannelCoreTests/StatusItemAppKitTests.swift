@@ -9,6 +9,11 @@ final class StatusItemAppKitTests: XCTestCase {
         let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24))
 
         XCTAssertTrue(button.registeredDraggedTypes.contains(.fileURL))
+        XCTAssertTrue(button.image?.isTemplate == true)
+        XCTAssertNil(
+            button.contentTintColor,
+            "idle template icons must let the menu bar choose a contrasting tint"
+        )
         XCTAssertEqual(button.accessibilityRole(), .button)
         XCTAssertEqual(button.accessibilityLabel(), "Mac 通道文件传输")
         XCTAssertTrue(button.acceptsFirstResponder)
@@ -17,11 +22,18 @@ final class StatusItemAppKitTests: XCTestCase {
         button.phase = .ready
         XCTAssertEqual(button.title, "准备发送")
         XCTAssertEqual(button.accessibilityValue() as? String, "准备发送，可选择接收设备")
-        XCTAssertEqual(button.contentTintColor, .controlAccentColor)
+        XCTAssertNil(
+            button.contentTintColor,
+            "ready template icons must also remain legible over dark menu bars"
+        )
 
         button.phase = .transferring(progress: 0.42)
         XCTAssertEqual(button.title, "42%")
         XCTAssertEqual(button.accessibilityValue() as? String, "正在传输，42%")
+        XCTAssertNil(
+            button.contentTintColor,
+            "transfer icons must keep the menu bar's automatic contrasting tint"
+        )
     }
 
     @MainActor
