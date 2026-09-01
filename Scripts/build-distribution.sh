@@ -8,6 +8,7 @@ identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 version="${MACCHANNEL_VERSION:-1.2.0}"
 build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
 notary_profile="${MACCHANNEL_NOTARY_PROFILE:-}"
+release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 volume_name="Mac 通道"
 dist_root="$repo_root/dist"
 
@@ -16,8 +17,10 @@ chmod 700 "$dist_root"
 rm -f \
     "$dist_root/MacChannel.dmg" \
     "$dist_root/MacChannel.manifest.json" \
+    "$dist_root/appcast.xml" \
     "$dist_root/.MacChannel.dmg.new" \
-    "$dist_root/.MacChannel.manifest.json.new"
+    "$dist_root/.MacChannel.manifest.json.new" \
+    "$dist_root/.appcast.xml.new"
 
 fail_usage() {
     echo "$1" >&2
@@ -63,8 +66,10 @@ cleanup() {
         rm -f \
             "$dist_root/MacChannel.dmg" \
             "$dist_root/MacChannel.manifest.json" \
+            "$dist_root/appcast.xml" \
             "$dist_root/.MacChannel.dmg.new" \
-            "$dist_root/.MacChannel.manifest.json.new"
+            "$dist_root/.MacChannel.manifest.json.new" \
+            "$dist_root/.appcast.xml.new"
     fi
     exit "$status"
 }
@@ -225,6 +230,13 @@ mv "$dist_root/.MacChannel.dmg.new" "$dist_root/MacChannel.dmg"
 if ! mv "$dist_root/.MacChannel.manifest.json.new" "$dist_root/MacChannel.manifest.json"; then
     rm -f "$dist_root/MacChannel.dmg" "$dist_root/.MacChannel.manifest.json.new"
     exit 1
+fi
+
+if [[ -n "$release_notes" && "$release_state" == notarized ]]; then
+    MACCHANNEL_VERSION="$version" \
+    MACCHANNEL_BUILD_NUMBER="$build_number" \
+    MACCHANNEL_RELEASE_NOTES="$release_notes" \
+        bash Scripts/build-update-feed.sh
 fi
 published=1
 

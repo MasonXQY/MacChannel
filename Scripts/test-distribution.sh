@@ -11,6 +11,8 @@ fi
 
 grep -F 'spctl --assess --type open --context context:primary-signature' \
     Scripts/build-distribution.sh >/dev/null
+grep -F 'MACCHANNEL_RELEASE_NOTES' Scripts/build-distribution.sh >/dev/null
+grep -F 'bash Scripts/build-update-feed.sh' Scripts/build-distribution.sh >/dev/null
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then
@@ -27,7 +29,8 @@ cleanup() {
         hdiutil detach "$mounted_path" -quiet || true
     fi
     rm -rf "$test_root"
-    rm -f dist/MacChannel.dmg dist/MacChannel.manifest.json
+    rm -f dist/MacChannel.dmg dist/MacChannel.manifest.json dist/appcast.xml \
+        dist/.appcast.xml.new
 }
 trap cleanup EXIT
 
@@ -47,8 +50,16 @@ expect_failure() {
     test ! -e dist/MacChannel.manifest.json
 }
 
-expect_failure 2 env -u MACCHANNEL_CODESIGN_IDENTITY bash Scripts/build-distribution.sh
-expect_failure 2 env MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: Missing (AAAAAAAAAA)" \
+expect_distribution_failure() {
+    mkdir -p dist
+    printf '%s\n' stale-feed >dist/appcast.xml
+    expect_failure "$@"
+    test ! -e dist/appcast.xml
+    test ! -e dist/.appcast.xml.new
+}
+
+expect_distribution_failure 2 env -u MACCHANNEL_CODESIGN_IDENTITY bash Scripts/build-distribution.sh
+expect_distribution_failure 2 env MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: Missing (AAAAAAAAAA)" \
     bash Scripts/build-distribution.sh
 expect_failure 2 env MACCHANNEL_VERSION=1.0 bash Scripts/build-app.sh
 expect_failure 2 env MACCHANNEL_BUILD_NUMBER=0 bash Scripts/build-app.sh
@@ -56,27 +67,33 @@ expect_failure 2 env MACCHANNEL_BUILD_NUMBER=0 bash Scripts/build-app.sh
 dirty_marker="distribution-contract-dirty-marker"
 trap 'rm -f "$dirty_marker"; cleanup' EXIT
 : >"$dirty_marker"
-expect_failure 2 env MACCHANNEL_CODESIGN_IDENTITY="$identity" bash Scripts/build-distribution.sh
+expect_distribution_failure 2 env MACCHANNEL_CODESIGN_IDENTITY="$identity" \
+    bash Scripts/build-distribution.sh
 rm -f "$dirty_marker"
 trap cleanup EXIT
 
 for fail_at in app-built app-verified stage-ready image-created image-verified manifest-ready; do
-    expect_failure 70 env \
+    expect_distribution_failure 70 env \
         MACCHANNEL_CODESIGN_IDENTITY="$identity" \
         MACCHANNEL_DISTRIBUTION_TESTING=1 \
         MACCHANNEL_DISTRIBUTION_FAIL_AT="$fail_at" \
         bash Scripts/build-distribution.sh
 done
 
-MACCHANNEL_CODESIGN_IDENTITY="$identity" bash Scripts/build-distribution.sh
+MACCHANNEL_CODESIGN_IDENTITY="$identity" \
+MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
+    bash Scripts/build-distribution.sh
 
 test -f dist/MacChannel.dmg
 test -f dist/MacChannel.manifest.json
+test ! -e dist/appcast.xml
 codesign --verify --strict --verbose=2 dist/MacChannel.dmg
 
 cp dist/MacChannel.manifest.json "$test_root/first-manifest.json"
 first_dmg_sha="$(shasum -a 256 dist/MacChannel.dmg | awk '{print $1}')"
-MACCHANNEL_CODESIGN_IDENTITY="$identity" bash Scripts/build-distribution.sh
+MACCHANNEL_CODESIGN_IDENTITY="$identity" \
+MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
+    bash Scripts/build-distribution.sh
 
 for manifest_key in \
     product bundleIdentifier version build gitCommit teamID releaseState volumeName \
