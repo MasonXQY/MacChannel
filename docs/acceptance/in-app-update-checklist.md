@@ -18,20 +18,36 @@
 | Bundle / Team / designated requirement | `com.mason.macchannel` / `XKAZ67HN45`；挂载 App 通过 `Distribution/ProductionSigningAnchor.plist` 的 Developer ID Application requirement |
 | 签名与公证 | DMG 与嵌套 App 通过 strict code-sign；`stapler validate` 成功；DMG 与 App 均获 Gatekeeper `accepted`，来源为 `Notarized Developer ID` |
 
+## Mac A 最后一次手动迁移证据
+
+2026-09-02 在 Mac A 使用已公开复核的 v1.2.0 DMG 完成从 v1.1.10 的最后一次手动覆盖安装。此处只记录本机可自动确认的事实，不等同于应用内升级或双机传输验收。
+
+| 项目 | Mac A 观察结果 |
+| --- | --- |
+| 设备 / 系统 | `Mac14,14` / macOS `15.7.3 (24G419)` |
+| 安装路径与版本 | `/Applications/MacChannel.app`；`1.2.0 (13)` |
+| 旧版本与可恢复备份 | `1.1.10 (12)`；完整 App 保留于 owner-only trusted temp backup（路径见 Task 8 报告） |
+| 安装后身份验证 | deep/strict code-sign PASS；Team `XKAZ67HN45`；production designated-requirement PASS |
+| 公证边界 | DMG `stapler validate` PASS；安装 App Gatekeeper `accepted` / `Notarized Developer ID`；App 包本身无独立 staple ticket |
+| 正式启动 | PID `62468`，可执行路径严格来自 `/Applications/MacChannel.app`；启动后 5 秒稳定存活，错误/故障日志为 0 |
+| 本机状态 | 设置、信任与 Keychain 身份指纹保持；历史表行数未减少；未输出设置、身份、信任或历史内容 |
+| 菜单栏图标 | 仅截取状态栏项区域；白色纸飞机轮廓在深色菜单栏上清晰可辨 |
+| 仍未证明 | 应用内升级、传输中延迟重启、双机配对/传输和 Mac B 安装均为 `NOT RUN` |
+
 ## 版本与资产
 
 | 项目 | Mac A | Mac B |
 | --- | --- | --- |
-| Mac 型号 | NOT RUN | NOT RUN |
-| macOS | NOT RUN | NOT RUN |
-| 旧版本 / build | NOT RUN | NOT RUN |
-| 新版本 / build | NOT RUN | NOT RUN |
-| Git commit | NOT RUN | NOT RUN |
-| appcast SHA-256 | NOT RUN | NOT RUN |
-| DMG SHA-256 | NOT RUN | NOT RUN |
-| Team ID | NOT RUN | NOT RUN |
-| designated requirement | NOT RUN | NOT RUN |
-| 公证 / stapler / Gatekeeper | NOT RUN | NOT RUN |
+| Mac 型号 | `Mac14,14` | NOT RUN |
+| macOS | `15.7.3 (24G419)` | NOT RUN |
+| 旧版本 / build | `1.1.10 (12)` | NOT RUN |
+| 新版本 / build | `1.2.0 (13)` | NOT RUN |
+| Git commit | `657fce2302b781c8b11e2a529736f80bda067545` | NOT RUN |
+| appcast SHA-256 | `2014db28f1aae3010267255676e33619f9ec4ab52eee9a4472b155ae6b834912` | NOT RUN |
+| DMG SHA-256 | `89d97360142c9fdc75f3ad09a722f9108abb4081276ba75406e0d2a7fb4eed9e` | NOT RUN |
+| Team ID | `XKAZ67HN45` | NOT RUN |
+| designated requirement | production anchor PASS | NOT RUN |
+| 公证 / stapler / Gatekeeper | DMG staple PASS；App Gatekeeper PASS；App 无独立 staple ticket | NOT RUN |
 
 ## 正向升级
 
@@ -40,8 +56,8 @@
 | 空闲时发现、下载、验证、安装和一次重启 | NOT RUN | NOT RUN |
 | 传输中安装延迟到传输结束 | NOT RUN | NOT RUN |
 | 传输文件 SHA-256 一致 | NOT RUN | NOT RUN |
-| 设备身份、双向信任与配对保留 | NOT RUN | NOT RUN |
-| 设置、历史和接收目录保留 | NOT RUN | NOT RUN |
+| 设备身份、双向信任与配对保留 | 本机身份/信任存储保持；双向现场 NOT RUN | NOT RUN |
+| 设置、历史和接收目录保留 | 本机设置/历史未重置；跨机确认 NOT RUN | NOT RUN |
 
 ## 安全与恢复负例
 
