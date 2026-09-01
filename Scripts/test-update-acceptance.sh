@@ -197,13 +197,16 @@ assert_embedded_team() {
 
 build_fixture_app() {
     local name=$1 version=$2 build=$3 signer=$4
-    local build_root="$test_root/build-$name" output="$test_root/build-$name/MacChannel.app"
+    local build_root="$test_root/build-$name"
+    local staging_output="$test_root/MacChannel.app"
+    local archived_output="$build_root/MacChannel.app"
     local signing_identity expected_team
     signing_identity="$(test_identity_for_signer "$signer")"
     expected_team="$(test_team_for_signer "$signer")"
     mkdir -p "$build_root/home"; chmod 700 "$build_root" "$build_root/home"
+    [[ ! -e "$staging_output" && ! -L "$staging_output" ]]
     env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$test_root/" LANG=C LC_ALL=C \
-        MACCHANNEL_UPDATE_TESTING=1 MACCHANNEL_UPDATE_TEST_ROOT="$build_root" \
+        MACCHANNEL_UPDATE_TESTING=1 MACCHANNEL_UPDATE_TEST_ROOT="$test_root" \
         MACCHANNEL_BUILD_CONFIGURATION=release MACCHANNEL_UPDATE_TEST_BUNDLE_ID="$fixture_bundle_id" \
         MACCHANNEL_UPDATE_TEST_FEED_URL=https://localhost:49191/appcast.xml \
         MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$test_root/sparkle-a.pub" \
@@ -211,15 +214,20 @@ build_fixture_app() {
         MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN="$signing_keychain" \
         MACCHANNEL_CODESIGN_IDENTITY="$signing_identity" \
         MACCHANNEL_VERSION="$version" MACCHANNEL_BUILD_NUMBER="$build" \
-        MACCHANNEL_APP_OUTPUT="$output" bash Scripts/build-app.sh >"$test_root/build-$name.log" 2>&1
+        MACCHANNEL_APP_OUTPUT="$staging_output" bash Scripts/build-app.sh \
+        >"$test_root/build-$name.log" 2>&1
     ! grep -F "$fake_identity" "$test_root/build-$name.log" >/dev/null
     ! grep -F "$fake_keychain" "$test_root/build-$name.log" >/dev/null
-    assert_embedded_team "$output" "$expected_team"
+    assert_embedded_team "$staging_output" "$expected_team"
+    [[ ! -e "$archived_output" && ! -L "$archived_output" ]]
+    mv "$staging_output" "$archived_output"
+    [[ -d "$archived_output" && ! -e "$staging_output" && ! -L "$staging_output" ]]
 }
 build_fixture_app base 1.2.0 13 primary
 build_fixture_app update-primary 1.2.1 14 primary
 build_fixture_app update-alternate 1.2.1 14 alternate
 build_fixture_app update-downgrade 1.1.0 12 primary
+printf 'update-acceptance static-fixtures-complete count=4\n'
 
 production_root="$test_root/production"
 mkdir -p "$production_root/home"; chmod 700 "$production_root" "$production_root/home"

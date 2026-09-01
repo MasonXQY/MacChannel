@@ -191,6 +191,7 @@ for fixture_script in \
     test-build-app-contract.sh \
     test-distribution.sh \
     test-update-acceptance.sh \
+    test-update-acceptance-static-contract.sh \
     test-update-feed.sh \
     test-update-process-contract.sh \
     test-update-tls-contract.sh \

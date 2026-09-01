@@ -10,6 +10,20 @@ output_app="$test_root/output/MacChannel.app"
 signing_tmp="$test_root/signing-tmp"
 mkdir -p "$(dirname "$output_app")" "$signing_tmp" "$test_root/home"
 
+# Acceptance builds must use the trusted root itself and the one allowed direct
+# child output. A nested directory may archive a completed app, but it can never
+# become MACCHANNEL_UPDATE_TEST_ROOT.
+acceptance_output="$test_root/MacChannel.app"
+macchannel_require_isolated_test_root "$repo_root" "$test_root"
+macchannel_require_direct_child_path "$test_root" "$acceptance_output" MacChannel.app
+nested_test_root="$test_root/build-nested"
+mkdir "$nested_test_root"
+chmod 700 "$nested_test_root"
+if macchannel_require_isolated_test_root "$repo_root" "$nested_test_root"; then
+    echo "nested acceptance test root unexpectedly passed validation" >&2
+    exit 1
+fi
+
 cleanup() {
     if macchannel_require_canonical_test_root "$test_root"; then
         rm -rf "$test_root"
