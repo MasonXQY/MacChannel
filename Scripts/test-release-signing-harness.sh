@@ -12,6 +12,12 @@ fi
 grep -F 'app_executable' "$harness" >/dev/null
 grep -F 'smoke_pid=$!' "$harness" >/dev/null
 grep -F 'wait "$smoke_pid"' "$harness" >/dev/null
+if sed -n '/^run_smoke_test()/,/^}/p' "$harness" | \
+    grep -F 'wait "$smoke_pid"' >/dev/null; then
+    echo "release signing smoke run still has an unbounded post-marker wait" >&2
+    exit 1
+fi
+grep -F 'stop_smoke_child' "$harness" >/dev/null
 test "$(grep -c '^run_smoke_test ' "$harness")" -eq 2
 
 echo "release signing harness contract PASS"

@@ -14,18 +14,33 @@ app_path="$release_root/MacChannel.app"
 app_executable="$app_path/Contents/MacOS/MacChannelApp"
 smoke_pid=""
 
-cleanup() {
-    if [[ -n "$smoke_pid" ]]; then
-        if kill -0 "$smoke_pid" 2>/dev/null; then
-            kill -TERM "$smoke_pid" 2>/dev/null || true
-            for _ in {1..20}; do
-                kill -0 "$smoke_pid" 2>/dev/null || break
-                sleep 0.1
-            done
-            kill -KILL "$smoke_pid" 2>/dev/null || true
-        fi
-        wait "$smoke_pid" 2>/dev/null || true
+stop_smoke_child() {
+    [[ -n "$smoke_pid" ]] || return 0
+    if kill -0 "$smoke_pid" 2>/dev/null; then
+        kill -TERM "$smoke_pid" 2>/dev/null || true
+        for _ in {1..20}; do
+            kill -0 "$smoke_pid" 2>/dev/null || break
+            sleep 0.1
+        done
     fi
+    if kill -0 "$smoke_pid" 2>/dev/null; then
+        kill -KILL "$smoke_pid" 2>/dev/null || true
+        for _ in {1..20}; do
+            kill -0 "$smoke_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+    fi
+    if kill -0 "$smoke_pid" 2>/dev/null; then
+        echo "signed smoke child did not exit within the bounded deadline" >&2
+        smoke_pid=""
+        return 1
+    fi
+    wait "$smoke_pid" 2>/dev/null || true
+    smoke_pid=""
+}
+
+cleanup() {
+    stop_smoke_child || true
     rm -rf "$release_root"
 }
 trap cleanup EXIT
@@ -97,8 +112,7 @@ run_smoke_test() {
     done
     test -f "$launch_marker"
     grep -qx "ready accessory" "$launch_marker"
-    wait "$smoke_pid"
-    smoke_pid=""
+    stop_smoke_child
     ! pgrep -f "$app_executable --smoke-test $runtime_root" >/dev/null
 }
 

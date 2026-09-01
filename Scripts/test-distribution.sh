@@ -53,6 +53,7 @@ expect_failure() {
 expect_distribution_failure() {
     mkdir -p dist
     printf '%s\n' stale-feed >dist/appcast.xml
+    printf '%s\n' stale-pending >dist/.appcast.xml.new
     expect_failure "$@"
     test ! -e dist/appcast.xml
     test ! -e dist/.appcast.xml.new

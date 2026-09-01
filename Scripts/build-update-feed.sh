@@ -26,6 +26,7 @@ chmod 700 "$dist_root"
 rm -f "$feed_path" "$pending_feed"
 updates_root=""
 published=0
+release_identity_validated=0
 cleanup() {
     local status=$?
     [[ -z "$updates_root" ]] || rm -rf "$updates_root"
@@ -34,15 +35,34 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 fail_feed() {
+    local output_version=unvalidated
+    local output_build=unvalidated
+    if [[ "$release_identity_validated" -eq 1 ]]; then
+        output_version="$version"
+        output_build="$build_number"
+    fi
     printf 'update-feed failure stage=%s version=%s build=%s\n' \
-        "$1" "$version" "$build_number" >&3
+        "$1" "$output_version" "$output_build" >&3
     exit "${2:-1}"
 }
 
-[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail_feed input 2
-[[ "$build_number" =~ ^[1-9][0-9]*$ ]] || fail_feed input 2
+if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || \
+    ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
+    fail_feed input 2
+fi
+release_identity_validated=1
 [[ -n "$release_notes" && "$release_notes" == *.md ]] || fail_feed input 2
 [[ "$account" == com.mason.macchannel.updates ]] || fail_feed account 2
+
+security_command=/usr/bin/security
+requested_security_command="${MACCHANNEL_UPDATE_SECURITY_COMMAND:-}"
+if [[ -n "$requested_security_command" ]]; then
+    [[ "${MACCHANNEL_UPDATE_TESTING:-0}" == 1 ]] || fail_feed test 2
+    [[ "$requested_security_command" == /* && -f "$requested_security_command" && \
+        ! -L "$requested_security_command" && -x "$requested_security_command" ]] || \
+        fail_feed test 2
+    security_command="$requested_security_command"
+fi
 [[ -f "$dmg_path" && ! -L "$dmg_path" ]] || fail_feed assets
 [[ -f "$manifest_path" && ! -L "$manifest_path" ]] || fail_feed assets
 [[ -f "$release_notes" && ! -L "$release_notes" && -s "$release_notes" ]] || fail_feed input
@@ -74,9 +94,10 @@ public_key="$(tr -d '\r\n' <Distribution/SparklePublicKey.txt)"
 [[ "$public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || fail_feed key
 public_key_length="$(printf '%s' "$public_key" | base64 -D 2>/dev/null | wc -c | tr -d ' ')"
 [[ "$public_key_length" == 32 ]] || fail_feed key
-login_keychain="$(security login-keychain 2>/dev/null | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
+login_keychain="$("$security_command" login-keychain 2>/dev/null | \
+    sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
 [[ -f "$login_keychain" ]] || fail_feed key
-if ! keychain_metadata="$(security find-generic-password -a "$account" \
+if ! keychain_metadata="$("$security_command" find-generic-password -a "$account" \
     -s https://sparkle-project.org "$login_keychain" 2>/dev/null)"; then
     fail_feed key
 fi

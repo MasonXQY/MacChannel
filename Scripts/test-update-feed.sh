@@ -20,6 +20,7 @@ fixture_root="$test_root/fixture"
 fixture_dmg="$fixture_root/MacChannel.dmg"
 fixture_manifest="$fixture_root/MacChannel.manifest.json"
 release_notes="$repo_root/Distribution/ReleaseNotes/v1.2.0.md"
+security_shim="$test_root/security-missing-key"
 
 cleanup() {
     [[ "${MACCHANNEL_TEST_KEEP_TEMP:-0}" == 1 ]] || rm -rf "$test_root"
@@ -30,6 +31,8 @@ trap cleanup EXIT
 
 mkdir -p "$fixture_root/app"
 chmod 700 "$test_root" "$fixture_root"
+cp Tests/Fixtures/security-missing-key.sh "$security_shim"
+chmod 700 "$security_shim"
 ditto ".build/tools/Sparkle-2.9.6/Sparkle Test App.app" \
     "$fixture_root/app/MacChannel.app"
 fixture_plist="$fixture_root/app/MacChannel.app/Contents/Info.plist"
@@ -80,7 +83,39 @@ run_feed_builder() {
         MACCHANNEL_UPDATE_TESTING="${MACCHANNEL_TESTING:-0}" \
         MACCHANNEL_UPDATE_TEST_FAIL_STAGE="${MACCHANNEL_TEST_FAIL_STAGE:-}" \
         MACCHANNEL_UPDATE_TEST_MUTATION="${MACCHANNEL_TEST_MUTATION:-}" \
+        MACCHANNEL_UPDATE_SECURITY_COMMAND="${MACCHANNEL_TEST_SECURITY_COMMAND:-}" \
+        MACCHANNEL_SECURITY_SHIM_MARKER="${MACCHANNEL_TEST_SECURITY_MARKER:-}" \
+        MACCHANNEL_SECURITY_SHIM_NOISE="${MACCHANNEL_TEST_SECURITY_NOISE:-}" \
         bash Scripts/build-update-feed.sh
+}
+
+expect_unvalidated_input_failure() {
+    local input_name="$1"
+    local hostile_value="$2"
+    prepare_fixture
+    printf '%s\n' stale-feed >dist/appcast.xml
+    printf '%s\n' stale-pending >dist/.appcast.xml.new
+    set +e
+    if [[ "$input_name" == version ]]; then
+        MACCHANNEL_TEST_VERSION="$hostile_value" run_feed_builder \
+            >"$test_root/hostile-$input_name.log" 2>&1
+    else
+        MACCHANNEL_TEST_BUILD_NUMBER="$hostile_value" run_feed_builder \
+            >"$test_root/hostile-$input_name.log" 2>&1
+    fi
+    local actual_status=$?
+    set -e
+    [[ "$actual_status" -eq 2 ]]
+    grep -Fx 'update-feed failure stage=input version=unvalidated build=unvalidated' \
+        "$test_root/hostile-$input_name.log" >/dev/null
+    test "$(wc -l <"$test_root/hostile-$input_name.log" | tr -d ' ')" = 1
+    if grep -F "$hostile_value" "$test_root/hostile-$input_name.log" >/dev/null; then
+        echo "unvalidated release identity leaked into failure output" >&2
+        exit 1
+    fi
+    assert_redacted_output "$test_root/hostile-$input_name.log"
+    [[ ! -e dist/appcast.xml && ! -L dist/appcast.xml ]]
+    [[ ! -e dist/.appcast.xml.new && ! -L dist/.appcast.xml.new ]]
 }
 
 assert_redacted_output() {
@@ -117,12 +152,17 @@ expect_failure() {
     local expected_build="${MACCHANNEL_TEST_BUILD_NUMBER:-$build_number}"
     grep -Fx "update-feed failure stage=$expected_stage version=$expected_version build=$expected_build" \
         "$test_root/expected-failure.log" >/dev/null
+    test "$(wc -l <"$test_root/expected-failure.log" | tr -d ' ')" = 1
     assert_redacted_output "$test_root/expected-failure.log"
 }
 
 prepare_fixture
 mv dist/MacChannel.dmg "$test_root/missing.dmg"
 expect_failure assets run_feed_builder
+
+hostile_payload="$repo_root/MacChannel.dmg"$'\n''此版本包含安全更新与稳定性改进。'$'\033[31m$(touch /tmp/never-run)\001'
+expect_unvalidated_input_failure version "$hostile_payload"
+expect_unvalidated_input_failure build_number "$hostile_payload"
 
 prepare_fixture
 plutil -replace releaseState -string internalSignedNotNotarized \
@@ -145,6 +185,20 @@ MACCHANNEL_TEST_RELEASE_NOTES="$test_root/missing.md" expect_failure input run_f
 prepare_fixture
 MACCHANNEL_TEST_SPARKLE_ACCOUNT=com.mason.macchannel.missing \
     expect_failure account run_feed_builder
+
+prepare_fixture
+MACCHANNEL_TEST_SECURITY_COMMAND="$security_shim" \
+    expect_failure test run_feed_builder
+
+prepare_fixture
+security_marker="$test_root/security-shim-called"
+security_noise="$repo_root/MacChannel.dmg 此版本包含安全更新与稳定性改进。"
+MACCHANNEL_TESTING=1 \
+MACCHANNEL_TEST_SECURITY_COMMAND="$security_shim" \
+MACCHANNEL_TEST_SECURITY_MARKER="$security_marker" \
+MACCHANNEL_TEST_SECURITY_NOISE="$security_noise" \
+    expect_failure key run_feed_builder
+test -f "$security_marker"
 prepare_fixture
 MACCHANNEL_TEST_GENERATE_APPCAST="$repo_root/.build/tools/Sparkle-2.9.6/bin/sign_update" \
     expect_failure tool run_feed_builder
