@@ -4,9 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
 source Scripts/update-test-paths.sh
-raw_test_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-build-contract.XXXXXX")"
-chmod 700 "$raw_test_root"
-test_root="$(cd "$raw_test_root" && pwd -P)"
+test_root="$(macchannel_create_test_root macchannel-build-contract)"
 macchannel_require_canonical_test_root "$test_root"
 output_app="$test_root/output/MacChannel.app"
 signing_tmp="$test_root/signing-tmp"

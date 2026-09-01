@@ -17,9 +17,7 @@ static_only="${MACCHANNEL_UPDATE_TEST_STATIC_ONLY:-0}"
 [[ -x "$generate_appcast" && -x "$sign_update" && -f "$bounded_runner" && \
     -f "$https_server" && -f "$hang_fixture" ]]
 
-raw_test_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-update-acceptance.matrix.XXXXXX")"
-chmod 700 "$raw_test_root"
-test_root="$(cd "$raw_test_root" && pwd -P)"
+test_root="$(macchannel_create_test_root macchannel-update-acceptance.matrix)"
 macchannel_require_canonical_test_root "$test_root"
 clean_codesign() {
     env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$test_root/" LANG=C LC_ALL=C \

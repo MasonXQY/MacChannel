@@ -1,26 +1,72 @@
 #!/usr/bin/env bash
 
 # Shared fail-closed path validation for destructive update-test operations.
-# Callers must create an owner-only root first, resolve it with pwd -P, and pass
-# only direct children of that root to the mutation helpers below.
+# Test roots are created only as unique direct children of the macOS user temp
+# directory returned by an ambient-independent getconf invocation.
+
+macchannel_trusted_user_temp_parent() {
+    local reported_parent physical_parent parent_mode parent_uid source=getconf
+
+    if ! reported_parent="$(/usr/bin/env -i \
+        PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \
+        /usr/bin/getconf DARWIN_USER_TEMP_DIR 2>/dev/null)"; then
+        reported_parent=/private/tmp
+        source=fallback
+    fi
+    reported_parent="${reported_parent%/}"
+    [[ -n "$reported_parent" && "$reported_parent" == /* ]] || return 1
+    case "$reported_parent" in
+        *$'\n'*|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+    esac
+    [[ -d "$reported_parent" && ! -L "$reported_parent" ]] || return 1
+    physical_parent="$(cd "$reported_parent" 2>/dev/null && /bin/pwd -P)" || return 1
+    [[ -n "$physical_parent" && "$physical_parent" != / && ! -L "$physical_parent" ]] || return 1
+    parent_mode="$(/usr/bin/stat -f %Lp "$physical_parent" 2>/dev/null)" || return 1
+    parent_uid="$(/usr/bin/stat -f %u "$physical_parent" 2>/dev/null)" || return 1
+    if [[ "$source" == getconf ]]; then
+        [[ "$parent_mode" == 700 && "$parent_uid" == "$(/usr/bin/id -u)" ]] || return 1
+    else
+        [[ "$physical_parent" == /private/tmp && "$parent_mode" == 1777 && "$parent_uid" == 0 ]] || return 1
+    fi
+    printf '%s\n' "$physical_parent"
+}
+
+macchannel_create_test_root() {
+    local prefix="${1:-}"
+    local trusted_parent created_root
+
+    [[ "$prefix" =~ ^macchannel-[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || return 1
+    trusted_parent="$(macchannel_trusted_user_temp_parent)" || return 1
+    created_root="$(umask 077; /usr/bin/mktemp -d "$trusted_parent/$prefix.XXXXXX")" || return 1
+    if ! /bin/chmod 700 "$created_root" || ! macchannel_require_canonical_test_root "$created_root"; then
+        /bin/rmdir "$created_root" 2>/dev/null || true
+        return 1
+    fi
+    printf '%s\n' "$created_root"
+}
 
 macchannel_require_canonical_test_root() {
     local root="${1:-}"
-    local physical_root root_mode root_uid
+    local physical_root root_mode root_uid trusted_parent root_parent root_name
 
     [[ -n "$root" && "$root" == /* ]] || return 1
     case "$root" in
         *//*|*/./*|*/../*|*/.|*/..) return 1 ;;
     esac
     [[ -d "$root" && ! -L "$root" ]] || return 1
-    physical_root="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
+    physical_root="$(cd "$root" 2>/dev/null && /bin/pwd -P)" || return 1
     [[ "$physical_root" == "$root" ]] || return 1
     case "$physical_root" in
         /|/Applications|/Applications/*|/System/Applications|/System/Applications/*) return 1 ;;
     esac
-    root_mode="$(stat -f %Lp "$root" 2>/dev/null)" || return 1
-    root_uid="$(stat -f %u "$root" 2>/dev/null)" || return 1
-    [[ "$root_mode" == 700 && "$root_uid" == "$(id -u)" ]] || return 1
+    root_mode="$(/usr/bin/stat -f %Lp "$root" 2>/dev/null)" || return 1
+    root_uid="$(/usr/bin/stat -f %u "$root" 2>/dev/null)" || return 1
+    [[ "$root_mode" == 700 && "$root_uid" == "$(/usr/bin/id -u)" ]] || return 1
+    trusted_parent="$(macchannel_trusted_user_temp_parent)" || return 1
+    root_parent="${root%/*}"
+    root_name="${root##*/}"
+    [[ "$root_parent" == "$trusted_parent" ]] || return 1
+    [[ "$root_name" =~ ^macchannel-[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.[A-Za-z0-9]{6}$ ]] || return 1
 }
 
 macchannel_require_canonical_repository_root() {
@@ -32,7 +78,7 @@ macchannel_require_canonical_repository_root() {
         *//*|*/./*|*/../*|*/.|*/..) return 1 ;;
     esac
     [[ -d "$root" && ! -L "$root" ]] || return 1
-    physical_root="$(cd "$root" 2>/dev/null && pwd -P)" || return 1
+    physical_root="$(cd "$root" 2>/dev/null && /bin/pwd -P)" || return 1
     [[ "$physical_root" == "$root" ]] || return 1
     case "$physical_root" in
         /|/Applications|/Applications/*|/System/Applications|/System/Applications/*) return 1 ;;
@@ -46,6 +92,9 @@ macchannel_require_isolated_test_root() {
     macchannel_require_canonical_repository_root "$repo_root" || return 1
     macchannel_require_canonical_test_root "$test_root" || return 1
     [[ "$test_root" != "$repo_root" && "$test_root" != "$repo_root/dist" ]] || return 1
+    case "$test_root/" in
+        "$repo_root/"*) return 1 ;;
+    esac
 }
 
 macchannel_require_direct_child_path() {

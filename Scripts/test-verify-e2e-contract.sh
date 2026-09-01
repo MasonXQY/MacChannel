@@ -3,10 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 source "$repo_root/Scripts/update-test-paths.sh"
-raw_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-verify-e2e-contract.XXXXXX")"
-chmod 700 "$raw_root"
-test_root="$(cd "$raw_root" && pwd -P)"
-temp_parent="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+test_root="$(macchannel_create_test_root macchannel-verify-e2e-contract)"
+temp_parent="$(macchannel_trusted_user_temp_parent)"
 cleanup() {
     local status=$?
     trap - EXIT

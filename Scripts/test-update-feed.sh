@@ -15,9 +15,7 @@ build_number=13
 account=com.mason.macchannel.updates
 generate_appcast="$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast"
 
-raw_test_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-update-feed-test.XXXXXX")"
-chmod 700 "$raw_test_root"
-test_root="$(cd "$raw_test_root" && pwd -P)"
+test_root="$(macchannel_create_test_root macchannel-update-feed-test)"
 macchannel_require_canonical_test_root "$test_root"
 fixture_root="$test_root/fixture"
 test_dist="$test_root/dist"

@@ -25,7 +25,6 @@ expected_team_id="$(sed -E 's/^.*\(([A-Z0-9]{10})\)$/\1/' <<<"$identity")"
     exit 2
 }
 signing_home="${HOME:?}"
-signing_tmp="${TMPDIR:-/tmp}"
 unset MACCHANNEL_NOTARY_PROFILE MACCHANNEL_RELEASE_NOTES MACCHANNEL_VERSION \
     MACCHANNEL_BUILD_NUMBER MACCHANNEL_DISTRIBUTION_TESTING \
     MACCHANNEL_DISTRIBUTION_FAIL_AT MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT \
@@ -33,13 +32,12 @@ unset MACCHANNEL_NOTARY_PROFILE MACCHANNEL_RELEASE_NOTES MACCHANNEL_VERSION \
     MACCHANNEL_UPDATE_TEST_ED_KEY_FILE MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH \
     MACCHANNEL_SPARKLE_GENERATE_APPCAST MACCHANNEL_SPARKLE_ACCOUNT
 
-raw_test_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-distribution-test.XXXXXX")"
-chmod 700 "$raw_test_root"
-test_root="$(cd "$raw_test_root" && pwd -P)"
-test_dist="$test_root/dist"
-mkdir -p "$test_dist"
-chmod 700 "$test_dist"
 source Scripts/update-test-paths.sh
+test_root="$(macchannel_create_test_root macchannel-distribution-test)"
+test_dist="$test_root/dist"
+signing_tmp="$test_root/signing-tmp"
+mkdir -p "$test_dist" "$signing_tmp"
+chmod 700 "$test_dist" "$signing_tmp"
 macchannel_require_canonical_test_root "$test_root"
 test "$(MACCHANNEL_UPDATE_TESTING=1 MACCHANNEL_UPDATE_TEST_ROOT="$test_root" \
     MACCHANNEL_UPDATE_TEST_DIST_ROOT="$test_dist" \
