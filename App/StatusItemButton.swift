@@ -7,6 +7,14 @@ final class StatusItemButton: NSStatusBarButton {
         didSet { render() }
     }
 
+    var updateAvailable = false {
+        didSet { render() }
+    }
+
+    var showsUpdateIndicator: Bool {
+        updateAvailable && phase == .idle
+    }
+
     var onDragEntered: ((DropIntent, StatusItemDragFingerprint) -> StatusItemDragToken?)?
     var onDragCancelled: ((StatusItemDragToken, StatusItemDragFingerprint) -> Void)?
     var onDropOutside: ((StatusItemDragToken, StatusItemDragFingerprint) -> Void)?
@@ -79,6 +87,21 @@ final class StatusItemButton: NSStatusBarButton {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+
+        if showsUpdateIndicator {
+            let diameter: CGFloat = 4
+            let indicator = NSBezierPath(
+                ovalIn: NSRect(
+                    x: bounds.maxX - diameter - 4,
+                    y: bounds.maxY - diameter - 4,
+                    width: diameter,
+                    height: diameter
+                )
+            )
+            NSColor.controlAccentColor.setFill()
+            indicator.fill()
+        }
+
         guard let progress = phase.presentation.progress else { return }
 
         let center = NSPoint(x: 13, y: bounds.midY)
@@ -129,8 +152,11 @@ final class StatusItemButton: NSStatusBarButton {
             return symbol
         }
         contentTintColor = phase == .ready ? .controlAccentColor : .labelColor
-        setAccessibilityValue(phase.localizedAccessibilityValue)
-        toolTip = phase.localizedAccessibilityValue
+        let accessibilityValue = updateAvailable
+            ? "\(phase.localizedAccessibilityValue)，有新版本可用"
+            : phase.localizedAccessibilityValue
+        setAccessibilityValue(accessibilityValue)
+        toolTip = accessibilityValue
         needsDisplay = true
     }
 

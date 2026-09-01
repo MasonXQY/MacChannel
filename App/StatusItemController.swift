@@ -45,6 +45,8 @@ final class StatusItemController: NSObject {
     private var runtimeStatus: AppRuntimeStatus?
     private var runtimeStatusItem: NSMenuItem?
     private var runtimeRetryItem: NSMenuItem?
+    private var availableUpdateItem: NSMenuItem?
+    private var availableUpdateAction: (() -> Void)?
 
     init(
         button: StatusItemButton,
@@ -259,6 +261,14 @@ final class StatusItemController: NSObject {
         renderPhase()
     }
 
+    func setUpdateAvailable(_ available: Bool, action: (() -> Void)?) {
+        availableUpdateAction = available ? action : nil
+        availableUpdateItem?.isHidden = !available
+        availableUpdateItem?.isEnabled = available && action != nil
+        button.updateAvailable = available
+        renderPhase()
+    }
+
     func updateDeviceNames(_ names: [DeviceID: String]) {
         for (id, rawName) in names {
             let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -387,6 +397,22 @@ final class StatusItemController: NSObject {
         settings.keyEquivalentModifierMask = [.command]
         settings.target = self
         statusMenu.addItem(settings)
+
+        let availableUpdate = NSMenuItem(
+            title: "有新版本可用",
+            action: #selector(showAvailableUpdate(_:)),
+            keyEquivalent: ""
+        )
+        availableUpdate.target = self
+        availableUpdate.isHidden = true
+        availableUpdate.isEnabled = false
+        availableUpdate.image = NSImage(
+            systemSymbolName: "arrow.down.circle",
+            accessibilityDescription: "有新版本可用"
+        )
+        availableUpdate.setAccessibilityLabel("有新版本可用")
+        availableUpdateItem = availableUpdate
+        statusMenu.addItem(availableUpdate)
         statusMenu.addItem(.separator())
 
         let quit = NSMenuItem(
@@ -446,11 +472,10 @@ final class StatusItemController: NSObject {
 
     private func renderPhase() {
         button.phase = state.phase
-        let accessibilityValue = if let runtimeStatus {
-            "\(state.phase.localizedAccessibilityValue)，\(runtimeStatus.localizedText)"
-        } else {
-            state.phase.localizedAccessibilityValue
-        }
+        var accessibilityParts = [state.phase.localizedAccessibilityValue]
+        if let runtimeStatus { accessibilityParts.append(runtimeStatus.localizedText) }
+        if button.updateAvailable { accessibilityParts.append("有新版本可用") }
+        let accessibilityValue = accessibilityParts.joined(separator: "，")
         button.setAccessibilityValue(accessibilityValue)
         nativeButton?.setAccessibilityValue(accessibilityValue)
         nativeButton?.toolTip = accessibilityValue
@@ -491,6 +516,10 @@ final class StatusItemController: NSObject {
 
     @objc private func showSettings(_ sender: Any?) {
         onShowSettings?()
+    }
+
+    @objc private func showAvailableUpdate(_ sender: Any?) {
+        availableUpdateAction?()
     }
 
     @objc private func retryRuntime(_ sender: Any?) {

@@ -3,6 +3,17 @@ import MacChannelCore
 import SwiftUI
 
 @MainActor
+protocol SoftwareUpdateSnapshotProviding: AnyObject {
+    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { get }
+    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot>
+}
+
+extension SparkleUpdateController: SoftwareUpdateSnapshotProviding {
+    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { snapshot }
+    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot> { snapshots() }
+}
+
+@MainActor
 final class AppSurfaceController: NSObject, NSPopoverDelegate {
     static let historyLimit = 200
     static let liveHistoryLimit = historyLimit
@@ -37,6 +48,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private var pendingPeerTask: Task<Void, Never>?
     private var pairedDeviceTask: Task<Void, Never>?
     private var historyTask: Task<Void, Never>?
+    private var softwareUpdateTask: Task<Void, Never>?
 
     init(
         fanPanel: DeviceFanPanel = DeviceFanPanel(),
@@ -67,6 +79,12 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     func bind(to controller: StatusItemController) {
         statusController = controller
         controller.updateDeviceNames(deviceNames)
+        if let updates = updateService as? any SoftwareUpdateSnapshotProviding {
+            updateSoftwareUpdate(updates.softwareUpdateSnapshot)
+            observeSoftwareUpdates(updates)
+        } else {
+            updateSoftwareUpdate(settingsModel.updateSnapshot)
+        }
         let previousTransferStarted = controller.onTransferStarted
         controller.onTransferStarted = { [weak self] id, token in
             if let self {
@@ -216,6 +234,16 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     func updateRuntimeStatus(_ status: AppRuntimeStatus) {
         settingsModel.runtimeStatus = status
+    }
+
+    func updateSoftwareUpdate(_ snapshot: SoftwareUpdateSnapshot) {
+        settingsModel.updateSnapshot = snapshot
+        statusController?.setUpdateAvailable(
+            snapshot.phase.hasAvailableUpdate,
+            action: snapshot.phase.hasAvailableUpdate
+                ? { [weak self] in self?.updateService.showAvailableUpdate() }
+                : nil
+        )
     }
 
     func updateTransferSnapshots(_ snapshots: [TransferSnapshot]) {
@@ -368,7 +396,9 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         pairedDeviceTask?.cancel()
         pairedDeviceTask = nil
         historyTask?.cancel()
+        softwareUpdateTask?.cancel()
         historyTask = nil
+        softwareUpdateTask = nil
         transferTokens.removeAll()
         latestSnapshots.removeAll()
         lastLiveItems.removeAll()
@@ -418,6 +448,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 model: settingsModel,
                 service: settingsService,
                 directorySelector: directorySelector,
+                updateService: updateService,
                 onRetryRuntime: onRetryRuntime,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
             )
@@ -551,6 +582,17 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                     ? Double(snapshot.completedBytes) / Double(snapshot.totalBytes)
                     : 0
                 statusController.updateTransferProgress(progress, token: token)
+            }
+        }
+    }
+
+    private func observeSoftwareUpdates(_ updates: any SoftwareUpdateSnapshotProviding) {
+        softwareUpdateTask?.cancel()
+        softwareUpdateTask = Task { [weak self, weak updates] in
+            guard let updates else { return }
+            for await snapshot in updates.softwareUpdateSnapshots() {
+                guard !Task.isCancelled else { return }
+                self?.updateSoftwareUpdate(snapshot)
             }
         }
     }

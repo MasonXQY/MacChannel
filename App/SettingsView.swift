@@ -125,6 +125,7 @@ final class SettingsSurfaceModel: ObservableObject {
     @Published var launchAtLogin: Bool
     @Published var devices: [DeviceSetting]
     @Published var runtimeStatus: AppRuntimeStatus
+    @Published var updateSnapshot: SoftwareUpdateSnapshot
     @Published var actionError: String?
     @Published var actionNotice: String?
     private let announcer: any AccessibilityAnnouncing
@@ -136,6 +137,12 @@ final class SettingsSurfaceModel: ObservableObject {
         launchAtLogin: Bool = false,
         devices: [DeviceSetting] = [],
         runtimeStatus: AppRuntimeStatus = .loading,
+        updateSnapshot: SoftwareUpdateSnapshot = SoftwareUpdateSnapshot(
+            installedVersion: InstalledAppVersion(),
+            phase: .idle,
+            canCheck: false,
+            lastCheckedAt: nil
+        ),
         actionError: String? = nil,
         announcer: (any AccessibilityAnnouncing)? = nil
     ) {
@@ -145,6 +152,7 @@ final class SettingsSurfaceModel: ObservableObject {
         self.launchAtLogin = launchAtLogin
         self.devices = devices
         self.runtimeStatus = runtimeStatus
+        self.updateSnapshot = updateSnapshot
         self.actionError = actionError
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
     }
@@ -280,6 +288,14 @@ final class SettingsSurfaceModel: ObservableObject {
         }
     }
 
+    func performUpdateAction(using service: any SoftwareUpdateServicing) {
+        if updateSnapshot.phase.hasAvailableUpdate {
+            service.showAvailableUpdate()
+        } else {
+            service.checkForUpdates()
+        }
+    }
+
     private func publishError(_ message: String) {
         actionNotice = nil
         actionError = message
@@ -312,6 +328,7 @@ struct SettingsView: View {
     @ObservedObject var model: SettingsSurfaceModel
     let service: any DeviceSettingsServicing
     let directorySelector: any DirectorySelecting
+    let updateService: any SoftwareUpdateServicing
     let loginItems: any LoginItemRegistering
     let onRetryRuntime: () -> Void
     let onDismiss: () -> Void
@@ -321,6 +338,7 @@ struct SettingsView: View {
         model: SettingsSurfaceModel,
         service: any DeviceSettingsServicing,
         directorySelector: any DirectorySelecting,
+        updateService: any SoftwareUpdateServicing,
         loginItems: any LoginItemRegistering = LoginItemController.shared,
         onRetryRuntime: @escaping () -> Void = {},
         onDismiss: @escaping () -> Void
@@ -328,6 +346,7 @@ struct SettingsView: View {
         self.model = model
         self.service = service
         self.directorySelector = directorySelector
+        self.updateService = updateService
         self.loginItems = loginItems
         self.onRetryRuntime = onRetryRuntime
         self.onDismiss = onDismiss
@@ -340,54 +359,63 @@ struct SettingsView: View {
             statusMessages
             Divider()
             Form {
-                Section("这台 Mac") {
-                    HStack {
-                        TextField("本机名称", text: $draftLocalName)
-                            .frame(minHeight: 40)
-                            .onSubmit(saveLocalName)
-                            .accessibilityLabel("本机名称")
-                        Button("保存", action: saveLocalName)
-                            .disabled(
-                                draftLocalName.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    .isEmpty
-                            )
-                            .frame(minHeight: 40)
-                    }
-                }
-
-                Section("接收文件") {
-                    Toggle("自动接收已配对 Mac 发来的文件", isOn: autoReceiveBinding)
-                        .frame(minHeight: 40)
-                    HStack {
-                        Label(defaultDirectoryText, systemImage: "folder")
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .accessibilityLabel("接收目录，\(defaultDirectoryText)")
-                        Spacer()
-                        Button("选择…", action: chooseDefaultDirectory)
-                            .frame(minHeight: 40)
-                    }
-                    Text("默认保存到“下载/Mac 通道”；可以改成任何文件夹。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("已配对的 Mac") {
-                    if model.devices.isEmpty {
-                        Label("还没有其他 Mac", systemImage: "desktopcomputer")
-                            .foregroundStyle(.secondary)
-                            .frame(minHeight: 60)
-                    } else {
-                        ForEach(model.devices) { device in
-                            DeviceSettingRow(device: device, model: model, service: service)
+                Group {
+                    Section("这台 Mac") {
+                        HStack {
+                            TextField("本机名称", text: $draftLocalName)
+                                .frame(minHeight: 40)
+                                .onSubmit(saveLocalName)
+                                .accessibilityLabel("本机名称")
+                            Button("保存", action: saveLocalName)
+                                .disabled(
+                                    draftLocalName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        .isEmpty
+                                )
+                                .frame(minHeight: 40)
                         }
                     }
-                }
 
-                Section("启动") {
-                    Toggle("登录后自动启动 Mac 通道", isOn: launchAtLoginBinding)
-                        .frame(minHeight: 40)
+                    Section("接收文件") {
+                        Toggle("自动接收已配对 Mac 发来的文件", isOn: autoReceiveBinding)
+                            .frame(minHeight: 40)
+                        HStack {
+                            Label(defaultDirectoryText, systemImage: "folder")
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .accessibilityLabel("接收目录，\(defaultDirectoryText)")
+                            Spacer()
+                            Button("选择…", action: chooseDefaultDirectory)
+                                .frame(minHeight: 40)
+                        }
+                        Text("默认保存到“下载/Mac 通道”；可以改成任何文件夹。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Section("已配对的 Mac") {
+                        if model.devices.isEmpty {
+                            Label("还没有其他 Mac", systemImage: "desktopcomputer")
+                                .foregroundStyle(.secondary)
+                                .frame(minHeight: 60)
+                        } else {
+                            ForEach(model.devices) { device in
+                                DeviceSettingRow(device: device, model: model, service: service)
+                            }
+                        }
+                    }
+
+                    Section("启动") {
+                        Toggle("登录后自动启动 Mac 通道", isOn: launchAtLoginBinding)
+                            .frame(minHeight: 40)
+                    }
                 }
+                .disabled(!service.isAvailable)
+
+                SoftwareUpdateSection(
+                    snapshot: model.updateSnapshot,
+                    serviceAvailable: updateService.isAvailable,
+                    performAction: { model.performUpdateAction(using: updateService) }
+                )
 
                 DisclosureGroup("诊断信息") {
                     Label("正在使用内置安全服务", systemImage: "lock.shield")
@@ -395,9 +423,9 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                .disabled(!service.isAvailable)
             }
             .formStyle(.grouped)
-            .disabled(!service.isAvailable)
         }
         .frame(width: 540, height: 650)
         .onExitCommand(perform: onDismiss)
@@ -496,6 +524,58 @@ struct SettingsView: View {
         guard let selected = directorySelector.chooseDirectory(current: model.defaultDirectory)
         else { return }
         Task { await model.updateDefaultDirectory(selected, using: service) }
+    }
+}
+
+private struct SoftwareUpdateSection: View {
+    let snapshot: SoftwareUpdateSnapshot
+    let serviceAvailable: Bool
+    let performAction: () -> Void
+
+    var body: some View {
+        Section("软件更新") {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(snapshot.installedVersion.localizedText)
+                        .font(.body.weight(.medium))
+                    if isFailure {
+                        Text(snapshot.phase.statusText)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text(snapshot.phase.statusText)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("最近检查：\(snapshot.lastCheckedText())")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("每天自动检查一次，是否安装由你决定。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                Button(actionTitle, action: performAction)
+                    .frame(minHeight: 40)
+                    .disabled(!serviceAvailable || !snapshot.canCheck)
+                    .accessibilityHint(actionHint)
+            }
+        }
+    }
+
+    private var actionTitle: String {
+        snapshot.phase.hasAvailableUpdate ? "查看更新" : "检查更新"
+    }
+
+    private var actionHint: String {
+        snapshot.phase.hasAvailableUpdate
+            ? "打开软件更新窗口，查看版本说明和安装选项"
+            : "立即检查是否有新的 Mac 通道版本"
+    }
+
+    private var isFailure: Bool {
+        switch snapshot.phase {
+        case .failed, .securityFailure: true
+        case .idle, .checking, .upToDate, .available, .downloading, .installDeferred: false
+        }
     }
 }
 

@@ -38,6 +38,66 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testAvailableUpdateAddsAccessibleMenuActionAndIndicator() throws {
+        _ = NSApplication.shared
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: RecordingTransferCoordinator()
+        )
+        var opened = 0
+
+        controller.setUpdateAvailable(true, action: { opened += 1 })
+
+        let item = controller.statusMenu.items.first { $0.title == "有新版本可用" }
+        XCTAssertFalse(item?.isHidden ?? true)
+        let action = try XCTUnwrap(item?.action)
+        XCTAssertTrue(NSApp.sendAction(action, to: item?.target, from: item))
+        XCTAssertEqual(opened, 1)
+        XCTAssertTrue(controller.button.updateAvailable)
+        XCTAssertTrue(controller.button.showsUpdateIndicator)
+        XCTAssertTrue(
+            (controller.button.accessibilityValue() as? String)?.contains("有新版本") == true
+        )
+
+        controller.button.phase = .ready
+        XCTAssertFalse(controller.button.showsUpdateIndicator)
+        XCTAssertTrue(
+            (controller.button.accessibilityValue() as? String)?.contains("有新版本") == true
+        )
+
+        controller.setUpdateAvailable(false, action: nil)
+        XCTAssertTrue(item?.isHidden ?? false)
+        XCTAssertFalse(controller.button.updateAvailable)
+    }
+
+    @MainActor
+    func testUpdateIndicatorUsesResolvableSystemAccentInLightAndDarkAppearances() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("App/StatusItemButton.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains("NSColor.controlAccentColor"))
+
+        for name: NSAppearance.Name in [.aqua, .darkAqua] {
+            let appearance = try XCTUnwrap(NSAppearance(named: name))
+            var resolved: NSColor?
+            appearance.performAsCurrentDrawingAppearance {
+                resolved = NSColor.controlAccentColor.usingColorSpace(.sRGB)
+            }
+            let color = try XCTUnwrap(
+                resolved,
+                "accent color did not resolve for \(name.rawValue)"
+            )
+            XCTAssertEqual(color.alphaComponent, CGFloat(1), accuracy: CGFloat(0.001))
+        }
+    }
+
+    @MainActor
     func testKeyboardFilePickerPresentsOnlineDevicesAndUsesOneShotSend() async throws {
         let transfer = RecordingTransferCoordinator()
         let online = DeviceID(rawValue: UUID())
@@ -212,6 +272,11 @@ final class StatusItemAppKitTests: XCTestCase {
         XCTAssertEqual(nativeButton.accessibilityValue() as? String, "空闲")
         XCTAssertFalse(controller.button.isAccessibilityElement())
         XCTAssertEqual(nativeButton.focusRingType, .default)
+
+        controller.setUpdateAvailable(true, action: {})
+        XCTAssertTrue(
+            (nativeButton.accessibilityValue() as? String)?.contains("有新版本可用") == true
+        )
     }
 
     @MainActor

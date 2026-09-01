@@ -181,6 +181,96 @@ final class TransferSurfaceTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testSettingsExposeInstalledVersionAndManualUpdateAction() {
+        let updates = RecordingSoftwareUpdateService()
+        let snapshot = SoftwareUpdateSnapshot.fixtureUpToDate
+        let model = SettingsSurfaceModel(updateSnapshot: snapshot)
+
+        XCTAssertEqual(
+            model.updateSnapshot.installedVersion.localizedText,
+            "Mac 通道 1.2.0（13）"
+        )
+        model.performUpdateAction(using: updates)
+        XCTAssertEqual(updates.checkCount, 1)
+        XCTAssertEqual(updates.showCount, 0)
+
+        model.updateSnapshot = SoftwareUpdateSnapshot(
+            installedVersion: snapshot.installedVersion,
+            phase: .available(version: "1.2.1"),
+            canCheck: true,
+            lastCheckedAt: snapshot.lastCheckedAt
+        )
+        model.performUpdateAction(using: updates)
+        XCTAssertEqual(updates.checkCount, 1)
+        XCTAssertEqual(updates.showCount, 1)
+    }
+
+    @MainActor
+    func testSurfaceBindingPublishesUpdateSnapshotAndMenuAction() async throws {
+        _ = NSApplication.shared
+        let snapshot = SoftwareUpdateSnapshot(
+            installedVersion: SoftwareUpdateSnapshot.fixtureUpToDate.installedVersion,
+            phase: .available(version: "1.2.1"),
+            canCheck: true,
+            lastCheckedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let updates = RecordingSoftwareUpdateService(snapshot: snapshot)
+        let settings = SettingsSurfaceModel(updateSnapshot: .fixtureUpToDate)
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: SurfaceTransferCoordinator()
+            ),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            settingsModel: settings,
+            updateService: updates
+        )
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: SurfaceTransferCoordinator()
+        )
+
+        surfaces.bind(to: controller)
+        for _ in 0..<100 where settings.updateSnapshot != snapshot {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(settings.updateSnapshot, snapshot)
+        let item = try XCTUnwrap(
+            controller.statusMenu.items.first { $0.title == "有新版本可用" }
+        )
+        XCTAssertFalse(item.isHidden)
+        let action = try XCTUnwrap(item.action)
+        XCTAssertTrue(NSApp.sendAction(action, to: item.target, from: item))
+        XCTAssertEqual(updates.showCount, 1)
+    }
+
+    func testSettingsSourceContainsIndependentNativeSoftwareUpdateSection() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let settings = try String(
+            contentsOf: root.appendingPathComponent("App/SettingsView.swift"),
+            encoding: .utf8
+        )
+
+        for required in [
+            "软件更新",
+            "检查更新",
+            "每天自动检查一次，是否安装由你决定。",
+            "最近检查：",
+            ".foregroundStyle(.orange)",
+        ] {
+            XCTAssertTrue(settings.contains(required), "missing update UI contract: \(required)")
+        }
+        XCTAssertTrue(settings.contains(".frame(minHeight: 40)"))
+        XCTAssertTrue(settings.contains("SoftwareUpdateSection"))
+    }
+
     func testOrdinaryPairingAndSettingsSourcesContainNoExpertNetworkOrFingerprintControls() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1106,6 +1196,45 @@ private actor CorrelatedSurfaceTransferCoordinator: TransferCoordinating {
     func resume(_ id: TransferID) async throws {}
     func cancel(_ id: TransferID) async -> TransferCancellationResult { .requested }
     func sendCount() -> Int { sends }
+}
+
+@MainActor
+private final class RecordingSoftwareUpdateService:
+    SoftwareUpdateServicing,
+    SoftwareUpdateSnapshotProviding
+{
+    let isAvailable = true
+    private(set) var checkCount = 0
+    private(set) var showCount = 0
+    let softwareUpdateSnapshot: SoftwareUpdateSnapshot
+
+    init(snapshot: SoftwareUpdateSnapshot = .fixtureUpToDate) {
+        softwareUpdateSnapshot = snapshot
+    }
+
+    func checkForUpdates() { checkCount += 1 }
+    func showAvailableUpdate() { showCount += 1 }
+
+    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot> {
+        AsyncStream { continuation in
+            continuation.yield(softwareUpdateSnapshot)
+            continuation.finish()
+        }
+    }
+}
+
+private extension SoftwareUpdateSnapshot {
+    static var fixtureUpToDate: SoftwareUpdateSnapshot {
+        SoftwareUpdateSnapshot(
+            installedVersion: InstalledAppVersion(info: [
+                "CFBundleShortVersionString": "1.2.0",
+                "CFBundleVersion": "13",
+            ]),
+            phase: .upToDate,
+            canCheck: true,
+            lastCheckedAt: Date(timeIntervalSince1970: 1_000)
+        )
+    }
 }
 
 @MainActor
