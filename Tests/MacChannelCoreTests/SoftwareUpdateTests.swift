@@ -16,7 +16,7 @@ final class SoftwareUpdateTests: XCTestCase {
     }
 
     func testUpdatePhasesProvideLocalizedStatusAndAvailability() {
-        XCTAssertEqual(SoftwareUpdatePhase.idle.statusText, "尚未检查更新。")
+        XCTAssertEqual(SoftwareUpdatePhase.idle.statusText, "每天自动检查一次，是否安装由你决定。")
         XCTAssertEqual(SoftwareUpdatePhase.checking.statusText, "正在检查更新…")
         XCTAssertEqual(SoftwareUpdatePhase.upToDate.statusText, "当前已是最新版本。")
         XCTAssertEqual(SoftwareUpdatePhase.available(version: "1.2.1").statusText, "发现新版本 1.2.1。")

@@ -263,8 +263,12 @@ final class StatusItemController: NSObject {
 
     func setUpdateAvailable(_ available: Bool, action: (() -> Void)?) {
         availableUpdateAction = available ? action : nil
+        availableUpdateItem?.action = availableUpdateAction == nil
+            ? nil
+            : #selector(showAvailableUpdate(_:))
+        availableUpdateItem?.target = availableUpdateAction == nil ? nil : self
         availableUpdateItem?.isHidden = !available
-        availableUpdateItem?.isEnabled = available && action != nil
+        availableUpdateItem?.isEnabled = availableUpdateAction != nil
         availableUpdateItem?.setAccessibilityHelp(
             available && action == nil
                 ? "更新窗口暂时不可用，请稍后再试。"
@@ -406,10 +410,9 @@ final class StatusItemController: NSObject {
 
         let availableUpdate = NSMenuItem(
             title: "有新版本可用",
-            action: #selector(showAvailableUpdate(_:)),
+            action: nil,
             keyEquivalent: ""
         )
-        availableUpdate.target = self
         availableUpdate.isHidden = true
         availableUpdate.isEnabled = false
         availableUpdate.image = NSImage(

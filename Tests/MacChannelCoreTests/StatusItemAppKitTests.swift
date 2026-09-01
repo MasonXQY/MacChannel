@@ -81,6 +81,37 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testUnavailableUpdateMenuSurvivesAutoValidationAndRestoresItsAction() throws {
+        _ = NSApplication.shared
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: RecordingTransferCoordinator()
+        )
+        let item = try XCTUnwrap(
+            controller.statusMenu.items.first { $0.title == "有新版本可用" }
+        )
+
+        controller.setUpdateAvailable(true, action: nil)
+        controller.statusMenu.update()
+
+        XCTAssertFalse(item.isHidden)
+        XCTAssertFalse(item.isEnabled)
+        XCTAssertNil(item.action)
+        XCTAssertNil(item.target)
+        XCTAssertTrue(item.accessibilityHelp()?.contains("暂时不可用") == true)
+
+        var opened = 0
+        controller.setUpdateAvailable(true, action: { opened += 1 })
+        controller.statusMenu.update()
+
+        XCTAssertTrue(item.isEnabled)
+        let action = try XCTUnwrap(item.action)
+        XCTAssertTrue(NSApp.sendAction(action, to: item.target, from: item))
+        XCTAssertEqual(opened, 1)
+    }
+
+    @MainActor
     func testUpdateIndicatorUsesResolvableSystemAccentInLightAndDarkAppearances() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

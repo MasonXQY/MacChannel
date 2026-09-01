@@ -530,6 +530,18 @@ struct SettingsView: View {
     }
 }
 
+struct SoftwareUpdateSectionPresentation: Equatable {
+    let statusText: String?
+    let guidanceText: String
+    let lastCheckedText: String
+
+    init(snapshot: SoftwareUpdateSnapshot, timeZone: TimeZone = .current) {
+        statusText = snapshot.phase == .idle ? nil : snapshot.phase.statusText
+        guidanceText = SoftwareUpdatePhase.idle.statusText
+        lastCheckedText = snapshot.lastCheckedText(timeZone: timeZone)
+    }
+}
+
 private struct SoftwareUpdateSection: View {
     let snapshot: SoftwareUpdateSnapshot
     let serviceAvailable: Bool
@@ -541,17 +553,19 @@ private struct SoftwareUpdateSection: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(snapshot.installedVersion.localizedText)
                         .font(.body.weight(.medium))
-                    if isFailure {
-                        Text(snapshot.phase.statusText)
-                            .foregroundStyle(.orange)
-                    } else {
-                        Text(snapshot.phase.statusText)
-                            .foregroundStyle(.secondary)
+                    if let statusText = presentation.statusText {
+                        if isFailure {
+                            Text(statusText)
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text(statusText)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    Text("最近检查：\(snapshot.lastCheckedText())")
+                    Text("最近检查：\(presentation.lastCheckedText)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("每天自动检查一次，是否安装由你决定。")
+                    Text(presentation.guidanceText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if snapshot.phase.hasAvailableUpdate && !snapshot.canShowUpdate {
@@ -572,6 +586,10 @@ private struct SoftwareUpdateSection: View {
 
     private var actionTitle: String {
         snapshot.phase.hasAvailableUpdate ? "查看更新" : "检查更新"
+    }
+
+    private var presentation: SoftwareUpdateSectionPresentation {
+        SoftwareUpdateSectionPresentation(snapshot: snapshot)
     }
 
     private var actionAvailable: Bool {

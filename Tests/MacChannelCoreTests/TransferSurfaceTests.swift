@@ -327,18 +327,42 @@ final class TransferSurfaceTests: XCTestCase {
         for required in [
             "软件更新",
             "检查更新",
-            "每天自动检查一次，是否安装由你决定。",
             "最近检查：",
+            "Text(presentation.guidanceText)",
             ".foregroundStyle(.orange)",
         ] {
             XCTAssertTrue(settings.contains(required), "missing update UI contract: \(required)")
         }
         XCTAssertTrue(settings.contains(".frame(minHeight: 40)"))
         XCTAssertTrue(settings.contains("SoftwareUpdateSection"))
+        let updateModel = try String(
+            contentsOf: root.appendingPathComponent("App/SoftwareUpdateModel.swift"),
+            encoding: .utf8
+        )
         XCTAssertEqual(
-            settings.components(separatedBy: "每天自动检查一次，是否安装由你决定。").count - 1,
+            (settings + updateModel)
+                .components(separatedBy: "每天自动检查一次，是否安装由你决定。").count - 1,
             1
         )
+        XCTAssertFalse(settings.contains("尚未检查更新"))
+    }
+
+    func testIdleUpdatePresentationShowsGuidanceOnceWithARealLastCheckedValue() {
+        let snapshot = SoftwareUpdateSnapshot.fixture(
+            phase: .idle,
+            canCheck: true,
+            lastCheckedAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        let presentation = SoftwareUpdateSectionPresentation(
+            snapshot: snapshot,
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertNil(presentation.statusText)
+        XCTAssertEqual(presentation.guidanceText, SoftwareUpdatePhase.idle.statusText)
+        XCTAssertNotEqual(presentation.lastCheckedText, "尚未检查")
+        XCTAssertFalse(presentation.lastCheckedText.contains("尚未检查更新"))
     }
 
     func testOrdinaryPairingAndSettingsSourcesContainNoExpertNetworkOrFingerprintControls() throws {
@@ -1343,13 +1367,14 @@ private extension SoftwareUpdateSnapshot {
 
     static func fixture(
         phase: SoftwareUpdatePhase,
-        canCheck: Bool
+        canCheck: Bool,
+        lastCheckedAt: Date = Date(timeIntervalSince1970: 2_000)
     ) -> SoftwareUpdateSnapshot {
         SoftwareUpdateSnapshot(
             installedVersion: fixtureUpToDate.installedVersion,
             phase: phase,
             canCheck: canCheck,
-            lastCheckedAt: Date(timeIntervalSince1970: 2_000)
+            lastCheckedAt: lastCheckedAt
         )
     }
 }
