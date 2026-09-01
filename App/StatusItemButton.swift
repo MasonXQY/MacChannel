@@ -11,6 +11,10 @@ final class StatusItemButton: NSStatusBarButton {
         didSet { render() }
     }
 
+    var updateActionEnabled = false {
+        didSet { render() }
+    }
+
     var showsUpdateIndicator: Bool {
         updateAvailable && phase == .idle
     }
@@ -152,9 +156,15 @@ final class StatusItemButton: NSStatusBarButton {
             return symbol
         }
         contentTintColor = phase == .ready ? .controlAccentColor : .labelColor
-        let accessibilityValue = updateAvailable
-            ? "\(phase.localizedAccessibilityValue)，有新版本可用"
-            : phase.localizedAccessibilityValue
+        let accessibilityValue: String
+        if updateAvailable {
+            let updateValue = updateActionEnabled
+                ? "有新版本可用"
+                : "有新版本可用，暂时无法查看"
+            accessibilityValue = "\(phase.localizedAccessibilityValue)，\(updateValue)"
+        } else {
+            accessibilityValue = phase.localizedAccessibilityValue
+        }
         setAccessibilityValue(accessibilityValue)
         toolTip = accessibilityValue
         needsDisplay = true

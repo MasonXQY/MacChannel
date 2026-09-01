@@ -56,6 +56,7 @@ final class StatusItemAppKitTests: XCTestCase {
         XCTAssertEqual(opened, 1)
         XCTAssertTrue(controller.button.updateAvailable)
         XCTAssertTrue(controller.button.showsUpdateIndicator)
+        XCTAssertTrue(controller.button.updateActionEnabled)
         XCTAssertTrue(
             (controller.button.accessibilityValue() as? String)?.contains("有新版本") == true
         )
@@ -64,6 +65,14 @@ final class StatusItemAppKitTests: XCTestCase {
         XCTAssertFalse(controller.button.showsUpdateIndicator)
         XCTAssertTrue(
             (controller.button.accessibilityValue() as? String)?.contains("有新版本") == true
+        )
+
+        controller.setUpdateAvailable(true, action: nil)
+        XCTAssertFalse(item?.isEnabled ?? true)
+        XCTAssertFalse(controller.button.updateActionEnabled)
+        XCTAssertTrue(
+            (controller.button.accessibilityValue() as? String)?
+                .contains("暂时无法查看") == true
         )
 
         controller.setUpdateAvailable(false, action: nil)

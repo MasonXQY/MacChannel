@@ -240,7 +240,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         settingsModel.updateSnapshot = snapshot
         statusController?.setUpdateAvailable(
             snapshot.phase.hasAvailableUpdate,
-            action: snapshot.phase.hasAvailableUpdate
+            action: snapshot.canShowUpdate
                 ? { [weak self] in self?.updateService.showAvailableUpdate() }
                 : nil
         )

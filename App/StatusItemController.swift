@@ -265,6 +265,12 @@ final class StatusItemController: NSObject {
         availableUpdateAction = available ? action : nil
         availableUpdateItem?.isHidden = !available
         availableUpdateItem?.isEnabled = available && action != nil
+        availableUpdateItem?.setAccessibilityHelp(
+            available && action == nil
+                ? "更新窗口暂时不可用，请稍后再试。"
+                : "打开软件更新窗口"
+        )
+        button.updateActionEnabled = available && action != nil
         button.updateAvailable = available
         renderPhase()
     }
@@ -474,7 +480,13 @@ final class StatusItemController: NSObject {
         button.phase = state.phase
         var accessibilityParts = [state.phase.localizedAccessibilityValue]
         if let runtimeStatus { accessibilityParts.append(runtimeStatus.localizedText) }
-        if button.updateAvailable { accessibilityParts.append("有新版本可用") }
+        if button.updateAvailable {
+            accessibilityParts.append(
+                button.updateActionEnabled
+                    ? "有新版本可用"
+                    : "有新版本可用，暂时无法查看"
+            )
+        }
         let accessibilityValue = accessibilityParts.joined(separator: "，")
         button.setAccessibilityValue(accessibilityValue)
         nativeButton?.setAccessibilityValue(accessibilityValue)

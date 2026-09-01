@@ -32,7 +32,7 @@ enum SoftwareUpdatePhase: Equatable, Sendable {
     var statusText: String {
         switch self {
         case .idle:
-            "每天自动检查一次，是否安装由你决定。"
+            "尚未检查更新。"
         case .checking:
             "正在检查更新…"
         case .upToDate:
@@ -65,6 +65,10 @@ struct SoftwareUpdateSnapshot: Equatable, Sendable {
     let phase: SoftwareUpdatePhase
     let canCheck: Bool
     let lastCheckedAt: Date?
+
+    var canShowUpdate: Bool {
+        phase.hasAvailableUpdate && canCheck
+    }
 
     func lastCheckedText(timeZone: TimeZone = .current) -> String {
         guard let lastCheckedAt else { return "尚未检查" }

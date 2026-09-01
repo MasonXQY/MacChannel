@@ -289,9 +289,12 @@ final class SettingsSurfaceModel: ObservableObject {
     }
 
     func performUpdateAction(using service: any SoftwareUpdateServicing) {
+        guard service.isAvailable else { return }
         if updateSnapshot.phase.hasAvailableUpdate {
+            guard updateSnapshot.canShowUpdate else { return }
             service.showAvailableUpdate()
         } else {
+            guard updateSnapshot.canCheck else { return }
             service.checkForUpdates()
         }
     }
@@ -551,11 +554,17 @@ private struct SoftwareUpdateSection: View {
                     Text("每天自动检查一次，是否安装由你决定。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if snapshot.phase.hasAvailableUpdate && !snapshot.canShowUpdate {
+                        Text("更新窗口暂时不可用，请稍后再试。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer(minLength: 12)
                 Button(actionTitle, action: performAction)
                     .frame(minHeight: 40)
-                    .disabled(!serviceAvailable || !snapshot.canCheck)
+                    .disabled(!actionAvailable)
+                    .accessibilityLabel(actionAccessibilityLabel)
                     .accessibilityHint(actionHint)
             }
         }
@@ -565,10 +574,22 @@ private struct SoftwareUpdateSection: View {
         snapshot.phase.hasAvailableUpdate ? "查看更新" : "检查更新"
     }
 
+    private var actionAvailable: Bool {
+        guard serviceAvailable else { return false }
+        return snapshot.phase.hasAvailableUpdate ? snapshot.canShowUpdate : snapshot.canCheck
+    }
+
     private var actionHint: String {
         snapshot.phase.hasAvailableUpdate
             ? "打开软件更新窗口，查看版本说明和安装选项"
             : "立即检查是否有新的 Mac 通道版本"
+    }
+
+    private var actionAccessibilityLabel: String {
+        if snapshot.phase.hasAvailableUpdate && !snapshot.canShowUpdate {
+            return "查看更新，暂时不可用"
+        }
+        return actionTitle
     }
 
     private var isFailure: Bool {

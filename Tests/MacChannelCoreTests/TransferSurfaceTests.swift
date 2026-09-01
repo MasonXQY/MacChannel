@@ -204,18 +204,35 @@ final class TransferSurfaceTests: XCTestCase {
         model.performUpdateAction(using: updates)
         XCTAssertEqual(updates.checkCount, 1)
         XCTAssertEqual(updates.showCount, 1)
+
+        model.updateSnapshot = SoftwareUpdateSnapshot(
+            installedVersion: snapshot.installedVersion,
+            phase: .available(version: "1.2.1"),
+            canCheck: false,
+            lastCheckedAt: snapshot.lastCheckedAt
+        )
+        model.performUpdateAction(using: updates)
+        XCTAssertEqual(updates.checkCount, 1)
+        XCTAssertEqual(updates.showCount, 1)
     }
 
     @MainActor
-    func testSurfaceBindingPublishesUpdateSnapshotAndMenuAction() async throws {
+    func testSurfaceBindingPropagatesLiveUpdatesAndRejectsStaleOrPostInvalidationEvents()
+        async throws
+    {
         _ = NSApplication.shared
-        let snapshot = SoftwareUpdateSnapshot(
-            installedVersion: SoftwareUpdateSnapshot.fixtureUpToDate.installedVersion,
+        let initial = SoftwareUpdateSnapshot.fixtureUpToDate
+        let unavailable = SoftwareUpdateSnapshot.fixture(
             phase: .available(version: "1.2.1"),
-            canCheck: true,
-            lastCheckedAt: Date(timeIntervalSince1970: 2_000)
+            canCheck: false
         )
-        let updates = RecordingSoftwareUpdateService(snapshot: snapshot)
+        let available = SoftwareUpdateSnapshot.fixture(
+            phase: .available(version: "1.2.1"),
+            canCheck: true
+        )
+        let downloading = SoftwareUpdateSnapshot.fixture(phase: .downloading, canCheck: false)
+        let deferred = SoftwareUpdateSnapshot.fixture(phase: .installDeferred, canCheck: true)
+        let updates = ControllableSoftwareUpdateService(snapshot: initial)
         let settings = SettingsSurfaceModel(updateSnapshot: .fixtureUpToDate)
         let surfaces = AppSurfaceController(
             transferService: NativeTransferSurfaceService(
@@ -227,25 +244,74 @@ final class TransferSurfaceTests: XCTestCase {
             settingsModel: settings,
             updateService: updates
         )
-        let controller = StatusItemController(
+        let firstController = StatusItemController(
             button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
             devices: [],
             transferCoordinator: SurfaceTransferCoordinator()
         )
 
-        surfaces.bind(to: controller)
-        for _ in 0..<100 where settings.updateSnapshot != snapshot {
-            await Task.yield()
-        }
+        surfaces.bind(to: firstController)
+        await drainMainActorTasks()
+        XCTAssertEqual(updates.subscriptionCount, 1)
+        XCTAssertEqual(settings.updateSnapshot, initial)
 
-        XCTAssertEqual(settings.updateSnapshot, snapshot)
-        let item = try XCTUnwrap(
-            controller.statusMenu.items.first { $0.title == "有新版本可用" }
+        updates.publish(unavailable)
+        await drainMainActorTasks()
+        XCTAssertEqual(settings.updateSnapshot, unavailable)
+        let firstItem = try XCTUnwrap(
+            firstController.statusMenu.items.first { $0.title == "有新版本可用" }
         )
-        XCTAssertFalse(item.isHidden)
-        let action = try XCTUnwrap(item.action)
-        XCTAssertTrue(NSApp.sendAction(action, to: item.target, from: item))
+        XCTAssertFalse(firstItem.isHidden)
+        XCTAssertFalse(firstItem.isEnabled)
+        XCTAssertFalse(firstController.button.updateActionEnabled)
+        XCTAssertTrue(
+            (firstController.button.accessibilityValue() as? String)?
+                .contains("暂时无法查看") == true
+        )
+        XCTAssertEqual(updates.showCount, 0)
+
+        updates.publish(available)
+        await drainMainActorTasks()
+        XCTAssertTrue(firstItem.isEnabled)
+        let availableAction = try XCTUnwrap(firstItem.action)
+        XCTAssertTrue(NSApp.sendAction(availableAction, to: firstItem.target, from: firstItem))
         XCTAssertEqual(updates.showCount, 1)
+
+        updates.publish(downloading)
+        await drainMainActorTasks()
+        XCTAssertFalse(firstItem.isEnabled)
+
+        let secondController = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: SurfaceTransferCoordinator()
+        )
+        surfaces.bind(to: secondController)
+        await drainMainActorTasks()
+        XCTAssertEqual(updates.subscriptionCount, 2)
+        XCTAssertEqual(updates.terminationCount, 1)
+        XCTAssertEqual(settings.updateSnapshot, downloading)
+
+        updates.yieldStale(available, subscription: 0)
+        await drainMainActorTasks()
+        XCTAssertEqual(settings.updateSnapshot, downloading)
+
+        updates.publish(deferred)
+        await drainMainActorTasks()
+        XCTAssertEqual(settings.updateSnapshot, deferred)
+        let secondItem = try XCTUnwrap(
+            secondController.statusMenu.items.first { $0.title == "有新版本可用" }
+        )
+        XCTAssertTrue(secondItem.isEnabled)
+
+        surfaces.invalidate()
+        await drainMainActorTasks()
+        XCTAssertEqual(updates.terminationCount, 2)
+        updates.yieldStale(initial, subscription: 1)
+        await drainMainActorTasks()
+        XCTAssertEqual(settings.updateSnapshot, deferred)
+        XCTAssertFalse(secondItem.isHidden)
+        XCTAssertTrue(secondItem.isEnabled)
     }
 
     func testSettingsSourceContainsIndependentNativeSoftwareUpdateSection() throws {
@@ -269,6 +335,10 @@ final class TransferSurfaceTests: XCTestCase {
         }
         XCTAssertTrue(settings.contains(".frame(minHeight: 40)"))
         XCTAssertTrue(settings.contains("SoftwareUpdateSection"))
+        XCTAssertEqual(
+            settings.components(separatedBy: "每天自动检查一次，是否安装由你决定。").count - 1,
+            1
+        )
     }
 
     func testOrdinaryPairingAndSettingsSourcesContainNoExpertNetworkOrFingerprintControls() throws {
@@ -1167,6 +1237,13 @@ final class TransferSurfaceTests: XCTestCase {
             updatedAt: Date(timeIntervalSince1970: 1_000)
         )
     }
+
+    @MainActor
+    private func drainMainActorTasks() async {
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+    }
 }
 
 private actor SurfaceTransferCoordinator: TransferCoordinating {
@@ -1199,16 +1276,29 @@ private actor CorrelatedSurfaceTransferCoordinator: TransferCoordinating {
 }
 
 @MainActor
-private final class RecordingSoftwareUpdateService:
+private final class RecordingSoftwareUpdateService: SoftwareUpdateServicing {
+    let isAvailable = true
+    private(set) var checkCount = 0
+    private(set) var showCount = 0
+
+    func checkForUpdates() { checkCount += 1 }
+    func showAvailableUpdate() { showCount += 1 }
+}
+
+@MainActor
+private final class ControllableSoftwareUpdateService:
     SoftwareUpdateServicing,
     SoftwareUpdateSnapshotProviding
 {
     let isAvailable = true
     private(set) var checkCount = 0
     private(set) var showCount = 0
-    let softwareUpdateSnapshot: SoftwareUpdateSnapshot
+    private(set) var subscriptionCount = 0
+    private(set) var terminationCount = 0
+    private var continuations: [AsyncStream<SoftwareUpdateSnapshot>.Continuation] = []
+    var softwareUpdateSnapshot: SoftwareUpdateSnapshot
 
-    init(snapshot: SoftwareUpdateSnapshot = .fixtureUpToDate) {
+    init(snapshot: SoftwareUpdateSnapshot) {
         softwareUpdateSnapshot = snapshot
     }
 
@@ -1216,10 +1306,25 @@ private final class RecordingSoftwareUpdateService:
     func showAvailableUpdate() { showCount += 1 }
 
     func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot> {
-        AsyncStream { continuation in
+        subscriptionCount += 1
+        return AsyncStream { continuation in
+            continuations.append(continuation)
             continuation.yield(softwareUpdateSnapshot)
-            continuation.finish()
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in
+                    self?.terminationCount += 1
+                }
+            }
         }
+    }
+
+    func publish(_ snapshot: SoftwareUpdateSnapshot) {
+        softwareUpdateSnapshot = snapshot
+        continuations.last?.yield(snapshot)
+    }
+
+    func yieldStale(_ snapshot: SoftwareUpdateSnapshot, subscription: Int) {
+        continuations[subscription].yield(snapshot)
     }
 }
 
@@ -1233,6 +1338,18 @@ private extension SoftwareUpdateSnapshot {
             phase: .upToDate,
             canCheck: true,
             lastCheckedAt: Date(timeIntervalSince1970: 1_000)
+        )
+    }
+
+    static func fixture(
+        phase: SoftwareUpdatePhase,
+        canCheck: Bool
+    ) -> SoftwareUpdateSnapshot {
+        SoftwareUpdateSnapshot(
+            installedVersion: fixtureUpToDate.installedVersion,
+            phase: phase,
+            canCheck: canCheck,
+            lastCheckedAt: Date(timeIntervalSince1970: 2_000)
         )
     }
 }

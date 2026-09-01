@@ -16,7 +16,7 @@ final class SoftwareUpdateTests: XCTestCase {
     }
 
     func testUpdatePhasesProvideLocalizedStatusAndAvailability() {
-        XCTAssertEqual(SoftwareUpdatePhase.idle.statusText, "每天自动检查一次，是否安装由你决定。")
+        XCTAssertEqual(SoftwareUpdatePhase.idle.statusText, "尚未检查更新。")
         XCTAssertEqual(SoftwareUpdatePhase.checking.statusText, "正在检查更新…")
         XCTAssertEqual(SoftwareUpdatePhase.upToDate.statusText, "当前已是最新版本。")
         XCTAssertEqual(SoftwareUpdatePhase.available(version: "1.2.1").statusText, "发现新版本 1.2.1。")
@@ -25,6 +25,26 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertTrue(SoftwareUpdatePhase.downloading.hasAvailableUpdate)
         XCTAssertTrue(SoftwareUpdatePhase.installDeferred.hasAvailableUpdate)
         XCTAssertFalse(SoftwareUpdatePhase.securityFailure.hasAvailableUpdate)
+    }
+
+    func testAvailableUpdateActionCapabilityMatchesSparkleForegroundValidation() {
+        let installed = InstalledAppVersion(info: [:])
+        func snapshot(_ phase: SoftwareUpdatePhase, canCheck: Bool) -> SoftwareUpdateSnapshot {
+            SoftwareUpdateSnapshot(
+                installedVersion: installed,
+                phase: phase,
+                canCheck: canCheck,
+                lastCheckedAt: nil
+            )
+        }
+
+        XCTAssertTrue(snapshot(.available(version: "1.2.1"), canCheck: true).canShowUpdate)
+        XCTAssertFalse(snapshot(.available(version: "1.2.1"), canCheck: false).canShowUpdate)
+        XCTAssertTrue(snapshot(.downloading, canCheck: true).canShowUpdate)
+        XCTAssertFalse(snapshot(.downloading, canCheck: false).canShowUpdate)
+        XCTAssertTrue(snapshot(.installDeferred, canCheck: true).canShowUpdate)
+        XCTAssertFalse(snapshot(.installDeferred, canCheck: false).canShowUpdate)
+        XCTAssertFalse(snapshot(.upToDate, canCheck: true).canShowUpdate)
     }
 
     func testSnapshotFormatsLastCheckedTimeWithInjectedTimeZone() {
