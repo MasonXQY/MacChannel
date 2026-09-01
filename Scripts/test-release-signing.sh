@@ -2,8 +2,8 @@
 set -euo pipefail
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-version="${MACCHANNEL_VERSION:-1.1.10}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-12}"
+version="${MACCHANNEL_VERSION:-1.2.0}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
 if [[ -z "$identity" ]]; then
     echo "MACCHANNEL_CODESIGN_IDENTITY is required" >&2
     exit 2
@@ -30,6 +30,20 @@ MACCHANNEL_APP_OUTPUT="$app_path" \
     bash Scripts/build-app.sh
 
 codesign --verify --deep --strict --verbose=2 "$app_path"
+
+sparkle="$app_path/Contents/Frameworks/Sparkle.framework"
+plist="$app_path/Contents/Info.plist"
+test -d "$sparkle"
+test -x "$sparkle/Versions/Current/Sparkle"
+test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
+    "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
+test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$plist")" = true
+test "$(plutil -extract SUScheduledCheckInterval raw -o - "$plist")" = 86400.000000
+test "$(plutil -extract SUAutomaticallyUpdate raw -o - "$plist")" = false
+test "$(plutil -extract SUAllowsAutomaticUpdates raw -o - "$plist")" = false
+test "$(plutil -extract SUVerifyUpdateBeforeExtraction raw -o - "$plist")" = true
+test "$(plutil -extract SURequireSignedFeed raw -o - "$plist")" = true
+test -n "$(plutil -extract SUPublicEDKey raw -o - "$plist")"
 
 details="$(codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$details" >/dev/null

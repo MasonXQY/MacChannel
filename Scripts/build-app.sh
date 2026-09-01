@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+cd "$repo_root"
+
 build_configuration="${MACCHANNEL_BUILD_CONFIGURATION:-debug}"
 codesign_identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-app_version="${MACCHANNEL_VERSION:-1.1.10}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-12}"
+app_version="${MACCHANNEL_VERSION:-1.2.0}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
 
 case "$build_configuration" in
     debug|release) ;;
@@ -20,6 +23,21 @@ if [[ ! "$app_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 fi
 if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
     echo "MACCHANNEL_BUILD_NUMBER must be a positive integer" >&2
+    exit 2
+fi
+
+sparkle_public_key_path="$repo_root/Distribution/SparklePublicKey.txt"
+if [[ ! -f "$sparkle_public_key_path" ]]; then
+    echo "Distribution/SparklePublicKey.txt is required" >&2
+    exit 2
+fi
+if [[ "$(awk 'END { print NR }' "$sparkle_public_key_path")" -ne 1 ]]; then
+    echo "Distribution/SparklePublicKey.txt must contain exactly one line" >&2
+    exit 2
+fi
+IFS= read -r sparkle_public_key < "$sparkle_public_key_path"
+if [[ ! "$sparkle_public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+    echo "Distribution/SparklePublicKey.txt must contain a Sparkle public key" >&2
     exit 2
 fi
 
@@ -56,16 +74,19 @@ if [[ -n "$codesign_identity" ]]; then
 fi
 
 contents_path="$working_app/Contents"
-mkdir -p "$contents_path/MacOS" "$contents_path/Resources"
+mkdir -p "$contents_path/MacOS" "$contents_path/Resources" "$contents_path/Frameworks"
 cp -X "$product_path/MacChannelApp" "$contents_path/MacOS/MacChannelApp"
 cp -X -R "$product_path/WebRTC.framework" "$contents_path/MacOS/WebRTC.framework"
+cp -X -R "$product_path/Sparkle.framework" "$contents_path/Frameworks/Sparkle.framework"
 if [[ "$build_configuration" == release ]]; then
+    install_name_tool -add_rpath @executable_path/../Frameworks "$contents_path/MacOS/MacChannelApp"
     install_name_tool -add_rpath @executable_path "$contents_path/MacOS/MacChannelApp"
-fi
-if [[ -n "$codesign_identity" ]]; then
-    cp -X -R "$product_path/MacChannel_MacChannelAppKit.bundle" "$contents_path/Resources/MacChannel_MacChannelAppKit.bundle"
+    cp -X -R "$product_path/MacChannel_MacChannelAppKit.bundle" \
+        "$contents_path/Resources/MacChannel_MacChannelAppKit.bundle"
 else
-    cp -X -R "$product_path/MacChannel_MacChannelAppKit.bundle" "$working_app/MacChannel_MacChannelAppKit.bundle"
+    cp -X -R "$product_path/Sparkle.framework" "$contents_path/MacOS/Sparkle.framework"
+    cp -X -R "$product_path/MacChannel_MacChannelAppKit.bundle" \
+        "$working_app/MacChannel_MacChannelAppKit.bundle"
 fi
 
 cat > "$contents_path/Info.plist" <<PLIST
@@ -91,12 +112,29 @@ cat > "$contents_path/Info.plist" <<PLIST
     <true/>
     <key>NSDownloadsFolderUsageDescription</key>
     <string>用于将来自已配对 Mac 的文件自动保存到“下载”文件夹。</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>$sparkle_public_key</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <real>86400</real>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <key>SURequireSignedFeed</key>
+    <true/>
 </dict>
 </plist>
 PLIST
 plutil -lint "$contents_path/Info.plist" >/dev/null
 
 if [[ -n "$codesign_identity" ]]; then
+    xattr -cr "$working_app"
     signing_args=(
         --force
         --sign "$codesign_identity"
@@ -104,12 +142,23 @@ if [[ -n "$codesign_identity" ]]; then
         --timestamp
     )
 
+    sparkle_path="$working_app/Contents/Frameworks/Sparkle.framework"
+    for nested_sparkle_code in \
+        "$sparkle_path/Versions/Current/XPCServices/Downloader.xpc" \
+        "$sparkle_path/Versions/Current/XPCServices/Installer.xpc" \
+        "$sparkle_path/Versions/Current/Updater.app" \
+        "$sparkle_path/Versions/Current/Autoupdate"; do
+        if [[ -e "$nested_sparkle_code" ]]; then
+            codesign "${signing_args[@]}" "$nested_sparkle_code"
+        fi
+    done
+
+    codesign "${signing_args[@]}" "$sparkle_path"
     codesign "${signing_args[@]}" "$working_app/Contents/MacOS/WebRTC.framework"
     codesign "${signing_args[@]}" "$working_app/Contents/MacOS/MacChannelApp"
     codesign "${signing_args[@]}" "$working_app"
 
     mv "$working_app" "$app_path"
-    xattr -cr "$app_path"
     signing_root=""
     trap - EXIT
 else

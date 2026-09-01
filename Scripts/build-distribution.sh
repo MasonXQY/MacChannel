@@ -5,8 +5,8 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-version="${MACCHANNEL_VERSION:-1.1.10}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-12}"
+version="${MACCHANNEL_VERSION:-1.2.0}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
 notary_profile="${MACCHANNEL_NOTARY_PROFILE:-}"
 volume_name="Mac 通道"
 dist_root="$repo_root/dist"
@@ -117,6 +117,17 @@ done < <(find "$stage_path" -depth -print | LC_ALL=C sort)
 
 normalized_stage="$build_root/normalized-stage"
 ditto --noextattr --noqtn "$stage_path" "$normalized_stage"
+sparkle_path="$normalized_stage/MacChannel.app/Contents/Frameworks/Sparkle.framework"
+codesign --remove-signature "$sparkle_path" >/dev/null 2>&1
+for nested_sparkle_code in \
+    "$sparkle_path/Versions/Current/XPCServices/Downloader.xpc" \
+    "$sparkle_path/Versions/Current/XPCServices/Installer.xpc" \
+    "$sparkle_path/Versions/Current/Updater.app" \
+    "$sparkle_path/Versions/Current/Autoupdate"; do
+    if [[ -e "$nested_sparkle_code" ]]; then
+        codesign --remove-signature "$nested_sparkle_code" >/dev/null 2>&1
+    fi
+done
 codesign --remove-signature \
     "$normalized_stage/MacChannel.app/Contents/MacOS/WebRTC.framework" >/dev/null 2>&1
 codesign --remove-signature \

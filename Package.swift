@@ -10,6 +10,7 @@ let package = Package(
         .executable(name: "MacChannelApp", targets: ["MacChannelApp"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6"),
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "150.0.0"),
     ],
     targets: [
@@ -24,7 +25,10 @@ let package = Package(
         ),
         .target(
             name: "MacChannelAppKit",
-            dependencies: ["MacChannelCore"],
+            dependencies: [
+                "MacChannelCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             path: "App",
             resources: [.copy("Resources")]
         ),

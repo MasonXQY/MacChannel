@@ -103,14 +103,26 @@ printf '%s\n' Applications MacChannel.app README.txt | LC_ALL=C sort >"$test_roo
 cmp "$test_root/expected-entries.txt" "$mapfile_path"
 test -L "$mounted_path/Applications"
 test "$(readlink "$mounted_path/Applications")" = /Applications
-grep -F "版本 1.1.10 (12)" "$mounted_path/README.txt" >/dev/null
+grep -F "版本 1.2.0 (13)" "$mounted_path/README.txt" >/dev/null
 codesign --verify --deep --strict --verbose=2 "$mounted_path/MacChannel.app"
 
 plist="$mounted_path/MacChannel.app/Contents/Info.plist"
-test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.1.10
+sparkle="$mounted_path/MacChannel.app/Contents/Frameworks/Sparkle.framework"
+test -d "$sparkle"
+test -x "$sparkle/Versions/Current/Sparkle"
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.2.0
 test -n "$(plutil -extract NSDownloadsFolderUsageDescription raw -o - "$plist")"
-test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 12
+test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 13
 test "$(plutil -extract CFBundlePackageType raw -o - "$plist")" = APPL
+test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
+    "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
+test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$plist")" = true
+test "$(plutil -extract SUScheduledCheckInterval raw -o - "$plist")" = 86400.000000
+test "$(plutil -extract SUAutomaticallyUpdate raw -o - "$plist")" = false
+test "$(plutil -extract SUAllowsAutomaticUpdates raw -o - "$plist")" = false
+test "$(plutil -extract SUVerifyUpdateBeforeExtraction raw -o - "$plist")" = true
+test "$(plutil -extract SURequireSignedFeed raw -o - "$plist")" = true
+test -n "$(plutil -extract SUPublicEDKey raw -o - "$plist")"
 
 mutated_app="$test_root/Mutated.app"
 ditto "$mounted_path/MacChannel.app" "$mutated_app"
@@ -124,8 +136,8 @@ manifest_sha="$(plutil -extract dmgSHA256 raw -o - dist/MacChannel.manifest.json
 actual_sha="$(shasum -a 256 dist/MacChannel.dmg | awk '{print $1}')"
 test "$manifest_sha" = "$actual_sha"
 test "$(plutil -extract gitCommit raw -o - dist/MacChannel.manifest.json)" = "$(git rev-parse HEAD)"
-test "$(plutil -extract version raw -o - dist/MacChannel.manifest.json)" = 1.1.10
-test "$(plutil -extract build raw -o - dist/MacChannel.manifest.json)" = 12
+test "$(plutil -extract version raw -o - dist/MacChannel.manifest.json)" = 1.2.0
+test "$(plutil -extract build raw -o - dist/MacChannel.manifest.json)" = 13
 test "$(plutil -extract releaseState raw -o - dist/MacChannel.manifest.json)" = internalSignedNotNotarized
 test "$(plutil -extract teamID raw -o - dist/MacChannel.manifest.json)" = "$expected_team_id"
 

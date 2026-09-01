@@ -2,7 +2,8 @@
 set -euo pipefail
 
 bash Scripts/build-app.sh
-app_executable="$(pwd)/.build/MacChannel.app/Contents/MacOS/MacChannelApp"
+app_path="$(pwd)/.build/MacChannel.app"
+app_executable="$app_path/Contents/MacOS/MacChannelApp"
 if pgrep -f "$app_executable" >/dev/null; then
     echo "MacChannelApp is already running; refusing an ambiguous launch test" >&2
     exit 1
@@ -25,10 +26,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test "$(plutil -extract LSUIElement raw .build/MacChannel.app/Contents/Info.plist)" = "true"
-test "$(plutil -extract CFBundlePackageType raw .build/MacChannel.app/Contents/Info.plist)" = "APPL"
-test "$(plutil -extract CFBundleShortVersionString raw .build/MacChannel.app/Contents/Info.plist)" = "1.1.10"
-test -n "$(plutil -extract NSDownloadsFolderUsageDescription raw .build/MacChannel.app/Contents/Info.plist)"
+plist="$app_path/Contents/Info.plist"
+sparkle="$app_path/Contents/Frameworks/Sparkle.framework"
+test -d "$sparkle"
+test -x "$sparkle/Versions/Current/Sparkle"
+test "$(plutil -extract LSUIElement raw -o - "$plist")" = "true"
+test "$(plutil -extract CFBundlePackageType raw -o - "$plist")" = "APPL"
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = "1.2.0"
+test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = "13"
+test -n "$(plutil -extract NSDownloadsFolderUsageDescription raw -o - "$plist")"
+test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
+    "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
+test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$plist")" = true
+test "$(plutil -extract SUScheduledCheckInterval raw -o - "$plist")" = 86400.000000
+test "$(plutil -extract SUAutomaticallyUpdate raw -o - "$plist")" = false
+test "$(plutil -extract SUAllowsAutomaticUpdates raw -o - "$plist")" = false
+test "$(plutil -extract SUVerifyUpdateBeforeExtraction raw -o - "$plist")" = true
+test "$(plutil -extract SURequireSignedFeed raw -o - "$plist")" = true
+test -n "$(plutil -extract SUPublicEDKey raw -o - "$plist")"
 
 if rg -n 'Tailscale|个人网络|连接方式|安全中继地址|rendezvousURL' \
     App/SettingsView.swift App/PairingView.swift; then
