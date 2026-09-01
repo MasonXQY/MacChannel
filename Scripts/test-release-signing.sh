@@ -11,12 +11,20 @@ fi
 
 release_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-release-test.XXXXXX")"
 app_path="$release_root/MacChannel.app"
-launch_marker="$release_root/launch.marker"
-opener_pid=""
+app_executable="$app_path/Contents/MacOS/MacChannelApp"
+smoke_pid=""
 
 cleanup() {
-    if [[ -n "$opener_pid" ]] && kill -0 "$opener_pid" 2>/dev/null; then
-        kill "$opener_pid" 2>/dev/null || true
+    if [[ -n "$smoke_pid" ]]; then
+        if kill -0 "$smoke_pid" 2>/dev/null; then
+            kill -TERM "$smoke_pid" 2>/dev/null || true
+            for _ in {1..20}; do
+                kill -0 "$smoke_pid" 2>/dev/null || break
+                sleep 0.1
+            done
+            kill -KILL "$smoke_pid" 2>/dev/null || true
+        fi
+        wait "$smoke_pid" 2>/dev/null || true
     fi
     rm -rf "$release_root"
 }
@@ -70,15 +78,31 @@ else
     exit 1
 fi
 
-/usr/bin/open -n -W "$app_path" --args --smoke-test "$launch_marker" &
-opener_pid=$!
-for _ in {1..100}; do
-    [[ -f "$launch_marker" ]] && break
-    sleep 0.1
-done
-test -f "$launch_marker"
-grep -qx "ready accessory" "$launch_marker"
-wait "$opener_pid"
-opener_pid=""
+run_smoke_test() {
+    local run_number="$1"
+    local runtime_root
+    runtime_root="$(mktemp -d "$release_root/smoke-$run_number.XXXXXX")"
+    local launch_marker="$runtime_root/launch.marker"
+    mkdir -p "$runtime_root/tmp"
+    chmod 700 "$runtime_root" "$runtime_root/tmp"
+
+    TMPDIR="$runtime_root/tmp" \
+    MACCHANNEL_SIGNING_SMOKE_RUN="$run_number" \
+        "$app_executable" --smoke-test "$launch_marker" &
+    smoke_pid=$!
+    for _ in {1..150}; do
+        [[ -f "$launch_marker" ]] && break
+        kill -0 "$smoke_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    test -f "$launch_marker"
+    grep -qx "ready accessory" "$launch_marker"
+    wait "$smoke_pid"
+    smoke_pid=""
+    ! pgrep -f "$app_executable --smoke-test $runtime_root" >/dev/null
+}
+
+run_smoke_test 1
+run_smoke_test 2
 
 echo "release signing PASS"

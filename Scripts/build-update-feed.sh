@@ -3,7 +3,6 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
-
 version="${MACCHANNEL_VERSION:-1.2.0}"
 build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
@@ -17,89 +16,71 @@ pending_feed="$dist_root/.appcast.xml.new"
 expected_generate_appcast_sha256=b3b54ba3fb85ef1f25eb2f5a9ad90c32ba6e71af777b181c50ffb5d860bac6b7
 expected_sign_update_sha256=bfb52400c3da18bb4c251ac4818c2c2e1e31c2e649a45b31c11109b6e57b34ad
 
+# Reserve the caller's stderr for stable status records; raw tool diagnostics are
+# intentionally suppressed or captured below.
+exec 3>&2
+exec 2>/dev/null
+
 mkdir -p "$dist_root"
 chmod 700 "$dist_root"
 rm -f "$feed_path" "$pending_feed"
-
 updates_root=""
 published=0
 cleanup() {
     local status=$?
-    if [[ -n "$updates_root" ]]; then
-        rm -rf "$updates_root"
-    fi
-    if [[ "$published" -ne 1 ]]; then
-        rm -f "$feed_path" "$pending_feed"
-    fi
+    [[ -z "$updates_root" ]] || rm -rf "$updates_root"
+    [[ "$published" -eq 1 ]] || rm -f "$feed_path" "$pending_feed"
     exit "$status"
 }
 trap cleanup EXIT INT TERM HUP
-
-fail_usage() {
-    echo "$1" >&2
-    exit 2
-}
-
 fail_feed() {
-    echo "$1" >&2
-    exit 1
+    printf 'update-feed failure stage=%s version=%s build=%s\n' \
+        "$1" "$version" "$build_number" >&3
+    exit "${2:-1}"
 }
 
-[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
-    fail_usage "MACCHANNEL_VERSION must be a release SemVer such as 1.2.3"
-[[ "$build_number" =~ ^[1-9][0-9]*$ ]] || \
-    fail_usage "MACCHANNEL_BUILD_NUMBER must be a positive integer"
-[[ -n "$release_notes" ]] || fail_usage "MACCHANNEL_RELEASE_NOTES is required"
-[[ -n "$account" ]] || fail_usage "MACCHANNEL_SPARKLE_ACCOUNT is required"
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail_feed input 2
+[[ "$build_number" =~ ^[1-9][0-9]*$ ]] || fail_feed input 2
+[[ -n "$release_notes" && "$release_notes" == *.md ]] || fail_feed input 2
+[[ "$account" == com.mason.macchannel.updates ]] || fail_feed account 2
+[[ -f "$dmg_path" && ! -L "$dmg_path" ]] || fail_feed assets
+[[ -f "$manifest_path" && ! -L "$manifest_path" ]] || fail_feed assets
+[[ -f "$release_notes" && ! -L "$release_notes" && -s "$release_notes" ]] || fail_feed input
+while IFS= read -r release_entry; do
+    case "$(basename "$release_entry")" in
+        MacChannel.dmg|MacChannel.manifest.json) ;;
+        *) fail_feed assets ;;
+    esac
+done < <(find "$dist_root" -mindepth 1 -maxdepth 1 -print)
 
-[[ -f "$dmg_path" ]] || fail_feed "dist/MacChannel.dmg is required"
-[[ -f "$manifest_path" ]] || fail_feed "dist/MacChannel.manifest.json is required"
-[[ -f "$release_notes" && -s "$release_notes" ]] || \
-    fail_feed "release notes Markdown is missing or empty"
-[[ "$release_notes" == *.md ]] || fail_usage "MACCHANNEL_RELEASE_NOTES must reference Markdown"
-
-manifest_version="$(plutil -extract version raw -o - "$manifest_path" 2>/dev/null)" || \
-    fail_feed "distribution manifest has no version"
-manifest_build="$(plutil -extract build raw -o - "$manifest_path" 2>/dev/null)" || \
-    fail_feed "distribution manifest has no build"
-release_state="$(plutil -extract releaseState raw -o - "$manifest_path" 2>/dev/null)" || \
-    fail_feed "distribution manifest has no releaseState"
-manifest_dmg_sha="$(plutil -extract dmgSHA256 raw -o - "$manifest_path" 2>/dev/null)" || \
-    fail_feed "distribution manifest has no dmgSHA256"
-
-[[ "$manifest_version" == "$version" ]] || fail_feed "manifest version does not match release version"
-[[ "$manifest_build" == "$build_number" ]] || fail_feed "manifest build does not match release build"
-[[ "$release_state" == notarized ]] || fail_feed "only notarized releases may have an appcast"
-[[ "$manifest_dmg_sha" =~ ^[0-9a-f]{64}$ ]] || fail_feed "manifest DMG digest is invalid"
+manifest_version="$(plutil -extract version raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
+manifest_build="$(plutil -extract build raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
+release_state="$(plutil -extract releaseState raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
+manifest_dmg_sha="$(plutil -extract dmgSHA256 raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
+[[ "$manifest_version" == "$version" && "$manifest_build" == "$build_number" && \
+    "$release_state" == notarized && "$manifest_dmg_sha" =~ ^[0-9a-f]{64}$ ]] || fail_feed manifest
 actual_dmg_sha="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
-[[ "$actual_dmg_sha" == "$manifest_dmg_sha" ]] || fail_feed "manifest DMG digest does not match the DMG"
+[[ "$actual_dmg_sha" == "$manifest_dmg_sha" ]] || fail_feed manifest
 
-[[ -x "$generate_appcast" ]] || fail_feed "Sparkle generate_appcast is missing or not executable"
+[[ -x "$generate_appcast" ]] || fail_feed tool
 actual_generator_sha="$(shasum -a 256 "$generate_appcast" | awk '{print $1}')"
-[[ "$actual_generator_sha" == "$expected_generate_appcast_sha256" ]] || \
-    fail_feed "MACCHANNEL_SPARKLE_GENERATE_APPCAST must be the pinned Sparkle 2.9.6 generator"
+[[ "$actual_generator_sha" == "$expected_generate_appcast_sha256" ]] || fail_feed tool
 sign_update="$(dirname "$generate_appcast")/sign_update"
-[[ -x "$sign_update" ]] || fail_feed "Sparkle 2.9.6 sign_update is missing or not executable"
+[[ -x "$sign_update" ]] || fail_feed tool
 actual_sign_update_sha="$(shasum -a 256 "$sign_update" | awk '{print $1}')"
-[[ "$actual_sign_update_sha" == "$expected_sign_update_sha256" ]] || \
-    fail_feed "Sparkle sign_update does not match the pinned 2.9.6 tool"
+[[ "$actual_sign_update_sha" == "$expected_sign_update_sha256" ]] || fail_feed tool
 
 public_key="$(tr -d '\r\n' <Distribution/SparklePublicKey.txt)"
-[[ "$public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || fail_feed "Sparkle public key is invalid"
+[[ "$public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || fail_feed key
 public_key_length="$(printf '%s' "$public_key" | base64 -D 2>/dev/null | wc -c | tr -d ' ')"
-[[ "$public_key_length" == 32 ]] || fail_feed "Sparkle public key must decode to 32 bytes"
-
-login_keychain="$(security login-keychain | \
-    sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
-[[ -f "$login_keychain" ]] || fail_feed "the user login Keychain is unavailable"
-if ! keychain_metadata="$(security find-generic-password \
-    -a "$account" \
-    -s https://sparkle-project.org \
-    "$login_keychain" 2>&1)"; then
-    fail_feed "Sparkle private key account is missing from the login Keychain"
+[[ "$public_key_length" == 32 ]] || fail_feed key
+login_keychain="$(security login-keychain 2>/dev/null | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
+[[ -f "$login_keychain" ]] || fail_feed key
+if ! keychain_metadata="$(security find-generic-password -a "$account" \
+    -s https://sparkle-project.org "$login_keychain" 2>/dev/null)"; then
+    fail_feed key
 fi
-grep -F "$public_key" <<<"$keychain_metadata" >/dev/null || \
-    fail_feed "Sparkle Keychain account does not match Distribution/SparklePublicKey.txt"
+grep -F "$public_key" <<<"$keychain_metadata" >/dev/null || fail_feed key
 unset keychain_metadata
 
 updates_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-update-feed.XXXXXX")"
@@ -107,75 +88,62 @@ chmod 700 "$updates_root"
 cp -p "$dmg_path" "$updates_root/MacChannel.dmg"
 cp -p "$release_notes" "$updates_root/MacChannel.md"
 chmod 600 "$updates_root/MacChannel.dmg" "$updates_root/MacChannel.md"
-
-(
+tool_log="$updates_root/tool.log"
+if ! (
     cd "$updates_root"
-    "$generate_appcast" \
-        --account "$account" \
+    "$generate_appcast" --account "$account" \
         --download-url-prefix "https://github.com/MasonXQY/MacChannel/releases/download/v$version/" \
-        --embed-release-notes \
-        --maximum-versions 1 \
-        --maximum-deltas 0 \
-        -o appcast.xml \
-        "$updates_root"
-)
-
+        --embed-release-notes --maximum-versions 1 --maximum-deltas 0 \
+        -o appcast.xml "$updates_root"
+) >"$tool_log" 2>&1; then
+    fail_feed generate
+fi
+[[ "${MACCHANNEL_UPDATE_TESTING:-0}" != 1 || \
+    "${MACCHANNEL_UPDATE_TEST_FAIL_STAGE:-}" != after-generate ]] || fail_feed generate
 generated_feed="$updates_root/appcast.xml"
-[[ -f "$generated_feed" ]] || fail_feed "Sparkle did not generate appcast.xml"
-xmllint --noout "$generated_feed" || fail_feed "generated appcast is not valid XML"
+[[ -f "$generated_feed" && ! -L "$generated_feed" ]] || fail_feed generate
 
-item_count="$(xmllint --xpath 'count(//*[local-name()="item"])' "$generated_feed")"
-feed_build="$(xmllint --xpath \
-    'string(//*[local-name()="item"][1]/*[local-name()="version"])' \
-    "$generated_feed")"
-feed_version="$(xmllint --xpath \
-    'string(//*[local-name()="item"][1]/*[local-name()="shortVersionString"])' \
-    "$generated_feed")"
-enclosure_url="$(xmllint --xpath \
-    'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@url)' \
-    "$generated_feed")"
-enclosure_length="$(xmllint --xpath \
-    'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@length)' \
-    "$generated_feed")"
-enclosure_signature="$(xmllint --xpath \
-    'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@*[local-name()="edSignature"])' \
-    "$generated_feed")"
-embedded_release_notes="$(xmllint --xpath \
-    'string(//*[local-name()="item"][1]/*[local-name()="description"])' \
-    "$generated_feed")"
-
-[[ "$item_count" == 1 ]] || fail_feed "appcast must contain exactly one release"
-[[ "$feed_build" == "$build_number" ]] || fail_feed "appcast build does not match the manifest"
-[[ "$feed_version" == "$version" ]] || fail_feed "appcast version does not match the manifest"
-expected_url="https://github.com/MasonXQY/MacChannel/releases/download/v$version/MacChannel.dmg"
-[[ "$enclosure_url" == "$expected_url" ]] || fail_feed "appcast enclosure URL is incorrect"
-[[ "$enclosure_length" == "$(stat -f %z "$dmg_path")" ]] || \
-    fail_feed "appcast enclosure length does not match the DMG"
-[[ -n "$enclosure_signature" ]] || fail_feed "appcast enclosure has no EdDSA signature"
-[[ -n "$embedded_release_notes" ]] || fail_feed "release notes were not embedded in the appcast"
-grep -F '<!-- sparkle-signatures:' "$generated_feed" >/dev/null || \
-    fail_feed "appcast has no embedded feed signature"
-grep -F 'edSignature: ' "$generated_feed" >/dev/null || \
-    fail_feed "appcast feed signature is empty"
-
-"$sign_update" --account "$account" --verify "$dmg_path" "$enclosure_signature" >/dev/null
-"$sign_update" --account "$account" --verify "$generated_feed" >/dev/null
-
-for forbidden_metadata in \
-    "$repo_root" \
-    "$updates_root" \
-    "$release_notes" \
-    "$account" \
-    'Developer ID Application:' \
-    'file://'; do
-    if grep -F "$forbidden_metadata" "$generated_feed" >/dev/null; then
-        fail_feed "generated appcast contains sensitive local metadata"
-    fi
+if [[ "${MACCHANNEL_UPDATE_TESTING:-0}" == 1 && -n "${MACCHANNEL_UPDATE_TEST_MUTATION:-}" ]]; then
+    case "$MACCHANNEL_UPDATE_TEST_MUTATION" in
+        repo-path) mutation_value="$repo_root" ;;
+        updates-path) mutation_value="$updates_root" ;;
+        release-notes-path) mutation_value="$release_notes" ;;
+        account) mutation_value="$account" ;;
+        developer-id) mutation_value='Developer ID Application:' ;;
+        file-url) mutation_value='file://' ;;
+        *) fail_feed test 2 ;;
+    esac
+    MUTATION_VALUE="$mutation_value" perl -0pi -e \
+        's#<channel>#<channel><test-sensitive>$ENV{MUTATION_VALUE}</test-sensitive>#' \
+        "$generated_feed" 2>>"$tool_log" || fail_feed test
+fi
+for forbidden_metadata in "$repo_root" "$updates_root" "$release_notes" "$account" \
+    'Developer ID Application:' 'file://'; do
+    grep -F "$forbidden_metadata" "$generated_feed" >/dev/null && fail_feed metadata
 done
 
-mv "$generated_feed" "$pending_feed"
-chmod 644 "$pending_feed"
-mv "$pending_feed" "$feed_path"
-published=1
+xmllint --noout "$generated_feed" >>"$tool_log" 2>&1 || fail_feed verify
+item_count="$(xmllint --xpath 'count(//*[local-name()="item"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
+feed_build="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="version"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
+feed_version="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="shortVersionString"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
+enclosure_url="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@url)' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
+enclosure_length="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@length)' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
+enclosure_signature="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@*[local-name()="edSignature"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
+embedded_release_notes="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="description"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
+[[ "$item_count" == 1 && "$feed_build" == "$build_number" && "$feed_version" == "$version" ]] || fail_feed verify
+expected_url="https://github.com/MasonXQY/MacChannel/releases/download/v$version/MacChannel.dmg"
+[[ "$enclosure_url" == "$expected_url" ]] || fail_feed verify
+[[ "$enclosure_length" == "$(stat -f %z "$dmg_path")" ]] || fail_feed verify
+[[ -n "$enclosure_signature" && -n "$embedded_release_notes" ]] || fail_feed verify
+grep -F '<!-- sparkle-signatures:' "$generated_feed" >/dev/null || fail_feed verify
+grep -F 'edSignature: ' "$generated_feed" >/dev/null || fail_feed verify
+"$sign_update" --account "$account" --verify "$dmg_path" "$enclosure_signature" >>"$tool_log" 2>&1 || fail_feed verify
+"$sign_update" --account "$account" --verify "$generated_feed" >>"$tool_log" 2>&1 || fail_feed verify
+[[ "${MACCHANNEL_UPDATE_TESTING:-0}" != 1 || \
+    "${MACCHANNEL_UPDATE_TEST_FAIL_STAGE:-}" != after-verify ]] || fail_feed test
 
-echo "created $feed_path (signed Sparkle feed for $version ($build_number))"
+mv "$generated_feed" "$pending_feed" || fail_feed publish
+chmod 644 "$pending_feed" || fail_feed publish
+mv "$pending_feed" "$feed_path" || fail_feed publish
+published=1
+printf 'update-feed success version=%s build=%s\n' "$version" "$build_number"

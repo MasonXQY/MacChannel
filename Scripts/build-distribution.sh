@@ -27,11 +27,38 @@ fail_usage() {
     exit 2
 }
 
-[[ -n "$identity" ]] || fail_usage "MACCHANNEL_CODESIGN_IDENTITY is required"
 [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
     fail_usage "MACCHANNEL_VERSION must be a release SemVer such as 1.2.3"
 [[ "$build_number" =~ ^[1-9][0-9]*$ ]] || \
     fail_usage "MACCHANNEL_BUILD_NUMBER must be a positive integer"
+
+update_fixture_root="${MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT:-}"
+if [[ -n "$update_fixture_root" && "${MACCHANNEL_UPDATE_TESTING:-0}" != 1 ]]; then
+    fail_usage "update fixture seam requires MACCHANNEL_UPDATE_TESTING=1"
+fi
+if [[ "${MACCHANNEL_UPDATE_TESTING:-0}" == 1 && -n "$update_fixture_root" ]]; then
+    [[ -n "$release_notes" ]] || fail_usage "MACCHANNEL_RELEASE_NOTES is required"
+    fixture_dmg="$update_fixture_root/MacChannel.dmg"
+    fixture_manifest="$update_fixture_root/MacChannel.manifest.json"
+    [[ -f "$fixture_dmg" && ! -L "$fixture_dmg" ]] || fail_usage "invalid update fixture"
+    [[ -f "$fixture_manifest" && ! -L "$fixture_manifest" ]] || fail_usage "invalid update fixture"
+    cp "$fixture_dmg" "$dist_root/.MacChannel.dmg.new"
+    cp "$fixture_manifest" "$dist_root/.MacChannel.manifest.json.new"
+    mv "$dist_root/.MacChannel.dmg.new" "$dist_root/MacChannel.dmg"
+    mv "$dist_root/.MacChannel.manifest.json.new" "$dist_root/MacChannel.manifest.json"
+    if ! MACCHANNEL_VERSION="$version" \
+        MACCHANNEL_BUILD_NUMBER="$build_number" \
+        MACCHANNEL_RELEASE_NOTES="$release_notes" \
+        bash Scripts/build-update-feed.sh; then
+        rm -f "$dist_root/appcast.xml" "$dist_root/.appcast.xml.new"
+        exit 1
+    fi
+    printf 'distribution success state=notarized version=%s build=%s\n' \
+        "$version" "$build_number"
+    exit 0
+fi
+
+[[ -n "$identity" ]] || fail_usage "MACCHANNEL_CODESIGN_IDENTITY is required"
 
 if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
     fail_usage "distribution builds require a clean Git worktree"
@@ -55,6 +82,7 @@ manifest_path="$build_root/MacChannel.manifest.json"
 mount_path="$build_root/mounted"
 mounted=0
 published=0
+base_assets_published=0
 
 cleanup() {
     local status=$?
@@ -62,7 +90,7 @@ cleanup() {
         hdiutil detach "$mount_path" -quiet >/dev/null 2>&1 || true
     fi
     rm -rf "$build_root"
-    if [[ "$published" -ne 1 ]]; then
+    if [[ "$published" -ne 1 && "$base_assets_published" -ne 1 ]]; then
         rm -f \
             "$dist_root/MacChannel.dmg" \
             "$dist_root/MacChannel.manifest.json" \
@@ -70,6 +98,9 @@ cleanup() {
             "$dist_root/.MacChannel.dmg.new" \
             "$dist_root/.MacChannel.manifest.json.new" \
             "$dist_root/.appcast.xml.new"
+    fi
+    if [[ "$base_assets_published" -eq 1 && "$published" -ne 1 ]]; then
+        rm -f "$dist_root/appcast.xml" "$dist_root/.appcast.xml.new"
     fi
     exit "$status"
 }
@@ -231,6 +262,7 @@ if ! mv "$dist_root/.MacChannel.manifest.json.new" "$dist_root/MacChannel.manife
     rm -f "$dist_root/MacChannel.dmg" "$dist_root/.MacChannel.manifest.json.new"
     exit 1
 fi
+base_assets_published=1
 
 if [[ -n "$release_notes" && "$release_state" == notarized ]]; then
     MACCHANNEL_VERSION="$version" \
@@ -240,5 +272,5 @@ if [[ -n "$release_notes" && "$release_state" == notarized ]]; then
 fi
 published=1
 
-echo "created $dist_root/MacChannel.dmg"
-echo "created $dist_root/MacChannel.manifest.json ($release_state)"
+printf 'distribution success state=%s version=%s build=%s\n' \
+    "$release_state" "$version" "$build_number"

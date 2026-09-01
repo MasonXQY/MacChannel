@@ -22,7 +22,7 @@ fixture_manifest="$fixture_root/MacChannel.manifest.json"
 release_notes="$repo_root/Distribution/ReleaseNotes/v1.2.0.md"
 
 cleanup() {
-    rm -rf "$test_root"
+    [[ "${MACCHANNEL_TEST_KEEP_TEMP:-0}" == 1 ]] || rm -rf "$test_root"
     rm -f dist/MacChannel.dmg dist/MacChannel.manifest.json dist/appcast.xml \
         dist/.appcast.xml.new
 }
@@ -77,11 +77,29 @@ run_feed_builder() {
         MACCHANNEL_RELEASE_NOTES="${MACCHANNEL_TEST_RELEASE_NOTES:-$release_notes}" \
         MACCHANNEL_SPARKLE_ACCOUNT="${MACCHANNEL_TEST_SPARKLE_ACCOUNT:-$account}" \
         MACCHANNEL_SPARKLE_GENERATE_APPCAST="${MACCHANNEL_TEST_GENERATE_APPCAST:-$generate_appcast}" \
+        MACCHANNEL_UPDATE_TESTING="${MACCHANNEL_TESTING:-0}" \
+        MACCHANNEL_UPDATE_TEST_FAIL_STAGE="${MACCHANNEL_TEST_FAIL_STAGE:-}" \
+        MACCHANNEL_UPDATE_TEST_MUTATION="${MACCHANNEL_TEST_MUTATION:-}" \
         bash Scripts/build-update-feed.sh
 }
 
+assert_redacted_output() {
+    local output_path="$1"
+    local release_note_text='此版本包含安全更新与稳定性改进。'
+    for forbidden in "$repo_root" "$test_root" "$release_note_text" \
+        MacChannel.dmg MacChannel.manifest.json appcast.xml .appcast.xml.new; do
+        if grep -F "$forbidden" "$output_path" >/dev/null; then
+            echo "release output exposed prohibited metadata" >&2
+            exit 1
+        fi
+    done
+}
+
 expect_failure() {
+    local expected_stage="$1"
+    shift
     printf '%s\n' stale-feed >dist/appcast.xml
+    printf '%s\n' stale-pending >dist/.appcast.xml.new
     set +e
     "$@" >"$test_root/expected-failure.log" 2>&1
     local actual_status=$?
@@ -90,58 +108,62 @@ expect_failure() {
         echo "expected feed build to fail" >&2
         exit 1
     fi
-    if [[ -e dist/appcast.xml || -e dist/.appcast.xml.new ]]; then
+    if [[ -e dist/appcast.xml || -L dist/appcast.xml || \
+        -e dist/.appcast.xml.new || -L dist/.appcast.xml.new ]]; then
         echo "failed feed build left a published appcast" >&2
         exit 1
     fi
+    local expected_version="${MACCHANNEL_TEST_VERSION:-$version}"
+    local expected_build="${MACCHANNEL_TEST_BUILD_NUMBER:-$build_number}"
+    grep -Fx "update-feed failure stage=$expected_stage version=$expected_version build=$expected_build" \
+        "$test_root/expected-failure.log" >/dev/null
+    assert_redacted_output "$test_root/expected-failure.log"
 }
 
 prepare_fixture
 mv dist/MacChannel.dmg "$test_root/missing.dmg"
-expect_failure run_feed_builder
-grep -F 'dist/MacChannel.dmg is required' "$test_root/expected-failure.log" >/dev/null
+expect_failure assets run_feed_builder
 
 prepare_fixture
 plutil -replace releaseState -string internalSignedNotNotarized \
     dist/MacChannel.manifest.json
-expect_failure run_feed_builder
-grep -F 'only notarized releases may have an appcast' \
-    "$test_root/expected-failure.log" >/dev/null
+expect_failure manifest run_feed_builder
 
 prepare_fixture
-MACCHANNEL_TEST_VERSION=1.2.1 expect_failure run_feed_builder
-grep -F 'manifest version does not match release version' \
-    "$test_root/expected-failure.log" >/dev/null
+MACCHANNEL_TEST_VERSION=1.2.1 expect_failure manifest run_feed_builder
 prepare_fixture
-MACCHANNEL_TEST_BUILD_NUMBER=14 expect_failure run_feed_builder
-grep -F 'manifest build does not match release build' \
-    "$test_root/expected-failure.log" >/dev/null
+MACCHANNEL_TEST_BUILD_NUMBER=14 expect_failure manifest run_feed_builder
 
 prepare_fixture
 plutil -replace dmgSHA256 -string \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     dist/MacChannel.manifest.json
-expect_failure run_feed_builder
-grep -F 'manifest DMG digest does not match the DMG' \
-    "$test_root/expected-failure.log" >/dev/null
+expect_failure manifest run_feed_builder
 
 prepare_fixture
-MACCHANNEL_TEST_RELEASE_NOTES="$test_root/missing.md" expect_failure run_feed_builder
-grep -F 'release notes Markdown is missing or empty' \
-    "$test_root/expected-failure.log" >/dev/null
+MACCHANNEL_TEST_RELEASE_NOTES="$test_root/missing.md" expect_failure input run_feed_builder
 prepare_fixture
 MACCHANNEL_TEST_SPARKLE_ACCOUNT=com.mason.macchannel.missing \
-    expect_failure run_feed_builder
-grep -F 'Sparkle private key account is missing from the login Keychain' \
-    "$test_root/expected-failure.log" >/dev/null
+    expect_failure account run_feed_builder
 prepare_fixture
 MACCHANNEL_TEST_GENERATE_APPCAST="$repo_root/.build/tools/Sparkle-2.9.6/bin/sign_update" \
-    expect_failure run_feed_builder
-grep -F 'must be the pinned Sparkle 2.9.6 generator' \
-    "$test_root/expected-failure.log" >/dev/null
+    expect_failure tool run_feed_builder
 
 prepare_fixture
-run_feed_builder
+MACCHANNEL_TESTING=1 MACCHANNEL_TEST_FAIL_STAGE=after-generate \
+    expect_failure generate run_feed_builder
+
+for mutation in repo-path updates-path release-notes-path account developer-id file-url; do
+    prepare_fixture
+    MACCHANNEL_TESTING=1 MACCHANNEL_TEST_MUTATION="$mutation" \
+        expect_failure metadata run_feed_builder
+done
+
+prepare_fixture
+run_feed_builder >"$test_root/success.log" 2>&1
+grep -Fx "update-feed success version=$version build=$build_number" \
+    "$test_root/success.log" >/dev/null
+assert_redacted_output "$test_root/success.log"
 
 test -f dist/appcast.xml
 xmllint --noout dist/appcast.xml
@@ -195,14 +217,99 @@ for forbidden_metadata in \
     fi
 done
 
-test -z "$(find dist -mindepth 1 -maxdepth 1 -type f \
-    ! -name MacChannel.dmg \
-    ! -name MacChannel.manifest.json \
-    ! -name appcast.xml \
-    -print -quit)"
+assert_exact_release_assets() {
+    for required in MacChannel.dmg MacChannel.manifest.json appcast.xml; do
+        [[ -f "dist/$required" && ! -L "dist/$required" ]] || return 1
+    done
+    local actual
+    actual="$(find dist -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)"
+    [[ "$actual" == $'MacChannel.dmg\nMacChannel.manifest.json\nappcast.xml' ]]
+}
+assert_exact_release_assets
+
+expect_asset_contract_failure() {
+    if assert_exact_release_assets; then
+        echo "asset contract accepted an extra or non-regular entry" >&2
+        exit 1
+    fi
+}
+mkdir dist/extra-directory
+expect_asset_contract_failure
+rmdir dist/extra-directory
+ln -s MacChannel.dmg dist/extra-link
+expect_asset_contract_failure
+rm dist/extra-link
+mkfifo dist/extra-fifo
+expect_asset_contract_failure
+rm dist/extra-fifo
+mv dist/appcast.xml "$test_root/regular-appcast.xml"
+ln -s "$test_root/regular-appcast.xml" dist/appcast.xml
+expect_asset_contract_failure
+rm dist/appcast.xml
+mv "$test_root/regular-appcast.xml" dist/appcast.xml
+assert_exact_release_assets
+
+# Exercise build-distribution.sh's guarded notarized-assets handoff into the real
+# feed builder without invoking Apple's live notary service.
+rm -f dist/MacChannel.dmg dist/MacChannel.manifest.json dist/appcast.xml \
+    dist/.appcast.xml.new
+env MACCHANNEL_UPDATE_TESTING=1 \
+    MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
+    MACCHANNEL_RELEASE_NOTES="$release_notes" \
+    MACCHANNEL_VERSION="$version" \
+    MACCHANNEL_BUILD_NUMBER="$build_number" \
+    bash Scripts/build-distribution.sh >"$test_root/handoff-success.log" 2>&1
+assert_redacted_output "$test_root/handoff-success.log"
+grep -Fx "update-feed success version=$version build=$build_number" \
+    "$test_root/handoff-success.log" >/dev/null
+grep -Fx "distribution success state=notarized version=$version build=$build_number" \
+    "$test_root/handoff-success.log" >/dev/null
+assert_exact_release_assets
+
+handoff_dmg_sha="$(shasum -a 256 dist/MacChannel.dmg | awk '{print $1}')"
+handoff_manifest_sha="$(shasum -a 256 dist/MacChannel.manifest.json | awk '{print $1}')"
+printf '%s\n' stale-feed >dist/appcast.xml
+printf '%s\n' stale-pending >dist/.appcast.xml.new
+set +e
+env MACCHANNEL_UPDATE_TESTING=1 \
+    MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
+    MACCHANNEL_UPDATE_TEST_FAIL_STAGE=after-verify \
+    MACCHANNEL_RELEASE_NOTES="$release_notes" \
+    MACCHANNEL_VERSION="$version" \
+    MACCHANNEL_BUILD_NUMBER="$build_number" \
+    bash Scripts/build-distribution.sh >"$test_root/handoff-failure.log" 2>&1
+handoff_status=$?
+set -e
+[[ "$handoff_status" -ne 0 ]]
+assert_redacted_output "$test_root/handoff-failure.log"
+grep -Fx "update-feed failure stage=test version=$version build=$build_number" \
+    "$test_root/handoff-failure.log" >/dev/null
+[[ -f dist/MacChannel.dmg && ! -L dist/MacChannel.dmg ]]
+[[ -f dist/MacChannel.manifest.json && ! -L dist/MacChannel.manifest.json ]]
+test "$handoff_dmg_sha" = "$(shasum -a 256 dist/MacChannel.dmg | awk '{print $1}')"
+test "$handoff_manifest_sha" = \
+    "$(shasum -a 256 dist/MacChannel.manifest.json | awk '{print $1}')"
+[[ ! -e dist/appcast.xml && ! -L dist/appcast.xml ]]
+[[ ! -e dist/.appcast.xml.new && ! -L dist/.appcast.xml.new ]]
+
+set +e
+env MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
+    MACCHANNEL_RELEASE_NOTES="$release_notes" \
+    bash Scripts/build-distribution.sh >"$test_root/unguarded-seam.log" 2>&1
+unguarded_status=$?
+set -e
+[[ "$unguarded_status" -ne 0 ]]
+grep -F 'update fixture seam requires MACCHANNEL_UPDATE_TESTING=1' \
+    "$test_root/unguarded-seam.log" >/dev/null
+
+prepare_fixture
+run_feed_builder >"$test_root/post-handoff-success.log" 2>&1
+assert_redacted_output "$test_root/post-handoff-success.log"
+assert_exact_release_assets
 
 cp dist/appcast.xml "$test_root/first-appcast.xml"
-run_feed_builder
+run_feed_builder >"$test_root/repeat-success.log" 2>&1
+assert_redacted_output "$test_root/repeat-success.log"
 cmp "$test_root/first-appcast.xml" dist/appcast.xml
 test "$(shasum -a 256 "$release_notes" | awk '{print $1}')" = \
     "$release_notes_sha_before"
