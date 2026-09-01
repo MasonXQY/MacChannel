@@ -131,6 +131,8 @@ v1.1.10 本身没有更新器，因此不能远程获得本功能。包含更新
 1. Apple Developer ID 签名、公证和 Gatekeeper 验证。
 2. Sparkle Ed25519 更新包签名；启用签名 appcast 后，更新清单和发布说明也必须经过验证。
 
+Sparkle 2.9.6 对应用更新采用官方双认证策略：有效的 Ed25519 archive 签名或与宿主匹配的代码签名身份任一成立即可继续，因此有效 Ed25519 更新允许轮换 Developer ID。MacChannel 不 fork 或弱化这一运行时策略。作为发布侧补强，`build-update-feed.sh` 必须在签名/发布 appcast 前挂载 DMG，并把实际 Team ID、designated requirement、bundle ID、版本和 build 与分发 manifest 精确比对；任一不符即删除正式和 pending feed 输出并失败关闭。
+
 Sparkle 私钥只保存于发布机钥匙串，不写入仓库、环境文件、CI 日志或 GitHub Release。公钥编入应用。发布脚本通过 Sparkle 官方 `generate_appcast`/`sign_update` 工具访问钥匙串生成签名，禁止把私钥作为命令行参数传入。
 
 依赖版本在 `Package.swift` 中精确固定。升级 Sparkle 必须单独审查发布说明，至少关注安全修复、安装权限和无 Dock 菜单栏应用的行为。
@@ -168,10 +170,11 @@ Sparkle 私钥只保存于发布机钥匙串，不写入仓库、环境文件、
 3. 发布构建号更高的已签名、公证测试包，两台 Mac 均能发现更新。
 4. 一台空闲安装；另一台在真实文件传输过程中下载并点击安装，确认直到传输完成才重启。
 5. 重启后核对新版本、原设备身份、双向信任、设置、历史和接收目录。
-6. 使用被修改的 DMG、错误 Ed25519 签名、错误 Developer ID、较低构建号和离线网络分别验证拒绝或可恢复提示。
-7. 从公开 GitHub Release 重新下载最终资产，核对 appcast、SHA-256、Apple 公证票据和 Gatekeeper，再执行一轮真实升级。
+6. 使用被修改的 feed、被修改的 DMG、无法由代码签名身份补救的错误 Ed25519 key、错误 signer 加无效 Ed25519、较低构建号和离线网络分别验证拒绝或可恢复提示。另记录“有效 Ed25519 + 轮换 signer”按 Sparkle 官方策略被接受的 characterization，不得标成拒绝。
+7. 发布时用错误 Team ID/designated requirement 的 DMG 验证在 appcast 生成前失败且两个 feed 输出都被清理；同 Team ID/designated requirement 必须通过。
+8. 从公开 GitHub Release 重新下载最终资产，核对 appcast、SHA-256、Apple 公证票据和 Gatekeeper，再执行一轮真实升级。
 
-只有第 7 步成功后，才能把应用内更新标记为可公开使用。
+只有第 8 步成功后，才能把应用内更新标记为可公开使用。
 
 ## 9. 本次范围外
 

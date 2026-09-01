@@ -8,6 +8,38 @@ build_configuration="${MACCHANNEL_BUILD_CONFIGURATION:-debug}"
 codesign_identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 app_version="${MACCHANNEL_VERSION:-1.2.0}"
 build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
+update_testing="${MACCHANNEL_UPDATE_TESTING:-0}"
+update_test_bundle_id="${MACCHANNEL_UPDATE_TEST_BUNDLE_ID:-}"
+update_test_feed_url="${MACCHANNEL_UPDATE_TEST_FEED_URL:-}"
+update_test_public_key_path="${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}"
+update_test_codesign_keychain="${MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN:-}"
+update_test_embed_harness="${MACCHANNEL_UPDATE_TEST_EMBED_HARNESS:-0}"
+update_test_signer_variant="${MACCHANNEL_UPDATE_TEST_SIGNER_VARIANT:-}"
+
+case "$update_testing" in
+    0|1) ;;
+    *)
+        echo "MACCHANNEL_UPDATE_TESTING must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
+
+update_override_names=(
+    MACCHANNEL_UPDATE_TEST_BUNDLE_ID
+    MACCHANNEL_UPDATE_TEST_FEED_URL
+    MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH
+    MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN
+    MACCHANNEL_UPDATE_TEST_EMBED_HARNESS
+    MACCHANNEL_UPDATE_TEST_SIGNER_VARIANT
+)
+if [[ "$update_testing" != 1 ]]; then
+    for override_name in "${update_override_names[@]}"; do
+        if [[ -n "${!override_name:-}" ]]; then
+            echo "update test overrides require MACCHANNEL_UPDATE_TESTING=1" >&2
+            exit 2
+        fi
+    done
+fi
 
 case "$build_configuration" in
     debug|release) ;;
@@ -26,18 +58,55 @@ if [[ ! "$build_number" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
+bundle_identifier=com.mason.macchannel
+feed_url=https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml
 sparkle_public_key_path="$repo_root/Distribution/SparklePublicKey.txt"
+if [[ "$update_testing" == 1 ]]; then
+    if [[ ! "$update_test_bundle_id" =~ ^com\.mason\.macchannel\.update-acceptance\.[A-Za-z0-9-]+$ ]]; then
+        echo "MACCHANNEL_UPDATE_TEST_BUNDLE_ID must be an isolated acceptance identifier" >&2
+        exit 2
+    fi
+    if [[ ! "$update_test_feed_url" =~ ^https://localhost:[1-9][0-9]*/appcast\.xml$ ]]; then
+        echo "MACCHANNEL_UPDATE_TEST_FEED_URL must be a local HTTPS appcast URL" >&2
+        exit 2
+    fi
+    if [[ "$update_test_public_key_path" != /* || ! -f "$update_test_public_key_path" || \
+        -L "$update_test_public_key_path" ]]; then
+        echo "MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH must be an absolute regular file" >&2
+        exit 2
+    fi
+    if [[ -n "$update_test_codesign_keychain" && \
+        ( "$update_test_codesign_keychain" != /* || ! -f "$update_test_codesign_keychain" || \
+        -L "$update_test_codesign_keychain" ) ]]; then
+        echo "MACCHANNEL_UPDATE_TEST_CODESIGN_KEYCHAIN must be an absolute regular file when provided" >&2
+        exit 2
+    fi
+    if [[ "$update_test_embed_harness" != 1 || "$codesign_identity" != - ]]; then
+        echo "update acceptance builds require the signed packaged updater harness" >&2
+        exit 2
+    fi
+    case "$update_test_signer_variant" in
+        primary|alternate) ;;
+        *)
+            echo "MACCHANNEL_UPDATE_TEST_SIGNER_VARIANT must be primary or alternate" >&2
+            exit 2
+            ;;
+    esac
+    bundle_identifier="$update_test_bundle_id"
+    feed_url="$update_test_feed_url"
+    sparkle_public_key_path="$update_test_public_key_path"
+fi
 if [[ ! -f "$sparkle_public_key_path" ]]; then
-    echo "Distribution/SparklePublicKey.txt is required" >&2
+    echo "Sparkle public key file is required" >&2
     exit 2
 fi
 if [[ "$(awk 'END { print NR }' "$sparkle_public_key_path")" -ne 1 ]]; then
-    echo "Distribution/SparklePublicKey.txt must contain exactly one line" >&2
+    echo "Sparkle public key file must contain exactly one line" >&2
     exit 2
 fi
 IFS= read -r sparkle_public_key < "$sparkle_public_key_path"
 if [[ ! "$sparkle_public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
-    echo "Distribution/SparklePublicKey.txt must contain a Sparkle public key" >&2
+    echo "Sparkle public key file must contain a Sparkle public key" >&2
     exit 2
 fi
 
@@ -57,6 +126,18 @@ case "$app_path" in
         exit 2
         ;;
 esac
+if [[ "$update_testing" == 1 ]]; then
+    update_test_temp_base="${TMPDIR:-/tmp}"
+    update_test_temp_base="${update_test_temp_base%/}"
+    case "$app_path" in
+        "$update_test_temp_base"/macchannel-update-acceptance.*/MacChannel.app) ;;
+        *)
+            echo "update acceptance output must remain in its isolated temporary root" >&2
+            exit 2
+            ;;
+    esac
+fi
+mkdir -p "$(dirname "$app_path")"
 rm -rf "$app_path"
 
 signing_root=""
@@ -89,6 +170,61 @@ else
         "$working_app/MacChannel_MacChannelAppKit.bundle"
 fi
 
+if [[ "$update_testing" == 1 ]]; then
+    sparkle_cli_source="$repo_root/.build/checkouts/Sparkle/sparkle-cli"
+    sparkle_private_headers="$contents_path/Frameworks/Sparkle.framework/Versions/Current/PrivateHeaders"
+    [[ -f "$sparkle_cli_source/main.m" && -f "$sparkle_private_headers/SUInstallerLauncher+Private.h" ]] || {
+        echo "pinned Sparkle acceptance harness sources are unavailable" >&2
+        exit 2
+    }
+    harness_source="$signing_root/SPUCommandLineUserDriver.m"
+    harness_driver_source="$signing_root/SPUCommandLineDriver.m"
+    cp -p "$sparkle_cli_source/SPUCommandLineUserDriver.m" "$harness_source"
+    cp -p "$sparkle_cli_source/SPUCommandLineDriver.m" "$harness_driver_source"
+    perl -0pi -e \
+        's/installUpdateHandler\(SPUUserUpdateChoiceDismiss\);/fprintf(stdout, "macchannel-update-acceptance state=validated\\n"); fflush(stdout); installUpdateHandler(SPUUserUpdateChoiceSkip);/' \
+        "$harness_source"
+    perl -0pi -e \
+        's/if \(_probingForUpdates\) \{/if (_probingForUpdates) { fprintf(stdout, "macchannel-update-acceptance state=available build=%s\\n", item.versionString.UTF8String); fflush(stdout);/' \
+        "$harness_driver_source"
+    perl -0pi -e \
+        's/fprintf\(stderr, "Error: Update has failed due to error %ld \(%s\)\. %s\\n", \(long\)error\.code, error\.domain\.UTF8String, error\.localizedDescription\.UTF8String\);/for (NSError *cursor = error; cursor != nil; cursor = cursor.userInfo[NSUnderlyingErrorKey]) { fprintf(stderr, "macchannel-update-acceptance state=failed domain=%s code=%ld\\n", cursor.domain.UTF8String, (long)cursor.code); }/' \
+        "$harness_driver_source"
+    xcrun clang \
+        -fobjc-arc \
+        -fmodules \
+        -DSPU_OBJC_DIRECT_MEMBERS= \
+        -DSPU_OBJC_DIRECT= \
+        -framework AppKit \
+        -framework Foundation \
+        -framework Security \
+        -framework Sparkle \
+        -F "$contents_path/Frameworks" \
+        -I "$sparkle_cli_source" \
+        -I "$sparkle_private_headers" \
+        "$sparkle_cli_source/main.m" \
+        "$harness_driver_source" \
+        "$harness_source" \
+        "$repo_root/Tests/Fixtures/UpdateAcceptanceTLSProtocol.m" \
+        -Wl,-rpath,@executable_path/../Frameworks \
+        -o "$contents_path/MacOS/MacChannelUpdateAcceptance"
+    xcrun clang \
+        -fobjc-arc \
+        -fmodules \
+        -framework Foundation \
+        -framework Sparkle \
+        -F "$contents_path/Frameworks" \
+        "$repo_root/Tests/Fixtures/UpdateAcceptanceLoadProbe.m" \
+        -Wl,-rpath,@executable_path/../Frameworks \
+        -o "$contents_path/MacOS/MacChannelUpdateLoadProbe"
+fi
+
+update_test_plist_fragment=""
+if [[ "$update_testing" == 1 ]]; then
+    update_test_plist_fragment="    <key>MacChannelUpdateTestSigner</key>
+    <string>$update_test_signer_variant</string>"
+fi
+
 cat > "$contents_path/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -97,7 +233,7 @@ cat > "$contents_path/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>
     <string>MacChannelApp</string>
     <key>CFBundleIdentifier</key>
-    <string>com.mason.macchannel</string>
+    <string>$bundle_identifier</string>
     <key>CFBundleName</key>
     <string>MacChannel</string>
     <key>CFBundlePackageType</key>
@@ -113,7 +249,7 @@ cat > "$contents_path/Info.plist" <<PLIST
     <key>NSDownloadsFolderUsageDescription</key>
     <string>用于将来自已配对 Mac 的文件自动保存到“下载”文件夹。</string>
     <key>SUFeedURL</key>
-    <string>https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml</string>
+    <string>$feed_url</string>
     <key>SUPublicEDKey</key>
     <string>$sparkle_public_key</string>
     <key>SUEnableAutomaticChecks</key>
@@ -128,6 +264,7 @@ cat > "$contents_path/Info.plist" <<PLIST
     <true/>
     <key>SURequireSignedFeed</key>
     <true/>
+$update_test_plist_fragment
 </dict>
 </plist>
 PLIST
@@ -139,8 +276,14 @@ if [[ -n "$codesign_identity" ]]; then
         --force
         --sign "$codesign_identity"
         --options runtime
-        --timestamp
     )
+    if [[ "$update_testing" == 1 ]]; then
+        [[ -z "$update_test_codesign_keychain" ]] || \
+            signing_args+=(--keychain "$update_test_codesign_keychain")
+        signing_args+=(--timestamp=none)
+    else
+        signing_args+=(--timestamp)
+    fi
 
     sparkle_path="$working_app/Contents/Frameworks/Sparkle.framework"
     for nested_sparkle_code in \
@@ -155,10 +298,24 @@ if [[ -n "$codesign_identity" ]]; then
 
     codesign "${signing_args[@]}" "$sparkle_path"
     codesign "${signing_args[@]}" "$working_app/Contents/MacOS/WebRTC.framework"
+    if [[ "$update_testing" == 1 ]]; then
+        codesign "${signing_args[@]}" \
+            --entitlements "$repo_root/Tests/Fixtures/UpdateAcceptance.entitlements" \
+            "$working_app/Contents/MacOS/MacChannelUpdateAcceptance"
+        codesign "${signing_args[@]}" \
+            --entitlements "$repo_root/Tests/Fixtures/UpdateAcceptance.entitlements" \
+            "$working_app/Contents/MacOS/MacChannelUpdateLoadProbe"
+    fi
     codesign "${signing_args[@]}" "$working_app/Contents/MacOS/MacChannelApp"
-    codesign "${signing_args[@]}" "$working_app"
+    if [[ "$update_testing" == 1 ]]; then
+        acceptance_requirement="=designated => identifier \"$bundle_identifier\" and info[MacChannelUpdateTestSigner] = \"$update_test_signer_variant\""
+        codesign "${signing_args[@]}" --requirements "$acceptance_requirement" "$working_app"
+    else
+        codesign "${signing_args[@]}" "$working_app"
+    fi
 
     mv "$working_app" "$app_path"
+    rm -rf "$signing_root"
     signing_root=""
     trap - EXIT
 else

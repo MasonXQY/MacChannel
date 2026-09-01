@@ -127,6 +127,8 @@ codesign --verify --deep --strict --verbose=2 "$app_path"
 app_details="$(codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$app_details" >/dev/null
 grep -F "TeamIdentifier=$team_id" <<<"$app_details" >/dev/null
+designated_requirement="$(codesign -d -r- "$app_path" 2>&1 | sed -n 's/^designated => //p')"
+test -n "$designated_requirement"
 grep -E 'flags=.*runtime' <<<"$app_details" >/dev/null
 test "$(plutil -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" = \
     com.mason.macchannel
@@ -242,6 +244,7 @@ plutil -insert version -string "$version" "$manifest_path"
 plutil -insert build -string "$build_number" "$manifest_path"
 plutil -insert gitCommit -string "$git_commit" "$manifest_path"
 plutil -insert teamID -string "$team_id" "$manifest_path"
+plutil -insert designatedRequirement -string "$designated_requirement" "$manifest_path"
 plutil -insert signingIdentity -string "$identity" "$manifest_path"
 plutil -insert releaseState -string "$release_state" "$manifest_path"
 plutil -insert volumeName -string "$volume_name" "$manifest_path"

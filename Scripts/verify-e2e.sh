@@ -65,6 +65,10 @@ if [[ "${local_only}" == true ]]; then
   temporary_files+=("${local_output}")
   run_local_integration "${local_output}"
   rm -f "${local_output}"
+  (
+    cd "${repository_root}"
+    bash Scripts/test-update-acceptance.sh
+  )
   echo "local direct integration PASS；Internet/TURN 未运行。"
   exit 0
 fi

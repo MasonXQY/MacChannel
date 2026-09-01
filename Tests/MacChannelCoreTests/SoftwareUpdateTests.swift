@@ -146,6 +146,69 @@ final class SoftwareUpdateTests: XCTestCase {
     }
 
     @MainActor
+    func testManualFailureCanRetryFromAVisibleFailureState() {
+        let driver = RecordingUpdateDriver()
+        let controller = SparkleUpdateController(
+            driver: driver,
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        controller.didAbort(
+            with: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut),
+            userInitiated: true
+        )
+
+        controller.checkForUpdates()
+
+        XCTAssertEqual(controller.snapshot.phase, .checking)
+        XCTAssertEqual(driver.checkCount, 1)
+    }
+
+    @MainActor
+    func testSparkleNoUpdateErrorIsUpToDateAndInstallationCancellationReturnsIdle() {
+        let noUpdateController = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        noUpdateController.didAbort(
+            with: NSError(domain: "SUSparkleErrorDomain", code: 1001),
+            userInitiated: true
+        )
+
+        let cancelledController = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        cancelledController.didAbort(
+            with: NSError(domain: "SUSparkleErrorDomain", code: 4007),
+            userInitiated: true
+        )
+
+        XCTAssertEqual(noUpdateController.snapshot.phase, .upToDate)
+        XCTAssertEqual(cancelledController.snapshot.phase, .idle)
+    }
+
+    @MainActor
+    func testSparkleAppcastSignatureValidationAndDowngradeErrorsAreSecurityFailures() {
+        for code in [1000, 1002, 3001, 3002, 4006, 4009] {
+            let controller = SparkleUpdateController(
+                driver: RecordingUpdateDriver(),
+                installedVersion: InstalledAppVersion(info: [:])
+            )
+
+            controller.didAbort(
+                with: NSError(domain: "SUSparkleErrorDomain", code: code),
+                userInitiated: false
+            )
+
+            XCTAssertEqual(
+                controller.snapshot.phase,
+                .securityFailure,
+                "Expected Sparkle error \(code) to fail closed"
+            )
+        }
+    }
+
+    @MainActor
     func testManualUpdateSessionFailureRemainsVisibleAfterFindingAnUpdate() {
         let controller = SparkleUpdateController(
             driver: RecordingUpdateDriver(),
@@ -307,6 +370,30 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertEqual(installs, 1)
         oldContinuation.finish()
         newContinuation.finish()
+    }
+
+    @MainActor
+    func testReplacingTransferStreamCancelsTheOldObserver() async {
+        let controller = SparkleUpdateController(
+            driver: RecordingUpdateDriver(),
+            installedVersion: InstalledAppVersion(info: [:])
+        )
+        let oldTermination = StreamTerminationRecorder()
+        let oldStream = AsyncStream<[TransferSnapshot]> { continuation in
+            continuation.onTermination = { _ in oldTermination.record() }
+            continuation.yield([self.snapshot(phase: .transferring)])
+        }
+        controller.observeTransfers { oldStream }
+        await drainMainActorTasks()
+
+        let replacement = AsyncStream<[TransferSnapshot]> { continuation in
+            continuation.yield([])
+            continuation.finish()
+        }
+        controller.observeTransfers { replacement }
+        await drainMainActorTasks()
+
+        XCTAssertTrue(oldTermination.wasTerminated)
     }
 
     @MainActor
@@ -473,6 +560,34 @@ final class SoftwareUpdateTests: XCTestCase {
     }
 
     @MainActor
+    func testLastVerifyingOrCancellingTransferReleasesInstallExactlyOnce() {
+        for finalActivePhase in [TransferPhase.verifying, .cancelling] {
+            let gate = UpdateInstallationGate()
+            let first = TransferID(rawValue: UUID())
+            let last = TransferID(rawValue: UUID())
+            var installs = 0
+            gate.updateTransfers([
+                snapshot(id: first, phase: .transferring),
+                snapshot(id: last, phase: finalActivePhase),
+            ])
+            XCTAssertTrue(gate.postponeRelaunch { installs += 1 })
+
+            gate.updateTransfers([
+                snapshot(id: first, phase: .completed),
+                snapshot(id: last, phase: finalActivePhase),
+            ])
+            XCTAssertEqual(installs, 0)
+
+            gate.updateTransfers([
+                snapshot(id: first, phase: .completed),
+                snapshot(id: last, phase: .cancelled),
+            ])
+            gate.updateTransfers([])
+            XCTAssertEqual(installs, 1)
+        }
+    }
+
+    @MainActor
     func testInstallCallbackCanReenterGateWithoutRunningAgain() {
         let gate = UpdateInstallationGate()
         var installs = 0
@@ -510,6 +625,19 @@ final class SoftwareUpdateTests: XCTestCase {
         for _ in 0..<10 {
             await Task.yield()
         }
+    }
+}
+
+private final class StreamTerminationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var terminated = false
+
+    var wasTerminated: Bool {
+        lock.withLock { terminated }
+    }
+
+    func record() {
+        lock.withLock { terminated = true }
     }
 }
 

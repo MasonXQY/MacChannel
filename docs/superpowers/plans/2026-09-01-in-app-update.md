@@ -580,7 +580,9 @@ Expected: 每个新增测试先 RED，完成后全部 PASS。
 
 在 `Scripts/verify-e2e.sh --local-only` 中构建 build 13 测试 App，生成指向 build 14 的本机 HTTPS fixture feed，使用独立 bundle ID 与测试 feed URL。只有显式 `MACCHANNEL_UPDATE_TESTING=1` 时 `build-app.sh` 才接受覆盖；正式构建若看到覆盖变量必须失败。
 
-fixture 必须验证：发现 build 14；篡改 DMG 一个字节后拒绝；换另一 Ed25519 key 后拒绝；enclosure 降为 build 12 后拒绝；断网后 build 13 仍可正常启动。
+fixture 必须通过实际打包进 App 的 Sparkle 2.9.6 updater 路径验证：有效 build 14 可下载、解压、验证并安装；篡改 signed feed 后拒绝；篡改 DMG 一个字节后拒绝；换另一 Ed25519 key 且代码签名身份也不认证时拒绝；错误 signer 加无效 Ed25519 时拒绝；降级 payload 拒绝；断网后 build 13 保持稳定并可重试恢复。所有 test override 仅在 `MACCHANNEL_UPDATE_TESTING=1` 下可用，TLS 仅允许进程内 pin，不修改系统信任。
+
+采用用户批准的 Sparkle 官方双认证边界：有效 Ed25519 archive 可以轮换 Developer ID；自动化必须把“有效 Ed25519 + 轮换 signer 被接受”记录为 characterization，禁止声称运行时拒绝。发布脚本另加同 Team ID/designated requirement 门禁，在 feed 签名/发布前拒绝错误签名身份，并验证正式与 pending feed 都已清理；同 Team ID/designated requirement 通过。
 
 - [ ] **Step 3: 写真实验收表**
 
@@ -670,5 +672,6 @@ Expected: 非 draft、非 prerelease，含 `MacChannel.dmg`、`MacChannel.manife
 - v1.2.0 公共 DMG 已签名、公证并在两台 Mac 手动安装。
 - v1.2.1 已被两台 Mac 从应用内发现、下载、验证、替换并重启。
 - 传输中安装确实等待真实传输完成，且文件 SHA-256 一致。
-- 篡改包、错误 key、错误 Developer ID、降级和离线都有拒绝/恢复证据。
+- 篡改 feed/包、无法由 signer 补救的错误 key、错误 signer 加无效 key、降级和离线都有拒绝/恢复证据；有效 key 加 signer 轮换按 Sparkle 官方策略记录为接受。
+- 发布时同 Team ID/designated requirement 门禁已有错误身份失败清理和正确身份通过证据。
 - 公共 Release 三资产从互联网重新下载后 digest、版本、签名和 appcast 一致。

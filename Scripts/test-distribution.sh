@@ -97,7 +97,7 @@ MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
     bash Scripts/build-distribution.sh
 
 for manifest_key in \
-    product bundleIdentifier version build gitCommit teamID releaseState volumeName \
+    product bundleIdentifier version build gitCommit teamID designatedRequirement releaseState volumeName \
     stagedFilesystemSHA256 sourceDateEpoch createdAt; do
     first_value="$(plutil -extract "$manifest_key" raw -o - "$test_root/first-manifest.json")"
     second_value="$(plutil -extract "$manifest_key" raw -o - dist/MacChannel.manifest.json)"
@@ -158,6 +158,10 @@ test "$(plutil -extract version raw -o - dist/MacChannel.manifest.json)" = 1.2.0
 test "$(plutil -extract build raw -o - dist/MacChannel.manifest.json)" = 13
 test "$(plutil -extract releaseState raw -o - dist/MacChannel.manifest.json)" = internalSignedNotNotarized
 test "$(plutil -extract teamID raw -o - dist/MacChannel.manifest.json)" = "$expected_team_id"
+actual_requirement="$(codesign -d -r- "$mounted_path/MacChannel.app" 2>&1 | \
+    sed -n 's/^designated => //p')"
+test "$(plutil -extract designatedRequirement raw -o - dist/MacChannel.manifest.json)" = \
+    "$actual_requirement"
 
 hdiutil detach "$mounted_path" -quiet
 mounted_path=""

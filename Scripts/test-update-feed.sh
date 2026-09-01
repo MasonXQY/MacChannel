@@ -13,7 +13,6 @@ version=1.2.0
 build_number=13
 account=com.mason.macchannel.updates
 generate_appcast="$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast"
-public_key="$(tr -d '\r\n' <Distribution/SparklePublicKey.txt)"
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-update-feed-test.XXXXXX")"
 fixture_root="$test_root/fixture"
@@ -21,6 +20,12 @@ fixture_dmg="$fixture_root/MacChannel.dmg"
 fixture_manifest="$fixture_root/MacChannel.manifest.json"
 release_notes="$repo_root/Distribution/ReleaseNotes/v1.2.0.md"
 security_shim="$test_root/security-missing-key"
+codesign_shim="$test_root/codesign-update-fixture"
+test_private_pem="$test_root/sparkle-private.pem"
+test_private_key="$test_root/sparkle-private.key"
+test_public_key="$test_root/sparkle-public.key"
+fixture_team_id=TESTTEAM01
+fixture_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate leaf[subject.OU] = "TESTTEAM01"'
 
 cleanup() {
     [[ "${MACCHANNEL_TEST_KEEP_TEMP:-0}" == 1 ]] || rm -rf "$test_root"
@@ -32,7 +37,16 @@ trap cleanup EXIT
 mkdir -p "$fixture_root/app"
 chmod 700 "$test_root" "$fixture_root"
 cp Tests/Fixtures/security-missing-key.sh "$security_shim"
+cp Tests/Fixtures/codesign-update-fixture.sh "$codesign_shim"
 chmod 700 "$security_shim"
+chmod 700 "$codesign_shim"
+openssl genpkey -algorithm Ed25519 -out "$test_private_pem" >/dev/null 2>&1
+openssl pkey -in "$test_private_pem" -outform DER 2>/dev/null | tail -c 32 | \
+    base64 >"$test_private_key"
+openssl pkey -in "$test_private_pem" -pubout -outform DER 2>/dev/null | tail -c 32 | \
+    base64 >"$test_public_key"
+chmod 600 "$test_private_pem" "$test_private_key" "$test_public_key"
+public_key="$(tr -d '\r\n' <"$test_public_key")"
 ditto ".build/tools/Sparkle-2.9.6/Sparkle Test App.app" \
     "$fixture_root/app/MacChannel.app"
 fixture_plist="$fixture_root/app/MacChannel.app/Contents/Info.plist"
@@ -63,6 +77,8 @@ plutil -insert version -string "$version" "$fixture_manifest"
 plutil -insert build -string "$build_number" "$fixture_manifest"
 plutil -insert releaseState -string notarized "$fixture_manifest"
 plutil -insert dmgSHA256 -string "$dmg_sha" "$fixture_manifest"
+plutil -insert teamID -string "$fixture_team_id" "$fixture_manifest"
+plutil -insert designatedRequirement -string "$fixture_requirement" "$fixture_manifest"
 plutil -convert json "$fixture_manifest"
 
 prepare_fixture() {
@@ -74,18 +90,33 @@ prepare_fixture() {
 }
 
 run_feed_builder() {
+    local testing="${MACCHANNEL_TESTING:-1}"
+    local use_disposable_key="${MACCHANNEL_TEST_USE_DISPOSABLE_KEY:-1}"
+    local ed_key_file=""
+    local public_key_path=""
+    if [[ "$use_disposable_key" == 1 ]]; then
+        ed_key_file="$test_private_key"
+        public_key_path="$test_public_key"
+    fi
     env \
         MACCHANNEL_VERSION="${MACCHANNEL_TEST_VERSION:-$version}" \
         MACCHANNEL_BUILD_NUMBER="${MACCHANNEL_TEST_BUILD_NUMBER:-$build_number}" \
         MACCHANNEL_RELEASE_NOTES="${MACCHANNEL_TEST_RELEASE_NOTES:-$release_notes}" \
         MACCHANNEL_SPARKLE_ACCOUNT="${MACCHANNEL_TEST_SPARKLE_ACCOUNT:-$account}" \
         MACCHANNEL_SPARKLE_GENERATE_APPCAST="${MACCHANNEL_TEST_GENERATE_APPCAST:-$generate_appcast}" \
-        MACCHANNEL_UPDATE_TESTING="${MACCHANNEL_TESTING:-0}" \
+        MACCHANNEL_UPDATE_TESTING="$testing" \
         MACCHANNEL_UPDATE_TEST_FAIL_STAGE="${MACCHANNEL_TEST_FAIL_STAGE:-}" \
         MACCHANNEL_UPDATE_TEST_MUTATION="${MACCHANNEL_TEST_MUTATION:-}" \
         MACCHANNEL_UPDATE_SECURITY_COMMAND="${MACCHANNEL_TEST_SECURITY_COMMAND:-}" \
+        MACCHANNEL_UPDATE_CODESIGN_COMMAND="${MACCHANNEL_TEST_CODESIGN_COMMAND:-$codesign_shim}" \
+        MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$ed_key_file" \
+        MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$public_key_path" \
         MACCHANNEL_SECURITY_SHIM_MARKER="${MACCHANNEL_TEST_SECURITY_MARKER:-}" \
         MACCHANNEL_SECURITY_SHIM_NOISE="${MACCHANNEL_TEST_SECURITY_NOISE:-}" \
+        MACCHANNEL_CODESIGN_FIXTURE_VERIFY="${MACCHANNEL_TEST_CODESIGN_VERIFY:-pass}" \
+        MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID="${MACCHANNEL_TEST_CODESIGN_BUNDLE_ID:-com.mason.macchannel}" \
+        MACCHANNEL_CODESIGN_FIXTURE_TEAM_ID="${MACCHANNEL_TEST_CODESIGN_TEAM_ID:-$fixture_team_id}" \
+        MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT="${MACCHANNEL_TEST_CODESIGN_REQUIREMENT:-$fixture_requirement}" \
         bash Scripts/build-update-feed.sh
 }
 
@@ -188,17 +219,33 @@ MACCHANNEL_TEST_SPARKLE_ACCOUNT=com.mason.macchannel.missing \
 
 prepare_fixture
 MACCHANNEL_TEST_SECURITY_COMMAND="$security_shim" \
+MACCHANNEL_TESTING=0 \
     expect_failure test run_feed_builder
 
 prepare_fixture
 security_marker="$test_root/security-shim-called"
 security_noise="$repo_root/MacChannel.dmg 此版本包含安全更新与稳定性改进。"
 MACCHANNEL_TESTING=1 \
+MACCHANNEL_TEST_USE_DISPOSABLE_KEY=0 \
 MACCHANNEL_TEST_SECURITY_COMMAND="$security_shim" \
 MACCHANNEL_TEST_SECURITY_MARKER="$security_marker" \
 MACCHANNEL_TEST_SECURITY_NOISE="$security_noise" \
     expect_failure key run_feed_builder
 test -f "$security_marker"
+
+prepare_fixture
+MACCHANNEL_TEST_CODESIGN_TEAM_ID=WRONGTEAM2 \
+    expect_failure identity run_feed_builder
+prepare_fixture
+MACCHANNEL_TEST_CODESIGN_REQUIREMENT='identifier "com.mason.macchannel" and anchor apple generic and certificate leaf[subject.OU] = "TESTTEAM01" and true' \
+    expect_failure identity run_feed_builder
+prepare_fixture
+MACCHANNEL_TEST_CODESIGN_TEAM_ID="$fixture_team_id" \
+MACCHANNEL_TEST_CODESIGN_REQUIREMENT="$fixture_requirement" \
+    run_feed_builder >"$test_root/same-team-success.log" 2>&1
+grep -Fx "update-feed success version=$version build=$build_number" \
+    "$test_root/same-team-success.log" >/dev/null
+assert_redacted_output "$test_root/same-team-success.log"
 prepare_fixture
 MACCHANNEL_TEST_GENERATE_APPCAST="$repo_root/.build/tools/Sparkle-2.9.6/bin/sign_update" \
     expect_failure tool run_feed_builder
@@ -309,6 +356,13 @@ rm -f dist/MacChannel.dmg dist/MacChannel.manifest.json dist/appcast.xml \
     dist/.appcast.xml.new
 env MACCHANNEL_UPDATE_TESTING=1 \
     MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
+    MACCHANNEL_UPDATE_CODESIGN_COMMAND="$codesign_shim" \
+    MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$test_private_key" \
+    MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$test_public_key" \
+    MACCHANNEL_CODESIGN_FIXTURE_VERIFY=pass \
+    MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID=com.mason.macchannel \
+    MACCHANNEL_CODESIGN_FIXTURE_TEAM_ID="$fixture_team_id" \
+    MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT="$fixture_requirement" \
     MACCHANNEL_RELEASE_NOTES="$release_notes" \
     MACCHANNEL_VERSION="$version" \
     MACCHANNEL_BUILD_NUMBER="$build_number" \
@@ -327,6 +381,13 @@ printf '%s\n' stale-pending >dist/.appcast.xml.new
 set +e
 env MACCHANNEL_UPDATE_TESTING=1 \
     MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
+    MACCHANNEL_UPDATE_CODESIGN_COMMAND="$codesign_shim" \
+    MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$test_private_key" \
+    MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$test_public_key" \
+    MACCHANNEL_CODESIGN_FIXTURE_VERIFY=pass \
+    MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID=com.mason.macchannel \
+    MACCHANNEL_CODESIGN_FIXTURE_TEAM_ID="$fixture_team_id" \
+    MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT="$fixture_requirement" \
     MACCHANNEL_UPDATE_TEST_FAIL_STAGE=after-verify \
     MACCHANNEL_RELEASE_NOTES="$release_notes" \
     MACCHANNEL_VERSION="$version" \
