@@ -9,20 +9,33 @@ enum ReceiveNotificationAuthorizationState: Equatable {
     case authorized
     case provisional
     case ephemeral
-    case deliveryUnavailable
 
     var canDeliverNotifications: Bool {
         switch self {
         case .authorized, .provisional, .ephemeral:
             true
-        case .notDetermined, .denied, .deliveryUnavailable:
+        case .notDetermined, .denied:
             false
         }
     }
 }
 
+enum ReceiveNotificationDeliveryState: Equatable {
+    case available
+    case temporarilyUnavailable
+}
+
 struct ReceiveNotificationSnapshot: Equatable {
     let authorizationState: ReceiveNotificationAuthorizationState
+    let deliveryState: ReceiveNotificationDeliveryState
+
+    init(
+        authorizationState: ReceiveNotificationAuthorizationState,
+        deliveryState: ReceiveNotificationDeliveryState = .available
+    ) {
+        self.authorizationState = authorizationState
+        self.deliveryState = deliveryState
+    }
 }
 
 struct ReceiveNotificationContent: Equatable {
@@ -57,10 +70,20 @@ protocol ReceiveTargetRevealing: AnyObject {
 
 @MainActor
 final class ReceiveNotificationController {
+    private struct NotificationTarget {
+        let urls: [URL]
+        let createdAt: Date
+        let order: UInt64
+    }
+
     private let center: any ReceiveNotificationCenter
     private let revealer: any ReceiveTargetRevealing
     private var continuations: [UUID: AsyncStream<ReceiveNotificationSnapshot>.Continuation] = [:]
-    private var notificationTargets: [String: [URL]] = [:]
+    private var notificationTargets: [String: NotificationTarget] = [:]
+    private let notificationTargetCapacity: Int
+    private let notificationTargetTTL: TimeInterval
+    private let now: () -> Date
+    private var notificationTargetOrder: UInt64 = 0
     private var didRequestAuthorization = false
     private var authorizationQueryGeneration: UInt = 0
     private var authorizationRequestGeneration: UInt = 0
@@ -76,10 +99,16 @@ final class ReceiveNotificationController {
 
     init(
         center: any ReceiveNotificationCenter,
-        revealer: any ReceiveTargetRevealing
+        revealer: any ReceiveTargetRevealing,
+        notificationTargetCapacity: Int = 64,
+        notificationTargetTTL: TimeInterval = 10 * 60,
+        now: @escaping () -> Date = Date.init
     ) {
         self.center = center
         self.revealer = revealer
+        self.notificationTargetCapacity = max(1, notificationTargetCapacity)
+        self.notificationTargetTTL = max(0, notificationTargetTTL)
+        self.now = now
 
         if let systemCenter = center as? SystemReceiveNotificationCenter {
             systemCenter.setResponseHandler { [weak self] identifier in
@@ -150,9 +179,10 @@ final class ReceiveNotificationController {
 
         do {
             try await center.deliver(request)
-            notificationTargets[identifier] = revealTargets(for: urls)
+            storeNotificationTarget(revealTargets(for: urls), identifier: identifier)
+            publishDeliveryState(.available)
         } catch {
-            publish(.deliveryUnavailable)
+            publishDeliveryState(.temporarilyUnavailable)
         }
     }
 
@@ -174,14 +204,28 @@ final class ReceiveNotificationController {
     }
 
     func openNotification(identifier: String) {
-        guard let urls = notificationTargets.removeValue(forKey: identifier), !urls.isEmpty else {
+        pruneNotificationTargets()
+        guard let target = notificationTargets.removeValue(forKey: identifier),
+              !target.urls.isEmpty
+        else {
             return
         }
-        revealer.reveal(urls)
+        revealer.reveal(target.urls)
     }
 
     private func publish(_ authorizationState: ReceiveNotificationAuthorizationState) {
-        snapshot = ReceiveNotificationSnapshot(authorizationState: authorizationState)
+        snapshot = ReceiveNotificationSnapshot(
+            authorizationState: authorizationState,
+            deliveryState: snapshot.deliveryState
+        )
+        continuations.values.forEach { $0.yield(snapshot) }
+    }
+
+    private func publishDeliveryState(_ deliveryState: ReceiveNotificationDeliveryState) {
+        snapshot = ReceiveNotificationSnapshot(
+            authorizationState: snapshot.authorizationState,
+            deliveryState: deliveryState
+        )
         continuations.values.forEach { $0.yield(snapshot) }
     }
 
@@ -224,6 +268,27 @@ final class ReceiveNotificationController {
             return "\(urls[0].lastPathComponent) 已保存到接收文件夹"
         }
         return "已收到 \(urls.count) 个文件，已保存到接收文件夹"
+    }
+
+    private func storeNotificationTarget(_ urls: [URL], identifier: String) {
+        guard !urls.isEmpty else { return }
+        pruneNotificationTargets()
+        while notificationTargets.count >= notificationTargetCapacity,
+              let oldest = notificationTargets.min(by: { $0.value.order < $1.value.order })?.key
+        {
+            notificationTargets.removeValue(forKey: oldest)
+        }
+        notificationTargetOrder &+= 1
+        notificationTargets[identifier] = NotificationTarget(
+            urls: urls,
+            createdAt: now(),
+            order: notificationTargetOrder
+        )
+    }
+
+    private func pruneNotificationTargets() {
+        let expiry = now().addingTimeInterval(-notificationTargetTTL)
+        notificationTargets = notificationTargets.filter { $0.value.createdAt >= expiry }
     }
 
     private func revealTargets(for urls: [URL]) -> [URL] {
@@ -277,6 +342,14 @@ final class SystemReceiveNotificationCenter: NSObject, ReceiveNotificationCenter
             responseHandler(identifier)
             completion.call()
         }
+    }
+
+    /// DropMesh targets macOS 14+, where `.banner` and `.list` replace the
+    /// deprecated `.alert` foreground option while `.sound` remains separate.
+    nonisolated static func dispatchForegroundPresentation(
+        completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
     }
 
     func authorizationState() async -> ReceiveNotificationAuthorizationState {
@@ -342,6 +415,14 @@ private final class NotificationResponseCompletion: @unchecked Sendable {
 }
 
 extension SystemReceiveNotificationCenter: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(
+        _: UNUserNotificationCenter,
+        willPresent _: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        Self.dispatchForegroundPresentation(completionHandler: completionHandler)
+    }
+
     nonisolated func userNotificationCenter(
         _: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,

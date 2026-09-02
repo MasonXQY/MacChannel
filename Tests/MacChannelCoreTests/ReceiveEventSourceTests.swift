@@ -5,6 +5,28 @@ import XCTest
 @testable import MacChannelCore
 
 final class ReceiveEventSourceTests: XCTestCase {
+    func testBurstLargerThanLegacyBufferIsDeliveredWithoutLoss() async {
+        let source = RuntimeReceiveEventSource()
+        let stream = await source.stream()
+        let expected = (0..<32).map { index in
+            TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/received-\(index).bin")]
+            )
+        }
+
+        for result in expected {
+            await source.publish(result)
+        }
+        await source.finish()
+
+        var observed: [TransferReceiveResult] = []
+        for await result in stream {
+            observed.append(result)
+        }
+        XCTAssertEqual(observed, expected)
+    }
+
     func testEverySubscriptionReceivesEventsPublishedAfterItStarts() async throws {
         let source = RuntimeReceiveEventSource()
         let first = await source.stream()

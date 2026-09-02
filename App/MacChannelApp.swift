@@ -100,6 +100,8 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private var pendingReceiveEventDrain: ReceiveEventDrain?
     private var receiveEventDrainGeneration = 0
     private var containerReplacementGeneration = 0
+    private(set) var observedReceiveEventCount = 0
+    private var acknowledgedReceiveEventCount = 0
 
     private struct ReceiveEventDrain {
         let generation: Int
@@ -208,6 +210,10 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         statusController.onRetryRuntime = { [weak runtimeHost] in
             Task { await runtimeHost?.bootstrap() }
         }
+        statusController.onAcknowledgeReceive = { [weak self] in
+            guard let self else { return }
+            acknowledgedReceiveEventCount = observedReceiveEventCount
+        }
         surfaces.bind(to: statusController)
         statusController.setRuntimeStatus(status)
         surfaces.updateRuntimeStatus(status)
@@ -299,11 +305,21 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         guard let makeEvents = container.receiveEvents else { return }
         receiveEventTask = Task { [weak self] in
             let events = await makeEvents()
+            var notificationTail: Task<Void, Never>?
             for await result in events {
-                guard !Task.isCancelled, let self else { return }
-                statusItemController?.setUnreadReceive(true)
-                await receiveNotificationController.notify(receive: result)
+                guard !Task.isCancelled, let self else { break }
+                observedReceiveEventCount += 1
+                if observedReceiveEventCount > acknowledgedReceiveEventCount {
+                    statusItemController?.setUnreadReceive(true)
+                }
+                let priorNotification = notificationTail
+                let notifications = receiveNotificationController
+                notificationTail = Task { @MainActor in
+                    await priorNotification?.value
+                    await notifications.notify(receive: result)
+                }
             }
+            await notificationTail?.value
         }
     }
 

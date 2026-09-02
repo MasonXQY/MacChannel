@@ -736,6 +736,70 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testBlockedNotificationDeliveryDoesNotLoseBurstOrRelightAcknowledgedUnread() async {
+        let events = RuntimeReceiveEventSource()
+        let notificationCenter = BlockingApplicationShellNotificationCenter()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        var statusController: StatusItemController?
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: { container in
+                let controller = StatusItemController(
+                    button: StatusItemButton(
+                        frame: NSRect(x: 0, y: 0, width: 30, height: 24)
+                    ),
+                    devices: [],
+                    transferCoordinator: container.transferCoordinator
+                )
+                statusController = controller
+                return controller
+            }
+        )
+        let base = AppContainer.localShell()
+        let container = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await events.stream() }
+        )
+
+        await shell.replace(container, status: .ready)
+        let expected = (0..<32).map { index in
+            TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/burst-\(index).bin")]
+            )
+        }
+        for result in expected {
+            await events.publish(result)
+        }
+        await notificationCenter.waitUntilDeliveryStarts()
+        for _ in 0..<1_000 where shell.observedReceiveEventCount < expected.count {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(shell.observedReceiveEventCount, expected.count)
+        XCTAssertTrue(shell.hasUnreadReceive)
+        statusController?.prepareToOpenStatusMenu()
+        XCTAssertFalse(shell.hasUnreadReceive)
+
+        notificationCenter.releaseFirstDelivery()
+        for _ in 0..<1_000 where notificationCenter.deliveredCount < expected.count {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(notificationCenter.deliveredCount, expected.count)
+        XCTAssertEqual(Set(notificationCenter.deliveredIdentifiers).count, expected.count)
+        XCTAssertFalse(shell.hasUnreadReceive)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
     func testApplicationShellSerializesReplacementAndTerminationBehindPriorObserverWork()
         async throws
     {
@@ -936,7 +1000,8 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
     private var deliveryStarted = false
     private var deliveryStartContinuation: CheckedContinuation<Void, Never>?
     private var deliveryReleaseContinuation: CheckedContinuation<Void, Never>?
-    private(set) var deliveredCount = 0
+    private(set) var deliveredIdentifiers: [String] = []
+    var deliveredCount: Int { deliveredIdentifiers.count }
 
     func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
     func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .authorized }
@@ -951,7 +1016,7 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
                 await withCheckedContinuation { deliveryReleaseContinuation = $0 }
             }
         }
-        deliveredCount += 1
+        deliveredIdentifiers.append(request.identifier)
     }
 
     func waitUntilDeliveryStarts() async {

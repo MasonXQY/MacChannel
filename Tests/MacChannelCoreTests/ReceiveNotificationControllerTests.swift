@@ -2,9 +2,26 @@ import Foundation
 import XCTest
 @testable import MacChannelAppKit
 @testable import MacChannelCore
+@preconcurrency import UserNotifications
 
 @MainActor
 final class ReceiveNotificationControllerTests: XCTestCase {
+    func testForegroundNotificationUsesModernPresentationSurfacesAndCompletesOnce() {
+        var completionCount = 0
+        var observedOptions: UNNotificationPresentationOptions = []
+
+        SystemReceiveNotificationCenter.dispatchForegroundPresentation {
+            completionCount += 1
+            observedOptions = $0
+        }
+
+        XCTAssertEqual(completionCount, 1)
+        XCTAssertTrue(observedOptions.contains(.banner))
+        XCTAssertTrue(observedOptions.contains(.list))
+        XCTAssertTrue(observedOptions.contains(.sound))
+        XCTAssertEqual(observedOptions, [.banner, .list, .sound])
+    }
+
     func testSingleFileNotificationUsesFilenameAndCanRevealIt() async throws {
         let center = RecordingReceiveNotificationCenter(status: .authorized)
         let finder = RecordingReceiveTargetRevealer()
@@ -192,7 +209,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(current?.authorizationState, .authorized)
     }
 
-    func testDeliveryFailurePublishesDeliveryUnavailableWithoutThrowing() async {
+    func testDeliveryFailurePreservesAuthorizationAndPublishesTransientFailure() async {
         let center = RecordingReceiveNotificationCenter(status: .authorized)
         center.deliveryError = TestError.deliveryUnavailable
         let controller = ReceiveNotificationController(
@@ -209,7 +226,17 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(center.requests.count, 1)
         var iterator = snapshots.makeAsyncIterator()
         let observedSnapshot = await iterator.next()
-        XCTAssertEqual(observedSnapshot?.authorizationState, .deliveryUnavailable)
+        XCTAssertEqual(observedSnapshot?.authorizationState, .authorized)
+        XCTAssertEqual(observedSnapshot?.deliveryState, .temporarilyUnavailable)
+
+        center.deliveryError = nil
+        await controller.notify(receive: TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/retry.pdf")]
+        ))
+        let recoveredSnapshot = await iterator.next()
+        XCTAssertEqual(recoveredSnapshot?.authorizationState, .authorized)
+        XCTAssertEqual(recoveredSnapshot?.deliveryState, .available)
     }
 
     func testUnknownNotificationIdentifierDoesNotRevealAnyTarget() {
@@ -240,6 +267,57 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         controller.openNotification(identifier: identifier)
 
         XCTAssertEqual(finder.revealedURLs, [[file]])
+    }
+
+    func testNotificationTargetCacheEvictsOldestEntryAtCapacity() async throws {
+        let center = RecordingReceiveNotificationCenter(status: .authorized)
+        let finder = RecordingReceiveTargetRevealer()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: finder,
+            notificationTargetCapacity: 2
+        )
+
+        for index in 0..<3 {
+            await controller.notify(receive: TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/\(index).bin")]
+            ))
+        }
+
+        controller.openNotification(identifier: center.requests[0].identifier)
+        controller.openNotification(identifier: center.requests[1].identifier)
+        controller.openNotification(identifier: center.requests[2].identifier)
+
+        XCTAssertEqual(
+            finder.revealedURLs,
+            [
+                [URL(fileURLWithPath: "/tmp/Downloads/1.bin")],
+                [URL(fileURLWithPath: "/tmp/Downloads/2.bin")],
+            ]
+        )
+    }
+
+    func testNotificationTargetCacheExpiresBeforeClick() async throws {
+        var now = Date(timeIntervalSince1970: 1_000)
+        let center = RecordingReceiveNotificationCenter(status: .authorized)
+        let finder = RecordingReceiveTargetRevealer()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: finder,
+            notificationTargetTTL: 60,
+            now: { now }
+        )
+        await controller.notify(receive: TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/plan.pdf")]
+        ))
+        let identifier = try XCTUnwrap(center.requests.first?.identifier)
+
+        now.addTimeInterval(61)
+        controller.openNotification(identifier: identifier)
+
+        XCTAssertTrue(finder.revealedURLs.isEmpty)
     }
 
     func testSystemResponseCompletesAfterItsMainActorHandler() async {

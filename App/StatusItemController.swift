@@ -26,6 +26,7 @@ final class StatusItemController: NSObject {
     var onShowPairing: (() -> Void)?
     var onShowSettings: (() -> Void)?
     var onRetryRuntime: (() -> Void)?
+    var onAcknowledgeReceive: (() -> Void)?
 
     var phase: StatusItemPhase { state.phase }
     var nativeButton: NSStatusBarButton? { statusItem?.button }
@@ -256,6 +257,7 @@ final class StatusItemController: NSObject {
     }
 
     func prepareToOpenStatusMenu() {
+        onAcknowledgeReceive?()
         setUnreadReceive(false)
     }
 
