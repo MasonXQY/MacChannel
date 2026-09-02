@@ -300,6 +300,20 @@ for forbidden_metadata in "$repo_root" "$updates_root" "$release_notes" "$accoun
 done
 
 xmllint --noout "$generated_feed" >>"$tool_log" 2>&1 || fail_feed verify
+channel_title="$(xmllint --xpath 'string(//*[local-name()="channel"]/*[local-name()="title"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
+legacy_channel_title="$actual_display_name"
+case "$channel_title" in
+    DropMesh) ;;
+    "$legacy_channel_title")
+        CHANNEL_OLD_TITLE="$legacy_channel_title" CHANNEL_TITLE=DropMesh perl -0pi -e \
+            's#(<channel>[[:space:]]*<title>)\Q$ENV{CHANNEL_OLD_TITLE}\E(</title>)#$1$ENV{CHANNEL_TITLE}$2#' \
+            "$generated_feed" 2>>"$tool_log" || fail_feed verify
+        clean_update_tool "$sign_update" "${signing_key_arguments[@]}" \
+            "$generated_feed" >>"$tool_log" 2>&1 || fail_feed verify
+        ;;
+    *) fail_feed verify ;;
+esac
+channel_title="$(xmllint --xpath 'string(//*[local-name()="channel"]/*[local-name()="title"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
 item_count="$(xmllint --xpath 'count(//*[local-name()="item"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
 feed_build="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="version"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
 feed_version="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="shortVersionString"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
@@ -307,7 +321,8 @@ enclosure_url="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-nam
 enclosure_length="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@length)' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
 enclosure_signature="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@*[local-name()="edSignature"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
 embedded_release_notes="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="description"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
-[[ "$item_count" == 1 && "$feed_build" == "$build_number" && "$feed_version" == "$version" ]] || fail_feed verify
+[[ "$channel_title" == DropMesh && "$item_count" == 1 && \
+    "$feed_build" == "$build_number" && "$feed_version" == "$version" ]] || fail_feed verify
 expected_url="https://github.com/MasonXQY/MacChannel/releases/download/v$version/DropMesh.dmg"
 [[ "$enclosure_url" == "$expected_url" ]] || fail_feed verify
 [[ "$enclosure_length" == "$(stat -f %z "$dmg_path")" ]] || fail_feed verify

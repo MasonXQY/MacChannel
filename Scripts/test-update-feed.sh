@@ -488,9 +488,13 @@ enclosure_signature="$(xmllint --xpath \
 description_value="$(xmllint --xpath \
     'string(//*[local-name()="item"][1]/*[local-name()="description"])' \
     "$test_dist/appcast.xml")"
+channel_title="$(xmllint --xpath \
+    'string(//*[local-name()="channel"]/*[local-name()="title"])' \
+    "$test_dist/appcast.xml")"
 
 test "$version_value" = "$build_number"
 test "$short_value" = "$version"
+test "$channel_title" = DropMesh
 test "$enclosure_url" = \
     "https://github.com/MasonXQY/MacChannel/releases/download/v$version/DropMesh.dmg"
 test "$enclosure_length" = "$(stat -f %z "$test_dist/DropMesh.dmg")"
