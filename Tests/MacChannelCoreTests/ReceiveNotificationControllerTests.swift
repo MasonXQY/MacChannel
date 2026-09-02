@@ -148,6 +148,69 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(latest?.authorizationState, .authorized)
     }
 
+    func testCancellingOneSharedAuthorizationRefreshDoesNotCancelTheSurvivingWaiter() async {
+        let center = ControllableReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer(),
+            authorizationStatusTimeout: .seconds(30)
+        )
+        let cancelled = Task { @MainActor in
+            await controller.refreshAuthorizationState()
+        }
+        await waitForAuthorizationQueries(1, in: center)
+        let surviving = Task { @MainActor in
+            await controller.refreshAuthorizationState()
+        }
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(center.authorizationQueryCount, 1)
+
+        cancelled.cancel()
+        await cancelled.value
+        center.resolveAuthorizationQuery(at: 0, with: .authorized)
+        await surviving.value
+
+        var snapshots = controller.snapshots().makeAsyncIterator()
+        let authorized = await snapshots.next()
+        XCTAssertEqual(authorized?.authorizationState, .authorized)
+        XCTAssertEqual(center.authorizationQueryCount, 1)
+    }
+
+    func testCancellingOneSharedAuthorizationRequestDoesNotSuppressWaitingNotification()
+        async
+    {
+        let center = ControllableReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer(),
+            authorizationPromptTimeout: .seconds(30)
+        )
+        let cancelledPrepare = Task { @MainActor in
+            await controller.prepare()
+        }
+        await waitForAuthorizationQueries(1, in: center)
+        center.resolveAuthorizationQuery(at: 0, with: .notDetermined)
+        await waitForAuthorizationRequests(1, in: center)
+
+        let survivingNotification = Task { @MainActor in
+            await controller.notify(receive: self.receiveResult(named: "survivor.pdf"))
+        }
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(center.authorizationRequestCount, 1)
+
+        cancelledPrepare.cancel()
+        await cancelledPrepare.value
+        center.resolveAuthorizationRequest(at: 0, with: .authorized)
+        await survivingNotification.value
+
+        XCTAssertEqual(center.authorizationRequestCount, 1)
+        XCTAssertEqual(center.requests.count, 1)
+        XCTAssertEqual(center.requests.first?.content.body, "survivor.pdf 已保存到接收文件夹")
+        var snapshots = controller.snapshots().makeAsyncIterator()
+        let authorized = await snapshots.next()
+        XCTAssertEqual(authorized?.authorizationState, .authorized)
+    }
+
     func testCancelledAuthorizationRefreshDoesNotPublishItsLateResult() async {
         let center = ControllableReceiveNotificationCenter()
         let controller = ReceiveNotificationController(
@@ -291,6 +354,58 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(center.authorizationQueryCount, 1)
         center.releaseAuthorizationQuery(with: .authorized)
         await refresh.value
+    }
+
+    func testAuthorizationQueryTimeoutKeepsOneResidualSystemOperation() async {
+        let center = ControllableReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer(),
+            authorizationStatusTimeout: .milliseconds(20)
+        )
+
+        await controller.refreshAuthorizationState()
+        await controller.refreshAuthorizationState()
+
+        XCTAssertEqual(center.authorizationQueryCount, 1)
+        center.resolveAuthorizationQuery(at: 0, with: .denied)
+        for _ in 0..<100 { await Task.yield() }
+
+        let recovered = Task { @MainActor in
+            await controller.refreshAuthorizationState()
+        }
+        await waitForAuthorizationQueries(2, in: center)
+        center.resolveAuthorizationQuery(at: 1, with: .authorized)
+        await recovered.value
+
+        XCTAssertEqual(center.authorizationQueryCount, 2)
+        var snapshots = controller.snapshots().makeAsyncIterator()
+        let current = await snapshots.next()
+        XCTAssertEqual(current?.authorizationState, .authorized)
+    }
+
+    func testAuthorizationRequestTimeoutKeepsOneResidualSystemOperation() async {
+        let center = ControllableReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer(),
+            authorizationPromptTimeout: .milliseconds(20)
+        )
+
+        let first = Task { @MainActor in
+            await controller.prepare()
+        }
+        await waitForAuthorizationQueries(1, in: center)
+        center.resolveAuthorizationQuery(at: 0, with: .notDetermined)
+        await waitForAuthorizationRequests(1, in: center)
+        await first.value
+
+        await controller.prepare()
+        XCTAssertEqual(center.authorizationRequestCount, 1)
+        center.resolveAuthorizationRequest(at: 0, with: .authorized)
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertEqual(center.authorizationRequestCount, 1)
     }
 
     func testWorkspaceRevealerSelectsAnExistingSingleFile() {

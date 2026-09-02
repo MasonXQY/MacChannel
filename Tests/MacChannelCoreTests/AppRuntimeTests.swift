@@ -764,7 +764,8 @@ final class AppRuntimeTests: XCTestCase {
         let container = AppContainer(
             deviceDirectory: base.deviceDirectory,
             transferCoordinator: base.transferCoordinator,
-            receiveEvents: { await events.stream() }
+            receiveEvents: { await events.stream() },
+            receiveCompletionState: events.completionState
         )
 
         await shell.replace(container, status: .ready)
@@ -800,7 +801,9 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testDelayedNotificationCompletionDoesNotRelightAcknowledgedUnread() async {
+    func testAcknowledgingPublishedBurstWhileDeliveryIsBlockedDoesNotRelightUntilANewReceive()
+        async
+    {
         let events = RuntimeReceiveEventSource(bufferCapacity: 2)
         let notificationCenter = BlockingApplicationShellNotificationCenter()
         let notifier = ReceiveNotificationController(
@@ -830,26 +833,52 @@ final class AppRuntimeTests: XCTestCase {
         let container = AppContainer(
             deviceDirectory: base.deviceDirectory,
             transferCoordinator: base.transferCoordinator,
-            receiveEvents: { await events.stream() }
+            receiveEvents: { await events.stream() },
+            receiveCompletionState: events.completionState
         )
 
         await shell.replace(container, status: .ready)
-        await events.publish(
+        let acknowledgedResults = (0..<4).map { index in
             TransferReceiveResult(
                 transferID: TransferID(rawValue: UUID()),
-                receivedURLs: [URL(fileURLWithPath: "/tmp/one.pdf")]
+                receivedURLs: [URL(fileURLWithPath: "/tmp/acknowledged-\(index).pdf")]
             )
-        )
+        }
+        let publisher = Task {
+            for result in acknowledgedResults {
+                await events.publish(result)
+            }
+        }
         await notificationCenter.waitUntilDeliveryStarts()
+        for _ in 0..<1_000 where events.completionState.latestSequence < 4 {
+            await Task.yield()
+        }
+        XCTAssertEqual(events.completionState.latestSequence, 4)
         XCTAssertTrue(shell.hasUnreadReceive)
 
         statusController?.prepareToOpenStatusMenu()
         XCTAssertFalse(shell.hasUnreadReceive)
         notificationCenter.releaseFirstDelivery()
-        for _ in 0..<100 where notificationCenter.deliveredCount == 0 { await Task.yield() }
+        await publisher.value
+        for _ in 0..<1_000 where notificationCenter.deliveredCount < acknowledgedResults.count {
+            await Task.yield()
+        }
 
-        XCTAssertEqual(notificationCenter.deliveredCount, 1)
+        XCTAssertEqual(notificationCenter.deliveredCount, acknowledgedResults.count)
         XCTAssertFalse(shell.hasUnreadReceive)
+
+        await events.publish(
+            TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/new-after-ack.pdf")]
+            )
+        )
+        for _ in 0..<1_000 where notificationCenter.deliveredCount < 5 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(notificationCenter.deliveredCount, 5)
+        XCTAssertTrue(shell.hasUnreadReceive)
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
@@ -956,11 +985,13 @@ private func makeApplicationShellContainer(
     return AppContainer(
         deviceDirectory: shell.deviceDirectory,
         transferCoordinator: shell.transferCoordinator,
-        receiveEvents: { await receiveEvents.stream() }
+        receiveEvents: { await receiveEvents.stream() },
+        receiveCompletionState: receiveEvents.completionState
     )
 }
 
 private actor ApplicationShellReceiveEventSource {
+    nonisolated let completionState = RuntimeReceiveCompletionState()
     private var pending: [TransferReceiveResult] = []
     private var nextContinuation: CheckedContinuation<TransferReceiveResult?, Never>?
     private var subscribed = false
@@ -979,6 +1010,7 @@ private actor ApplicationShellReceiveEventSource {
     }
 
     func publish(_ result: TransferReceiveResult) {
+        completionState.recordCompletion()
         if let nextContinuation {
             self.nextContinuation = nil
             nextContinuation.resume(returning: result)
@@ -1001,6 +1033,7 @@ private actor ApplicationShellReceiveEventSource {
 
     private func markCancelled() {
         cancelled = true
+        completionState.finish()
         nextContinuation?.resume(returning: nil)
         nextContinuation = nil
         pending.removeAll()

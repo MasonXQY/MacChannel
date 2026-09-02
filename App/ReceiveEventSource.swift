@@ -1,6 +1,63 @@
 import Foundation
 import MacChannelCore
 
+final class RuntimeReceiveCompletionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sequence: UInt64 = 0
+    private var continuations: [UUID: AsyncStream<UInt64>.Continuation] = [:]
+    private var isFinished = false
+
+    var latestSequence: UInt64 {
+        lock.withLock { sequence }
+    }
+
+    func sequences() -> AsyncStream<UInt64> {
+        let id = UUID()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            continuation.onTermination = { [weak self] _ in
+                self?.removeContinuation(id)
+            }
+            let initial: UInt64? = lock.withLock {
+                guard !isFinished else { return nil }
+                continuations[id] = continuation
+                return sequence
+            }
+            if let initial {
+                continuation.yield(initial)
+            } else {
+                continuation.finish()
+            }
+        }
+    }
+
+    func recordCompletion() {
+        let update: (UInt64, [AsyncStream<UInt64>.Continuation])? = lock.withLock {
+            guard !isFinished else { return nil }
+            sequence &+= 1
+            return (sequence, Array(continuations.values))
+        }
+        guard let (sequence, continuations) = update else { return }
+        continuations.forEach { $0.yield(sequence) }
+    }
+
+    func finish() {
+        let current: [AsyncStream<UInt64>.Continuation] = lock.withLock {
+            guard !isFinished else { return [] }
+            isFinished = true
+            let current = Array(continuations.values)
+            continuations.removeAll(keepingCapacity: false)
+            return current
+        }
+        current.forEach { $0.finish() }
+    }
+
+    private func removeContinuation(_ id: UUID) {
+        _ = lock.withLock {
+            continuations.removeValue(forKey: id)
+        }
+    }
+}
+
 struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
     typealias Element = TransferReceiveResult
 
@@ -103,6 +160,7 @@ actor RuntimeReceiveEventSource {
     }
 
     private let bufferCapacity: Int
+    nonisolated let completionState = RuntimeReceiveCompletionState()
     private var subscriptions: [UUID: SubscriptionState] = [:]
     private var pendingFirstSubscription: [TransferReceiveResult] = []
     private var pendingPublications: [PendingPublication] = []
@@ -132,6 +190,7 @@ actor RuntimeReceiveEventSource {
 
     func publish(_ result: TransferReceiveResult) async {
         guard !isFinished else { return }
+        completionState.recordCompletion()
         if pendingPublications.isEmpty, canAcceptPublication {
             commitPublication(result)
             return
@@ -161,6 +220,7 @@ actor RuntimeReceiveEventSource {
     func finish() {
         guard !isFinished else { return }
         isFinished = true
+        completionState.finish()
         let publishers = pendingPublications
         pendingFirstSubscription.removeAll(keepingCapacity: false)
         pendingPublications.removeAll(keepingCapacity: false)

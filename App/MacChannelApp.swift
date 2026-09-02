@@ -97,11 +97,15 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private let receiveNotificationController: ReceiveNotificationController
     private let statusItemControllerFactory: (AppContainer) -> StatusItemController
     private var receiveEventTask: Task<Void, Never>?
+    private var receiveCompletionTask: Task<Void, Never>?
     private var pendingReceiveEventDrain: ReceiveEventDrain?
     private var receiveEventDrainGeneration = 0
     private var containerReplacementGeneration = 0
     private(set) var observedReceiveEventCount = 0
-    private var acknowledgedReceiveEventCount = 0
+    private var latestReceiveCompletionCount: UInt64 = 0
+    private var acknowledgedReceiveCompletionCount: UInt64 = 0
+    private var currentReceiveCompletionBase: UInt64 = 0
+    private var currentReceiveCompletionState: RuntimeReceiveCompletionState?
 
     private struct ReceiveEventDrain {
         let generation: Int
@@ -211,8 +215,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             Task { await runtimeHost?.bootstrap() }
         }
         statusController.onAcknowledgeReceive = { [weak self] in
-            guard let self else { return }
-            acknowledgedReceiveEventCount = observedReceiveEventCount
+            self?.acknowledgeCurrentReceiveCompletions()
         }
         surfaces.bind(to: statusController)
         statusController.setRuntimeStatus(status)
@@ -302,33 +305,75 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observeReceiveEvents(from container: AppContainer) {
+        if let currentReceiveCompletionState {
+            updateReceiveCompletion(
+                currentReceiveCompletionState.latestSequence,
+                base: currentReceiveCompletionBase
+            )
+        }
+        currentReceiveCompletionBase = latestReceiveCompletionCount
+        currentReceiveCompletionState = container.receiveCompletionState
+        if let completionState = container.receiveCompletionState {
+            updateReceiveCompletion(
+                completionState.latestSequence,
+                base: currentReceiveCompletionBase
+            )
+            let sequences = completionState.sequences()
+            let base = currentReceiveCompletionBase
+            receiveCompletionTask = Task { [weak self] in
+                for await sequence in sequences {
+                    guard !Task.isCancelled, let self else { break }
+                    updateReceiveCompletion(sequence, base: base)
+                }
+            }
+        }
+
         guard let makeEvents = container.receiveEvents else { return }
         receiveEventTask = Task { [weak self] in
             let events = await makeEvents()
             for await result in events {
                 guard !Task.isCancelled, let self else { break }
                 observedReceiveEventCount += 1
-                if observedReceiveEventCount > acknowledgedReceiveEventCount {
-                    statusItemController?.setUnreadReceive(true)
-                }
                 await receiveNotificationController.notify(receive: result)
             }
             await events.cancel()
         }
     }
 
+    private func updateReceiveCompletion(_ sequence: UInt64, base: UInt64) {
+        latestReceiveCompletionCount = max(latestReceiveCompletionCount, base &+ sequence)
+        if latestReceiveCompletionCount > acknowledgedReceiveCompletionCount {
+            statusItemController?.setUnreadReceive(true)
+        }
+    }
+
+    private func acknowledgeCurrentReceiveCompletions() {
+        if let currentReceiveCompletionState {
+            updateReceiveCompletion(
+                currentReceiveCompletionState.latestSequence,
+                base: currentReceiveCompletionBase
+            )
+        }
+        acknowledgedReceiveCompletionCount = latestReceiveCompletionCount
+    }
+
     @discardableResult
     private func beginReceiveEventDrain() -> ReceiveEventDrain? {
-        guard let observerTask = receiveEventTask else { return pendingReceiveEventDrain }
-        observerTask.cancel()
+        let observerTask = receiveEventTask
+        let completionTask = receiveCompletionTask
+        guard observerTask != nil || completionTask != nil else { return pendingReceiveEventDrain }
+        observerTask?.cancel()
+        completionTask?.cancel()
         self.receiveEventTask = nil
+        self.receiveCompletionTask = nil
         receiveEventDrainGeneration += 1
         let priorDrainTask = pendingReceiveEventDrain?.task
         let drain = ReceiveEventDrain(
             generation: receiveEventDrainGeneration,
             task: Task {
                 await priorDrainTask?.value
-                await observerTask.value
+                await observerTask?.value
+                await completionTask?.value
             }
         )
         pendingReceiveEventDrain = drain

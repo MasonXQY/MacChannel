@@ -13,6 +13,7 @@ final class AppContainer {
     let settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)?
     let transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)?
     let receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)?
+    let receiveCompletionState: RuntimeReceiveCompletionState?
     let runtimeIdentityID: DeviceID?
 
     init(
@@ -26,6 +27,7 @@ final class AppContainer {
         settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)? = nil,
         transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil,
         receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)? = nil,
+        receiveCompletionState: RuntimeReceiveCompletionState? = nil,
         runtimeIdentityID: DeviceID? = nil
     ) {
         self.deviceDirectory = deviceDirectory
@@ -38,6 +40,7 @@ final class AppContainer {
         self.settingsSnapshots = settingsSnapshots
         self.transferHistory = transferHistory
         self.receiveEvents = receiveEvents
+        self.receiveCompletionState = receiveCompletionState
         self.runtimeIdentityID = runtimeIdentityID
     }
 

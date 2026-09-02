@@ -479,6 +479,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             settingsSnapshots: { await settingsStore.snapshots() },
             transferHistory: { await history.stream() },
             receiveEvents: { await receiveEvents.stream() },
+            receiveCompletionState: receiveEvents.completionState,
             runtimeIdentityID: identity.id
         )
         return ProductionAppRuntime(

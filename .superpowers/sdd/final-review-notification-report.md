@@ -3,8 +3,9 @@
 ## Scope
 
 This follow-up fixes the three Important findings from the second notification
-review. It changes only receive-event delivery, notification-operation lifetime,
-and Finder routing. Installer and distribution code were not changed.
+review and the two remaining concurrency findings from the third review. It
+changes only receive-event delivery, notification-operation lifetime, and Finder
+routing. Installer and distribution code were not changed.
 
 ## Implemented behavior
 
@@ -36,9 +37,17 @@ and Finder routing. Installer and distribution code were not changed.
 - Cancellation or timeout releases the application worker immediately. If a
   system API ignores cancellation, at most one operation remains retained in its
   lane and another operation is not accumulated behind it.
-- Unread state is set only when the worker ingests a receive event. Notification
-  completion never writes unread state, so acknowledging the green dot while a
-  system delivery is delayed cannot light it again.
+- Every completed receive increments a thread-safe monotonic sequence before the
+  bounded notification publication can suspend. A separate
+  `bufferingNewest(1)` signal updates unread state without waiting for the
+  notification worker.
+- Opening the status menu synchronously acknowledges the completion source's
+  current highest sequence. Neither event consumption nor notification completion
+  writes unread state, so queued old events cannot relight the dot after that
+  acknowledgment; only a later completion can.
+- Shared authorization query and prompt operations track their waiters
+  independently. Cancelling or timing out one waiter leaves a shared operation
+  alive for every remaining waiter; only the last departed waiter cancels it.
 - Foreground presentation remains `[.banner, .list, .sound]`. Authorization state
   and transient delivery state remain independent.
 
@@ -86,8 +95,11 @@ releasing the cancellation-insensitive system-delivery fake, the old subscriptio
 is cancelled, and the new runtime subscribes. A blocked delivery holds event
 ingestion at one item and backpressures a six-event burst through a two-element
 test channel; after release, all six notifications complete once and in order with
-maximum system-delivery concurrency of one. A separate test acknowledges unread
-while delivery is blocked and proves delayed completion does not relight it.
+    maximum system-delivery concurrency of one. The final combined regression uses
+    a capacity-two channel, blocks the first delivery, starts four completions so
+    the fourth publication is backpressured, acknowledges the menu, then releases
+    delivery. All four notifications arrive without relighting the dot; the fifth
+    completion is the first one that lights it again.
 
 ### Operation bounds and Finder RED
 
@@ -106,19 +118,39 @@ published authorization state. Concurrent refreshes share one system query.
 Finder fakes independently prove select-existing-single, open-multiple-common-
 directory, and open-parent-for-moved-single behavior.
 
+### Shared authorization waiter RED
+
+`swift test --scratch-path /tmp/dropmesh-notification-fix3-red --filter 'ReceiveNotificationControllerTests/testCancellingOneSharedAuthorization'`
+
+The old implementation failed both deterministic interleavings. Cancelling one
+of two refresh waiters cancelled the shared query and left the published snapshot
+at `.notDetermined`. Cancelling the `prepare()` waiter sharing an authorization
+prompt with a live `notify()` call likewise discarded the authorized result and
+delivered zero notifications.
+
+Each authorization operation now has a lock-protected waiter registry. The
+cancellation handler synchronously releases only its own token and cancels the
+underlying system task only when that token was the last waiter. The normal return
+path is idempotent with cancellation. Separate 20 ms timeout regressions prove
+that the query and prompt lanes each retain at most one cancellation-insensitive
+system operation and recover after its callback; the earlier late-result and
+generation guards remain green.
+
 ## GREEN verification
 
 - `ReceiveEventSourceTests`: 7 passed, 0 failed.
-- `ReceiveNotificationControllerTests`: 20 passed, 0 failed.
+- `ReceiveNotificationControllerTests`: 24 passed, 0 failed.
 - `AppRuntimeTests`: 30 passed, 0 failed.
-- Complete isolated Swift suite: 654 passed, 3 documented Docker-dependent skips,
+- Combined receive-event, notification, and app-runtime suite: 61 passed, 0 failed.
+- Complete isolated Swift suite: 658 passed, 3 documented Docker-dependent skips,
   0 failed.
 - The full suite included the real direct-LAN integration. An explicit rerun of
   `TransferIntegrationTests.testLANPreferenceUsesAnActualHostCandidateWebRTCChannel`
   passed with matching source and destination SHA-256 values:
   `77beecbc3fec52949142c29b38f26665666491c29dbe7e8a79611dcdc673eab4`.
-- Final verification uses `/tmp/dropmesh-notification-fix2-final`, followed by
-  `git diff --check` and a residual-process check.
+- Final verification uses `/tmp/dropmesh-notification-fix3-full`, followed by
+  `git diff --check` and a residual-process check. No process from any fix3
+  scratch path remained.
 
 ## Residual risk
 

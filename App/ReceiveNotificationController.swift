@@ -123,6 +123,44 @@ private func waitForReceiveNotificationOperation<Value: Sendable>(
     }
 }
 
+private final class ReceiveAuthorizationOperationWaiters: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiters: Set<UUID> = []
+    private var task: Task<Void, Never>?
+    private var completed = false
+
+    func install(task: Task<Void, Never>) {
+        lock.withLock {
+            guard !completed else { return }
+            self.task = task
+        }
+    }
+
+    func add() -> UUID {
+        let waiter = UUID()
+        _ = lock.withLock {
+            waiters.insert(waiter)
+        }
+        return waiter
+    }
+
+    func release(_ waiter: UUID, cancelIfLast: Bool) {
+        let taskToCancel: Task<Void, Never>? = lock.withLock {
+            guard waiters.remove(waiter) != nil else { return nil }
+            guard cancelIfLast, waiters.isEmpty, !completed else { return nil }
+            return task
+        }
+        taskToCancel?.cancel()
+    }
+
+    func complete() {
+        lock.withLock {
+            completed = true
+            task = nil
+        }
+    }
+}
+
 @MainActor
 final class ReceiveNotificationController {
     private enum DeliveryOutcome: Sendable {
@@ -133,7 +171,7 @@ final class ReceiveNotificationController {
     private struct AuthorizationOperation {
         let id: UUID
         let signal: ReceiveNotificationOperationSignal<ReceiveNotificationAuthorizationState>
-        let task: Task<Void, Never>
+        let waiters: ReceiveAuthorizationOperationWaiters
     }
 
     private struct DeliveryOperation {
@@ -309,29 +347,33 @@ final class ReceiveNotificationController {
 
     private func awaitAuthorizationQuery() async -> ReceiveNotificationAuthorizationState? {
         let operation = authorizationQueryOperation ?? startAuthorizationQuery()
+        let waiter = operation.waiters.add()
         let state = await withTaskCancellationHandler {
             await waitForReceiveNotificationOperation(
                 operation.signal,
                 timeout: authorizationStatusTimeout
             )
         } onCancel: {
-            operation.task.cancel()
+            operation.waiters.release(waiter, cancelIfLast: true)
         }
-        if state == nil { operation.task.cancel() }
+        operation.waiters.release(waiter, cancelIfLast: state == nil)
         return state
     }
 
     private func startAuthorizationQuery() -> AuthorizationOperation {
         let id = UUID()
         let signal = ReceiveNotificationOperationSignal<ReceiveNotificationAuthorizationState>()
+        let waiters = ReceiveAuthorizationOperationWaiters()
         let center = center
         let task = Task { @MainActor [weak self] in
             let state = await center.authorizationState()
             let cancelled = Task.isCancelled
+            waiters.complete()
             self?.completeAuthorizationQuery(id: id, state: state, cancelled: cancelled)
             await signal.resolve(state)
         }
-        let operation = AuthorizationOperation(id: id, signal: signal, task: task)
+        waiters.install(task: task)
+        let operation = AuthorizationOperation(id: id, signal: signal, waiters: waiters)
         authorizationQueryOperation = operation
         return operation
     }
@@ -355,29 +397,33 @@ final class ReceiveNotificationController {
             didRequestAuthorization = true
             operation = startAuthorizationRequest()
         }
+        let waiter = operation.waiters.add()
         let state = await withTaskCancellationHandler {
             await waitForReceiveNotificationOperation(
                 operation.signal,
                 timeout: authorizationPromptTimeout
             )
         } onCancel: {
-            operation.task.cancel()
+            operation.waiters.release(waiter, cancelIfLast: true)
         }
-        if state == nil { operation.task.cancel() }
+        operation.waiters.release(waiter, cancelIfLast: state == nil)
         return state
     }
 
     private func startAuthorizationRequest() -> AuthorizationOperation {
         let id = UUID()
         let signal = ReceiveNotificationOperationSignal<ReceiveNotificationAuthorizationState>()
+        let waiters = ReceiveAuthorizationOperationWaiters()
         let center = center
         let task = Task { @MainActor [weak self] in
             let state = await center.requestAuthorization()
             let cancelled = Task.isCancelled
+            waiters.complete()
             self?.completeAuthorizationRequest(id: id, state: state, cancelled: cancelled)
             await signal.resolve(state)
         }
-        let operation = AuthorizationOperation(id: id, signal: signal, task: task)
+        waiters.install(task: task)
+        let operation = AuthorizationOperation(id: id, signal: signal, waiters: waiters)
         authorizationRequestOperation = operation
         return operation
     }
