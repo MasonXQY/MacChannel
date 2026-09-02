@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 version="${MACCHANNEL_VERSION:-1.2.2}"
 build_number="${MACCHANNEL_BUILD_NUMBER:-15}"
@@ -14,6 +15,17 @@ clean_codesign() {
     env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
         /usr/bin/codesign "$@"
 }
+
+anchor="$repo_root/Distribution/ProductionSigningAnchor.plist"
+anchor_product="$(plutil -extract product raw -o - "$anchor")"
+anchor_bundle_id="$(plutil -extract bundleIdentifier raw -o - "$anchor")"
+anchor_executable="$(plutil -extract bundleExecutable raw -o - "$anchor")"
+anchor_team_id="$(plutil -extract teamID raw -o - "$anchor")"
+anchor_requirement="$(plutil -extract designatedRequirement raw -o - "$anchor")"
+expected_anchor_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = XKAZ67HN45'
+[[ "$anchor_product" == DropMesh && "$anchor_bundle_id" == com.mason.macchannel && \
+    "$anchor_executable" == MacChannelApp && "$anchor_team_id" == XKAZ67HN45 && \
+    "$anchor_requirement" == "$expected_anchor_requirement" ]]
 
 release_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-release-test.XXXXXX")"
 app_path="$release_root/MacChannel.app"
@@ -60,22 +72,24 @@ MACCHANNEL_APP_OUTPUT="$app_path" \
     bash Scripts/build-app.sh
 
 clean_codesign --verify --deep --strict --verbose=2 "$app_path"
+clean_codesign --verify --deep --strict \
+    --test-requirement "=$anchor_requirement" "$app_path"
 
 sparkle="$app_path/Contents/Frameworks/Sparkle.framework"
 plist="$app_path/Contents/Info.plist"
 test -d "$sparkle"
 test -x "$sparkle/Versions/Current/Sparkle"
 bundle_executable="$(plutil -extract CFBundleExecutable raw -o - "$plist")"
-if [[ "$bundle_executable" != MacChannelApp ]]; then
-    echo "CFBundleExecutable changed: expected MacChannelApp, got $bundle_executable" >&2
+if [[ "$bundle_executable" != "$anchor_executable" ]]; then
+    echo "CFBundleExecutable changed: expected $anchor_executable, got $bundle_executable" >&2
     exit 1
 fi
 bundle_identifier="$(plutil -extract CFBundleIdentifier raw -o - "$plist")"
-if [[ "$bundle_identifier" != com.mason.macchannel ]]; then
-    echo "CFBundleIdentifier changed: expected com.mason.macchannel, got $bundle_identifier" >&2
+if [[ "$bundle_identifier" != "$anchor_bundle_id" ]]; then
+    echo "CFBundleIdentifier changed: expected $anchor_bundle_id, got $bundle_identifier" >&2
     exit 1
 fi
-test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleName raw -o - "$plist")" = "$anchor_product"
 test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = MacChannel
 test "$(plutil -extract LSHasLocalizedDisplayName raw -o - "$plist")" = true
 localized_info="$app_path/Contents/Resources/en.lproj/InfoPlist.strings"
@@ -101,7 +115,11 @@ details="$(clean_codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$details" >/dev/null
 grep -E 'flags=.*runtime' <<<"$details" >/dev/null
 team_id="$(sed -E 's/^.*\(([A-Z0-9]{10})\)$/\1/' <<<"$identity")"
-grep -F "TeamIdentifier=$team_id" <<<"$details" >/dev/null
+test "$team_id" = "$anchor_team_id"
+grep -F "TeamIdentifier=$anchor_team_id" <<<"$details" >/dev/null
+actual_requirement="$(clean_codesign -d -r- "$app_path" 2>&1 | \
+    sed -n 's/^designated => //p')"
+test "$actual_requirement" = "$anchor_requirement"
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = \
     "$version"
 test "$(plutil -extract CFBundleVersion raw -o - "$app_path/Contents/Info.plist")" = \

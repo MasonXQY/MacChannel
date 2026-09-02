@@ -138,10 +138,16 @@ anchor_team_id="$(plutil -extract teamID raw -o - "$anchor_path")" || \
     fail_usage "production signing anchor is invalid"
 anchor_bundle_id="$(plutil -extract bundleIdentifier raw -o - "$anchor_path")" || \
     fail_usage "production signing anchor is invalid"
+anchor_executable="$(plutil -extract bundleExecutable raw -o - "$anchor_path")" || \
+    fail_usage "production signing anchor is invalid"
+anchor_product="$(plutil -extract product raw -o - "$anchor_path")" || \
+    fail_usage "production signing anchor is invalid"
 anchor_requirement="$(plutil -extract designatedRequirement raw -o - "$anchor_path")" || \
     fail_usage "production signing anchor is invalid"
-expected_anchor_requirement='anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"'
-[[ "$anchor_team_id" == XKAZ67HN45 && "$anchor_bundle_id" == com.mason.macchannel ]] || \
+expected_anchor_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = XKAZ67HN45'
+[[ "$anchor_team_id" == XKAZ67HN45 && \
+    "$anchor_bundle_id" == com.mason.macchannel && \
+    "$anchor_executable" == MacChannelApp && "$anchor_product" == DropMesh ]] || \
     fail_usage "production signing anchor is invalid"
 [[ "$anchor_requirement" == "$expected_anchor_requirement" ]] || \
     fail_usage "production signing anchor is invalid"
@@ -205,7 +211,7 @@ app_details="$(clean_codesign -dvvv "$app_path" 2>&1)"
 grep -F "Authority=$identity" <<<"$app_details" >/dev/null
 grep -F "TeamIdentifier=$team_id" <<<"$app_details" >/dev/null
 designated_requirement="$(clean_codesign -d -r- "$app_path" 2>&1 | sed -n 's/^designated => //p')"
-test -n "$designated_requirement"
+test "$designated_requirement" = "$anchor_requirement"
 grep -E 'flags=.*runtime' <<<"$app_details" >/dev/null
 test "$(plutil -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" = \
     "$anchor_bundle_id"
@@ -214,8 +220,9 @@ test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/
 test "$(plutil -extract CFBundleVersion raw -o - "$app_path/Contents/Info.plist")" = \
     "$build_number"
 test "$(plutil -extract CFBundleExecutable raw -o - "$app_path/Contents/Info.plist")" = \
-    MacChannelApp
-test "$(plutil -extract CFBundleName raw -o - "$app_path/Contents/Info.plist")" = DropMesh
+    "$anchor_executable"
+test "$(plutil -extract CFBundleName raw -o - "$app_path/Contents/Info.plist")" = \
+    "$anchor_product"
 test "$(plutil -extract CFBundleDisplayName raw -o - "$app_path/Contents/Info.plist")" = \
     MacChannel
 test "$(plutil -extract LSHasLocalizedDisplayName raw -o - \
@@ -325,13 +332,13 @@ dmg_sha="$(shasum -a 256 "$image_path" | awk '{print $1}')"
 git_commit="$(git rev-parse HEAD)"
 created_at="$(date -u -r "$source_epoch" +%Y-%m-%dT%H:%M:%SZ)"
 plutil -create xml1 "$manifest_path"
-plutil -insert product -string DropMesh "$manifest_path"
-plutil -insert bundleIdentifier -string com.mason.macchannel "$manifest_path"
+plutil -insert product -string "$anchor_product" "$manifest_path"
+plutil -insert bundleIdentifier -string "$anchor_bundle_id" "$manifest_path"
 plutil -insert version -string "$version" "$manifest_path"
 plutil -insert build -string "$build_number" "$manifest_path"
 plutil -insert gitCommit -string "$git_commit" "$manifest_path"
 plutil -insert teamID -string "$team_id" "$manifest_path"
-plutil -insert designatedRequirement -string "$designated_requirement" "$manifest_path"
+plutil -insert designatedRequirement -string "$anchor_requirement" "$manifest_path"
 plutil -insert signingIdentity -string "$identity" "$manifest_path"
 plutil -insert releaseState -string "$release_state" "$manifest_path"
 plutil -insert volumeName -string "$volume_name" "$manifest_path"

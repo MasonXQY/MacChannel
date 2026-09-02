@@ -175,7 +175,7 @@ expect_resolver_failure env MACCHANNEL_UPDATE_TESTING=0 \
 
 test "$sentinel_sha" = "$(shasum -a 256 "$checkout/dist/MacChannel.dmg" | awk '{print $1}')"
 
-expected_requirement='anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"'
+expected_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = XKAZ67HN45'
 test "$(plutil -extract designatedRequirement raw -o - \
     "$repo_root/Distribution/ProductionSigningAnchor.plist")" = "$expected_requirement"
 

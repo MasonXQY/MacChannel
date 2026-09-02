@@ -159,6 +159,7 @@ done < <(find "$dist_root" -mindepth 1 -maxdepth 1 -print)
 manifest_version="$(plutil -extract version raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_build="$(plutil -extract build raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_product="$(plutil -extract product raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
+manifest_bundle_id="$(plutil -extract bundleIdentifier raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 release_state="$(plutil -extract releaseState raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_dmg_sha="$(plutil -extract dmgSHA256 raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_team_id="$(plutil -extract teamID raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
@@ -167,14 +168,20 @@ anchor_path="$repo_root/Distribution/ProductionSigningAnchor.plist"
 [[ -f "$anchor_path" && ! -L "$anchor_path" ]] || fail_feed identity
 anchor_team_id="$(plutil -extract teamID raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
 anchor_bundle_id="$(plutil -extract bundleIdentifier raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
+anchor_executable="$(plutil -extract bundleExecutable raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
+anchor_product="$(plutil -extract product raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
 anchor_requirement="$(plutil -extract designatedRequirement raw -o - "$anchor_path" 2>/dev/null)" || fail_feed identity
-expected_anchor_requirement='anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"'
+expected_anchor_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = XKAZ67HN45'
 [[ "$anchor_team_id" == XKAZ67HN45 && "$anchor_bundle_id" == com.mason.macchannel && \
+    "$anchor_executable" == MacChannelApp && "$anchor_product" == DropMesh && \
     "$anchor_requirement" == "$expected_anchor_requirement" ]] || fail_feed identity
-[[ "$manifest_product" == DropMesh && "$manifest_version" == "$version" && \
+[[ "$manifest_product" == "$anchor_product" && \
+    "$manifest_bundle_id" == "$anchor_bundle_id" && \
+    "$manifest_version" == "$version" && \
     "$manifest_build" == "$build_number" && \
     "$release_state" == notarized && "$manifest_dmg_sha" =~ ^[0-9a-f]{64}$ && \
-    "$manifest_team_id" =~ ^[A-Z0-9]{10}$ && -n "$manifest_requirement" ]] || fail_feed manifest
+    "$manifest_team_id" == "$anchor_team_id" && \
+    "$manifest_requirement" == "$anchor_requirement" ]] || fail_feed manifest
 actual_dmg_sha="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
 [[ "$actual_dmg_sha" == "$manifest_dmg_sha" ]] || fail_feed manifest
 
@@ -220,10 +227,12 @@ actual_build="$(plutil -extract CFBundleVersion raw -o - "$mounted_app/Contents/
 unset app_identity
 cleanup_identity_mount
 [[ "$actual_team_id" == "$anchor_team_id" && \
-    "$actual_requirement" == "$manifest_requirement" && \
+    "$actual_requirement" == "$anchor_requirement" && \
+    "$manifest_requirement" == "$actual_requirement" && \
     "$manifest_team_id" == "$actual_team_id" && \
     "$actual_bundle_id" == "$anchor_bundle_id" && \
-    "$actual_executable" == MacChannelApp && "$actual_bundle_name" == DropMesh && \
+    "$actual_executable" == "$anchor_executable" && \
+    "$actual_bundle_name" == "$anchor_product" && \
     "$actual_display_name" == MacChannel && \
     "$actual_localized_display_name" == DropMesh && \
     "$actual_has_localized_display_name" == true && \

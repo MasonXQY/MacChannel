@@ -114,6 +114,9 @@ grep -F 'MacChannelApp' Scripts/build-app.sh >/dev/null
 grep -F 'https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml' \
     Scripts/build-app.sh >/dev/null
 grep -F 'com.mason.macchannel' Distribution/ProductionSigningAnchor.plist >/dev/null
+test "$(plutil -extract product raw -o - Distribution/ProductionSigningAnchor.plist)" = DropMesh
+test "$(plutil -extract bundleExecutable raw -o - \
+    Distribution/ProductionSigningAnchor.plist)" = MacChannelApp
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then
@@ -328,12 +331,16 @@ test "$(plutil -extract version raw -o - $test_dist/DropMesh.manifest.json)" = 1
 test "$(plutil -extract build raw -o - $test_dist/DropMesh.manifest.json)" = 15
 test "$(plutil -extract releaseState raw -o - $test_dist/DropMesh.manifest.json)" = internalSignedNotNotarized
 test "$(plutil -extract product raw -o - $test_dist/DropMesh.manifest.json)" = DropMesh
+test "$(plutil -extract bundleIdentifier raw -o - \
+    $test_dist/DropMesh.manifest.json)" = com.mason.macchannel
 test "$(plutil -extract volumeName raw -o - $test_dist/DropMesh.manifest.json)" = DropMesh
 test "$(plutil -extract teamID raw -o - $test_dist/DropMesh.manifest.json)" = "$expected_team_id"
 actual_requirement="$(clean_codesign -d -r- "$mounted_path/MacChannel.app" 2>&1 | \
     sed -n 's/^designated => //p')"
 test "$(plutil -extract designatedRequirement raw -o - $test_dist/DropMesh.manifest.json)" = \
     "$actual_requirement"
+test "$actual_requirement" = "$(plutil -extract designatedRequirement raw -o - \
+    Distribution/ProductionSigningAnchor.plist)"
 
 hdiutil detach "$mounted_path" -quiet
 mounted_path=""

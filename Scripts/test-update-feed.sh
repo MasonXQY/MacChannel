@@ -29,7 +29,7 @@ test_private_pem="$test_root/sparkle-private.pem"
 test_private_key="$test_root/sparkle-private.key"
 test_public_key="$test_root/sparkle-public.key"
 fixture_team_id=XKAZ67HN45
-fixture_requirement='anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"'
+fixture_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = XKAZ67HN45'
 
 snapshot_dist() {
     local root="$1"
@@ -165,6 +165,7 @@ release_notes_sha_before="$(shasum -a 256 "$release_notes" | awk '{print $1}')"
 dmg_sha="$(shasum -a 256 "$fixture_dmg" | awk '{print $1}')"
 plutil -create xml1 "$fixture_manifest"
 plutil -insert product -string DropMesh "$fixture_manifest"
+plutil -insert bundleIdentifier -string com.mason.macchannel "$fixture_manifest"
 plutil -insert version -string "$version" "$fixture_manifest"
 plutil -insert build -string "$build_number" "$fixture_manifest"
 plutil -insert releaseState -string notarized "$fixture_manifest"
@@ -372,7 +373,7 @@ MACCHANNEL_TEST_SECURITY_MARKER="$pre_key_marker" \
 MACCHANNEL_TEST_CODESIGN_TEAM_ID="$wrong_team" \
 MACCHANNEL_TEST_CODESIGN_REQUIREMENT="$wrong_requirement" \
 MACCHANNEL_TEST_CODESIGN_ANCHOR_MATCH=fail \
-    expect_failure identity run_feed_builder
+    expect_failure manifest run_feed_builder
 [[ ! -e "$pre_key_marker" ]]
 prepare_fixture
 MACCHANNEL_TEST_CODESIGN_REQUIREMENT='identifier "com.mason.macchannel" and anchor apple generic and certificate leaf[subject.OU] = "TESTTEAM01" and true' \
