@@ -87,6 +87,16 @@ env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$signing_tmp" \
     bash Scripts/build-app.sh
 
 plist="$output_app/Contents/Info.plist"
+bundle_executable="$(plutil -extract CFBundleExecutable raw -o - "$plist")"
+if [[ "$bundle_executable" != MacChannelApp ]]; then
+    echo "CFBundleExecutable changed: expected MacChannelApp, got $bundle_executable" >&2
+    exit 1
+fi
+bundle_identifier="$(plutil -extract CFBundleIdentifier raw -o - "$plist")"
+if [[ "$bundle_identifier" != com.mason.macchannel ]]; then
+    echo "CFBundleIdentifier changed: expected com.mason.macchannel, got $bundle_identifier" >&2
+    exit 1
+fi
 test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
 test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = DropMesh
 test "$(plutil -extract CFBundleIconFile raw -o - "$plist")" = DropMesh

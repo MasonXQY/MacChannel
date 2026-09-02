@@ -65,6 +65,16 @@ sparkle="$app_path/Contents/Frameworks/Sparkle.framework"
 plist="$app_path/Contents/Info.plist"
 test -d "$sparkle"
 test -x "$sparkle/Versions/Current/Sparkle"
+bundle_executable="$(plutil -extract CFBundleExecutable raw -o - "$plist")"
+if [[ "$bundle_executable" != MacChannelApp ]]; then
+    echo "CFBundleExecutable changed: expected MacChannelApp, got $bundle_executable" >&2
+    exit 1
+fi
+bundle_identifier="$(plutil -extract CFBundleIdentifier raw -o - "$plist")"
+if [[ "$bundle_identifier" != com.mason.macchannel ]]; then
+    echo "CFBundleIdentifier changed: expected com.mason.macchannel, got $bundle_identifier" >&2
+    exit 1
+fi
 test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
     "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
 test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$plist")" = true
