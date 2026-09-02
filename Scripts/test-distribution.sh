@@ -33,8 +33,7 @@ while IFS=: read -r source_file source_line source_text; do
                 && allowed=1
             ;;
         Sources/MacChannelCore/Orchestration/OutgoingTransferPackage.swift)
-            [[ "$source_text" == *'"MacChannel Transfer"'* || \
-               "$source_text" == *'appendingPathComponent("MacChannel/Outgoing", isDirectory: true)'* ]] \
+            [[ "$source_text" == *'appendingPathComponent("MacChannel/Outgoing", isDirectory: true)'* ]] \
                 && allowed=1
             ;;
         Sources/MacChannelCore/Pairing/PairingCoordinator.swift)

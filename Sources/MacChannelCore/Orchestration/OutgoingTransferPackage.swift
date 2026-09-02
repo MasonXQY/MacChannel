@@ -22,7 +22,7 @@ struct OutgoingTransferPackage: Sendable {
         let createdAt: Date
     }
 
-    static let containerDisplayName = "MacChannel Transfer"
+    static let containerDisplayName = "DropMesh Transfer"
 
     let directory: URL
     let metadata: Metadata

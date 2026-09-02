@@ -706,7 +706,7 @@ final class TransferCoordinatorTests: XCTestCase {
         let id = try await coordinator.send(items: [folder, file], to: peerA)
         try await waitForPhase(.completed, id: id, on: coordinator)
 
-        let container = destinationA.appendingPathComponent("MacChannel Transfer")
+        let container = destinationA.appendingPathComponent("DropMesh Transfer")
         XCTAssertEqual(
             try Data(contentsOf: container.appendingPathComponent("note.txt")),
             Data("note".utf8)
@@ -717,11 +717,36 @@ final class TransferCoordinatorTests: XCTestCase {
         )
         XCTAssertFalse(
             FileManager.default.fileExists(
-                atPath: destinationB.appendingPathComponent("MacChannel Transfer").path
+                atPath: destinationB.appendingPathComponent("DropMesh Transfer").path
             )
         )
+        let record = try await database.persistedTransfer(id: id)
+        XCTAssertEqual(record?.displayFilename, "DropMesh Transfer")
+        XCTAssertFalse(record?.displayFilename.contains("MacChannel") ?? true)
         let connectedIDs = await connector.connectedTransferIDs()
         XCTAssertEqual(connectedIDs, [id])
+    }
+
+    func testOutgoingPackageLoadPreservesPersistedLegacyContainerDisplayName() throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let first = root.appendingPathComponent("first.txt")
+        let second = root.appendingPathComponent("second.txt")
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+        let outgoing = root.appendingPathComponent("outgoing")
+        let package = try OutgoingTransferPackage.create(
+            items: [first, second],
+            peer: DeviceID(rawValue: UUID()),
+            in: outgoing
+        )
+        try rewritePackageAsPersistedLegacyContainer(package, outgoing: outgoing)
+
+        let restored = try OutgoingTransferPackage.load(package.directory)
+
+        XCTAssertEqual(restored.metadata.displayFilename, "MacChannel Transfer")
+        XCTAssertEqual(restored.metadata.rootRelativePath, "payload/MacChannel Transfer")
+        XCTAssertEqual(restored.displayFilename, "MacChannel Transfer")
     }
 
     func testCoordinatorRejectsFilesystemEquivalentSelectedNames() async throws {
@@ -3107,6 +3132,61 @@ private func replaceReadOnlyFile(_ url: URL, with data: Data) throws {
     guard chmod(url.path, S_IRUSR) == 0 else {
         throw TransferProtocolError.unsupportedSource
     }
+}
+
+private func rewritePackageAsPersistedLegacyContainer(
+    _ package: OutgoingTransferPackage,
+    outgoing: URL
+) throws {
+    let legacyDisplayName = "MacChannel Transfer"
+    let payload = package.directory.appendingPathComponent("payload", isDirectory: true)
+    let currentRoot = payload.appendingPathComponent(
+        package.metadata.displayFilename,
+        isDirectory: true
+    )
+    let legacyRoot = payload.appendingPathComponent(legacyDisplayName, isDirectory: true)
+    if currentRoot.standardizedFileURL != legacyRoot.standardizedFileURL {
+        guard chmod(payload.path, S_IRWXU) == 0 else {
+            throw TransferProtocolError.unsupportedSource
+        }
+        try FileManager.default.copyItem(at: currentRoot, to: legacyRoot)
+        guard chmod(payload.path, S_IRUSR | S_IXUSR) == 0 else {
+            throw TransferProtocolError.unsupportedSource
+        }
+    }
+    let legacyManifest = try TransferManifest.build(
+        from: legacyRoot,
+        transferID: package.id,
+        immutablePackageSource: true
+    )
+    let metadata = OutgoingTransferPackage.Metadata(
+        version: package.metadata.version,
+        transferID: package.metadata.transferID,
+        peerID: package.metadata.peerID,
+        displayFilename: legacyDisplayName,
+        rootRelativePath: "payload/\(legacyDisplayName)",
+        totalBytes: package.metadata.totalBytes,
+        manifestFingerprint: try manifestFingerprint(legacyManifest).base64EncodedString(),
+        createdAt: package.metadata.createdAt
+    )
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .millisecondsSince1970
+    encoder.outputFormatting = [.sortedKeys]
+    let encoded = try encoder.encode(metadata)
+    let keyData = try Data(
+        contentsOf: outgoing.appendingPathComponent(".package-authentication-key")
+    )
+    let authentication = Data(
+        HMAC<SHA256>.authenticationCode(for: encoded, using: SymmetricKey(data: keyData))
+    )
+    try replaceReadOnlyFile(
+        package.directory.appendingPathComponent("metadata.json"),
+        with: encoded
+    )
+    try replaceReadOnlyFile(
+        package.directory.appendingPathComponent("metadata.hmac"),
+        with: authentication
+    )
 }
 
 private func removeCoordinatorTemporaryDirectory(_ root: URL) {

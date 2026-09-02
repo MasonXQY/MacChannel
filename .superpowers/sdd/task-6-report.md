@@ -133,3 +133,27 @@ Live notarization and publication are outside this task.
 
 Protected historical UE PIDs `38136`, `49361`, `80713`, `82338`, `25679`, `28690`, and
 `29145` were not signaled, terminated, or otherwise mutated.
+
+## Final multi-file container branding repair
+
+New multi-file selections now create, transmit, publish in Finder, and persist in transfer
+history as `DropMesh Transfer`; the old public name is no longer accepted by the production
+source audit. The internal outgoing storage path remains unchanged. A dedicated authenticated
+package fixture proves that an already-persisted version-2 package whose
+`metadata.displayFilename` is `MacChannel Transfer` still loads with those exact bytes, so
+restart and resumable-history compatibility are preserved without rewriting old metadata.
+
+TDD evidence for this repair:
+
+```text
+RED: mixed-selection receive/history regression failed on MacChannel Transfer
+GREEN: new multi-file receive/history plus authenticated legacy restore  2 passed
+full Swift suite                                                  640 passed, 3 skipped
+direct-LAN integration                                            SHA-256 matched
+clean-tree signed distribution gate                               PASS
+```
+
+The distribution gate passed on the committed repair after one retry; the first attempt
+was interrupted by a transient missing Apple timestamp on the signed DMG, while the retry
+verified the source audit, failure injection, signed app and DMG, mounted identity, and
+tamper rejection end to end.
