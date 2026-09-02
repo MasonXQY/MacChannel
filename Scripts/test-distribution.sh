@@ -14,9 +14,8 @@ grep -F 'spctl --assess --type open --context context:primary-signature' \
 grep -F 'MACCHANNEL_RELEASE_NOTES' Scripts/build-distribution.sh >/dev/null
 grep -F 'bash Scripts/build-update-feed.sh' Scripts/build-distribution.sh >/dev/null
 
-# Public branding must not leak the legacy product name. This is the complete
-# source-level compatibility allowlist for legacy string literals; test fixtures
-# and historical release notes are audited by their own contracts.
+# Public branding must not leak the legacy product name. Swift string literals
+# are allowed only for these byte-for-byte storage/protocol compatibility IDs.
 while IFS=: read -r source_file source_line source_text; do
     allowed=0
     case "$source_file" in
@@ -48,10 +47,66 @@ while IFS=: read -r source_file source_line source_text; do
     fi
 done < <(rg -n --no-heading '"[^"\n]*(Mac 通道|MacChannel)' App Sources || true)
 
+# Current documentation permits the old name only where it identifies a real
+# transition path/repository or explains the v1.2.2 rename. Historical release
+# notes have their own immutable contract and are intentionally excluded.
+while IFS=: read -r source_file source_line source_text; do
+    allowed=0
+    case "$source_file:$source_text" in
+        'README.md:open .build/MacChannel.app'|\
+        'README.md:MACCHANNEL_APP_OUTPUT="/tmp/MacChannel.app" \'|\
+        'README.md:[官方 GitHub Releases](https://github.com/MasonXQY/MacChannel/releases) 下载本次'|\
+        'Distribution/ReleaseNotes/v1.2.2.md:MacChannel 现在更名为 DropMesh，同时换上了全新的应用图标。这次更名不会改变你的设备身份、配对关系、设置、传输历史或接收目录，升级后无需重新配对。')
+            allowed=1
+            ;;
+    esac
+    if [[ "$allowed" -ne 1 ]]; then
+        echo "legacy product copy outside documentation compatibility allowlist: $source_file:$source_line" >&2
+        exit 1
+    fi
+done < <(rg -n --no-heading 'Mac 通道|MacChannel' \
+    README.md Distribution/README.txt Distribution/ReleaseNotes/v1.2.2.md || true)
+
+# Production scripts may refer to frozen executable, bundle, environment,
+# repository, and artifact migration identifiers. Removing those exact tokens
+# must leave no ordinary legacy brand prose behind.
+normalize_script_compatibility_anchors() {
+    perl -pe '
+        s/(?<![A-Za-z0-9_])MacChannel_MacChannelAppKit(?![A-Za-z0-9_])//g;
+        s/(?<![A-Za-z0-9_])MacChannelUpdateAcceptance(?![A-Za-z0-9_])//g;
+        s/(?<![A-Za-z0-9_])MacChannelUpdateLoadProbe(?![A-Za-z0-9_])//g;
+        s/(?<![A-Za-z0-9_])MacChannelUpdateTestSigner(?![A-Za-z0-9_])//g;
+        s/(?<![A-Za-z0-9_])MacChannelApp(?![A-Za-z0-9_])//g;
+        s/(?<![A-Za-z0-9_])MacChannel\.(?:app|dmg|manifest\.json)(?![A-Za-z0-9_])//g;
+        s#MasonXQY/MacChannel(?![A-Za-z0-9_])##g;
+    '
+}
+script_audit_probe='MacChannelBogus must remain visible to the audit'
+script_audit_probe_normalized="$(normalize_script_compatibility_anchors \
+    <<<"$script_audit_probe")"
+test "$script_audit_probe_normalized" = "$script_audit_probe"
+while IFS=: read -r source_file source_line source_text; do
+    case "$source_file:$source_text" in
+        'Scripts/build-app.sh:    <string>MacChannel</string>'|\
+        'Scripts/build-distribution.sh:    MacChannel'|\
+        'Scripts/build-update-feed.sh:    "$actual_display_name" == MacChannel && \'|\
+        "Scripts/verify-personal-mesh.sh:if pgrep -f '/MacChannel\\.app/Contents/MacOS/MacChannelApp' >/dev/null; then")
+            continue
+            ;;
+    esac
+    normalized="$(normalize_script_compatibility_anchors <<<"$source_text")"
+    if [[ "$normalized" == *MacChannel* || "$normalized" == *"Mac 通道"* ]]; then
+        echo "legacy product copy in production script: $source_file:$source_line" >&2
+        exit 1
+    fi
+done < <(find Scripts -maxdepth 1 -type f ! -name 'test-*' -print0 | \
+    xargs -0 rg -n --no-heading 'Mac 通道|MacChannel' || true)
+
+legacy_cleanup_refs="$(rg --no-heading -o 'MacChannel\.(dmg|manifest\.json)' \
+    Scripts/build-distribution.sh || true)"
+test "$legacy_cleanup_refs" = $'MacChannel.dmg\nMacChannel.manifest.json'
 if rg -n 'MacChannel\.(dmg|manifest\.json)|Mac 通道' \
-    Scripts/build-distribution.sh \
-    Scripts/build-update-feed.sh \
-    Distribution/README.txt; then
+    Scripts/build-update-feed.sh Distribution/README.txt; then
     echo "current public distribution branding still contains the legacy product name" >&2
     exit 1
 fi
@@ -242,7 +297,12 @@ test "$(plutil -extract CFBundlePackageType raw -o - "$plist")" = APPL
 test "$(plutil -extract CFBundleIdentifier raw -o - "$plist")" = com.mason.macchannel
 test "$(plutil -extract CFBundleExecutable raw -o - "$plist")" = MacChannelApp
 test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
-test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = MacChannel
+test "$(plutil -extract LSHasLocalizedDisplayName raw -o - "$plist")" = true
+localized_info="$mounted_path/MacChannel.app/Contents/Resources/en.lproj/InfoPlist.strings"
+test "$(plutil -extract CFBundleDisplayName raw -o - "$localized_info")" = DropMesh
+display_name="$(/usr/bin/swift -e 'import Foundation; print(FileManager.default.displayName(atPath: CommandLine.arguments[1]))' "$mounted_path/MacChannel.app")"
+test "$display_name" = DropMesh
 test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
     "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
 test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$plist")" = true

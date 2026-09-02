@@ -76,7 +76,12 @@ if [[ "$bundle_identifier" != com.mason.macchannel ]]; then
     exit 1
 fi
 test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
-test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = MacChannel
+test "$(plutil -extract LSHasLocalizedDisplayName raw -o - "$plist")" = true
+localized_info="$app_path/Contents/Resources/en.lproj/InfoPlist.strings"
+test "$(plutil -extract CFBundleDisplayName raw -o - "$localized_info")" = DropMesh
+display_name="$(/usr/bin/swift -e 'import Foundation; print(FileManager.default.displayName(atPath: CommandLine.arguments[1]))' "$app_path")"
+test "$display_name" = DropMesh
 test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
     "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
 test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$plist")" = true

@@ -211,6 +211,10 @@ actual_bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$mounted_app/Co
 actual_executable="$(plutil -extract CFBundleExecutable raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 actual_bundle_name="$(plutil -extract CFBundleName raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 actual_display_name="$(plutil -extract CFBundleDisplayName raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
+actual_localized_display_name="$(plutil -extract CFBundleDisplayName raw -o - \
+    "$mounted_app/Contents/Resources/en.lproj/InfoPlist.strings" 2>/dev/null || true)"
+actual_has_localized_display_name="$(plutil -extract LSHasLocalizedDisplayName raw -o - \
+    "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 actual_version="$(plutil -extract CFBundleShortVersionString raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 actual_build="$(plutil -extract CFBundleVersion raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 unset app_identity
@@ -220,7 +224,9 @@ cleanup_identity_mount
     "$manifest_team_id" == "$actual_team_id" && \
     "$actual_bundle_id" == "$anchor_bundle_id" && \
     "$actual_executable" == MacChannelApp && "$actual_bundle_name" == DropMesh && \
-    "$actual_display_name" == DropMesh && \
+    "$actual_display_name" == MacChannel && \
+    "$actual_localized_display_name" == DropMesh && \
+    "$actual_has_localized_display_name" == true && \
     "$actual_version" == "$version" && "$actual_build" == "$build_number" ]] || \
     fail_feed identity
 

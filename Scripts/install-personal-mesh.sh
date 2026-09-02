@@ -5,11 +5,10 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 dmg="$repo_root/dist/DropMesh.dmg"
 manifest="$repo_root/dist/DropMesh.manifest.json"
 applications_dir="/Applications"
-tailscale_cli=""
 expected_commit=""
 
 usage() {
-    echo "usage: $0 [--dmg PATH] [--manifest PATH] [--applications-dir PATH] [--tailscale-cli PATH] [--expected-commit COMMIT]" >&2
+    echo "usage: $0 [--dmg PATH] [--manifest PATH] [--applications-dir PATH] [--expected-commit COMMIT]" >&2
     exit 2
 }
 
@@ -18,7 +17,6 @@ while [[ $# -gt 0 ]]; do
         --dmg) [[ $# -ge 2 ]] || usage; dmg="$2"; shift 2 ;;
         --manifest) [[ $# -ge 2 ]] || usage; manifest="$2"; shift 2 ;;
         --applications-dir) [[ $# -ge 2 ]] || usage; applications_dir="$2"; shift 2 ;;
-        --tailscale-cli) [[ $# -ge 2 ]] || usage; tailscale_cli="$2"; shift 2 ;;
         --expected-commit) [[ $# -ge 2 ]] || usage; expected_commit="$2"; shift 2 ;;
         *) usage ;;
     esac
@@ -26,10 +24,6 @@ done
 
 if [[ "$applications_dir" != /Applications && "${MACCHANNEL_INSTALL_TESTING:-}" != 1 ]]; then
     echo "custom application directory is available only to the installer contract test" >&2
-    exit 2
-fi
-if [[ -n "$tailscale_cli" && "${MACCHANNEL_INSTALL_TESTING:-}" != 1 ]]; then
-    echo "custom Tailscale CLI is available only to the installer contract test" >&2
     exit 2
 fi
 [[ -f "$dmg" && -f "$manifest" ]] || { echo "安装包或清单不存在" >&2; exit 2; }
@@ -52,26 +46,11 @@ actual_sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
 [[ "$actual_sha" == "$manifest_sha" ]] || { echo "安装包校验和不一致" >&2; exit 1; }
 codesign --verify --strict --verbose=2 "$dmg"
 
-if [[ -z "$tailscale_cli" ]]; then
-    for candidate in \
-        /Applications/Tailscale.app/Contents/MacOS/Tailscale \
-        /usr/local/bin/tailscale \
-        /opt/homebrew/bin/tailscale; do
-        if [[ -x "$candidate" ]]; then tailscale_cli="$candidate"; break; fi
-    done
-fi
-[[ -x "$tailscale_cli" ]] || {
-    echo "请先从 https://tailscale.com/download/mac 安装 Tailscale" >&2
-    exit 2
-}
-
 check_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-install.XXXXXX")"
 chmod 700 "$check_root"
 mount_path="$check_root/mounted"
-status_json="$check_root/status.json"
-serve_json="$check_root/serve.json"
-backup_path="$applications_dir/.MacChannel.backup.$$"
-new_path="$applications_dir/.MacChannel.install.$$"
+backup_path="$applications_dir/.DropMesh.backup.$$"
+new_path="$applications_dir/.DropMesh.install.$$"
 target_path="$applications_dir/MacChannel.app"
 mounted=0
 backup_created=0
@@ -94,31 +73,6 @@ cleanup() {
     exit "$result"
 }
 trap cleanup EXIT INT TERM HUP
-
-if ! "$tailscale_cli" status --json >"$status_json" 2>/dev/null; then
-    echo "无法读取 Tailscale 状态" >&2
-    exit 2
-fi
-[[ "$(stat -f %z "$status_json")" -le 1048576 ]] || { echo "Tailscale 状态过大" >&2; exit 2; }
-[[ "$(plutil -extract BackendState raw -o - "$status_json" 2>/dev/null || true)" == Running ]] || {
-    echo "请先在 Tailscale 中登录并连接" >&2
-    exit 2
-}
-
-if "$tailscale_cli" serve status --json >"$serve_json" 2>/dev/null; then
-    [[ "$(stat -f %z "$serve_json")" -le 1048576 ]] || { echo "Serve 状态过大" >&2; exit 2; }
-    forward=""
-    forward_file="$check_root/serve-forward.txt"
-    if plutil -extract 'TCP.51337.TCPForward' raw -o "$forward_file" "$serve_json" \
-        >/dev/null 2>&1; then
-        forward="$(<"$forward_file")"
-    fi
-    if [[ -n "$forward" && "$forward" != "127.0.0.1:51338" && \
-        "$forward" != "tcp://127.0.0.1:51338" ]]; then
-        echo "Tailscale Serve 端口 51337 已被其他服务使用" >&2
-        exit 2
-    fi
-fi
 
 mkdir -p "$mount_path"
 hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_path" -quiet
@@ -167,4 +121,4 @@ echo "DropMesh 已安装到“应用程序”"
 if [[ "$release_state" == internalSignedNotNotarized ]]; then
     echo "此版本已签名但未公证。若 macOS 首次阻止打开，请在 Finder 中右键 DropMesh，选择一次“打开”；不要关闭 Gatekeeper 或 SIP。"
 fi
-echo "下一步：打开设置，选择“个人网络（推荐）”，点击“启用个人网络通道”。"
+echo "启动后，DropMesh 会自动连接内置安全服务；在菜单栏完成设备配对即可传输文件。"

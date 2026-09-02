@@ -5,6 +5,63 @@ import XCTest
 @testable import MacChannelCore
 
 final class TransferSurfaceTests: XCTestCase {
+    func testDefaultReceiveDirectoryPresentationNamesTheRealCompatibilityPath() {
+        let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
+
+        XCTAssertEqual(
+            SettingsReceiveDirectoryPresentation.path(
+                defaultDirectory: nil,
+                homeDirectory: home
+            ),
+            "下载文件夹内的兼容接收目录"
+        )
+        XCTAssertEqual(
+            SettingsReceiveDirectoryPresentation.directory(
+                defaultDirectory: nil,
+                homeDirectory: home
+            ).path,
+            "/Users/example/Downloads/Mac 通道"
+        )
+        XCTAssertEqual(
+            SettingsReceiveDirectoryPresentation.path(
+                defaultDirectory: URL(fileURLWithPath: "/Volumes/Files", isDirectory: true),
+                homeDirectory: home
+            ),
+            "/Volumes/Files"
+        )
+        XCTAssertEqual(
+            SettingsReceiveDirectoryPresentation.guidance,
+            "未自定义时，文件保存在上方显示的兼容接收目录；可以随时更改。"
+        )
+    }
+
+    func testSettingsSourceOffersFinderRevealForTheEffectiveReceiveDirectory() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let settings = try String(
+            contentsOf: root.appendingPathComponent("App/SettingsView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(settings.contains("在 Finder 中显示"))
+        XCTAssertTrue(settings.contains("revealDefaultDirectory"))
+    }
+
+    @MainActor
+    func testFinderRevealUsesTheRealCompatibilityDirectoryWithoutChangingTheSetting() {
+        let revealer = RecordingDirectoryRevealer()
+        let model = SettingsSurfaceModel(defaultDirectory: nil)
+        let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
+
+        model.revealDefaultDirectory(using: revealer, homeDirectory: home)
+
+        XCTAssertEqual(revealer.directory?.path, "/Users/example/Downloads/Mac 通道")
+        XCTAssertNil(model.defaultDirectory)
+        XCTAssertNil(model.actionError)
+    }
+
     func testFailedTransferExplainsReceiverMustBeConnected() {
         let item = TransferSurfaceItem(
             snapshot: TransferSnapshot(
@@ -1790,6 +1847,12 @@ private final class StubLoginItemRegistration: LoginItemRegistering {
     func setEnabled(_ enabled: Bool) throws {
         if let error { throw error }
     }
+}
+
+@MainActor
+private final class RecordingDirectoryRevealer: DirectoryRevealing {
+    private(set) var directory: URL?
+    func revealDirectory(_ directory: URL) throws { self.directory = directory }
 }
 
 @MainActor

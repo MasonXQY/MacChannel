@@ -99,7 +99,7 @@ case "$1" in
         plutil -replace "rows.${index}.evidenceID" -string "$evidence_id" "$document"
         plutil -replace "rows.${index}.route" -string "$route" "$document"
         validate_json "$document"
-        echo "已记录 ${requested_id}；文件不包含 IP、主机名或原始 Tailscale 状态"
+        echo "已记录 ${requested_id}；文件不包含 IP、主机名或原始网络状态"
         ;;
     *) usage ;;
 esac

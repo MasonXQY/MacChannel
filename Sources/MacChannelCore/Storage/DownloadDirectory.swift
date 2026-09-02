@@ -18,8 +18,11 @@ public struct DownloadDirectory: Sendable {
     public func directory(for source: DeviceID) -> URL {
         if let sourceDirectory = perSource[source] { return sourceDirectory }
         if let globalDirectory { return globalDirectory }
-        return
-            homeDirectory
+        return defaultDirectory
+    }
+
+    public var defaultDirectory: URL {
+        homeDirectory
             .appendingPathComponent("Downloads", isDirectory: true)
             .appendingPathComponent("Mac 通道", isDirectory: true)
     }

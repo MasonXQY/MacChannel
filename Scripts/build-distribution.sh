@@ -58,6 +58,8 @@ fi
 mkdir -p "$dist_root"
 chmod 700 "$dist_root"
 rm -f \
+    "$dist_root/MacChannel.dmg" \
+    "$dist_root/MacChannel.manifest.json" \
     "$dist_root/DropMesh.dmg" \
     "$dist_root/DropMesh.manifest.json" \
     "$dist_root/appcast.xml" \
@@ -214,7 +216,12 @@ test "$(plutil -extract CFBundleVersion raw -o - "$app_path/Contents/Info.plist"
 test "$(plutil -extract CFBundleExecutable raw -o - "$app_path/Contents/Info.plist")" = \
     MacChannelApp
 test "$(plutil -extract CFBundleName raw -o - "$app_path/Contents/Info.plist")" = DropMesh
-test "$(plutil -extract CFBundleDisplayName raw -o - "$app_path/Contents/Info.plist")" = DropMesh
+test "$(plutil -extract CFBundleDisplayName raw -o - "$app_path/Contents/Info.plist")" = \
+    MacChannel
+test "$(plutil -extract LSHasLocalizedDisplayName raw -o - \
+    "$app_path/Contents/Info.plist")" = true
+localized_info="$app_path/Contents/Resources/en.lproj/InfoPlist.strings"
+test "$(plutil -extract CFBundleDisplayName raw -o - "$localized_info")" = DropMesh
 inject_failure app-verified
 
 mkdir -p "$stage_path"

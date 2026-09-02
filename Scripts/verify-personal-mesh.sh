@@ -9,16 +9,16 @@ if [[ $# -gt 1 || (${1:-} != "" && ${1:-} != "--local-only") ]]; then
     exit 2
 fi
 
-if pgrep -f '/MacChannel\.app/Contents/MacOS/MacChannel' >/dev/null; then
-    echo "personal mesh verification requires no pre-existing MacChannel app process" >&2
+if pgrep -f '/MacChannel\.app/Contents/MacOS/MacChannelApp' >/dev/null; then
+    echo "DropMesh verification requires no pre-existing app process" >&2
     exit 1
 fi
 
 swift test --filter PersonalMeshIntegrationTests
 bash Scripts/audit-privacy.sh --static-only
 
-if pgrep -f '/MacChannel\.app/Contents/MacOS/MacChannel' >/dev/null; then
-    echo "personal mesh verification left a MacChannel app process" >&2
+if pgrep -f '/MacChannel\.app/Contents/MacOS/MacChannelApp' >/dev/null; then
+    echo "DropMesh verification left an app process" >&2
     exit 1
 fi
 

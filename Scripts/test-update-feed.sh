@@ -138,7 +138,13 @@ plutil -replace CFBundleShortVersionString -string "$version" "$fixture_plist"
 plutil -replace CFBundleVersion -string "$build_number" "$fixture_plist"
 plutil -replace CFBundleExecutable -string MacChannelApp "$fixture_plist"
 plutil -replace CFBundleName -string DropMesh "$fixture_plist"
-plutil -replace CFBundleDisplayName -string DropMesh "$fixture_plist"
+plutil -replace CFBundleDisplayName -string MacChannel "$fixture_plist"
+plutil -replace LSHasLocalizedDisplayName -bool true "$fixture_plist"
+mkdir -p "$fixture_root/app/MacChannel.app/Contents/Resources/en.lproj"
+fixture_localized_info="$fixture_root/app/MacChannel.app/Contents/Resources/en.lproj/InfoPlist.strings"
+plutil -create binary1 "$fixture_localized_info"
+plutil -insert CFBundleDisplayName -string DropMesh "$fixture_localized_info"
+plutil -insert CFBundleName -string DropMesh "$fixture_localized_info"
 plutil -replace SUPublicEDKey -string "$public_key" "$fixture_plist"
 plutil -replace SURequireSignedFeed -bool true "$fixture_plist"
 clean_fixture_tool codesign --remove-signature "$fixture_root/app/MacChannel.app" >/dev/null 2>&1 || true
@@ -550,6 +556,8 @@ assert_exact_release_assets
 # feed builder without invoking Apple's live notary service.
 rm -f "$test_dist/DropMesh.dmg" "$test_dist/DropMesh.manifest.json" \
     "$test_dist/appcast.xml" "$test_dist/.appcast.xml.new"
+printf '%s\n' legacy-dmg >"$test_dist/MacChannel.dmg"
+printf '%s\n' legacy-manifest >"$test_dist/MacChannel.manifest.json"
 env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$test_root/" LANG=C LC_ALL=C \
     MACCHANNEL_UPDATE_TESTING=1 \
     MACCHANNEL_UPDATE_TEST_ROOT="$test_root" \
@@ -573,6 +581,9 @@ grep -Fx "update-feed success version=$version build=$build_number" \
     "$test_root/handoff-success.log" >/dev/null
 grep -Fx "distribution success state=notarized version=$version build=$build_number" \
     "$test_root/handoff-success.log" >/dev/null
+[[ ! -e "$test_dist/MacChannel.dmg" && ! -L "$test_dist/MacChannel.dmg" ]]
+[[ ! -e "$test_dist/MacChannel.manifest.json" && \
+    ! -L "$test_dist/MacChannel.manifest.json" ]]
 assert_exact_release_assets
 
 handoff_dmg_sha="$(shasum -a 256 "$test_dist/DropMesh.dmg" | awk '{print $1}')"

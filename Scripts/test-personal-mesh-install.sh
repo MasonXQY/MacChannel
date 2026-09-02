@@ -11,6 +11,13 @@ for required in Scripts/install-personal-mesh.sh Scripts/accept-personal-mesh.sh
     fi
 done
 
+if rg -n -i 'tailscale|个人网络通道|个人网络（推荐）|--tailscale-cli' \
+    Scripts/install-personal-mesh.sh Scripts/accept-personal-mesh.sh; then
+    echo "installer still depends on obsolete auxiliary networking" >&2
+    exit 1
+fi
+grep -F '内置安全服务' Scripts/install-personal-mesh.sh >/dev/null
+
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 [[ -n "$identity" ]] || { echo "MACCHANNEL_CODESIGN_IDENTITY is required" >&2; exit 2; }
 
@@ -29,19 +36,6 @@ trap cleanup EXIT INT TERM
 
 MACCHANNEL_CODESIGN_IDENTITY="$identity" bash Scripts/build-distribution.sh
 
-fake_cli="$test_root/tailscale"
-cat >"$fake_cli" <<'CLI'
-#!/usr/bin/env bash
-if [[ "$1 $2" == "status --json" ]]; then
-    printf '%s\n' '{"BackendState":"Running"}'
-elif [[ "$1 $2 $3" == "serve status --json" ]]; then
-    printf '%s\n' '{}'
-else
-    exit 2
-fi
-CLI
-chmod +x "$fake_cli"
-
 applications="$test_root/Applications"
 mkdir -p "$applications"
 data_root="$test_root/Application Support/MacChannel"
@@ -54,7 +48,6 @@ MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
     --dmg dist/DropMesh.dmg \
     --manifest dist/DropMesh.manifest.json \
     --applications-dir "$applications" \
-    --tailscale-cli "$fake_cli" \
     --expected-commit "$(git rev-parse HEAD)"
 codesign --verify --deep --strict "$applications/MacChannel.app"
 grep -qx 'preserve-me' "$data_root/settings.json"
@@ -69,7 +62,6 @@ MACCHANNEL_INSTALL_FAIL_AT=after-backup \
     --dmg dist/DropMesh.dmg \
     --manifest dist/DropMesh.manifest.json \
     --applications-dir "$applications" \
-    --tailscale-cli "$fake_cli" \
     --expected-commit "$(git rev-parse HEAD)" >/dev/null 2>&1
 rollback_status=$?
 set -e
@@ -89,36 +81,14 @@ expect_failure() {
 expect_failure 2 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
     bash Scripts/install-personal-mesh.sh --dmg dist/DropMesh.dmg \
     --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
-    --tailscale-cli "$fake_cli" --expected-commit 0000000000000000000000000000000000000000
-
-logged_out="$test_root/tailscale-logged-out"
-sed 's/Running/Stopped/' "$fake_cli" >"$logged_out"
-chmod +x "$logged_out"
-expect_failure 2 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
-    bash Scripts/install-personal-mesh.sh --dmg dist/DropMesh.dmg \
-    --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
-    --tailscale-cli "$logged_out" --expected-commit "$(git rev-parse HEAD)"
-
-conflict="$test_root/tailscale-conflict"
-sed 's/{}/{"TCP":{"51337":{"TCPForward":"127.0.0.1:9999"}}}/' "$fake_cli" >"$conflict"
-chmod +x "$conflict"
-expect_failure 2 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
-    bash Scripts/install-personal-mesh.sh --dmg dist/DropMesh.dmg \
-    --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
-    --tailscale-cli "$conflict" --expected-commit "$(git rev-parse HEAD)"
-
-mv "$fake_cli" "$test_root/tailscale-missing"
-expect_failure 2 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
-    bash Scripts/install-personal-mesh.sh --dmg dist/DropMesh.dmg \
-    --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
-    --tailscale-cli "$fake_cli" --expected-commit "$(git rev-parse HEAD)"
+    --expected-commit 0000000000000000000000000000000000000000
 
 cp dist/DropMesh.dmg "$test_root/mutated.dmg"
 printf 'mutation' >>"$test_root/mutated.dmg"
 expect_failure 1 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
     bash Scripts/install-personal-mesh.sh --dmg "$test_root/mutated.dmg" \
     --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
-    --tailscale-cli "$test_root/tailscale-missing" --expected-commit "$(git rev-parse HEAD)"
+    --expected-commit "$(git rev-parse HEAD)"
 
 if rg -n -i 'spctl[^\n]*master-disable|csrutil|xattr[^\n]*quarantine' \
     Scripts/install-personal-mesh.sh Scripts/accept-personal-mesh.sh; then

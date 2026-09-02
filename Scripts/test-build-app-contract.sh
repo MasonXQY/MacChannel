@@ -98,11 +98,25 @@ if [[ "$bundle_identifier" != com.mason.macchannel ]]; then
     exit 1
 fi
 test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
-test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = MacChannel
+test "$(plutil -extract LSHasLocalizedDisplayName raw -o - "$plist")" = true
 test "$(plutil -extract CFBundleIconFile raw -o - "$plist")" = DropMesh
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.2.2
 test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 15
 test -s "$output_app/Contents/Resources/DropMesh.icns"
+localized_info="$output_app/Contents/Resources/en.lproj/InfoPlist.strings"
+test -f "$localized_info" && test ! -L "$localized_info"
+test "$(plutil -extract CFBundleDisplayName raw -o - "$localized_info")" = DropMesh
+test "$(plutil -extract CFBundleName raw -o - "$localized_info")" = DropMesh
+test "$(basename "$output_app")" = MacChannel.app
+display_probe="$test_root/display-probe/MacChannel.app"
+mkdir -p "$(dirname "$display_probe")"
+ditto "$output_app" "$display_probe"
+plutil -replace CFBundleIdentifier \
+    -string "com.mason.macchannel.display-probe.$(basename "$test_root")" \
+    "$display_probe/Contents/Info.plist"
+display_name="$(/usr/bin/swift -e 'import Foundation; print(FileManager.default.displayName(atPath: CommandLine.arguments[1]))' "$display_probe")"
+test "$display_name" = DropMesh
 
 iconset="$test_root/DropMesh.iconset"
 iconutil -c iconset "$output_app/Contents/Resources/DropMesh.icns" -o "$iconset"

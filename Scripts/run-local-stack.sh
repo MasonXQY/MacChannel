@@ -175,14 +175,14 @@ prepare_standalone_material() {
       -keyout "${tls_root}/local-ca-key.pem" \
       -out "${tls_root}/local-ca.pem" \
       -days 3650 \
-      -subj "/CN=MacChannel Local Development Root/O=MacChannel Local"
+      -subj "/CN=DropMesh Local Development Root/O=DropMesh Local"
   fi
   if [[ ! -s "${tls_root}/localhost-key.pem" || ! -s "${tls_root}/localhost.pem" ]] || \
     ! openssl x509 -checkend 2592000 -noout -in "${tls_root}/localhost.pem" >/dev/null 2>&1; then
     openssl req -newkey rsa:3072 -sha256 -nodes \
       -keyout "${tls_root}/localhost-key.pem" \
       -out "${tls_root}/localhost.csr" \
-      -subj "/CN=localhost/O=MacChannel Local"
+      -subj "/CN=localhost/O=DropMesh Local"
     openssl x509 -req -sha256 \
       -in "${tls_root}/localhost.csr" \
       -CA "${tls_root}/local-ca.pem" \
@@ -215,7 +215,7 @@ install_local_trust_if_needed() {
   fi
   login_keychain="$(security default-keychain -d user | tr -d ' \"')"
   if ! security verify-cert -c "${tls_root}/localhost.pem" -p ssl -n localhost -L -q >/dev/null 2>&1; then
-    echo "正在把仅用于本地开发的 MacChannel CA 加入当前用户钥匙串；macOS 可能要求确认。"
+    echo "正在把仅用于本地开发的 DropMesh CA 加入当前用户钥匙串；macOS 可能要求确认。"
     certificate_hash="$(openssl x509 -in "${tls_root}/local-ca.pem" -fingerprint -sha1 -noout | awk -F= '{gsub(":", "", $2); print $2}')"
     security add-trusted-cert -r trustRoot -p ssl -s localhost -k "${login_keychain}" "${tls_root}/local-ca.pem"
     trust_added=true

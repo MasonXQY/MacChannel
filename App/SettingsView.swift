@@ -87,6 +87,11 @@ protocol DirectorySelecting: AnyObject {
 }
 
 @MainActor
+protocol DirectoryRevealing: AnyObject {
+    func revealDirectory(_ directory: URL) throws
+}
+
+@MainActor
 protocol DeviceSettingsServicing: AnyObject {
     var isAvailable: Bool { get }
     func updateLocalDisplayName(_ name: String) async throws
@@ -116,6 +121,35 @@ extension DeviceSettingsServicing {
 }
 
 private enum DeviceSettingsSurfaceError: Error { case unavailable }
+
+enum SettingsReceiveDirectoryPresentation {
+    static let guidance = "未自定义时，文件保存在上方显示的兼容接收目录；可以随时更改。"
+
+    static func directory(
+        defaultDirectory: URL?,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        defaultDirectory?.standardizedFileURL
+            ?? DownloadDirectory(homeDirectory: homeDirectory).defaultDirectory
+    }
+
+    static func path(
+        defaultDirectory: URL?,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> String {
+        guard defaultDirectory != nil else { return "下载文件夹内的兼容接收目录" }
+        let home = homeDirectory.standardizedFileURL
+        let directory = directory(defaultDirectory: defaultDirectory, homeDirectory: home)
+        var path = directory.path(percentEncoded: false)
+        if path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        let homePath = home.path(percentEncoded: false)
+        if path == homePath { return "~" }
+        if path.hasPrefix(homePath + "/") {
+            return "~" + path.dropFirst(homePath.count)
+        }
+        return path
+    }
+}
 
 @MainActor
 final class SettingsSurfaceModel: ObservableObject {
@@ -318,6 +352,22 @@ final class SettingsSurfaceModel: ObservableObject {
         openNotificationSettingsHandler?()
     }
 
+    func revealDefaultDirectory(
+        using revealer: any DirectoryRevealing,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) {
+        let directory = SettingsReceiveDirectoryPresentation.directory(
+            defaultDirectory: defaultDirectory,
+            homeDirectory: homeDirectory
+        )
+        do {
+            try revealer.revealDirectory(directory)
+            actionError = nil
+        } catch {
+            publishError("无法在 Finder 中显示接收目录，请确认目录仍可访问后重试。")
+        }
+    }
+
     private func publishError(_ message: String) {
         actionNotice = nil
         actionError = message
@@ -346,10 +396,24 @@ final class NativeDirectorySelector: DirectorySelecting {
     }
 }
 
+@MainActor
+final class NativeDirectoryRevealer: DirectoryRevealing {
+    static let shared = NativeDirectoryRevealer()
+
+    func revealDirectory(_ directory: URL) throws {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        NSWorkspace.shared.activateFileViewerSelecting([directory])
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: SettingsSurfaceModel
     let service: any DeviceSettingsServicing
     let directorySelector: any DirectorySelecting
+    let directoryRevealer: any DirectoryRevealing
     let updateService: any SoftwareUpdateServicing
     let loginItems: any LoginItemRegistering
     let onRetryRuntime: () -> Void
@@ -360,6 +424,7 @@ struct SettingsView: View {
         model: SettingsSurfaceModel,
         service: any DeviceSettingsServicing,
         directorySelector: any DirectorySelecting,
+        directoryRevealer: any DirectoryRevealing = NativeDirectoryRevealer.shared,
         updateService: any SoftwareUpdateServicing,
         loginItems: any LoginItemRegistering = LoginItemController.shared,
         onRetryRuntime: @escaping () -> Void = {},
@@ -368,6 +433,7 @@ struct SettingsView: View {
         self.model = model
         self.service = service
         self.directorySelector = directorySelector
+        self.directoryRevealer = directoryRevealer
         self.updateService = updateService
         self.loginItems = loginItems
         self.onRetryRuntime = onRetryRuntime
@@ -408,8 +474,12 @@ struct SettingsView: View {
                             Spacer()
                             Button("选择…", action: chooseDefaultDirectory)
                                 .frame(minHeight: 40)
+                            Button("在 Finder 中显示") {
+                                model.revealDefaultDirectory(using: directoryRevealer)
+                            }
+                            .frame(minHeight: 40)
                         }
-                        Text("默认保存到下载文件夹；可以改成任何文件夹。")
+                        Text(SettingsReceiveDirectoryPresentation.guidance)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -540,7 +610,7 @@ struct SettingsView: View {
     }
 
     private var defaultDirectoryText: String {
-        model.defaultDirectory?.path(percentEncoded: false) ?? "~/Downloads"
+        SettingsReceiveDirectoryPresentation.path(defaultDirectory: model.defaultDirectory)
     }
 
     private func saveLocalName() {

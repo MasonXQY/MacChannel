@@ -271,7 +271,11 @@ cat > "$contents_path/Info.plist" <<PLIST
     <key>CFBundleName</key>
     <string>DropMesh</string>
     <key>CFBundleDisplayName</key>
-    <string>DropMesh</string>
+    <string>MacChannel</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>LSHasLocalizedDisplayName</key>
+    <true/>
     <key>CFBundleIconFile</key>
     <string>DropMesh</string>
     <key>CFBundlePackageType</key>
@@ -307,6 +311,17 @@ $update_test_plist_fragment
 </plist>
 PLIST
 plutil -lint "$contents_path/Info.plist" >/dev/null
+
+localized_info_root="$contents_path/Resources/en.lproj"
+mkdir -p "$localized_info_root"
+localized_info="$localized_info_root/InfoPlist.strings"
+plutil -create binary1 "$localized_info"
+plutil -insert CFBundleDisplayName -string DropMesh "$localized_info"
+plutil -insert CFBundleName -string DropMesh "$localized_info"
+for localization in Base zh-Hans; do
+    mkdir -p "$contents_path/Resources/$localization.lproj"
+    cp -X "$localized_info" "$contents_path/Resources/$localization.lproj/InfoPlist.strings"
+done
 
 if [[ -n "$codesign_identity" ]]; then
     xattr -cr "$working_app"

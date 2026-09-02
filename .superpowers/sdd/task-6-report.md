@@ -1,104 +1,115 @@
 # Task 6 Report: DropMesh Public Rename and Distribution Migration
 
-## Scope
+## Scope and preserved compatibility anchors
 
-Renamed the current public macOS product surface to **DropMesh** while preserving the installed update identity and every existing data location:
+The current public product is **DropMesh**. Existing installations and updates keep these
+internal anchors so the rename does not create a second app or lose user data:
 
-- current status-menu, Settings, transfer failure, startup, accessibility, version, installer, README, DMG, manifest, and appcast copy now use DropMesh;
-- public assets are `DropMesh.dmg`, `DropMesh.manifest.json`, and unchanged `appcast.xml`;
-- the DMG volume and manifest product are DropMesh;
-- the mounted transition bundle remains `MacChannel.app`, with executable `MacChannelApp` and Bundle ID `com.mason.macchannel`;
-- the GitHub release origin and Sparkle feed URL remain unchanged;
-- keychain identifiers, protocol salts, application-support/database/staging paths, legacy receive directory, and v1.2.0/v1.2.1 release notes were not modified;
-- v1.2.2 build 15 release notes explain the rename, icon, receive notification, unread dot, outside-click dismissal, and no-re-pairing upgrade behavior.
+```text
+physical bundle path             MacChannel.app
+CFBundleDisplayName (raw)        MacChannel
+CFBundleDisplayName (localized)  DropMesh
+CFBundleName (raw/localized)     DropMesh
+CFBundleExecutable               MacChannelApp
+CFBundleIdentifier               com.mason.macchannel
+Sparkle/GitHub origin            MasonXQY/MacChannel
+```
 
-The distribution test now contains an explicit source allowlist for the legacy literals required by storage, transfer recovery, and cryptographic compatibility. A legacy product literal outside that allowlist fails the contract.
+The raw display name intentionally matches the physical bundle filename. Finder only
+uses the localized `InfoPlist.strings` display name when the raw name and filesystem name
+match. The build therefore sets `LSHasLocalizedDisplayName=true` and supplies DropMesh in
+`Base.lproj`, `en.lproj`, and `zh-Hans.lproj`. An isolated build-product probe changes the
+copy's Bundle ID to avoid LaunchServices cache reuse and verifies
+`FileManager.default.displayName(atPath:) == "DropMesh"` while the path remains
+`MacChannel.app`.
+
+The Bundle ID, executable, keychain identifiers, protocol salts, application-support
+paths, database/staging paths, and existing receive-directory bytes were not renamed.
+
+## Independent-review fixes
+
+### Finder and LaunchServices display name
+
+- `Scripts/build-app.sh` emits the raw/localized identity described above.
+- Build, release-signing, mounted-distribution, and update-feed contracts verify the
+  internal anchors and localized public name.
+- The build contract performs the cache-isolated `FileManager.displayName` probe and
+  passed against the real generated bundle.
+
+### Truthful receive-directory UI
+
+The existing default path remains `~/Downloads/Mac 通道`; no files are moved and no
+setting is silently rewritten. The Settings UI does not expose that legacy public name or
+falsely claim the root Downloads directory. It displays the neutral and truthful
+`下载文件夹内的兼容接收目录`. The new `在 Finder 中显示` action resolves the effective
+`DownloadDirectory.defaultDirectory`, creates it only when the user asks to reveal it,
+and selects it in Finder. A custom directory continues to display its real path.
+
+Focused tests verify the neutral label, exact compatibility URL, custom-path rendering,
+Finder reveal target, and unchanged nil setting.
+
+### Safe legacy distribution cleanup
+
+At the start of a distribution build, the explicit distribution root now removes only
+the exact obsolete public assets `MacChannel.dmg` and `MacChannel.manifest.json` in
+addition to the current DropMesh outputs. The update-feed regression first creates both
+legacy files in an isolated test distribution directory, performs the normal handoff,
+then proves they are gone and only the exact DropMesh release assets remain.
+
+### Tailscale-free personal installer
+
+`install-personal-mesh.sh` no longer discovers, invokes, or documents Tailscale and no
+longer accepts `--tailscale-cli`. Installation validates the signed DropMesh package,
+preserves the transition `MacChannel.app` target and user data, then explains that
+DropMesh automatically connects its built-in secure service. The acceptance script no
+longer exposes the obsolete network product in its user-facing evidence text.
+
+The installer contract rejects any return of Tailscale or the old “个人网络通道” guidance
+before it runs the signed install, rollback, commit-mismatch, and hash-mismatch cases.
+
+### Public-source audit
+
+The distribution gate audits current App/Sources strings, production scripts, README,
+distribution README, and the current v1.2.2 release note. It fails ordinary legacy-brand
+copy. Its allowlist is exact and limited to byte-compatible storage/protocol IDs, real
+transition artifact/executable/environment/repository anchors, and the precise historical
+rename sentence. v1.2.0 and v1.2.1 remain unchanged historical release notes.
+An adversarial `MacChannelBogus` probe proves that a new identifier sharing only the old
+prefix is not swallowed by a broad normalization rule.
 
 ## TDD evidence
 
-### RED: public rename
+Each independent-review finding received a failing contract before its implementation:
 
-The Swift expectations were changed before production copy:
+- the display-name contract failed because localized `InfoPlist.strings`,
+  `LSHasLocalizedDisplayName`, and a real filesystem display-name probe were absent;
+- the Settings test initially failed to compile because receive-directory presentation
+  and reveal behavior did not exist;
+- a distribution handoff beginning with legacy public assets failed because the stale
+  files survived;
+- the installer source gate listed every Tailscale dependency and obsolete instruction;
+- the widened script audit first failed on old public local-stack certificate copy.
 
-```sh
-swift test --scratch-path /tmp/dropmesh-task6-red-status --filter StatusItemAppKitTests
-swift test --scratch-path /tmp/dropmesh-task6-red-surfaces --filter TransferSurfaceTests
-swift test --scratch-path /tmp/dropmesh-task6-red-updates --filter SoftwareUpdateTests
-```
-
-Observed failures were limited to the intended old branding:
-
-- status item: 2 failures for `Mac 通道文件传输` versus `DropMesh 文件传输`;
-- transfer/settings: 4 failures for the old receiver guidance, version row, startup copy, and quit item;
-- update presentation: 2 failures for the old version and unknown-version names.
-
-### RED: compact transfer progress
-
-After the user reported the blue circular `51%` transfer state, an AppKit contract was added first. The focused test failed to compile because the compact progress-bar API did not exist. The old behavior also still exposed the percentage as the button title.
-
-### GREEN: Swift
-
-```sh
-swift test --scratch-path /tmp/dropmesh-task6-red-status --filter StatusItemAppKitTests
-swift test --scratch-path /tmp/dropmesh-task6-red-status --filter TransferSurfaceTests
-swift test --scratch-path /tmp/dropmesh-task6-red-status --filter SoftwareUpdateTests
-swift test --scratch-path /tmp/dropmesh-task6-red-status
-```
-
-Results:
-
-- StatusItemAppKitTests: 20/20 passed;
-- TransferSurfaceTests: 49/49 passed;
-- SoftwareUpdateTests: 35/35 passed;
-- complete Swift suite: 636 passed, 3 Docker-only tests skipped, 0 failures;
-- real direct-LAN integration SHA-256 matched;
-- no task-specific Swift test process remained.
-
-The transfer state now keeps the template status icon, uses the normal 30-point width, hides the visible percentage text, and draws a 14-by-2-point `NSColor.systemGreen` progress bar. AppKit tests verify the bar color in light and dark appearances and verify it does not intersect the unread receive dot. VoiceOver retains the textual percentage.
-
-## Build, signing, and update-feed verification
-
-```sh
-bash Scripts/test-build-app-contract.sh
-bash Scripts/test-update-feed.sh
-MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
-  bash Scripts/test-release-signing.sh
-```
-
-Results:
-
-- build app contract PASS;
-- update feed PASS with `DropMesh.dmg` enclosure and signed appcast;
-- Developer ID release signing PASS;
-- signed app remained universal (`arm64`, `x86_64`), retained hardened runtime, verified its designated requirement, and completed both bounded smoke launches.
-
-The clean-worktree-only distribution and installer contracts were run after the implementation commit; their final results are recorded below.
-
-## Compatibility evidence
-
-The generated app/distribution contracts assert:
+Green results on the implementation diff:
 
 ```text
-CFBundleName        DropMesh
-CFBundleDisplayName DropMesh
-CFBundleExecutable  MacChannelApp
-CFBundleIdentifier  com.mason.macchannel
-SUFeedURL            https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml
+TransferSurfaceTests                 52 passed
+ReceiveStore default/override test   passed
+complete Swift suite                 639 passed, 3 Docker-only skipped, 0 failed
+direct-LAN integration               SHA-256 matched
+build app contract                   PASS
+update feed contract                 PASS
+Developer ID release signing        PASS
 ```
 
-The working diff does not modify the production signing anchor, keychain implementation, persistent storage types, receive store, download-directory implementation, or historical release notes.
+The complete Swift suite used `/tmp/dropmesh-task6-fix-full`. The signed app remained
+universal (`arm64`, `x86_64`), retained hardened runtime, satisfied its designated
+requirement, and completed the bounded smoke launches. Compact green transfer-progress
+rendering and its prior AppKit contracts remain unchanged.
 
-## Files changed
+## Final clean-worktree release gates
 
-- public AppKit copy and transfer progress rendering in `App/`;
-- public version and UI tests in `Tests/MacChannelCoreTests/`;
-- public build/distribution/update/installer scripts and their contracts in `Scripts/`;
-- `Distribution/README.txt` and `Distribution/ReleaseNotes/v1.2.2.md`;
-- the current project `README.md`.
-
-## Post-commit clean-worktree verification
-
-The implementation was committed once before the clean-worktree-only gates were run:
+After the single repair commit, the exact committed revision is verified with:
 
 ```sh
 MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
@@ -107,14 +118,18 @@ MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZ
   bash Scripts/test-personal-mesh-install.sh
 ```
 
-Results:
+Both clean-tree gates passed on the committed implementation. The distribution contract
+verified the source audit, fail-closed clean-tree behavior, exact DropMesh release assets,
+signed DMG read-only mount, localized Finder name, manifest schema, preserved internal
+identity, install copy, bounded launch, and tamper rejection. The personal installer
+contract passed signed installation, existing-data preservation, replacement rollback,
+commit mismatch, corrupted DMG rejection, and acceptance-schema checks without any
+auxiliary-network dependency.
 
-- distribution contract PASS, including the legacy-literal source allowlist, clean-tree fail-closed behavior, signed DMG mount verification, DropMesh manifest schema, and preserved internal bundle identity;
-- personal mesh installer contract PASS, including the DropMesh public artifact CLI and installation into the transition `MacChannel.app` path;
-- generated state was `internalSignedNotNotarized`, version 1.2.2, build 15; notarization and publication remain a later release task.
-
-This report-only amendment does not change any compiled source, build contract, or release input exercised by those gates.
+The generated release state was `internalSignedNotNotarized`, version 1.2.2, build 15.
+Live notarization and publication are outside this task.
 
 ## Process safety
 
-Protected historical UE PIDs `38136`, `49361`, `80713`, `82338`, `25679`, `28690`, and `29145` were not inspected, signaled, or terminated.
+Protected historical UE PIDs `38136`, `49361`, `80713`, `82338`, `25679`, `28690`, and
+`29145` were not signaled, terminated, or otherwise mutated.
