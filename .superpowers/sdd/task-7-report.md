@@ -158,11 +158,11 @@ Date: 2026-09-02 (Asia/Dubai)
 
 ## Release decision
 
-**NOT PUBLISHED.** The automated, production-signing, notarization, and Mac A
-installed checks below passed, but no authorized remote-control path to Mac B was
-available and both configured peers were offline. The required real two-Mac LAN and
-forced-relay matrix therefore remains `NOT RUN`. This is a fail-closed release gate;
-local Docker networking and one-Mac UI evidence do not substitute for it.
+**NOT PUBLISHED.** The automated, production-signing, notarization, installed-app,
+and physical two-Mac acceptance checks below passed. Publication remains held for
+the primary agent's final full-branch review and explicit release approval. The
+physical evidence came from two separate Macs; local Docker networking and one-Mac
+UI evidence were not used as substitutes.
 
 ## Verification correction
 
@@ -256,25 +256,67 @@ Observed after launching the installed v1.2.2 (15) candidate:
   unrelated desktop content and device labels; they are not release assets and were
   not committed.
 
-## Mac B reachability and required items not run
+## Physical two-Mac acceptance
 
-Read-only discovery found no concrete SSH host alias, no dedicated DropMesh/MacChannel
-remote-acceptance configuration, and no online configured peer. No endpoint, key, token,
-or private material was guessed or exported. Consequently the following acceptance
-items remain `NOT RUN`:
+Both physical Macs ran the installed DropMesh version `1.2.2` build `15`. Mac A had
+system notifications denied and Mac B had them allowed. Before every result was
+accepted, the transfer history/database route and terminal phase were checked on the
+participating Mac, and the materialized file was hashed independently on the receiver.
 
-- install this exact candidate on Mac B;
-- LAN-direct transfer in both directions on two physical Macs;
-- forced encrypted-relay transfer in both directions on two physical Macs;
-- destination existence and SHA-256 comparison on each physical receiver;
-- receiver-only notification, one green unread dot, and clear-on-menu-open behavior;
-- failed/cancelled transfers producing neither success notification nor unread dot;
-- denied notification permission still allowing a successful transfer and unread dot;
-- close and reopen the transfer popover during a live physical transfer while progress
-  continues.
+### Successful transfer matrix
 
-Because those checks are mandatory, no `v1.2.2` GitHub release/tag/assets were created
-or changed, and no `latest` feed was updated.
+| Direction | Network condition | Recorded route and result | Receiver SHA-256 |
+| --- | --- | --- | --- |
+| Mac B to Mac A | Same LAN | Mac A inbound `route=lan`, `phase=completed`, `67,108,864/67,108,864` bytes | `f8a5396eb3acc520978f8945e09ba4d36bfb04a249b2bbd0c49e1b1d105feb1e` |
+| Mac A to Mac B | Same LAN | Mac A outbound `route=lan`, `phase=completed`, `67,108,864/67,108,864` bytes | `2662b2135768ca6a799ffbb2028be5f3327d3bec328122ac54d82b06a34cfa74` |
+| Mac B to Mac A | Macs deliberately separated onto different networks | Mac A inbound `route=relay`, `phase=completed`, `67,108,864/67,108,864` bytes | `f8a5396eb3acc520978f8945e09ba4d36bfb04a249b2bbd0c49e1b1d105feb1e` |
+| Mac A to Mac B | Macs deliberately separated onto different networks | Mac A outbound `route=relay`, `phase=completed`, `67,108,864/67,108,864` bytes | `2662b2135768ca6a799ffbb2028be5f3327d3bec328122ac54d82b06a34cfa74` |
+
+The source hashes matched the corresponding receiver hashes in all four cases. The
+two separated-network runs displayed the encrypted-relay route in the live UI and
+recorded `relay` in the transfer database; the result was not inferred merely from
+the network topology.
+
+### Notification, unread-dot, and popover behavior
+
+- When Mac B received successfully, the system posted exactly one DropMesh success
+  notification and the menu-bar item showed exactly one green unread dot. Mac A, the
+  sender, showed no unread dot. Opening Mac B's status menu cleared the dot immediately.
+- With notifications denied on Mac A, successful receipt still completed over both
+  LAN and relay. No system notification was posted, exactly one green unread dot was
+  shown, and opening the status menu cleared it. Mac B, the sender, showed no unread
+  dot. This verifies that notification authorization does not gate receipt or the
+  in-app unread indicator.
+- During the live Mac B to Mac A relay transfer, the transfer popover was closed and
+  reopened. The reopened view showed later byte progress and a shorter remaining time,
+  and the same transfer then completed with the expected receiver SHA-256.
+
+### Cancelled and failed negative cases
+
+- A fresh Mac B to Mac A transfer was cancelled after `4,188,928` of `67,108,864`
+  bytes. Mac A recorded the inbound transfer as `phase=cancelled`; neither endpoint
+  showed a success notification or a new green unread dot.
+- For a separate failure case, Mac A's DropMesh process was intentionally stopped only
+  after Mac B began a fresh LAN-direct connection attempt. Mac B recorded a fresh
+  outbound `phase=failed` result at `0/67,108,864` bytes and displayed `传输失败` in
+  history. Because the connection never became established, no route was committed to
+  that database row. Mac B's notification center contained no fresh success
+  notification, neither endpoint showed a new green unread dot, and Mac A was then
+  relaunched successfully.
+
+### Network restoration and residue
+
+After forced-relay testing, Mac B was restored to its original saved 5 GHz Wi-Fi. Its
+previous LAN reachability returned, the secure service reconnected, and a Bonjour
+browse showed two distinct `_macchannel._tcp` service instances for the two Macs. Mac
+B's receiver chooser again listed Mac A, and a subsequent failure-injection attempt
+began on the LAN-direct route before the receiver was deliberately stopped. Mac B was
+relaunched once to force a clean Bonjour re-advertisement; Mac A was relaunched after
+the intentional failure case. No temporary DropMesh Bonjour proxy or browse process
+was left running.
+
+No `v1.2.2` GitHub release, tag, or asset was created or changed during this acceptance,
+and no `latest` feed was updated.
 
 ## Safety and residue
 
