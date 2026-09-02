@@ -12,6 +12,7 @@ final class AppContainer {
     let pairingStates: AsyncStream<PairingState>?
     let settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)?
     let transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)?
+    let receiveEvents: (@Sendable () async -> AsyncStream<TransferReceiveResult>)?
     let runtimeIdentityID: DeviceID?
 
     init(
@@ -24,6 +25,7 @@ final class AppContainer {
         pairingStates: AsyncStream<PairingState>? = nil,
         settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)? = nil,
         transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil,
+        receiveEvents: (@Sendable () async -> AsyncStream<TransferReceiveResult>)? = nil,
         runtimeIdentityID: DeviceID? = nil
     ) {
         self.deviceDirectory = deviceDirectory
@@ -35,6 +37,7 @@ final class AppContainer {
         self.pairingStates = pairingStates
         self.settingsSnapshots = settingsSnapshots
         self.transferHistory = transferHistory
+        self.receiveEvents = receiveEvents
         self.runtimeIdentityID = runtimeIdentityID
     }
 

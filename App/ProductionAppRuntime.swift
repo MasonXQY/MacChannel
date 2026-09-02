@@ -160,6 +160,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let advertiser: BonjourPeerAdvertiser?
     private let trustPersistenceTask: Task<Void, Never>
     private let historySource: RuntimeHistorySource
+    private let receiveEvents: RuntimeReceiveEventSource
     private let statusSource: RuntimeStatusSource
     private let publicServiceLifecycle: PublicServiceLifecycle?
     private let publicServiceStatusTask: Task<Void, Never>?
@@ -182,6 +183,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         advertiser: BonjourPeerAdvertiser?,
         trustPersistenceTask: Task<Void, Never>,
         historySource: RuntimeHistorySource,
+        receiveEvents: RuntimeReceiveEventSource,
         statusSource: RuntimeStatusSource,
         publicServiceLifecycle: PublicServiceLifecycle?,
         publicServiceStatusTask: Task<Void, Never>?,
@@ -202,6 +204,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         self.advertiser = advertiser
         self.trustPersistenceTask = trustPersistenceTask
         self.historySource = historySource
+        self.receiveEvents = receiveEvents
         self.statusSource = statusSource
         self.publicServiceLifecycle = publicServiceLifecycle
         self.publicServiceStatusTask = publicServiceStatusTask
@@ -277,6 +280,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             settings: settingsStore,
             outputLocator: outputLocator
         )
+        let receiveEvents = RuntimeReceiveEventSource()
+        cleanup.push { await receiveEvents.finish() }
         let settingsService = ProductionDeviceSettingsService(
             store: settingsStore,
             trustRepository: trustRepository,
@@ -412,9 +417,10 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             settings: settingsStore,
             database: database,
             ownerID: identity.id,
-            onReceiveFinished: { result in
-                await history.recordInboundResult(result)
-            }
+            onReceiveFinished: makeReceiveFinishedHandler(
+                recordInboundResult: { result in await history.recordInboundResult(result) },
+                publishReceiveEvent: { result in await receiveEvents.publish(result) }
+            )
         )
         await incoming.start()
         cleanup.push { await incoming.stop() }
@@ -472,6 +478,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             pairingStates: pairingCoordinator.states,
             settingsSnapshots: { await settingsStore.snapshots() },
             transferHistory: { await history.stream() },
+            receiveEvents: { await receiveEvents.stream() },
             runtimeIdentityID: identity.id
         )
         return ProductionAppRuntime(
@@ -481,6 +488,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             advertiser: advertiser,
             trustPersistenceTask: trustPersistenceTask,
             historySource: history,
+            receiveEvents: receiveEvents,
             statusSource: statusSource,
             publicServiceLifecycle: publicServiceLifecycle,
             publicServiceStatusTask: publicServiceStatusTask,
@@ -502,6 +510,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     func shutdown() async {
         guard !stopped else { return }
         stopped = true
+        await receiveEvents.finish()
         await historySource.stop()
         publicServiceTrustTask?.cancel()
         await publicServiceLifecycle?.stop()
@@ -987,6 +996,18 @@ enum RuntimeReceivePolicy {
                 }
             )
         )
+    }
+}
+
+func makeReceiveFinishedHandler(
+    recordInboundResult: @escaping @Sendable (TransferReceiveResult?) async -> Void,
+    publishReceiveEvent: @escaping @Sendable (TransferReceiveResult) async -> Void
+) -> @Sendable (TransferReceiveResult?) async -> Void {
+    { result in
+        await recordInboundResult(result)
+        if let result {
+            await publishReceiveEvent(result)
+        }
     }
 }
 

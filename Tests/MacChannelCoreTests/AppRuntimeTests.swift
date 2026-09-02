@@ -632,6 +632,39 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(afterCommit.devices.first?.displayName, "远端 Mac")
     }
 
+    func testSuccessfulReceivePublishesAfterHistoryRecording() async {
+        let history = BlockingReceiveHistoryRecorder()
+        let receiveEvents = RuntimeReceiveEventSource()
+        let publisher = ReceiveEventPublisherRecorder()
+        let stream = await receiveEvents.stream()
+        let eventTask = Task { await stream.first(where: { _ in true }) }
+        let onReceiveFinished = makeReceiveFinishedHandler(
+            recordInboundResult: { result in await history.record(result) },
+            publishReceiveEvent: { result in
+                await publisher.publish(result)
+                await receiveEvents.publish(result)
+            }
+        )
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/report.pdf")]
+        )
+
+        await onReceiveFinished(nil)
+        let completionTask = Task { await onReceiveFinished(result) }
+        await history.waitUntilSuccessfulResultIsRecording()
+        let eventsPublishedBeforeHistoryFinished = await publisher.publishedResults()
+        XCTAssertTrue(eventsPublishedBeforeHistoryFinished.isEmpty)
+
+        await history.releaseSuccessfulResult()
+        await completionTask.value
+
+        let eventResult = await eventTask.value
+        XCTAssertEqual(eventResult, result)
+        let recordedResults = await history.recordedResults()
+        XCTAssertEqual(recordedResults, [nil, result])
+    }
+
     private func makeTrustedRuntimeFixture() throws -> TrustedRuntimeFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -675,6 +708,55 @@ private actor FailingTrustSnapshotPersister: TrustSnapshotPersisting {
 
 private actor RecordingTrustSnapshotPersister: TrustSnapshotPersisting {
     func persistLatest(from repository: TrustRepository) async throws {}
+}
+
+private actor BlockingReceiveHistoryRecorder {
+    private var results: [TransferReceiveResult?] = []
+    private var isRecordingSuccessfulResult = false
+    private var successfulResultWasReleased = false
+    private var recordingContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func record(_ result: TransferReceiveResult?) async {
+        results.append(result)
+        guard result != nil else { return }
+        isRecordingSuccessfulResult = true
+        recordingContinuation?.resume()
+        recordingContinuation = nil
+        guard !successfulResultWasReleased else { return }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilSuccessfulResultIsRecording() async {
+        guard !isRecordingSuccessfulResult else { return }
+        await withCheckedContinuation { continuation in
+            recordingContinuation = continuation
+        }
+    }
+
+    func releaseSuccessfulResult() {
+        successfulResultWasReleased = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    func recordedResults() -> [TransferReceiveResult?] {
+        results
+    }
+}
+
+private actor ReceiveEventPublisherRecorder {
+    private var results: [TransferReceiveResult] = []
+
+    func publish(_ result: TransferReceiveResult) {
+        results.append(result)
+    }
+
+    func publishedResults() -> [TransferReceiveResult] {
+        results
+    }
 }
 
 private actor DeferredProductionPairingCoordinator: ProductionPairingCoordinating {
