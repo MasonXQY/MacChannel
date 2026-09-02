@@ -44,6 +44,7 @@ cleanup() {
         hdiutil detach "$mount_path" -quiet || status=70
     fi
     if macchannel_require_canonical_test_root "$test_root"; then
+        chmod -R u+w "$test_root" 2>/dev/null || status=70
         rm -rf "$test_root"
     else
         status=70
@@ -105,6 +106,35 @@ make_fixture() {
 make_fixture primary "$identity"
 make_fixture alternate "$alternate_identity"
 
+make_primary_mode_fixture() {
+    local fixture_name="$1"
+    local root_mode="$2"
+    local fixture_root="$test_root/$fixture_name"
+    local stage="$fixture_root/stage"
+    local app="$stage/MacChannel.app"
+    local dmg="$fixture_root/DropMesh.dmg"
+    local manifest="$fixture_root/DropMesh.manifest.json"
+
+    mkdir -p "$stage"
+    /usr/bin/ditto --noextattr --noqtn \
+        "$test_root/primary/stage/MacChannel.app" "$app"
+    /bin/chmod "$root_mode" "$app"
+    ln -s /Applications "$stage/Applications"
+    hdiutil create -srcfolder "$stage" -volname DropMesh -fs HFS+ -format UDZO -ov \
+        "$dmg" >/dev/null
+    /usr/bin/codesign --force --sign "$identity" --timestamp=none "$dmg"
+    cp "$test_root/primary/DropMesh.manifest.json" "$manifest"
+    plutil -replace dmgSHA256 -string \
+        "$(shasum -a 256 "$dmg" | awk '{print $1}')" "$manifest"
+}
+
+# The production bundle root contract is exactly 0755. Even otherwise signed
+# packages with non-standard, owner-only, or broadly writable roots are rejected
+# before replacement starts.
+make_primary_mode_fixture unsafe-nonstandard 0711
+make_primary_mode_fixture unsafe-owner-only 0700
+make_primary_mode_fixture unsafe-world-writable 0777
+
 stapler_shim="$test_root/stapler-shim"
 spctl_shim="$test_root/spctl-shim"
 validation_marker="$test_root/validation.log"
@@ -164,23 +194,33 @@ prepare_old_app() {
     mkdir -p "$applications/MacChannel.app/Contents/Resources"
     printf 'old executable %s\n' "$label" >"$applications/MacChannel.app/Contents/MacChannelApp"
     printf 'old resource %s\n' "$label" >"$applications/MacChannel.app/Contents/Resources/state.bin"
+    chmod 0711 "$applications/MacChannel.app"
     cp -R "$applications/MacChannel.app" "$test_root/expected-old.app"
 }
 
 assert_old_app_unchanged() {
     [[ -d "$applications/MacChannel.app" && ! -L "$applications/MacChannel.app" ]]
     diff -rq "$test_root/expected-old.app" "$applications/MacChannel.app" >/dev/null
+    [[ "$(/usr/bin/stat -f %Lp "$applications/MacChannel.app")" == 711 ]]
 }
 
 assert_installed_app_valid() {
+    local expected_mode="${1:-755}"
     [[ -d "$applications/MacChannel.app" && ! -L "$applications/MacChannel.app" ]]
     /usr/bin/codesign --verify --deep --strict "$applications/MacChannel.app"
+    [[ "$(/usr/bin/stat -f %Lp "$applications/MacChannel.app")" == "$expected_mode" ]]
 }
 
 primary_dmg="$test_root/primary/DropMesh.dmg"
 primary_manifest="$test_root/primary/DropMesh.manifest.json"
 alternate_dmg="$test_root/alternate/DropMesh.dmg"
 alternate_manifest="$test_root/alternate/DropMesh.manifest.json"
+unsafe_nonstandard_dmg="$test_root/unsafe-nonstandard/DropMesh.dmg"
+unsafe_nonstandard_manifest="$test_root/unsafe-nonstandard/DropMesh.manifest.json"
+unsafe_owner_only_dmg="$test_root/unsafe-owner-only/DropMesh.dmg"
+unsafe_owner_only_manifest="$test_root/unsafe-owner-only/DropMesh.manifest.json"
+unsafe_world_writable_dmg="$test_root/unsafe-world-writable/DropMesh.dmg"
+unsafe_world_writable_manifest="$test_root/unsafe-world-writable/DropMesh.manifest.json"
 
 data_root="$test_root/Application Support/MacChannel"
 mkdir -p "$data_root"
@@ -192,7 +232,7 @@ printf 'preserve-me\n' >"$data_root/settings.json"
     --manifest "$primary_manifest" \
     --applications-dir "$applications" \
     --expected-commit "$(git rev-parse HEAD)"
-/usr/bin/codesign --verify --deep --strict "$applications/MacChannel.app"
+assert_installed_app_valid 755
 grep -qx 'preserve-me' "$data_root/settings.json"
 
 # RED on the vulnerable installer: a second valid Apple signer and a matching
@@ -207,6 +247,33 @@ expect_failure 1 "${installer_test_environment[@]}" \
 test "$(grep -c '^stapler' "$validation_marker")" -eq 1
 test "$(grep -c $'^spctl\topen\t' "$validation_marker")" -eq 1
 test "$(grep -c $'^spctl\texecute\t' "$validation_marker")" -eq 1
+
+# Unsafe signed source-root modes fail closed and preserve both the old app's
+# contents and its exact root mode.
+for unsafe_mode_fixture in nonstandard owner-only world-writable; do
+    prepare_old_app "unsafe-mode-$unsafe_mode_fixture"
+    case "$unsafe_mode_fixture" in
+        nonstandard)
+            unsafe_dmg="$unsafe_nonstandard_dmg"
+            unsafe_manifest="$unsafe_nonstandard_manifest"
+            ;;
+        owner-only)
+            unsafe_dmg="$unsafe_owner_only_dmg"
+            unsafe_manifest="$unsafe_owner_only_manifest"
+            ;;
+        world-writable)
+            unsafe_dmg="$unsafe_world_writable_dmg"
+            unsafe_manifest="$unsafe_world_writable_manifest"
+            ;;
+    esac
+    expect_failure 1 "${installer_test_environment[@]}" \
+        bash Scripts/install-personal-mesh.sh \
+        --dmg "$unsafe_dmg" \
+        --manifest "$unsafe_manifest" \
+        --applications-dir "$applications" \
+        --expected-commit "$(git rev-parse HEAD)"
+    assert_old_app_unchanged
+done
 
 assert_manifest_rejected() {
     local key="$1"

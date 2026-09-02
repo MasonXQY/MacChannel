@@ -181,9 +181,10 @@ transaction_identity=""
 staging_root_identity=""
 backup_root_identity=""
 staged_identity=""
+trusted_bundle_root_mode=""
 old_target_identity=""
 applications_dir_physical=""
-current_uid=""
+current_uid="$(/usr/bin/id -u)"
 mounted=0
 backup_created=0
 new_installed=0
@@ -235,14 +236,28 @@ require_private_child_root() {
 
 require_staged_destination() {
     local path="$1"
+    local expected_mode="$2"
 
     require_private_child_root "$staging_root" staging || return 1
     [[ "$path" == "$staging_root/MacChannel.app" && -d "$path" && ! -L "$path" ]] || return 1
     [[ "$(cd "$path" 2>/dev/null && /bin/pwd -P)" == "$path" ]] || return 1
     [[ "$(cd "${path%/*}" 2>/dev/null && /bin/pwd -P)" == "$staging_root" ]] || return 1
     [[ "$(/usr/bin/stat -f %u "$path" 2>/dev/null)" == "$current_uid" ]] || return 1
+    [[ "$(/usr/bin/stat -f %Lp "$path" 2>/dev/null)" == "$expected_mode" ]] || return 1
     [[ -z "$staged_identity" || \
         "$(/usr/bin/stat -f '%d:%i' "$path" 2>/dev/null)" == "$staged_identity" ]]
+}
+
+capture_trusted_bundle_root_mode() {
+    local path="$1"
+    local path_uid path_mode
+
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    path_uid="$(/usr/bin/stat -f %u "$path" 2>/dev/null)" || return 1
+    path_mode="$(/usr/bin/stat -f %Lp "$path" 2>/dev/null)" || return 1
+    [[ "$path_uid" == "$current_uid" || "$path_uid" == 0 ]] || return 1
+    [[ "$path_mode" == 755 ]] || return 1
+    trusted_bundle_root_mode="$path_mode"
 }
 
 inject_test_failure() {
@@ -381,6 +396,10 @@ actual_build="$(plutil -extract CFBundleVersion raw -o - "$mounted_plist" 2>/dev
     exit 1
 }
 run_spctl_execute "$mounted_app"
+capture_trusted_bundle_root_mode "$mounted_app" || {
+    echo "安装镜像中的应用根目录权限不安全" >&2
+    exit 1
+}
 
 if [[ ! -d "$applications_dir" ]]; then
     mkdir -p "$applications_dir"
@@ -396,7 +415,6 @@ if [[ -w "$applications_dir" ]]; then
         exit 1
     }
 
-    current_uid="$(/usr/bin/id -u)"
     transaction_root="$(umask 077; /usr/bin/mktemp -d \
         "$applications_dir/.DropMesh.transaction.XXXXXX")" || {
         echo "无法创建安全安装事务" >&2
@@ -419,10 +437,11 @@ if [[ -w "$applications_dir" ]]; then
     backup_path="$backup_root/MacChannel.app"
     /bin/mkdir -m 700 "$staged_path"
     staged_identity="$(/usr/bin/stat -f '%d:%i' "$staged_path")" || exit 1
-    require_staged_destination "$staged_path" || exit 1
+    require_staged_destination "$staged_path" 700 || exit 1
 
     /usr/bin/ditto --noextattr --noqtn "$mounted_app" "$staged_path"
-    require_staged_destination "$staged_path" || exit 1
+    /bin/chmod "$trusted_bundle_root_mode" "$staged_path"
+    require_staged_destination "$staged_path" "$trusted_bundle_root_mode" || exit 1
     /usr/bin/codesign --verify --deep --strict "$staged_path"
     /usr/bin/codesign --verify --deep --strict \
         --test-requirement "=$anchor_requirement" "$staged_path"
@@ -444,7 +463,9 @@ if [[ -w "$applications_dir" ]]; then
     new_installed=1
     installed_identity="$(/usr/bin/stat -f '%d:%i' "$target_path")" || exit 1
     [[ "$installed_identity" == "$staged_identity" && -d "$target_path" && \
-        ! -L "$target_path" ]] || exit 1
+        ! -L "$target_path" && \
+        "$(/usr/bin/stat -f %Lp "$target_path")" == \
+            "$trusted_bundle_root_mode" ]] || exit 1
     inject_test_event after-install
     success=1
     commit_critical=0

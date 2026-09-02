@@ -149,3 +149,60 @@ MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZ
 That gate rebuilt the release application and DMG twice, verified their pinned
 Developer ID signatures and mounted contents, exercised all fail-closed build
 points, and left the formal repository `dist/` unchanged.
+
+## P2 installed bundle-root permission remediation
+
+The final review found that the private transaction hardening pre-created the
+staged application root as `0700`. `ditto` preserved that destination-root mode,
+so the signed application could be atomically installed with an owner-only root
+that other local users could not traverse.
+
+### RED evidence
+
+At baseline `a549406`, the focused installer contract added an exact final-root
+mode assertion after a normal production-signed install. The installer reported
+success, but the assertion observed `0700` instead of the production package's
+required `0755`.
+
+### Implementation
+
+- The mounted, already signature- and Gatekeeper-verified app root must be a
+  non-symlink directory owned by the invoking user or root with exact production
+  mode `0755`. Signed fixtures with `0711`, `0700`, or `0777` fail closed before
+  any existing application is renamed.
+- The transaction, staging, and backup parent directories remain owner-only
+  `0700` with their existing canonical-path, ownership, and device/inode checks.
+- The staging app is still pre-created as `0700` to close the destination race.
+  After `ditto`, only that bundle root is restored to the validated `0755` mode;
+  no signed internal file or directory is chmodded.
+- The staged root mode is checked before signature verification, and the final
+  installed inode and exact `0755` mode are checked immediately after rename.
+- Tests now assert exact installed mode for normal, hostile-collision,
+  post-success failure, and all signal/commit-point cases. Rollback cases use an
+  old app with mode `0711` and prove both its bytes and original mode are restored.
+
+### Verification
+
+Fresh checks after the permission remediation:
+
+```text
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-personal-mesh-install.sh                 PASS
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-release-signing.sh                       PASS
+bash -n Scripts/install-personal-mesh.sh \
+  Scripts/test-personal-mesh-install.sh                      PASS
+git diff --check                                             PASS
+```
+
+After the remediation commit, the clean-worktree distribution gate also passed:
+
+```text
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-distribution.sh                         PASS
+```
+
+It completed two signed release builds, recursive app/DMG/mounted-app signature
+verification, deterministic comparison, fail-closed build cases, and left the
+formal `dist/` unchanged. No update-feed or notification source was changed,
+and no protected Unreal Engine process was inspected or signalled.
