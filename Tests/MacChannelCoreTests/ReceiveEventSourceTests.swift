@@ -9,20 +9,26 @@ final class ReceiveEventSourceTests: XCTestCase {
         let source = RuntimeReceiveEventSource()
         let first = await source.stream()
         let firstTask = Task { await first.first(where: { _ in true }) }
-        let result = TransferReceiveResult(
+        let firstResult = TransferReceiveResult(
             transferID: TransferID(rawValue: UUID()),
             receivedURLs: [URL(fileURLWithPath: "/tmp/report.pdf")]
         )
 
-        await source.publish(result)
-        let firstResult = await firstTask.value
-        XCTAssertEqual(firstResult, result)
+        await source.publish(firstResult)
+        let observedFirstResult = await firstTask.value
+        XCTAssertEqual(observedFirstResult, firstResult)
 
         let second = await source.stream()
         let secondTask = Task { await second.first(where: { _ in true }) }
-        await source.publish(result)
-        let secondResult = await secondTask.value
-        XCTAssertEqual(secondResult, result)
+        let secondResult = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/second-report.pdf")]
+        )
+
+        await source.publish(secondResult)
+        let observedSecondResult = await secondTask.value
+        XCTAssertEqual(observedSecondResult, secondResult)
+        XCTAssertNotEqual(observedSecondResult, firstResult)
     }
 
     func testFinishedSourceEndsExistingAndFutureSubscriptions() async {

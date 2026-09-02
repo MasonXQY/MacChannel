@@ -665,6 +665,26 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(recordedResults, [nil, result])
     }
 
+    func testEmptyReceiveRecordsHistoryWithoutPublishingEvent() async {
+        let history = ReceiveHistoryRecorder()
+        let publisher = ReceiveEventPublisherRecorder()
+        let onReceiveFinished = makeReceiveFinishedHandler(
+            recordInboundResult: { result in await history.record(result) },
+            publishReceiveEvent: { result in await publisher.publish(result) }
+        )
+        let emptyResult = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: []
+        )
+
+        await onReceiveFinished(emptyResult)
+
+        let recordedResults = await history.recordedResults()
+        let publishedResults = await publisher.publishedResults()
+        XCTAssertEqual(recordedResults, [emptyResult])
+        XCTAssertTrue(publishedResults.isEmpty)
+    }
+
     private func makeTrustedRuntimeFixture() throws -> TrustedRuntimeFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -740,6 +760,18 @@ private actor BlockingReceiveHistoryRecorder {
         successfulResultWasReleased = true
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+
+    func recordedResults() -> [TransferReceiveResult?] {
+        results
+    }
+}
+
+private actor ReceiveHistoryRecorder {
+    private var results: [TransferReceiveResult?] = []
+
+    func record(_ result: TransferReceiveResult?) {
+        results.append(result)
     }
 
     func recordedResults() -> [TransferReceiveResult?] {

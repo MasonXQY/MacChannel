@@ -1005,7 +1005,7 @@ func makeReceiveFinishedHandler(
 ) -> @Sendable (TransferReceiveResult?) async -> Void {
     { result in
         await recordInboundResult(result)
-        if let result {
+        if let result, !result.receivedURLs.isEmpty {
             await publishReceiveEvent(result)
         }
     }
