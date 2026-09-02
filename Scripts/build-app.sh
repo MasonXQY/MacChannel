@@ -179,6 +179,14 @@ fi
 
 contents_path="$working_app/Contents"
 mkdir -p "$contents_path/MacOS" "$contents_path/Resources" "$contents_path/Frameworks"
+dropmesh_icon_path="$contents_path/Resources/DropMesh.icns"
+clean_build_tool xcrun swift \
+    "$repo_root/Scripts/generate-dropmesh-icon.swift" \
+    "$dropmesh_icon_path"
+if [[ ! -s "$dropmesh_icon_path" ]]; then
+    echo "DropMesh application icon is required" >&2
+    exit 2
+fi
 cp -X "$product_path/MacChannelApp" "$contents_path/MacOS/MacChannelApp"
 cp -X -R "$product_path/WebRTC.framework" "$contents_path/MacOS/WebRTC.framework"
 cp -X -R "$product_path/Sparkle.framework" "$contents_path/Frameworks/Sparkle.framework"
@@ -261,7 +269,11 @@ cat > "$contents_path/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>$bundle_identifier</string>
     <key>CFBundleName</key>
-    <string>MacChannel</string>
+    <string>DropMesh</string>
+    <key>CFBundleDisplayName</key>
+    <string>DropMesh</string>
+    <key>CFBundleIconFile</key>
+    <string>DropMesh</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

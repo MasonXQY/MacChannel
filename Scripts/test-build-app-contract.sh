@@ -81,4 +81,43 @@ if find "$signing_tmp" -maxdepth 1 -name 'macchannel-sign.*' -print -quit | grep
     exit 1
 fi
 
-echo "build app failure contract PASS"
+env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$signing_tmp" \
+    MACCHANNEL_BUILD_CONFIGURATION=debug \
+    MACCHANNEL_APP_OUTPUT="$output_app" \
+    bash Scripts/build-app.sh
+
+plist="$output_app/Contents/Info.plist"
+test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleIconFile raw -o - "$plist")" = DropMesh
+test -s "$output_app/Contents/Resources/DropMesh.icns"
+
+iconset="$test_root/DropMesh.iconset"
+iconutil -c iconset "$output_app/Contents/Resources/DropMesh.icns" -o "$iconset"
+for required in \
+    icon_16x16.png \
+    icon_16x16@2x.png \
+    icon_128x128.png \
+    icon_128x128@2x.png \
+    icon_256x256.png \
+    icon_256x256@2x.png \
+    icon_512x512.png \
+    icon_512x512@2x.png; do
+    test -s "$iconset/$required"
+done
+
+if rg -n -i 'paperplane|#?(0088cc|229ed9)|telegram blue' \
+    Scripts/build-app.sh Scripts/generate-dropmesh-icon.swift; then
+    echo "DropMesh icon source contains a forbidden paper-plane or Telegram-blue design" >&2
+    exit 1
+fi
+if rg -n 'generate-dropmesh-icon\.swift.*(\|\|[[:space:]]*true|2>/dev/null)|if .*generate-dropmesh-icon\.swift' \
+    Scripts/build-app.sh; then
+    echo "DropMesh icon integration contains a fallback path" >&2
+    exit 1
+fi
+grep -F 'clean_build_tool xcrun swift \' Scripts/build-app.sh >/dev/null
+grep -F '"$repo_root/Scripts/generate-dropmesh-icon.swift" \' Scripts/build-app.sh >/dev/null
+grep -F 'if [[ ! -s "$dropmesh_icon_path" ]]; then' Scripts/build-app.sh >/dev/null
+
+echo "build app contract PASS"
