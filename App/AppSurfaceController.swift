@@ -16,11 +16,13 @@ extension SparkleUpdateController: SoftwareUpdateSnapshotProviding {
 @MainActor
 protocol ReceiveNotificationServicing: AnyObject {
     func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot>
+    func refreshReceiveNotifications() async
     func openSystemSettings()
 }
 
 extension ReceiveNotificationController: ReceiveNotificationServicing {
     func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot> { snapshots() }
+    func refreshReceiveNotifications() async { await refreshAuthorizationState() }
 }
 
 @MainActor
@@ -211,6 +213,11 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 self?.updateReceiveNotification(snapshot, using: notificationService)
             }
         }
+    }
+
+    func refreshReceiveNotifications() async {
+        guard let notificationService else { return }
+        await notificationService.refreshReceiveNotifications()
     }
 
     func updatePresence(_ devices: [DeviceSummary]) {
@@ -477,6 +484,9 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     private func showSettings(relativeTo anchor: NSView) {
+        Task { [weak self] in
+            await self?.refreshReceiveNotifications()
+        }
         let popover = configuredPopover()
         popover.contentViewController = NSHostingController(
             rootView: SettingsView(

@@ -343,7 +343,38 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
-    func testInvalidatingSurfaceCancelsReceiveNotificationObservation() async {
+    func testRefreshingNotificationPermissionUpdatesSettingsAfterSystemChanges() async {
+        let notifications = RecordingReceiveNotificationService(state: .denied)
+        let settings = SettingsSurfaceModel()
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: SurfaceTransferCoordinator()
+            ),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            settingsModel: settings,
+            notificationService: notifications
+        )
+
+        surfaces.observeReceiveNotifications()
+        await drainMainActorTasks()
+        XCTAssertEqual(settings.receiveNotificationSnapshot.authorizationState, .denied)
+
+        notifications.setState(.authorized)
+        await surfaces.refreshReceiveNotifications()
+        await drainMainActorTasks()
+        XCTAssertEqual(settings.receiveNotificationSnapshot.authorizationState, .authorized)
+
+        notifications.setState(.denied)
+        await surfaces.refreshReceiveNotifications()
+        await drainMainActorTasks()
+        XCTAssertEqual(settings.receiveNotificationSnapshot.authorizationState, .denied)
+        XCTAssertEqual(notifications.refreshCount, 2)
+    }
+
+    @MainActor
+    func testInvalidatingAndReobservingReceiveNotificationsRejectsOldSubscriptionEvents() async {
         let notifications = RecordingReceiveNotificationService(state: .authorized)
         let surfaces = AppSurfaceController(
             transferService: NativeTransferSurfaceService(
@@ -354,7 +385,13 @@ final class TransferSurfaceTests: XCTestCase {
             directorySelector: NativeDirectorySelector(),
             notificationService: notifications
         )
+        let firstController = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: SurfaceTransferCoordinator()
+        )
 
+        surfaces.bind(to: firstController)
         surfaces.observeReceiveNotifications()
         await drainMainActorTasks()
         XCTAssertEqual(notifications.subscriptionCount, 1)
@@ -362,6 +399,30 @@ final class TransferSurfaceTests: XCTestCase {
         surfaces.invalidate()
         await drainMainActorTasks()
         XCTAssertEqual(notifications.terminationCount, 1)
+
+        let secondController = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: SurfaceTransferCoordinator()
+        )
+        surfaces.bind(to: secondController)
+        surfaces.observeReceiveNotifications()
+        await drainMainActorTasks()
+        XCTAssertEqual(notifications.subscriptionCount, 2)
+
+        notifications.yield(.denied, subscription: 0)
+        await drainMainActorTasks()
+        XCTAssertEqual(
+            surfaces.settingsModel.receiveNotificationSnapshot.authorizationState,
+            .authorized
+        )
+
+        notifications.yield(.denied, subscription: 1)
+        await drainMainActorTasks()
+        XCTAssertEqual(
+            surfaces.settingsModel.receiveNotificationSnapshot.authorizationState,
+            .denied
+        )
     }
 
     func testSettingsSourceContainsNativeReceiveNotificationStatusWithoutToggle() throws {
@@ -1420,10 +1481,12 @@ private final class ControllableSoftwareUpdateService:
 
 @MainActor
 private final class RecordingReceiveNotificationService: ReceiveNotificationServicing {
-    private let snapshot: ReceiveNotificationSnapshot
+    private var snapshot: ReceiveNotificationSnapshot
     private(set) var openSettingsCount = 0
     private(set) var subscriptionCount = 0
     private(set) var terminationCount = 0
+    private(set) var refreshCount = 0
+    private var continuations: [AsyncStream<ReceiveNotificationSnapshot>.Continuation] = []
 
     init(state: ReceiveNotificationAuthorizationState) {
         snapshot = ReceiveNotificationSnapshot(authorizationState: state)
@@ -1432,6 +1495,7 @@ private final class RecordingReceiveNotificationService: ReceiveNotificationServ
     func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot> {
         subscriptionCount += 1
         return AsyncStream { continuation in
+            continuations.append(continuation)
             continuation.yield(snapshot)
             continuation.onTermination = { [weak self] _ in
                 Task { @MainActor in
@@ -1439,6 +1503,19 @@ private final class RecordingReceiveNotificationService: ReceiveNotificationServ
                 }
             }
         }
+    }
+
+    func refreshReceiveNotifications() async {
+        refreshCount += 1
+        continuations.last?.yield(snapshot)
+    }
+
+    func setState(_ state: ReceiveNotificationAuthorizationState) {
+        snapshot = ReceiveNotificationSnapshot(authorizationState: state)
+    }
+
+    func yield(_ state: ReceiveNotificationAuthorizationState, subscription: Int) {
+        continuations[subscription].yield(ReceiveNotificationSnapshot(authorizationState: state))
     }
 
     func openSystemSettings() {

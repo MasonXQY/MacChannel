@@ -94,6 +94,10 @@ final class ReceiveNotificationController {
         publish(state)
     }
 
+    func refreshAuthorizationState() async {
+        publish(await center.authorizationState())
+    }
+
     func notify(receive result: TransferReceiveResult) async {
         guard !result.receivedURLs.isEmpty else { return }
 

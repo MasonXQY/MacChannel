@@ -839,3 +839,51 @@ Existing PIDs 38136, 49361, 80713, 82338, 25679, 28690, and 29145 were not touch
 ## Concerns
 
 No blocker. This task intentionally does not add a new status-bar icon, branding, distribution work, or any transfer cancellation behavior.
+
+---
+
+# Task 4 reviewer remediation: notification authorization refresh
+
+## Outcome
+
+- Added `ReceiveNotificationController.refreshAuthorizationState()`, which re-queries the system notification adapter and publishes the resulting snapshot to active observers.
+- Added the narrow async `ReceiveNotificationServicing.refreshReceiveNotifications()` seam and invoke it whenever the DropMesh Settings popover is presented.
+- Added focused coverage for both external permission transitions: denied to authorized and authorized to denied.
+- Strengthened the observer-lifecycle test with retained, controllable stream continuations: after invalidate, rebind, and re-observe, yielding through the old continuation cannot mutate the current settings model; the current continuation can.
+- No app-activation observer was added because this app currently has no focused activation lifecycle hook; presentation-time refresh is the narrow existing-architecture integration point.
+
+## RED evidence
+
+```bash
+swift test --scratch-path /tmp/macchannel-task4-review-red2.b6uUlW \
+  --filter ReceiveNotificationControllerTests.testRefreshingAuthorizationRequeriesTheSystemAndPublishesExternalChanges
+```
+
+- Exit 1, as expected before implementation. The compiler reported missing `ReceiveNotificationController.refreshAuthorizationState()` and `AppSurfaceController.refreshReceiveNotifications()`.
+- The unrelated test-autoclosure mistake from the first RED attempt was corrected before this recorded RED run.
+- No new `MacChannelPackageTests.xctest` process remained. The only observed PIDs were pre-existing 25679, 28690, and 29145; baseline PIDs 38136, 49361, 80713, 82338, 25679, 28690, and 29145 were not touched.
+
+## GREEN evidence
+
+```bash
+swift test --scratch-path /tmp/macchannel-task4-review-green-receive.LoNT6N \
+  --filter ReceiveNotificationControllerTests
+swift test --scratch-path /tmp/macchannel-task4-review-green-surface.rRxQOE \
+  --filter TransferSurfaceTests
+```
+
+- Both commands exited 0 with no new residual test process.
+- `ReceiveNotificationControllerTests`: 9 tests, 0 failures.
+- `TransferSurfaceTests`: 47 tests, 0 failures.
+- The residual-process checks again showed only the pre-existing 25679, 28690, and 29145 test processes.
+
+## Changed files
+
+- `App/ReceiveNotificationController.swift`
+- `App/AppSurfaceController.swift`
+- `Tests/MacChannelCoreTests/ReceiveNotificationControllerTests.swift`
+- `Tests/MacChannelCoreTests/TransferSurfaceTests.swift`
+
+## Concerns
+
+No blocker. Permission status is refreshed whenever Settings is opened; it is not continuously polled while Settings remains open.

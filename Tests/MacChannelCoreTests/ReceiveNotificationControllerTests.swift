@@ -79,6 +79,28 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(observedSnapshot?.authorizationState, .denied)
     }
 
+    func testRefreshingAuthorizationRequeriesTheSystemAndPublishesExternalChanges() async {
+        let center = RecordingReceiveNotificationCenter(status: .denied)
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer()
+        )
+        var snapshots = controller.snapshots().makeAsyncIterator()
+
+        let initial = await snapshots.next()
+        XCTAssertEqual(initial?.authorizationState, .notDetermined)
+
+        center.setAuthorizationState(.authorized)
+        await controller.refreshAuthorizationState()
+        let authorized = await snapshots.next()
+        XCTAssertEqual(authorized?.authorizationState, .authorized)
+
+        center.setAuthorizationState(.denied)
+        await controller.refreshAuthorizationState()
+        let denied = await snapshots.next()
+        XCTAssertEqual(denied?.authorizationState, .denied)
+    }
+
     func testDeliveryFailurePublishesDeliveryUnavailableWithoutThrowing() async {
         let center = RecordingReceiveNotificationCenter(status: .authorized)
         center.deliveryError = TestError.deliveryUnavailable
@@ -172,6 +194,10 @@ private final class RecordingReceiveNotificationCenter: ReceiveNotificationCente
         authorizationRequestCount += 1
         status = requestedStatus
         return status
+    }
+
+    func setAuthorizationState(_ status: ReceiveNotificationAuthorizationState) {
+        self.status = status
     }
 
     func deliver(_ request: ReceiveNotificationRequest) async throws {
