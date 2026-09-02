@@ -29,6 +29,7 @@ final class StatusItemController: NSObject {
 
     var phase: StatusItemPhase { state.phase }
     var nativeButton: NSStatusBarButton? { statusItem?.button }
+    var hasUnreadReceive: Bool { button.hasUnreadReceive }
 
     private let transferCoordinator: any TransferCoordinating
     private let filePicker: any StatusItemFilePicking
@@ -247,6 +248,15 @@ final class StatusItemController: NSObject {
             NSStatusBar.system.removeStatusItem(statusItem)
             self.statusItem = nil
         }
+    }
+
+    func setUnreadReceive(_ unread: Bool) {
+        button.hasUnreadReceive = unread
+        renderPhase()
+    }
+
+    func prepareToOpenStatusMenu() {
+        setUnreadReceive(false)
     }
 
     func setRuntimeStatus(_ status: AppRuntimeStatus) {
@@ -490,6 +500,7 @@ final class StatusItemController: NSObject {
                     : "有新版本可用，暂时无法查看"
             )
         }
+        if button.hasUnreadReceive { accessibilityParts.append("有新接收文件") }
         let accessibilityValue = accessibilityParts.joined(separator: "，")
         button.setAccessibilityValue(accessibilityValue)
         nativeButton?.setAccessibilityValue(accessibilityValue)
@@ -510,6 +521,7 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func showStatusMenu(_ sender: Any?) {
+        prepareToOpenStatusMenu()
         statusMenu.popUp(
             positioning: nil,
             at: NSPoint(x: 0, y: button.bounds.maxY + 2),

@@ -93,6 +93,74 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testReceiveIndicatorAppearsAndOpeningMenuClearsIt() {
+        let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24))
+        let controller = StatusItemController(
+            button: button,
+            devices: [],
+            transferCoordinator: RecordingTransferCoordinator()
+        )
+
+        controller.setUnreadReceive(true)
+
+        XCTAssertTrue(controller.hasUnreadReceive)
+        XCTAssertTrue(button.showsReceiveIndicator)
+        XCTAssertTrue((button.accessibilityValue() as? String)?.contains("有新接收文件") == true)
+
+        controller.prepareToOpenStatusMenu()
+
+        XCTAssertFalse(controller.hasUnreadReceive)
+        XCTAssertFalse(button.showsReceiveIndicator)
+    }
+
+    @MainActor
+    func testReceiveIndicatorUsesResolvableSystemGreenInLightAndDarkAppearances() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("App/StatusItemButton.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(source.contains("NSColor.systemGreen"))
+
+        for name: NSAppearance.Name in [.aqua, .darkAqua] {
+            let appearance = try XCTUnwrap(NSAppearance(named: name))
+            var resolved: NSColor?
+            appearance.performAsCurrentDrawingAppearance {
+                resolved = NSColor.systemGreen.usingColorSpace(.sRGB)
+            }
+            let color = try XCTUnwrap(
+                resolved,
+                "system green did not resolve for \(name.rawValue)"
+            )
+            XCTAssertEqual(color.alphaComponent, CGFloat(1), accuracy: CGFloat(0.001))
+        }
+    }
+
+    @MainActor
+    func testUpdateAndReceiveIndicatorsUseDistinctRectanglesWhenBothAreActive() throws {
+        let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24))
+
+        button.updateAvailable = true
+        button.hasUnreadReceive = true
+
+        XCTAssertNotEqual(
+            try XCTUnwrap(button.updateIndicatorRect),
+            try XCTUnwrap(button.receiveIndicatorRect)
+        )
+        XCTAssertLessThan(
+            try XCTUnwrap(button.updateIndicatorRect).minY,
+            try XCTUnwrap(button.receiveIndicatorRect).minY
+        )
+        XCTAssertEqual(try XCTUnwrap(button.updateIndicatorRect).width, 4)
+        XCTAssertEqual(try XCTUnwrap(button.receiveIndicatorRect).width, 6)
+        XCTAssertTrue((button.accessibilityValue() as? String)?.contains("有新版本") == true)
+        XCTAssertTrue((button.accessibilityValue() as? String)?.contains("有新接收文件") == true)
+    }
+
+    @MainActor
     func testUnavailableUpdateMenuSurvivesAutoValidationAndRestoresItsAction() throws {
         _ = NSApplication.shared
         let controller = StatusItemController(

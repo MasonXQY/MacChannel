@@ -15,8 +15,30 @@ final class StatusItemButton: NSStatusBarButton {
         didSet { render() }
     }
 
+    var hasUnreadReceive = false {
+        didSet { render() }
+    }
+
     var showsUpdateIndicator: Bool {
         updateAvailable && phase == .idle
+    }
+
+    var showsReceiveIndicator: Bool {
+        hasUnreadReceive
+    }
+
+    var updateIndicatorRect: NSRect? {
+        guard showsUpdateIndicator else { return nil }
+        return indicatorRect(
+            diameter: 4,
+            inset: 4,
+            atUpperRight: !showsReceiveIndicator
+        )
+    }
+
+    var receiveIndicatorRect: NSRect? {
+        guard showsReceiveIndicator else { return nil }
+        return indicatorRect(diameter: 6, inset: 3, atUpperRight: true)
     }
 
     var onDragEntered: ((DropIntent, StatusItemDragFingerprint) -> StatusItemDragToken?)?
@@ -92,17 +114,15 @@ final class StatusItemButton: NSStatusBarButton {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        if showsUpdateIndicator {
-            let diameter: CGFloat = 4
-            let indicator = NSBezierPath(
-                ovalIn: NSRect(
-                    x: bounds.maxX - diameter - 4,
-                    y: bounds.maxY - diameter - 4,
-                    width: diameter,
-                    height: diameter
-                )
-            )
+        if let updateIndicatorRect {
+            let indicator = NSBezierPath(ovalIn: updateIndicatorRect)
             NSColor.controlAccentColor.setFill()
+            indicator.fill()
+        }
+
+        if let receiveIndicatorRect {
+            let indicator = NSBezierPath(ovalIn: receiveIndicatorRect)
+            NSColor.systemGreen.setFill()
             indicator.fill()
         }
 
@@ -160,18 +180,31 @@ final class StatusItemButton: NSStatusBarButton {
         // highlighted state. Semantic label colors can resolve to black even
         // when the menu bar itself is dark.
         contentTintColor = nil
-        let accessibilityValue: String
+        var accessibilityParts = [phase.localizedAccessibilityValue]
         if updateAvailable {
             let updateValue = updateActionEnabled
                 ? "有新版本可用"
                 : "有新版本可用，暂时无法查看"
-            accessibilityValue = "\(phase.localizedAccessibilityValue)，\(updateValue)"
-        } else {
-            accessibilityValue = phase.localizedAccessibilityValue
+            accessibilityParts.append(updateValue)
         }
+        if hasUnreadReceive { accessibilityParts.append("有新接收文件") }
+        let accessibilityValue = accessibilityParts.joined(separator: "，")
         setAccessibilityValue(accessibilityValue)
         toolTip = accessibilityValue
         needsDisplay = true
+    }
+
+    private func indicatorRect(
+        diameter: CGFloat,
+        inset: CGFloat,
+        atUpperRight: Bool
+    ) -> NSRect {
+        return NSRect(
+            x: bounds.maxX - diameter - inset,
+            y: atUpperRight ? bounds.maxY - diameter - inset : inset,
+            width: diameter,
+            height: diameter
+        )
     }
 
     private func fingerprint(for sender: NSDraggingInfo) -> StatusItemDragFingerprint {

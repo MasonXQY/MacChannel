@@ -685,6 +685,136 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertTrue(publishedResults.isEmpty)
     }
 
+    @MainActor
+    func testApplicationShellObservesOnlyCurrentReceiveStream() async throws {
+        let oldEvents = ApplicationShellReceiveEventSource()
+        let currentEvents = ApplicationShellReceiveEventSource()
+        let notificationCenter = ApplicationShellNotificationCenter()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: { container in
+                StatusItemController(
+                    button: StatusItemButton(
+                        frame: NSRect(x: 0, y: 0, width: 30, height: 24)
+                    ),
+                    devices: [],
+                    transferCoordinator: container.transferCoordinator
+                )
+            }
+        )
+        let oldContainer = makeApplicationShellContainer(receiveEvents: oldEvents)
+        let currentContainer = makeApplicationShellContainer(receiveEvents: currentEvents)
+
+        await shell.replace(oldContainer, status: .ready)
+        await oldEvents.waitUntilSubscribed()
+
+        await shell.replace(currentContainer, status: .ready)
+        await oldEvents.waitUntilCancelled()
+        await currentEvents.waitUntilSubscribed()
+        XCTAssertEqual(notificationCenter.deliveredCount, 0)
+
+        await currentEvents.publish(
+            TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/received.pdf")]
+            )
+        )
+        for _ in 0..<100 where notificationCenter.deliveredCount == 0 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(notificationCenter.deliveredCount, 1)
+        XCTAssertTrue(shell.hasUnreadReceive)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testApplicationShellKeepsNewestConcurrentReplacement() async throws {
+        let firstEvents = ApplicationShellReceiveEventSource()
+        let staleEvents = ApplicationShellReceiveEventSource()
+        let currentEvents = ApplicationShellReceiveEventSource()
+        let notificationCenter = BlockingApplicationShellNotificationCenter()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: { container in
+                StatusItemController(
+                    button: StatusItemButton(
+                        frame: NSRect(x: 0, y: 0, width: 30, height: 24)
+                    ),
+                    devices: [],
+                    transferCoordinator: container.transferCoordinator
+                )
+            }
+        )
+        let firstContainer = makeApplicationShellContainer(receiveEvents: firstEvents)
+        let staleContainer = makeApplicationShellContainer(receiveEvents: staleEvents)
+        let currentContainer = makeApplicationShellContainer(receiveEvents: currentEvents)
+
+        await shell.replace(firstContainer, status: .ready)
+        await firstEvents.waitUntilSubscribed()
+        await firstEvents.publish(
+            TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/first.pdf")]
+            )
+        )
+        await notificationCenter.waitUntilDeliveryStarts()
+
+        let staleReplacement = Task { @MainActor in
+            await shell.replace(staleContainer, status: .ready)
+        }
+        await Task.yield()
+        let currentReplacementInstalled = await shell.replace(currentContainer, status: .ready)
+        await currentEvents.waitUntilSubscribed()
+        notificationCenter.releaseFirstDelivery()
+        let staleReplacementInstalled = await staleReplacement.value
+
+        XCTAssertFalse(staleReplacementInstalled)
+        XCTAssertTrue(currentReplacementInstalled)
+
+        for _ in 0..<100 where notificationCenter.deliveredCount == 0 {
+            await Task.yield()
+        }
+        XCTAssertEqual(notificationCenter.deliveredCount, 1)
+
+        await staleEvents.publish(
+            TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/stale.pdf")]
+            )
+        )
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(notificationCenter.deliveredCount, 1)
+
+        await currentEvents.publish(
+            TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/current.pdf")]
+            )
+        )
+        for _ in 0..<100 where notificationCenter.deliveredCount < 2 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(notificationCenter.deliveredCount, 2)
+        XCTAssertTrue(shell.hasUnreadReceive)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
     private func makeTrustedRuntimeFixture() throws -> TrustedRuntimeFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -718,6 +848,116 @@ private struct TrustedRuntimeFixture {
     let peer: DeviceSummary
     let repository: TrustRepository
     let settings: RuntimeSettingsStore
+}
+
+@MainActor
+private func makeApplicationShellContainer(
+    receiveEvents: ApplicationShellReceiveEventSource
+) -> AppContainer {
+    let shell = AppContainer.localShell()
+    return AppContainer(
+        deviceDirectory: shell.deviceDirectory,
+        transferCoordinator: shell.transferCoordinator,
+        receiveEvents: { await receiveEvents.stream() }
+    )
+}
+
+private actor ApplicationShellReceiveEventSource {
+    private var continuation: AsyncStream<TransferReceiveResult>.Continuation?
+    private var subscribed = false
+    private var cancelled = false
+    private var subscribedContinuation: CheckedContinuation<Void, Never>?
+    private var cancelledContinuation: CheckedContinuation<Void, Never>?
+
+    func stream() -> AsyncStream<TransferReceiveResult> {
+        AsyncStream { continuation in
+            self.continuation = continuation
+            subscribed = true
+            subscribedContinuation?.resume()
+            subscribedContinuation = nil
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.markCancelled() }
+            }
+        }
+    }
+
+    func publish(_ result: TransferReceiveResult) {
+        continuation?.yield(result)
+    }
+
+    func waitUntilSubscribed() async {
+        guard !subscribed else { return }
+        await withCheckedContinuation { subscribedContinuation = $0 }
+    }
+
+    func waitUntilCancelled() async {
+        guard !cancelled else { return }
+        await withCheckedContinuation { cancelledContinuation = $0 }
+    }
+
+    private func markCancelled() {
+        cancelled = true
+        cancelledContinuation?.resume()
+        cancelledContinuation = nil
+    }
+}
+
+@MainActor
+private final class ApplicationShellNotificationCenter: ReceiveNotificationCenter {
+    private(set) var deliveredCount = 0
+
+    func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
+    func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .authorized }
+
+    func deliver(_ request: ReceiveNotificationRequest) async throws {
+        deliveredCount += 1
+    }
+
+    func openSystemSettings() {}
+}
+
+@MainActor
+private final class BlockingApplicationShellNotificationCenter: ReceiveNotificationCenter {
+    private var isFirstDelivery = true
+    private var isReleased = false
+    private var deliveryStarted = false
+    private var deliveryStartContinuation: CheckedContinuation<Void, Never>?
+    private var deliveryReleaseContinuation: CheckedContinuation<Void, Never>?
+    private(set) var deliveredCount = 0
+
+    func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
+    func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .authorized }
+
+    func deliver(_ request: ReceiveNotificationRequest) async throws {
+        if isFirstDelivery {
+            isFirstDelivery = false
+            deliveryStarted = true
+            deliveryStartContinuation?.resume()
+            deliveryStartContinuation = nil
+            if !isReleased {
+                await withCheckedContinuation { deliveryReleaseContinuation = $0 }
+            }
+        }
+        deliveredCount += 1
+    }
+
+    func waitUntilDeliveryStarts() async {
+        guard !deliveryStarted else { return }
+        await withCheckedContinuation { deliveryStartContinuation = $0 }
+    }
+
+    func releaseFirstDelivery() {
+        isReleased = true
+        deliveryReleaseContinuation?.resume()
+        deliveryReleaseContinuation = nil
+    }
+
+    func openSystemSettings() {}
+}
+
+@MainActor
+private final class ApplicationShellReceiveTargetRevealer: ReceiveTargetRevealing {
+    func reveal(_ urls: [URL]) {}
 }
 
 private actor FailingTrustSnapshotPersister: TrustSnapshotPersisting {

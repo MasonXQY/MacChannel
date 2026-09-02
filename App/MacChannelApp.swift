@@ -80,7 +80,7 @@ final class SoftwareUpdateLaunchCoordinator {
 }
 
 @MainActor
-private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
+final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private var container: AppContainer
     private let initialStatus: AppRuntimeStatus
     private let runtimeHost: AppRuntimeHost?
@@ -94,30 +94,57 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
     private var networkWasAvailable = false
     private let updateController = SparkleUpdateController()
     private lazy var updateLaunch = SoftwareUpdateLaunchCoordinator(controller: updateController)
+    private let receiveNotificationController: ReceiveNotificationController
+    private let statusItemControllerFactory: (AppContainer) -> StatusItemController
+    private var receiveEventTask: Task<Void, Never>?
+    private var containerReplacementGeneration = 0
+
+    var hasUnreadReceive: Bool { statusItemController?.hasUnreadReceive ?? false }
 
     init(
         initialContainer: AppContainer,
         initialStatus: AppRuntimeStatus,
-        runtimeHost: AppRuntimeHost?
+        runtimeHost: AppRuntimeHost?,
+        receiveNotificationController: ReceiveNotificationController = ReceiveNotificationController(),
+        statusItemControllerFactory: @escaping (AppContainer) -> StatusItemController = { container in
+            StatusItemController(
+                deviceDirectory: container.deviceDirectory,
+                transferCoordinator: container.transferCoordinator
+            )
+        }
     ) {
         container = initialContainer
         self.initialStatus = initialStatus
         self.runtimeHost = runtimeHost
+        self.receiveNotificationController = receiveNotificationController
+        self.statusItemControllerFactory = statusItemControllerFactory
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         install(container, status: initialStatus)
+        Task { [weak self] in
+            await self?.receiveNotificationController.prepare()
+        }
         if let runtimeHost {
             runtimeHost.onChange = { [weak self] status, container in
                 guard let self else { return }
                 if let container {
-                    self.container = container
-                    self.install(container, status: status)
-                    self.updateLaunch.prepare(transfers: container.transferSnapshots) { [weak self] in
-                        self?.completeProductionLaunchTestIfRequested(
+                    containerReplacementGeneration += 1
+                    let generation = containerReplacementGeneration
+                    Task { [weak self] in
+                        guard let self else { return }
+                        let installed = await self.replace(
+                            container,
                             status: status,
-                            container: container
+                            generation: generation
                         )
+                        guard installed else { return }
+                        self.updateLaunch.prepare(transfers: container.transferSnapshots) { [weak self] in
+                            self?.completeProductionLaunchTestIfRequested(
+                                status: status,
+                                container: container
+                            )
+                        }
                     }
                 } else {
                     self.statusItemController?.setRuntimeStatus(status)
@@ -154,12 +181,11 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
     }
 
     private func install(_ container: AppContainer, status: AppRuntimeStatus) {
+        cancelReceiveEventObservation()
+        self.container = container
         surfaceController?.invalidate()
         statusItemController?.invalidate()
-        let statusController = StatusItemController(
-            deviceDirectory: container.deviceDirectory,
-            transferCoordinator: container.transferCoordinator
-        )
+        let statusController = statusItemControllerFactory(container)
         let surfaces = AppSurfaceController(
             transferService: NativeTransferSurfaceService(
                 coordinator: container.transferCoordinator
@@ -193,13 +219,39 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         }
         statusItemController = statusController
         surfaceController = surfaces
+        observeReceiveEvents(from: container)
+    }
+
+    @discardableResult
+    func replace(_ container: AppContainer, status: AppRuntimeStatus) async -> Bool {
+        containerReplacementGeneration += 1
+        return await replace(
+            container,
+            status: status,
+            generation: containerReplacementGeneration
+        )
+    }
+
+    private func replace(
+        _ container: AppContainer,
+        status: AppRuntimeStatus,
+        generation: Int
+    ) async -> Bool {
+        if let task = cancelReceiveEventObservation() {
+            await task.value
+        }
+        guard generation == containerReplacementGeneration else { return false }
+        install(container, status: status)
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        containerReplacementGeneration += 1
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         networkMonitor?.cancel()
         networkMonitor = nil
         bootstrapTask?.cancel()
+        drainReceiveEventObservation()
         updateController.stop()
         surfaceController?.invalidate()
         statusItemController?.invalidate()
@@ -215,13 +267,41 @@ private final class MacChannelApplicationDelegate: NSObject, NSApplicationDelega
         guard !runtimeShutdownComplete else { return .terminateNow }
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
+        containerReplacementGeneration += 1
         bootstrapTask?.cancel()
+        drainReceiveEventObservation()
         Task {
             await runtimeHost.shutdown()
             self.finishProductionLaunchTestIfRequested()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    private func observeReceiveEvents(from container: AppContainer) {
+        cancelReceiveEventObservation()
+        guard let makeEvents = container.receiveEvents else { return }
+        receiveEventTask = Task { [weak self] in
+            let events = await makeEvents()
+            for await result in events {
+                guard !Task.isCancelled, let self else { return }
+                statusItemController?.setUnreadReceive(true)
+                await receiveNotificationController.notify(receive: result)
+            }
+        }
+    }
+
+    @discardableResult
+    private func cancelReceiveEventObservation() -> Task<Void, Never>? {
+        let task = receiveEventTask
+        task?.cancel()
+        receiveEventTask = nil
+        return task
+    }
+
+    private func drainReceiveEventObservation() {
+        guard let task = cancelReceiveEventObservation() else { return }
+        Task { await task.value }
     }
 
     private func completeLaunchSmokeTestIfRequested() {
