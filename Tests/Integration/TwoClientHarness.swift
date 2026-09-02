@@ -174,7 +174,7 @@ final class TwoClientHarness: @unchecked Sendable {
     private var senderRuntimeGeneration = UUID()
     private var senderRuntime: HarnessClientRuntime
     private let results: HarnessReceiveResults
-    private let incomingListener: IncomingTransferListener
+    private var incomingListener: IncomingTransferListener
     private let connectionListener: WebRTCConnectionListener
     private let signalHub: LocalRendezvousHub?
     private let stackPresence: StackPresenceLifecycle?
@@ -602,6 +602,26 @@ final class TwoClientHarness: @unchecked Sendable {
 
     func receivedFile(named name: String) -> URL {
         receiverDownloadRoot.appendingPathComponent(name)
+    }
+
+    func restartReceiverListener() async {
+        await incomingListener.stop()
+        let restarted = IncomingTransferListener(
+            source: connectionListener,
+            policy: ReceivePolicy(trustedSources: [senderID]),
+            directories: DownloadDirectory(globalDirectory: receiverDownloadRoot),
+            database: receiverDatabase,
+            incomingDirectory: root.appendingPathComponent("receiver/incoming", isDirectory: true),
+            inactivityTimeout: timeoutProfile.inactivity,
+            onReceiveFinished: { [results] result in
+                await results.record(result)
+            },
+            onReceiveFailed: { [results] transferID, failure in
+                await results.recordFailure(failure, for: transferID)
+            }
+        )
+        incomingListener = restarted
+        await restarted.start()
     }
 
     func iceConfiguration(for route: ConnectionRoute) async throws -> ICEConfiguration {

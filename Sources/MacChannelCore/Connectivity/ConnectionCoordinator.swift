@@ -676,9 +676,8 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
     private let factory: any WebRTCChannelFactory
     private let channelStream: AsyncThrowingStream<WebRTCSecureChannel, Error>
     private let channelContinuation: AsyncThrowingStream<WebRTCSecureChannel, Error>.Continuation
-    private let transferStream: AsyncThrowingStream<IncomingTransferConnection, Error>
-    private let transferContinuation:
-        AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation
+    private var transferContinuation:
+        AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation?
     private var readerTask: Task<Void, Never>?
     private var acceptanceTasks: [UUID: Acceptance] = [:]
     private var stopped = false
@@ -721,15 +720,7 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
             continuation = $0
         }
         channelContinuation = continuation
-        var transferContinuation:
-            AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation!
-        // Transfer orchestration owns the sole established-channel backlog.
-        // A zero-element handoff prevents this source from silently adding a
-        // second 32-channel queue; dropped handoffs are closed in `accept`.
-        transferStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(0)) {
-            transferContinuation = $0
-        }
-        self.transferContinuation = transferContinuation
+        transferContinuation = nil
     }
 
     deinit { readerTask?.cancel() }
@@ -741,9 +732,24 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
     }
 
     public func connections() async -> AsyncThrowingStream<IncomingTransferConnection, Error> {
+        guard !stopped else {
+            return AsyncThrowingStream { $0.finish() }
+        }
         if consumer == .none { consumer = .transferConnections }
+        transferContinuation?.finish()
+        var continuation:
+            AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation!
+        // Transfer orchestration owns the sole established-channel backlog.
+        // A fresh zero-element handoff is required for every listener lifecycle:
+        // cancelling one AsyncThrowingStream iterator terminates that stream.
+        let stream = AsyncThrowingStream<IncomingTransferConnection, Error>(
+            bufferingPolicy: .bufferingOldest(0)
+        ) {
+            continuation = $0
+        }
+        transferContinuation = continuation
         await beginReadingIfNeeded()
-        return transferStream
+        return stream
     }
 
     public func stop() {
@@ -754,7 +760,8 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         for acceptance in acceptanceTasks.values { acceptance.task.cancel() }
         acceptanceTasks.removeAll()
         channelContinuation.finish()
-        transferContinuation.finish()
+        transferContinuation?.finish()
+        transferContinuation = nil
     }
 
     private func beginReadingIfNeeded() async {
@@ -831,6 +838,10 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
                     transferID: TransferID(rawValue: offer.connectionID),
                     channel: channel
                 )
+                guard let transferContinuation else {
+                    await channel.close()
+                    return
+                }
                 switch transferContinuation.yield(connection) {
                 case .enqueued:
                     break

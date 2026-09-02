@@ -144,6 +144,22 @@ final class TransferIntegrationTests: XCTestCase {
         )
     }
 
+    func testTransferCompletesAfterReceiveListenerRestarts() async throws {
+        let harness = try await makeHarness(routePolicy: .lanOnly)
+        await harness.restartReceiverListener()
+        let source = try harness.makeDeterministicFile(
+            size: 2 * 1024 * 1024,
+            named: "after-receive-settings-change.bin"
+        )
+
+        let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
+        try await harness.waitForCompletion(transfer, timeout: .seconds(30))
+
+        try assertMatchingHashes(source, harness.receivedFile(named: source.lastPathComponent))
+        let routes = await harness.actualRoutes()
+        XCTAssertEqual(routes, [.lan])
+    }
+
     func testDirectoryTreeAndFileContentsArePreserved() async throws {
         let harness = try await makeHarness(routePolicy: .lanOnly)
         let source = try harness.makeDeterministicDirectory()

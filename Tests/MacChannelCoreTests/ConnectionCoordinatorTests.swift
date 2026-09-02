@@ -547,6 +547,69 @@ final class ConnectionCoordinatorTests: XCTestCase {
         XCTAssertEqual(streamRequests, 0)
     }
 
+    func testConnectionListenerProvidesFreshTransferStreamAfterConsumerRestart() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let session = MemoryRendezvousSignalSession()
+        let signaling = RendezvousWebRTCSignaling(session: session)
+        let repository = try TrustRepository(
+            ownerIdentity: identity,
+            trustStore: TrustStore(owner: identity.id),
+            persistedGeneration: 0
+        )
+        let listener = WebRTCConnectionListener(
+            directory: DeviceDirectory(trust: .allowing(identity.id)),
+            identity: identity,
+            trustRepository: repository,
+            signaling: signaling,
+            ice: ICEConfiguration(stunURLs: [], turnServers: [])
+        )
+        defer { Task { await listener.stop() } }
+
+        let firstStream = await listener.connections()
+        let firstWaiter = Task {
+            var iterator = firstStream.makeAsyncIterator()
+            _ = try await iterator.next()
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        firstWaiter.cancel()
+        _ = await firstWaiter.result
+
+        let secondStream = await listener.connections()
+        let didFinish = await streamTerminatesWithin(
+            secondStream,
+            timeout: .milliseconds(50)
+        )
+        XCTAssertFalse(
+            didFinish,
+            "Restarting the receive consumer must not inherit a terminated transfer stream"
+        )
+    }
+
+    func testStoppedConnectionListenerCannotRestartItsTransferStream() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let session = MemoryRendezvousSignalSession()
+        let signaling = RendezvousWebRTCSignaling(session: session)
+        let repository = try TrustRepository(
+            ownerIdentity: identity,
+            trustStore: TrustStore(owner: identity.id),
+            persistedGeneration: 0
+        )
+        let listener = WebRTCConnectionListener(
+            directory: DeviceDirectory(trust: .allowing(identity.id)),
+            identity: identity,
+            trustRepository: repository,
+            signaling: signaling,
+            ice: ICEConfiguration(stunURLs: [], turnServers: [])
+        )
+
+        await listener.stop()
+        let stream = await listener.connections()
+        let didFinish = await streamTerminatesWithin(stream, timeout: .seconds(1))
+        XCTAssertTrue(didFinish, "A stopped listener must return a terminated transfer stream")
+        let streamRequests = await session.streamRequests
+        XCTAssertEqual(streamRequests, 0)
+    }
+
     func testConnectionListenerCapsConcurrentOfferAcceptanceGloballyAndPerDevice() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let peers = try (0..<5).map { _ in try DeviceIdentity.ephemeral() }
@@ -607,6 +670,28 @@ final class ConnectionCoordinatorTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(1))
         }
         XCTFail("Signaling reader did not process \(count) frames")
+    }
+}
+
+private func streamTerminatesWithin<Element: Sendable>(
+    _ stream: AsyncThrowingStream<Element, Error>,
+    timeout: Duration
+) async -> Bool {
+    await withTaskGroup(of: Bool.self) { group in
+        group.addTask {
+            var iterator = stream.makeAsyncIterator()
+            do {
+                _ = try await iterator.next()
+            } catch {}
+            return true
+        }
+        group.addTask {
+            try? await Task.sleep(for: timeout)
+            return false
+        }
+        let result = await group.next() ?? false
+        group.cancelAll()
+        return result
     }
 }
 
