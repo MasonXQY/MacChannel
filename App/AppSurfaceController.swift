@@ -14,9 +14,20 @@ extension SparkleUpdateController: SoftwareUpdateSnapshotProviding {
 }
 
 @MainActor
+protocol ReceiveNotificationServicing: AnyObject {
+    func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot>
+    func openSystemSettings()
+}
+
+extension ReceiveNotificationController: ReceiveNotificationServicing {
+    func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot> { snapshots() }
+}
+
+@MainActor
 final class AppSurfaceController: NSObject, NSPopoverDelegate {
     static let historyLimit = 200
     static let liveHistoryLimit = historyLimit
+    static let standardPopoverBehavior: NSPopover.Behavior = .transient
 
     let fanPanel: DeviceFanPanel
     let transferModel: TransferSurfaceModel
@@ -28,6 +39,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private let pairingService: any PairingSurfaceServicing
     private let settingsService: any DeviceSettingsServicing
     private let directorySelector: any DirectorySelecting
+    private let notificationService: (any ReceiveNotificationServicing)?
     private let onRetryRuntime: () -> Void
     private let now: () -> Date
 
@@ -49,6 +61,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private var pairedDeviceTask: Task<Void, Never>?
     private var historyTask: Task<Void, Never>?
     private var softwareUpdateTask: Task<Void, Never>?
+    private var receiveNotificationTask: Task<Void, Never>?
 
     init(
         fanPanel: DeviceFanPanel = DeviceFanPanel(),
@@ -60,6 +73,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         pairingModel: PairingSurfaceModel = PairingSurfaceModel(),
         settingsModel: SettingsSurfaceModel = SettingsSurfaceModel(),
         updateService: (any SoftwareUpdateServicing)? = nil,
+        notificationService: (any ReceiveNotificationServicing)? = nil,
         onRetryRuntime: @escaping () -> Void = {},
         now: @escaping () -> Date = Date.init
     ) {
@@ -72,6 +86,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         self.pairingModel = pairingModel
         self.settingsModel = settingsModel
         self.updateService = updateService ?? InactiveSoftwareUpdateService()
+        self.notificationService = notificationService
         self.onRetryRuntime = onRetryRuntime
         self.now = now
     }
@@ -187,6 +202,17 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         }
     }
 
+    func observeReceiveNotifications() {
+        receiveNotificationTask?.cancel()
+        guard let notificationService else { return }
+        receiveNotificationTask = Task { [weak self] in
+            for await snapshot in notificationService.receiveNotificationSnapshots() {
+                guard !Task.isCancelled else { return }
+                self?.updateReceiveNotification(snapshot, using: notificationService)
+            }
+        }
+    }
+
     func updatePresence(_ devices: [DeviceSummary]) {
         let online = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
         presence = online.mapValues(\.availability)
@@ -234,6 +260,13 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     func updateRuntimeStatus(_ status: AppRuntimeStatus) {
         settingsModel.runtimeStatus = status
+    }
+
+    func updateReceiveNotification(
+        _ snapshot: ReceiveNotificationSnapshot,
+        using service: any ReceiveNotificationServicing
+    ) {
+        settingsModel.updateReceiveNotification(snapshot, openSystemSettings: service.openSystemSettings)
     }
 
     func updateSoftwareUpdate(_ snapshot: SoftwareUpdateSnapshot) {
@@ -397,8 +430,10 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         pairedDeviceTask = nil
         historyTask?.cancel()
         softwareUpdateTask?.cancel()
+        receiveNotificationTask?.cancel()
         historyTask = nil
         softwareUpdateTask = nil
+        receiveNotificationTask = nil
         transferTokens.removeAll()
         latestSnapshots.removeAll()
         lastLiveItems.removeAll()
@@ -458,7 +493,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     private func configuredPopover() -> NSPopover {
         let popover = NSPopover()
-        popover.behavior = .semitransient
+        popover.behavior = Self.standardPopoverBehavior
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.delegate = self
         return popover

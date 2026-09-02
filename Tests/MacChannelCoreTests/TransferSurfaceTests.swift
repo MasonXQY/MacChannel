@@ -314,6 +314,72 @@ final class TransferSurfaceTests: XCTestCase {
         XCTAssertTrue(secondItem.isEnabled)
     }
 
+    @MainActor
+    func testMenuBarSurfacesUseTransientPopovers() {
+        XCTAssertEqual(AppSurfaceController.standardPopoverBehavior, .transient)
+    }
+
+    @MainActor
+    func testDeniedNotificationPermissionOffersSystemSettingsAction() async {
+        let notifications = RecordingReceiveNotificationService(state: .denied)
+        let settings = SettingsSurfaceModel()
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: SurfaceTransferCoordinator()
+            ),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            settingsModel: settings,
+            notificationService: notifications
+        )
+
+        surfaces.observeReceiveNotifications()
+        await drainMainActorTasks()
+
+        XCTAssertEqual(settings.receiveNotificationSnapshot.authorizationState, .denied)
+        settings.openNotificationSettings()
+        XCTAssertEqual(notifications.openSettingsCount, 1)
+    }
+
+    @MainActor
+    func testInvalidatingSurfaceCancelsReceiveNotificationObservation() async {
+        let notifications = RecordingReceiveNotificationService(state: .authorized)
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: SurfaceTransferCoordinator()
+            ),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            notificationService: notifications
+        )
+
+        surfaces.observeReceiveNotifications()
+        await drainMainActorTasks()
+        XCTAssertEqual(notifications.subscriptionCount, 1)
+
+        surfaces.invalidate()
+        await drainMainActorTasks()
+        XCTAssertEqual(notifications.terminationCount, 1)
+    }
+
+    func testSettingsSourceContainsNativeReceiveNotificationStatusWithoutToggle() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let settings = try String(
+            contentsOf: root.appendingPathComponent("App/SettingsView.swift"),
+            encoding: .utf8
+        )
+
+        for label in ["接收通知", "已允许", "未允许", "打开系统设置"] {
+            XCTAssertTrue(settings.contains(label), "missing visible notification label: \(label)")
+        }
+        XCTAssertFalse(settings.contains("Toggle(\"接收通知\""))
+    }
+
     func testSettingsSourceContainsIndependentNativeSoftwareUpdateSection() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1349,6 +1415,34 @@ private final class ControllableSoftwareUpdateService:
 
     func yieldStale(_ snapshot: SoftwareUpdateSnapshot, subscription: Int) {
         continuations[subscription].yield(snapshot)
+    }
+}
+
+@MainActor
+private final class RecordingReceiveNotificationService: ReceiveNotificationServicing {
+    private let snapshot: ReceiveNotificationSnapshot
+    private(set) var openSettingsCount = 0
+    private(set) var subscriptionCount = 0
+    private(set) var terminationCount = 0
+
+    init(state: ReceiveNotificationAuthorizationState) {
+        snapshot = ReceiveNotificationSnapshot(authorizationState: state)
+    }
+
+    func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot> {
+        subscriptionCount += 1
+        return AsyncStream { continuation in
+            continuation.yield(snapshot)
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in
+                    self?.terminationCount += 1
+                }
+            }
+        }
+    }
+
+    func openSystemSettings() {
+        openSettingsCount += 1
     }
 }
 

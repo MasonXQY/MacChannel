@@ -784,3 +784,58 @@ git diff --check: exit 0, no output
 ### Concerns
 
 No new concern from this remediation. The previously recorded PostgreSQL-version, Swift HTTP adapter, trusted reverse-proxy, and TLS deployment concerns remain unchanged.
+
+---
+
+# Task 4 addendum: Notification Settings and Transient Popovers
+
+## Outcome
+
+- Added a narrow `ReceiveNotificationServicing` seam to `AppSurfaceController` and adapted the existing `ReceiveNotificationController`.
+- The app observes notification authorization snapshots for each installed surface controller and mirrors them into `SettingsSurfaceModel`.
+- Settings show a compact native `接收通知` row: notification-capable states read `已允许`; unavailable states read `未允许`; only `.denied` exposes `打开系统设置`.
+- All standard menu-bar popovers use `AppSurfaceController.standardPopoverBehavior == .transient`.
+- `invalidate()` cancels the notification observer. `closeActiveSurface()` remains a `performClose(nil)` call only, with no transfer cancellation.
+
+## RED evidence
+
+The required tests were added before production code and run with fresh isolated scratch paths:
+
+1. `swift test --scratch-path /tmp/macchannel-task4-red-popover.LgbkNa --filter TransferSurfaceTests.testMenuBarSurfacesUseTransientPopovers`
+   - Exit 1, expected compile errors: missing `ReceiveNotificationServicing`, `AppSurfaceController.standardPopoverBehavior`, notification-service initializer, and settings notification snapshot/action.
+   - No new residual `MacChannelPackageTests.xctest` PID.
+2. `swift test --scratch-path /tmp/macchannel-task4-red-denied.hFuyld --filter TransferSurfaceTests.testDeniedNotificationPermissionOffersSystemSettingsAction`
+   - Exit 1 with the same expected missing-feature compile errors.
+   - No new residual `MacChannelPackageTests.xctest` PID.
+
+## GREEN and full-suite evidence
+
+- `swift test --scratch-path /tmp/macchannel-task4-green-surface.GDE50N --filter TransferSurfaceTests`
+  - Exit 0; 46 tests, 0 failures; no new residual test PID.
+- `swift test --scratch-path /tmp/macchannel-task4-green-status.GAKNjD --filter StatusItemAppKitTests`
+  - Exit 0; 19 tests, 0 failures; no new residual test PID.
+- `swift test --scratch-path /tmp/macchannel-task4-full-verified.T93z5j`
+  - Exit 0; 628 tests, 3 skipped, 0 failures; no new residual test PID.
+  - Final suite log confirmed the direct-LAN integrity harness also passed.
+
+Existing PIDs 38136, 49361, 80713, 82338, 25679, 28690, and 29145 were not touched. The final residual-process check contained only the pre-existing 25679, 28690, and 29145 test processes.
+
+## Changed files
+
+- `App/AppSurfaceController.swift`
+- `App/MacChannelApp.swift` (narrow wiring of the already-owned notification controller into the new surface seam)
+- `App/SettingsView.swift`
+- `Tests/MacChannelCoreTests/TransferSurfaceTests.swift`
+
+## Self-review
+
+- The notification row is independent of the device-settings availability gate and has no custom notification toggle.
+- The system settings action is guarded by `.denied`; authorized/provisional/ephemeral states have no action.
+- `configuredPopover()` is the common factory for transfer, pairing, and settings surfaces, so all three receive `.transient`.
+- No animation was added; the pre-existing accessibility-respecting popover animation setting is unchanged.
+- `closeActiveSurface()` contains only the popover close action; it has no transfer cancellation call.
+- `git diff --check` passed before commit preparation.
+
+## Concerns
+
+No blocker. This task intentionally does not add a new status-bar icon, branding, distribution work, or any transfer cancellation behavior.

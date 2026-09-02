@@ -126,9 +126,11 @@ final class SettingsSurfaceModel: ObservableObject {
     @Published var devices: [DeviceSetting]
     @Published var runtimeStatus: AppRuntimeStatus
     @Published var updateSnapshot: SoftwareUpdateSnapshot
+    @Published var receiveNotificationSnapshot: ReceiveNotificationSnapshot
     @Published var actionError: String?
     @Published var actionNotice: String?
     private let announcer: any AccessibilityAnnouncing
+    private var openNotificationSettingsHandler: (() -> Void)?
 
     init(
         localDisplayName: String = Host.current().localizedName ?? "Mac",
@@ -143,6 +145,9 @@ final class SettingsSurfaceModel: ObservableObject {
             canCheck: false,
             lastCheckedAt: nil
         ),
+        receiveNotificationSnapshot: ReceiveNotificationSnapshot = ReceiveNotificationSnapshot(
+            authorizationState: .notDetermined
+        ),
         actionError: String? = nil,
         announcer: (any AccessibilityAnnouncing)? = nil
     ) {
@@ -153,6 +158,7 @@ final class SettingsSurfaceModel: ObservableObject {
         self.devices = devices
         self.runtimeStatus = runtimeStatus
         self.updateSnapshot = updateSnapshot
+        self.receiveNotificationSnapshot = receiveNotificationSnapshot
         self.actionError = actionError
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
     }
@@ -299,6 +305,19 @@ final class SettingsSurfaceModel: ObservableObject {
         }
     }
 
+    func updateReceiveNotification(
+        _ snapshot: ReceiveNotificationSnapshot,
+        openSystemSettings: @escaping () -> Void
+    ) {
+        receiveNotificationSnapshot = snapshot
+        openNotificationSettingsHandler = openSystemSettings
+    }
+
+    func openNotificationSettings() {
+        guard receiveNotificationSnapshot.authorizationState == .denied else { return }
+        openNotificationSettingsHandler?()
+    }
+
     private func publishError(_ message: String) {
         actionNotice = nil
         actionError = message
@@ -414,6 +433,11 @@ struct SettingsView: View {
                 }
                 .disabled(!service.isAvailable)
 
+                ReceiveNotificationSettingsRow(
+                    snapshot: model.receiveNotificationSnapshot,
+                    openSystemSettings: model.openNotificationSettings
+                )
+
                 SoftwareUpdateSection(
                     snapshot: model.updateSnapshot,
                     serviceAvailable: updateService.isAvailable,
@@ -527,6 +551,27 @@ struct SettingsView: View {
         guard let selected = directorySelector.chooseDirectory(current: model.defaultDirectory)
         else { return }
         Task { await model.updateDefaultDirectory(selected, using: service) }
+    }
+}
+
+private struct ReceiveNotificationSettingsRow: View {
+    let snapshot: ReceiveNotificationSnapshot
+    let openSystemSettings: () -> Void
+
+    var body: some View {
+        Section("接收通知") {
+            HStack {
+                Label("接收通知", systemImage: "bell")
+                Spacer()
+                Text(snapshot.authorizationState.canDeliverNotifications ? "已允许" : "未允许")
+                    .foregroundStyle(.secondary)
+                if snapshot.authorizationState == .denied {
+                    Button("打开系统设置", action: openSystemSettings)
+                        .buttonStyle(.bordered)
+                }
+            }
+            .frame(minHeight: 40)
+        }
     }
 }
 

@@ -200,6 +200,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             settingsService: container.settingsSurfaceService,
             directorySelector: container.directorySelector,
             updateService: updateController,
+            notificationService: receiveNotificationController,
             onRetryRuntime: { [weak runtimeHost] in
                 Task { await runtimeHost?.bootstrap() }
             }
@@ -223,6 +224,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         if let transferHistory = container.transferHistory {
             surfaces.observeTransferHistory(transferHistory)
         }
+        surfaces.observeReceiveNotifications()
         statusItemController = statusController
         surfaceController = surfaces
         observeReceiveEvents(from: container)
