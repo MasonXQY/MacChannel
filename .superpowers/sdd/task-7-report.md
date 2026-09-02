@@ -201,20 +201,32 @@ Correction commit:
   runtime, nested-code sealing, strict verification, designated requirement, and two
   bounded accessory-app smoke launches.
 
-## Production candidate before this report commit
+## Final notarized candidate evidence
 
-The corrected implementation commit produced a notarized candidate with Apple
-submission ID `f41ade4e-2ae9-4dfb-848b-4f08d83b1566`. Its DMG SHA-256 was
-`a5e0658a1cada73be15f8130ceda40fe6ef3312d8f136124247ef9ef235bc6eb`.
-The manifest recorded `notarized`, version `1.2.2`, build `15`, Team ID
-`XKAZ67HN45`, and the exact correction commit above. Strict app/DMG code-signature
-checks, production designated-requirement matching, stapler validation, Gatekeeper,
-the signed Sparkle enclosure, and the signed appcast all passed. The appcast channel
-title was `DropMesh` and its sole item was version `1.2.2`, build `15`.
+After the initial report commit, the production candidate was rebuilt from clean commit
+`1ca7434bc4c769e3af72d7177a123a5fb005ec09`. That candidate remains the current
+handoff artifact; this later report-only correction does not rebuild or alter it.
 
-After this tracked report is committed, the public candidate must be rebuilt from that
-new clean HEAD. The generated manifest, rather than this tracked file, is authoritative
-for the final candidate commit, Apple submission ID, byte length, and DMG digest.
+The generated manifest actually records the candidate's product, bundle identifier,
+version `1.2.2`, build `15`, Git commit
+`1ca7434bc4c769e3af72d7177a123a5fb005ec09`, Team ID `XKAZ67HN45`, signing
+identity, designated requirement, `notarized` release state, volume name, staged
+filesystem digest, DMG SHA-256
+`102c3a3f5c7ffbee6dad2e0b06b1f723acaa62639d82f5dc5857d918b087857f`, and
+source/build timestamps. It does **not** contain an Apple submission ID or DMG byte
+length.
+
+Those two values come from separate final-build evidence: `notarytool` history and the
+successful build output identified Apple submission
+`2d063a5d-8d46-4877-a49a-191199574c26` as accepted, while `stat` measured the final
+DMG at 19,492,207 bytes. Independent strict app/DMG code-signature checks, production
+designated-requirement matching, stapler validation, Gatekeeper, the signed Sparkle
+enclosure, and the signed appcast all passed. The appcast channel title was `DropMesh`
+and its sole item was version `1.2.2`, build `15`.
+
+An earlier notarized candidate from the correction commit was superseded by this final
+build; its submission identifier and digest are intentionally omitted to prevent it
+from being mistaken for the handoff artifact.
 
 ## Mac A upgrade and installed UI acceptance
 
