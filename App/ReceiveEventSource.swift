@@ -1,47 +1,271 @@
 import Foundation
 import MacChannelCore
 
-actor RuntimeReceiveEventSource {
-    private var continuations: [UUID: AsyncStream<TransferReceiveResult>.Continuation] = [:]
-    private var pendingFirstSubscription: [TransferReceiveResult] = []
-    private var hasSubscribed = false
-    private var isFinished = false
+struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
+    typealias Element = TransferReceiveResult
 
-    func stream() -> AsyncStream<TransferReceiveResult> {
-        guard !isFinished else { return AsyncStream { $0.finish() } }
-        let id = UUID()
-        return AsyncStream(bufferingPolicy: .unbounded) { continuation in
-            continuations[id] = continuation
-            if !hasSubscribed {
-                hasSubscribed = true
-                pendingFirstSubscription.forEach { _ = continuation.yield($0) }
-                pendingFirstSubscription.removeAll(keepingCapacity: false)
-            }
-            continuation.onTermination = { [weak self] _ in
-                Task { await self?.remove(id) }
-            }
+    struct AsyncIterator: AsyncIteratorProtocol {
+        fileprivate let subscription: Subscription
+
+        mutating func next() async -> TransferReceiveResult? {
+            await subscription.next()
         }
     }
 
-    func publish(_ result: TransferReceiveResult) {
+    fileprivate final class Subscription: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        private let nextValue: @Sendable () async -> TransferReceiveResult?
+        private let cancelSubscription: @Sendable () async -> Void
+
+        init(
+            next: @escaping @Sendable () async -> TransferReceiveResult?,
+            cancel: @escaping @Sendable () async -> Void
+        ) {
+            nextValue = next
+            cancelSubscription = cancel
+        }
+
+        func next() async -> TransferReceiveResult? {
+            guard !lock.withLock({ cancelled }) else { return nil }
+            return await nextValue()
+        }
+
+        func cancel() async {
+            let shouldCancel = lock.withLock { () -> Bool in
+                guard !cancelled else { return false }
+                cancelled = true
+                return true
+            }
+            if shouldCancel { await cancelSubscription() }
+        }
+
+        deinit {
+            let shouldCancel = lock.withLock { () -> Bool in
+                guard !cancelled else { return false }
+                cancelled = true
+                return true
+            }
+            guard shouldCancel else { return }
+            let cancelSubscription = cancelSubscription
+            Task { await cancelSubscription() }
+        }
+    }
+
+    fileprivate let subscription: Subscription
+
+    fileprivate init(subscription: Subscription) {
+        self.subscription = subscription
+    }
+
+    init(
+        next: @escaping @Sendable () async -> TransferReceiveResult?,
+        cancel: @escaping @Sendable () async -> Void
+    ) {
+        subscription = Subscription(next: next, cancel: cancel)
+    }
+
+    func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(subscription: subscription)
+    }
+
+    func cancel() async {
+        await subscription.cancel()
+    }
+
+    fileprivate static var finished: RuntimeReceiveEventStream {
+        RuntimeReceiveEventStream(
+            subscription: Subscription(next: { nil }, cancel: {})
+        )
+    }
+}
+
+actor RuntimeReceiveEventSource {
+    /// At most two inbound transfers complete concurrently. Four completion
+    /// waves are retained per subscriber; the fifth wave backpressures those
+    /// bounded receive runners instead of dropping a successful receive.
+    static let defaultBufferCapacity = IncomingTransferCapacity.maximumActiveTransfers * 4
+
+    private struct NextWaiter {
+        let token: UUID
+        let continuation: CheckedContinuation<TransferReceiveResult?, Never>
+    }
+
+    private struct SubscriptionState {
+        var buffered: [TransferReceiveResult]
+        var nextWaiter: NextWaiter?
+    }
+
+    private struct PendingPublication {
+        let token: UUID
+        let result: TransferReceiveResult
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private let bufferCapacity: Int
+    private var subscriptions: [UUID: SubscriptionState] = [:]
+    private var pendingFirstSubscription: [TransferReceiveResult] = []
+    private var pendingPublications: [PendingPublication] = []
+    private var hasSubscribed = false
+    private var isFinished = false
+
+    init(bufferCapacity: Int = RuntimeReceiveEventSource.defaultBufferCapacity) {
+        self.bufferCapacity = max(1, bufferCapacity)
+    }
+
+    func stream() -> RuntimeReceiveEventStream {
+        guard !isFinished else { return .finished }
+        let id = UUID()
+        let initial = hasSubscribed ? [] : pendingFirstSubscription
+        hasSubscribed = true
+        pendingFirstSubscription.removeAll(keepingCapacity: false)
+        subscriptions[id] = SubscriptionState(buffered: initial, nextWaiter: nil)
+        drainPendingPublications()
+
+        return RuntimeReceiveEventStream(
+            subscription: RuntimeReceiveEventStream.Subscription(
+                next: { [weak self] in await self?.next(subscription: id) },
+                cancel: { [weak self] in await self?.cancelSubscription(id) }
+            )
+        )
+    }
+
+    func publish(_ result: TransferReceiveResult) async {
         guard !isFinished else { return }
-        if continuations.isEmpty, !hasSubscribed {
-            pendingFirstSubscription.append(result)
+        if pendingPublications.isEmpty, canAcceptPublication {
+            commitPublication(result)
             return
         }
-        continuations.values.forEach { continuation in
-            _ = continuation.yield(result)
+
+        let token = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled, !isFinished else {
+                    continuation.resume()
+                    return
+                }
+                pendingPublications.append(
+                    PendingPublication(
+                        token: token,
+                        result: result,
+                        continuation: continuation
+                    )
+                )
+                drainPendingPublications()
+            }
+        } onCancel: {
+            Task { await self.cancelPublication(token) }
         }
     }
 
     func finish() {
+        guard !isFinished else { return }
         isFinished = true
-        continuations.values.forEach { $0.finish() }
-        continuations.removeAll()
+        let publishers = pendingPublications
         pendingFirstSubscription.removeAll(keepingCapacity: false)
+        pendingPublications.removeAll(keepingCapacity: false)
+        for id in Array(subscriptions.keys) {
+            guard var state = subscriptions[id], state.buffered.isEmpty else { continue }
+            let waiter = state.nextWaiter
+            state.nextWaiter = nil
+            subscriptions.removeValue(forKey: id)
+            waiter?.continuation.resume(returning: nil)
+        }
+        publishers.forEach { $0.continuation.resume() }
     }
 
-    private func remove(_ id: UUID) {
-        continuations.removeValue(forKey: id)
+    private var canAcceptPublication: Bool {
+        if !hasSubscribed {
+            return pendingFirstSubscription.count < bufferCapacity
+        }
+        guard !subscriptions.isEmpty else { return true }
+        return subscriptions.values.allSatisfy {
+            $0.nextWaiter != nil || $0.buffered.count < bufferCapacity
+        }
+    }
+
+    private func commitPublication(_ result: TransferReceiveResult) {
+        if !hasSubscribed {
+            pendingFirstSubscription.append(result)
+            return
+        }
+        guard !subscriptions.isEmpty else { return }
+
+        for id in Array(subscriptions.keys) {
+            guard var state = subscriptions[id] else { continue }
+            if let waiter = state.nextWaiter {
+                state.nextWaiter = nil
+                subscriptions[id] = state
+                waiter.continuation.resume(returning: result)
+            } else {
+                state.buffered.append(result)
+                subscriptions[id] = state
+            }
+        }
+    }
+
+    private func drainPendingPublications() {
+        while !isFinished, !pendingPublications.isEmpty, canAcceptPublication {
+            let publication = pendingPublications.removeFirst()
+            commitPublication(publication.result)
+            publication.continuation.resume()
+        }
+    }
+
+    private func next(subscription id: UUID) async -> TransferReceiveResult? {
+        let token = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled, var state = subscriptions[id] else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if !state.buffered.isEmpty {
+                    let result = state.buffered.removeFirst()
+                    if isFinished, state.buffered.isEmpty {
+                        subscriptions.removeValue(forKey: id)
+                    } else {
+                        subscriptions[id] = state
+                    }
+                    continuation.resume(returning: result)
+                    drainPendingPublications()
+                    return
+                }
+                guard !isFinished else {
+                    subscriptions.removeValue(forKey: id)
+                    continuation.resume(returning: nil)
+                    return
+                }
+                guard state.nextWaiter == nil else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                state.nextWaiter = NextWaiter(token: token, continuation: continuation)
+                subscriptions[id] = state
+            }
+        } onCancel: {
+            Task { await self.cancelNext(subscription: id, token: token) }
+        }
+    }
+
+    private func cancelNext(subscription id: UUID, token: UUID) {
+        guard var state = subscriptions[id], state.nextWaiter?.token == token else { return }
+        let waiter = state.nextWaiter
+        state.nextWaiter = nil
+        subscriptions[id] = state
+        waiter?.continuation.resume(returning: nil)
+    }
+
+    private func cancelSubscription(_ id: UUID) {
+        guard let state = subscriptions.removeValue(forKey: id) else { return }
+        state.nextWaiter?.continuation.resume(returning: nil)
+        drainPendingPublications()
+    }
+
+    private func cancelPublication(_ token: UUID) {
+        guard let index = pendingPublications.firstIndex(where: { $0.token == token }) else { return }
+        let publication = pendingPublications.remove(at: index)
+        publication.continuation.resume()
+        drainPendingPublications()
     }
 }

@@ -2,80 +2,134 @@
 
 ## Scope
 
-This change fixes only the four release-blocking notification findings from the
-final review. Installer and distribution code were not changed.
+This follow-up fixes the three Important findings from the second notification
+review. It changes only receive-event delivery, notification-operation lifetime,
+and Finder routing. Installer and distribution code were not changed.
 
 ## Implemented behavior
 
-- Added `UNUserNotificationCenterDelegate.userNotificationCenter(_:willPresent:withCompletionHandler:)`.
-  DropMesh targets macOS 14+, so foreground notifications use `.banner`, `.list`,
-  and `.sound`; deprecated `.alert` is intentionally not requested. The static
-  routing seam is covered by a completion-count assertion.
-- Changed `RuntimeReceiveEventSource` from a lossy eight-element newest buffer to
-  an unbounded lossless stream. Live results arriving during production bootstrap
-  are retained until the first subscriber is installed; later subscriptions remain
-  fresh and do not replay prior events.
-- Decoupled unread ingestion from sequential system-notification delivery. A
-  blocked notification center no longer blocks receive-event ingestion. The menu
-  acknowledgement records the latest ingested event before clearing the dot, and
-  delayed notification completions cannot light it again.
-- Added a bounded, expiring notification-target map: at most 64 entries, retained
-  for 10 minutes. Oldest entries are evicted deterministically, expired entries are
-  rejected, and a clicked identifier is removed before Finder routing. Existing
-  tests continue to cover single-file selection and multi-file common-directory
-  routing.
-- Split notification authorization from transient delivery health.
-  `ReceiveNotificationSnapshot.authorizationState` now remains truthful after an
-  `UNUserNotificationCenter.add` error, while `deliveryState` reports temporary
-  failure and returns to available after a successful delivery. Settings therefore
-  continues to reflect the real system authorization state.
+### Bounded lossless receive-event channel
+
+- `RuntimeReceiveEventSource` is now a custom bounded async channel rather than an
+  unbounded `AsyncStream` plus an unbounded pre-subscription array.
+- Its default capacity is 8: four completion waves at the production inbound
+  concurrency limit of `IncomingTransferCapacity.maximumActiveTransfers == 2`.
+  A fifth wave suspends the bounded receive runners instead of dropping an event
+  or allocating an unbounded history.
+- `publish` waits until every live subscriber has capacity. Accepted events remain
+  FIFO and lossless. `finish`, publisher cancellation, and explicit subscription
+  cancellation resume blocked continuations.
+- Only the first subscription can receive events produced during bootstrap. Once
+  a subscriber has existed, later subscriptions are fresh and never replay prior
+  notification history.
+
+### One receive worker with bounded system operations
+
+- The application shell now owns one receive-event task and awaits notification
+  handling inside that loop. It no longer creates a new unstructured `Task` for
+  every event or retains an ever-growing task tail.
+- The channel supplies the finite queue and backpressure. Runtime replacement
+  cancels and drains the one worker, which explicitly cancels its subscription.
+- Authorization-status lookup, the authorization prompt, and notification
+  delivery have separate single-flight lanes. Their default wait boundaries are
+  3 seconds, 60 seconds, and 3 seconds respectively.
+- Cancellation or timeout releases the application worker immediately. If a
+  system API ignores cancellation, at most one operation remains retained in its
+  lane and another operation is not accumulated behind it.
+- Unread state is set only when the worker ingests a receive event. Notification
+  completion never writes unread state, so acknowledging the green dot while a
+  system delivery is delayed cannot light it again.
+- Foreground presentation remains `[.banner, .list, .sound]`. Authorization state
+  and transient delivery state remain independent.
+
+### Finder semantics and notification targets
+
+- `ReceiveWorkspaceOpening` distinguishes Finder selection from opening a URL;
+  `SystemReceiveWorkspace` maps those operations to
+  `NSWorkspace.activateFileViewerSelecting` and `NSWorkspace.open`.
+- An existing single received item is selected in Finder.
+- Multiple received items open their common parent directory.
+- If a single received item was moved or deleted, its existing parent directory
+  is opened.
+- Notification targets still have a capacity of 64, a 10-minute TTL, and one-shot
+  consumption. The target map retains the original received URLs so click-time
+  existence checks can choose the correct Finder operation.
 
 ## TDD evidence
 
-### Foreground presentation RED
+### Bounded channel RED
 
-`swift test --scratch-path <isolated> --filter ReceiveNotificationControllerTests.testForegroundNotificationUsesModernPresentationSurfacesAndCompletesOnce`
+`swift test --scratch-path /tmp/dropmesh-notification-fix2-red-events --filter ReceiveEventSourceTests`
 
-Failed to compile because `dispatchForegroundPresentation` did not exist. After
-implementation the test passed with one completion and exact options
-`[.banner, .list, .sound]`.
+The new capacity/backpressure tests initially failed to compile because the old
+source had no `bufferCapacity` initializer and its stream had no explicit
+`cancel`. The legacy implementation also used `AsyncStream.unbounded` and an
+unbounded pre-subscription array.
 
-### Lossless delivery and unread acknowledgement RED
+After implementation, the focused suite proves that a blocked consumer applies
+backpressure beyond capacity, consuming one value releases exactly enough
+capacity, and all accepted values recover in order. Separate cases prove that
+`finish` wakes a publisher blocked before first subscription and explicit stream
+cancellation wakes a blocked publisher.
 
-`swift test --scratch-path /tmp/dropmesh-notification-final --filter ReceiveEventSourceTests.testBurstLargerThanLegacyBufferIsDeliveredWithoutLoss`
+### Worker lifetime RED
 
-Failed as intended: only results 24 through 31 survived the legacy buffer instead
-of all 32.
+`swift test --scratch-path /tmp/dropmesh-notification-fix2-red-app --filter AppRuntimeTests`
 
-The application-shell regression first failed because the required ingestion
-counter did not exist, then exposed a bootstrap race with only 31 of 32 events.
-After the lossless first-subscriber handoff and decoupled notification queue, all
-32 unique notifications were delivered and clearing unread while the first
-delivery was blocked remained cleared after the queue drained.
+Against the old task-tail implementation, runtime replacement exceeded the
+one-second bound while notification delivery was blocked. The worker test also
+observed all 6 receive events instead of stopping at 1 and its publisher completed
+instead of being backpressured.
 
-### Bounded target cache RED
+After replacing the task tail with one worker, replacement completes without
+releasing the cancellation-insensitive system-delivery fake, the old subscription
+is cancelled, and the new runtime subscribes. A blocked delivery holds event
+ingestion at one item and backpressures a six-event burst through a two-element
+test channel; after release, all six notifications complete once and in order with
+maximum system-delivery concurrency of one. A separate test acknowledges unread
+while delivery is blocked and proves delayed completion does not relight it.
 
-The two focused cache tests failed to compile because capacity, TTL, and clock
-injection did not exist. They passed after adding deterministic capacity eviction
-and expiration.
+### Operation bounds and Finder RED
 
-### Authorization/delivery separation RED
+`swift test --scratch-path /tmp/dropmesh-notification-fix2-red-notify --filter ReceiveNotificationControllerTests`
 
-The focused delivery-failure test failed to compile because snapshots had no
-independent `deliveryState`. It passed after separating the two state domains and
-also verified recovery on the next successful delivery.
+The new tests initially failed to compile because the controller had no injected
+authorization or delivery time bounds, no `ReceiveWorkspaceOpening` adapter, and
+no select/open-specific Finder initializer.
+
+After implementation, a blocked delivery returns at its 20 ms test boundary,
+retains at most one cancellation-insensitive system operation, rejects another
+system delivery while that lane is occupied, and accepts a later delivery after
+the first callback completes. Cancelling a blocked authorization query returns
+within the one-second assertion window and its late result cannot change the
+published authorization state. Concurrent refreshes share one system query.
+Finder fakes independently prove select-existing-single, open-multiple-common-
+directory, and open-parent-for-moved-single behavior.
 
 ## GREEN verification
 
-- `ReceiveNotificationControllerTests`: 15 passed, 0 failed.
-- `ReceiveEventSourceTests`: 4 passed, 0 failed.
-- `AppRuntimeTests`: 29 passed, 0 failed.
-- Complete `swift test --scratch-path /tmp/dropmesh-notification-final`: 645 passed,
-  3 documented Docker-dependent skips, 0 failed.
-- The full suite included real direct-LAN integration and reported matching source
-  and destination SHA-256 values.
-- `git diff --check`: clean.
-- No process remained for `/tmp/dropmesh-notification-final` after the test run.
+- `ReceiveEventSourceTests`: 7 passed, 0 failed.
+- `ReceiveNotificationControllerTests`: 20 passed, 0 failed.
+- `AppRuntimeTests`: 30 passed, 0 failed.
+- Complete isolated Swift suite: 654 passed, 3 documented Docker-dependent skips,
+  0 failed.
+- The full suite included the real direct-LAN integration. An explicit rerun of
+  `TransferIntegrationTests.testLANPreferenceUsesAnActualHostCandidateWebRTCChannel`
+  passed with matching source and destination SHA-256 values:
+  `77beecbc3fec52949142c29b38f26665666491c29dbe7e8a79611dcdc673eab4`.
+- Final verification uses `/tmp/dropmesh-notification-fix2-final`, followed by
+  `git diff --check` and a residual-process check.
+
+## Residual risk
+
+- Lossless backpressure means a prolonged OS notification stall can slow receipt
+  completion once the eight-event application buffer fills. This is intentional:
+  it bounds memory and preserves every accepted event. The system wait itself is
+  time-bounded, so ordinary stalls clear after at most the configured boundary.
+- A system API that ignores task cancellation may leave one retained operation in
+  its lane until its callback arrives. The lane cannot accumulate additional
+  blocked system operations, and runtime replacement or process termination does
+  not wait for that callback.
 
 ## Protected processes
 

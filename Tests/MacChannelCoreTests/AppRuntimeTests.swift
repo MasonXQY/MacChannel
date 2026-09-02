@@ -736,12 +736,77 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testBlockedNotificationDeliveryDoesNotLoseBurstOrRelightAcknowledgedUnread() async {
-        let events = RuntimeReceiveEventSource()
+    func testReceiveWorkerBackpressuresBurstWhileSystemDeliveryIsBlocked() async {
+        let events = RuntimeReceiveEventSource(bufferCapacity: 2)
         let notificationCenter = BlockingApplicationShellNotificationCenter()
         let notifier = ReceiveNotificationController(
             center: notificationCenter,
-            revealer: ApplicationShellReceiveTargetRevealer()
+            revealer: ApplicationShellReceiveTargetRevealer(),
+            deliveryTimeout: .seconds(30)
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: { container in
+                let controller = StatusItemController(
+                    button: StatusItemButton(
+                        frame: NSRect(x: 0, y: 0, width: 30, height: 24)
+                    ),
+                    devices: [],
+                    transferCoordinator: container.transferCoordinator
+                )
+                return controller
+            }
+        )
+        let base = AppContainer.localShell()
+        let container = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await events.stream() }
+        )
+
+        await shell.replace(container, status: .ready)
+        let expected = (0..<6).map { index in
+            TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [URL(fileURLWithPath: "/tmp/burst-\(index).bin")]
+            )
+        }
+        let publisherFinished = AsyncCompletionProbe()
+        let publisher = Task {
+            for result in expected { await events.publish(result) }
+            await publisherFinished.finish()
+        }
+        await notificationCenter.waitUntilDeliveryStarts()
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertEqual(shell.observedReceiveEventCount, 1)
+        let completedBeforeRelease = await publisherFinished.isFinished()
+        XCTAssertFalse(completedBeforeRelease)
+        XCTAssertTrue(shell.hasUnreadReceive)
+
+        notificationCenter.releaseFirstDelivery()
+        await publisher.value
+        for _ in 0..<1_000 where notificationCenter.deliveredCount < expected.count {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(notificationCenter.deliveredCount, expected.count)
+        XCTAssertEqual(Set(notificationCenter.deliveredIdentifiers).count, expected.count)
+        XCTAssertEqual(notificationCenter.maximumConcurrentDeliveries, 1)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testDelayedNotificationCompletionDoesNotRelightAcknowledgedUnread() async {
+        let events = RuntimeReceiveEventSource(bufferCapacity: 2)
+        let notificationCenter = BlockingApplicationShellNotificationCenter()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: ApplicationShellReceiveTargetRevealer(),
+            deliveryTimeout: .seconds(30)
         )
         var statusController: StatusItemController?
         let shell = MacChannelApplicationDelegate(
@@ -769,47 +834,36 @@ final class AppRuntimeTests: XCTestCase {
         )
 
         await shell.replace(container, status: .ready)
-        let expected = (0..<32).map { index in
+        await events.publish(
             TransferReceiveResult(
                 transferID: TransferID(rawValue: UUID()),
-                receivedURLs: [URL(fileURLWithPath: "/tmp/burst-\(index).bin")]
+                receivedURLs: [URL(fileURLWithPath: "/tmp/one.pdf")]
             )
-        }
-        for result in expected {
-            await events.publish(result)
-        }
+        )
         await notificationCenter.waitUntilDeliveryStarts()
-        for _ in 0..<1_000 where shell.observedReceiveEventCount < expected.count {
-            await Task.yield()
-        }
-
-        XCTAssertEqual(shell.observedReceiveEventCount, expected.count)
         XCTAssertTrue(shell.hasUnreadReceive)
+
         statusController?.prepareToOpenStatusMenu()
         XCTAssertFalse(shell.hasUnreadReceive)
-
         notificationCenter.releaseFirstDelivery()
-        for _ in 0..<1_000 where notificationCenter.deliveredCount < expected.count {
-            await Task.yield()
-        }
+        for _ in 0..<100 where notificationCenter.deliveredCount == 0 { await Task.yield() }
 
-        XCTAssertEqual(notificationCenter.deliveredCount, expected.count)
-        XCTAssertEqual(Set(notificationCenter.deliveredIdentifiers).count, expected.count)
+        XCTAssertEqual(notificationCenter.deliveredCount, 1)
         XCTAssertFalse(shell.hasUnreadReceive)
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
     @MainActor
-    func testApplicationShellSerializesReplacementAndTerminationBehindPriorObserverWork()
+    func testApplicationShellReplacementDoesNotWaitForBlockedNotificationOperation()
         async throws
     {
         let firstEvents = ApplicationShellReceiveEventSource()
-        let staleEvents = ApplicationShellReceiveEventSource()
         let currentEvents = ApplicationShellReceiveEventSource()
         let notificationCenter = BlockingApplicationShellNotificationCenter()
         let notifier = ReceiveNotificationController(
             center: notificationCenter,
-            revealer: ApplicationShellReceiveTargetRevealer()
+            revealer: ApplicationShellReceiveTargetRevealer(),
+            deliveryTimeout: .seconds(30)
         )
         let shell = MacChannelApplicationDelegate(
             initialContainer: AppContainer.localShell(),
@@ -827,7 +881,6 @@ final class AppRuntimeTests: XCTestCase {
             }
         )
         let firstContainer = makeApplicationShellContainer(receiveEvents: firstEvents)
-        let staleContainer = makeApplicationShellContainer(receiveEvents: staleEvents)
         let currentContainer = makeApplicationShellContainer(receiveEvents: currentEvents)
 
         await shell.replace(firstContainer, status: .ready)
@@ -840,54 +893,24 @@ final class AppRuntimeTests: XCTestCase {
         )
         await notificationCenter.waitUntilDeliveryStarts()
 
-        let staleReplacement = Task { @MainActor in
-            await shell.replace(staleContainer, status: .ready)
-        }
-        await Task.yield()
-        let currentReplacementFinished = AsyncCompletionProbe()
+        let replacementFinished = expectation(description: "runtime replacement finishes")
         let currentReplacement = Task { @MainActor in
             let installed = await shell.replace(currentContainer, status: .ready)
-            await currentReplacementFinished.finish()
+            replacementFinished.fulfill()
             return installed
         }
-        for _ in 0..<100 where !(await currentReplacementFinished.isFinished()) {
-            await Task.yield()
-        }
-
-        let replacementFinishedBeforeDrain = await currentReplacementFinished.isFinished()
-        let currentSubscribedBeforeDrain = await currentEvents.isSubscribed()
-        XCTAssertFalse(
-            replacementFinishedBeforeDrain,
-            "a newer replacement must join the observer already draining for an earlier replacement"
-        )
-        XCTAssertFalse(currentSubscribedBeforeDrain)
-
-        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+        await fulfillment(of: [replacementFinished], timeout: 1)
         notificationCenter.releaseFirstDelivery()
-        let staleReplacementInstalled = await staleReplacement.value
         let currentReplacementInstalled = await currentReplacement.value
 
-        XCTAssertFalse(staleReplacementInstalled)
-        XCTAssertFalse(currentReplacementInstalled)
+        XCTAssertTrue(currentReplacementInstalled)
+        await firstEvents.waitUntilCancelled()
+        await currentEvents.waitUntilSubscribed()
+        let currentSubscribed = await currentEvents.isSubscribed()
+        XCTAssertTrue(currentSubscribed)
 
-        for _ in 0..<100 where notificationCenter.deliveredCount == 0 {
-            await Task.yield()
-        }
-        XCTAssertEqual(notificationCenter.deliveredCount, 1)
-
-        await staleEvents.publish(
-            TransferReceiveResult(
-                transferID: TransferID(rawValue: UUID()),
-                receivedURLs: [URL(fileURLWithPath: "/tmp/stale.pdf")]
-            )
-        )
-        for _ in 0..<100 { await Task.yield() }
-        XCTAssertEqual(notificationCenter.deliveredCount, 1)
-
-        let currentSubscribedAfterTermination = await currentEvents.isSubscribed()
-        XCTAssertFalse(currentSubscribedAfterTermination)
-        XCTAssertEqual(notificationCenter.deliveredCount, 1)
-        XCTAssertTrue(shell.hasUnreadReceive)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+        await currentEvents.waitUntilCancelled()
     }
 
     private func makeTrustedRuntimeFixture() throws -> TrustedRuntimeFixture {
@@ -938,26 +961,30 @@ private func makeApplicationShellContainer(
 }
 
 private actor ApplicationShellReceiveEventSource {
-    private var continuation: AsyncStream<TransferReceiveResult>.Continuation?
+    private var pending: [TransferReceiveResult] = []
+    private var nextContinuation: CheckedContinuation<TransferReceiveResult?, Never>?
     private var subscribed = false
     private var cancelled = false
     private var subscribedContinuation: CheckedContinuation<Void, Never>?
     private var cancelledContinuation: CheckedContinuation<Void, Never>?
 
-    func stream() -> AsyncStream<TransferReceiveResult> {
-        AsyncStream { continuation in
-            self.continuation = continuation
-            subscribed = true
-            subscribedContinuation?.resume()
-            subscribedContinuation = nil
-            continuation.onTermination = { [weak self] _ in
-                Task { await self?.markCancelled() }
-            }
-        }
+    func stream() -> RuntimeReceiveEventStream {
+        subscribed = true
+        subscribedContinuation?.resume()
+        subscribedContinuation = nil
+        return RuntimeReceiveEventStream(
+            next: { [weak self] in await self?.next() },
+            cancel: { [weak self] in await self?.markCancelled() }
+        )
     }
 
     func publish(_ result: TransferReceiveResult) {
-        continuation?.yield(result)
+        if let nextContinuation {
+            self.nextContinuation = nil
+            nextContinuation.resume(returning: result)
+        } else {
+            pending.append(result)
+        }
     }
 
     func waitUntilSubscribed() async {
@@ -974,8 +1001,29 @@ private actor ApplicationShellReceiveEventSource {
 
     private func markCancelled() {
         cancelled = true
+        nextContinuation?.resume(returning: nil)
+        nextContinuation = nil
+        pending.removeAll()
         cancelledContinuation?.resume()
         cancelledContinuation = nil
+    }
+
+    private func next() async -> TransferReceiveResult? {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled, !cancelled else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if !pending.isEmpty {
+                    continuation.resume(returning: pending.removeFirst())
+                } else {
+                    nextContinuation = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.markCancelled() }
+        }
     }
 }
 
@@ -1001,12 +1049,17 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
     private var deliveryStartContinuation: CheckedContinuation<Void, Never>?
     private var deliveryReleaseContinuation: CheckedContinuation<Void, Never>?
     private(set) var deliveredIdentifiers: [String] = []
+    private var activeDeliveries = 0
+    private(set) var maximumConcurrentDeliveries = 0
     var deliveredCount: Int { deliveredIdentifiers.count }
 
     func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
     func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .authorized }
 
     func deliver(_ request: ReceiveNotificationRequest) async throws {
+        activeDeliveries += 1
+        maximumConcurrentDeliveries = max(maximumConcurrentDeliveries, activeDeliveries)
+        defer { activeDeliveries -= 1 }
         if isFirstDelivery {
             isFirstDelivery = false
             deliveryStarted = true

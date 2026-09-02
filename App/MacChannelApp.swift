@@ -305,21 +305,15 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         guard let makeEvents = container.receiveEvents else { return }
         receiveEventTask = Task { [weak self] in
             let events = await makeEvents()
-            var notificationTail: Task<Void, Never>?
             for await result in events {
                 guard !Task.isCancelled, let self else { break }
                 observedReceiveEventCount += 1
                 if observedReceiveEventCount > acknowledgedReceiveEventCount {
                     statusItemController?.setUnreadReceive(true)
                 }
-                let priorNotification = notificationTail
-                let notifications = receiveNotificationController
-                notificationTail = Task { @MainActor in
-                    await priorNotification?.value
-                    await notifications.notify(receive: result)
-                }
+                await receiveNotificationController.notify(receive: result)
             }
-            await notificationTail?.value
+            await events.cancel()
         }
     }
 

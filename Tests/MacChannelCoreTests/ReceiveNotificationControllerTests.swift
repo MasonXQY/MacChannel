@@ -58,7 +58,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(center.requests.count, 1)
         XCTAssertTrue(center.requests[0].content.body.contains("已收到 2 个文件"))
         controller.openNotification(identifier: center.requests[0].identifier)
-        XCTAssertEqual(finder.revealedURLs, [[directory]])
+        XCTAssertEqual(finder.revealedURLs, [[first, second]])
     }
 
     func testPrepareRequestsUndeterminedAuthorizationOnlyOnce() async {
@@ -118,7 +118,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(denied?.authorizationState, .denied)
     }
 
-    func testOutOfOrderAuthorizationRefreshPublishesOnlyNewestResult() async {
+    func testConcurrentAuthorizationRefreshesShareOneBoundedSystemQuery() async {
         let center = ControllableReceiveNotificationCenter()
         let controller = ReceiveNotificationController(
             center: center,
@@ -137,12 +137,12 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         let newerRefresh = Task { @MainActor in
             await controller.refreshAuthorizationState()
         }
-        await waitForAuthorizationQueries(2, in: center)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(center.authorizationQueryCount, 1)
 
-        center.resolveAuthorizationQuery(at: 1, with: .authorized)
-        await newerRefresh.value
-        center.resolveAuthorizationQuery(at: 0, with: .denied)
+        center.resolveAuthorizationQuery(at: 0, with: .authorized)
         await olderRefresh.value
+        await newerRefresh.value
 
         let latest = await snapshots.next()
         XCTAssertEqual(latest?.authorizationState, .authorized)
@@ -237,6 +237,105 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         let recoveredSnapshot = await iterator.next()
         XCTAssertEqual(recoveredSnapshot?.authorizationState, .authorized)
         XCTAssertEqual(recoveredSnapshot?.deliveryState, .available)
+    }
+
+    func testBlockedDeliveryTimesOutAndKeepsOnlyOneSystemOperationInFlight() async {
+        let center = BlockingReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer(),
+            deliveryTimeout: .milliseconds(20)
+        )
+        let firstFinished = expectation(description: "first notification returns at boundary")
+        let first = Task { @MainActor in
+            await controller.notify(receive: receiveResult(named: "first.pdf"))
+            firstFinished.fulfill()
+        }
+        await center.waitUntilDeliveryStarts()
+
+        await fulfillment(of: [firstFinished], timeout: 1)
+        XCTAssertEqual(center.deliveryStartCount, 1)
+
+        let secondFinished = expectation(description: "busy delivery fails without queueing")
+        await controller.notify(receive: receiveResult(named: "second.pdf"))
+        secondFinished.fulfill()
+        await fulfillment(of: [secondFinished], timeout: 1)
+        XCTAssertEqual(center.deliveryStartCount, 1)
+
+        center.releaseDelivery()
+        await first.value
+        await center.waitUntilDeliveryFinishes()
+
+        await controller.notify(receive: receiveResult(named: "third.pdf"))
+        XCTAssertEqual(center.deliveryStartCount, 2)
+        XCTAssertEqual(center.maximumConcurrentDeliveries, 1)
+    }
+
+    func testCancellingBlockedAuthorizationQueryReturnsWithoutWaitingForSystemCallback() async {
+        let center = BlockingAuthorizationReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer(),
+            authorizationStatusTimeout: .seconds(30)
+        )
+        let refreshFinished = expectation(description: "cancelled refresh returns")
+        let refresh = Task { @MainActor in
+            await controller.refreshAuthorizationState()
+            refreshFinished.fulfill()
+        }
+        await center.waitUntilAuthorizationQueryStarts()
+
+        refresh.cancel()
+
+        await fulfillment(of: [refreshFinished], timeout: 1)
+        XCTAssertEqual(center.authorizationQueryCount, 1)
+        center.releaseAuthorizationQuery(with: .authorized)
+        await refresh.value
+    }
+
+    func testWorkspaceRevealerSelectsAnExistingSingleFile() {
+        let workspace = RecordingReceiveWorkspace()
+        let file = URL(fileURLWithPath: "/Downloads/report.pdf")
+        let revealer = WorkspaceReceiveTargetRevealer(
+            workspace: workspace,
+            fileExists: { $0 == file }
+        )
+
+        revealer.reveal([file])
+
+        XCTAssertEqual(workspace.selectedURLs, [[file]])
+        XCTAssertTrue(workspace.openedURLs.isEmpty)
+    }
+
+    func testWorkspaceRevealerOpensCommonDirectoryForMultipleFiles() {
+        let workspace = RecordingReceiveWorkspace()
+        let directory = URL(fileURLWithPath: "/Downloads")
+        let first = directory.appendingPathComponent("report.pdf")
+        let second = directory.appendingPathComponent("notes.txt")
+        let revealer = WorkspaceReceiveTargetRevealer(
+            workspace: workspace,
+            fileExists: { $0 == directory || $0 == first || $0 == second }
+        )
+
+        revealer.reveal([first, second])
+
+        XCTAssertTrue(workspace.selectedURLs.isEmpty)
+        XCTAssertEqual(workspace.openedURLs, [directory])
+    }
+
+    func testWorkspaceRevealerOpensParentWhenSingleFileWasMoved() {
+        let workspace = RecordingReceiveWorkspace()
+        let directory = URL(fileURLWithPath: "/Downloads")
+        let movedFile = directory.appendingPathComponent("moved.pdf")
+        let revealer = WorkspaceReceiveTargetRevealer(
+            workspace: workspace,
+            fileExists: { $0.standardizedFileURL.path == directory.path }
+        )
+
+        revealer.reveal([movedFile])
+
+        XCTAssertTrue(workspace.selectedURLs.isEmpty)
+        XCTAssertEqual(workspace.openedURLs.map(\.path), [directory.path])
     }
 
     func testUnknownNotificationIdentifierDoesNotRevealAnyTarget() {
@@ -357,6 +456,13 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         }
         XCTAssertEqual(center.authorizationRequestCount, count)
     }
+
+    private func receiveResult(named name: String) -> TransferReceiveResult {
+        TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/\(name)")]
+        )
+    }
 }
 
 @MainActor
@@ -452,6 +558,98 @@ private final class RecordingReceiveTargetRevealer: ReceiveTargetRevealing {
     func reveal(_ urls: [URL]) {
         revealedURLs.append(urls)
     }
+}
+
+@MainActor
+private final class RecordingReceiveWorkspace: ReceiveWorkspaceOpening {
+    private(set) var selectedURLs: [[URL]] = []
+    private(set) var openedURLs: [URL] = []
+
+    func select(_ urls: [URL]) {
+        selectedURLs.append(urls)
+    }
+
+    func open(_ url: URL) {
+        openedURLs.append(url)
+    }
+}
+
+@MainActor
+private final class BlockingReceiveNotificationCenter: ReceiveNotificationCenter {
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    private var finishContinuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    private var firstDelivery = true
+    private var activeDeliveries = 0
+    private(set) var deliveryStartCount = 0
+    private(set) var maximumConcurrentDeliveries = 0
+
+    func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
+    func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .authorized }
+
+    func deliver(_ request: ReceiveNotificationRequest) async throws {
+        deliveryStartCount += 1
+        activeDeliveries += 1
+        maximumConcurrentDeliveries = max(maximumConcurrentDeliveries, activeDeliveries)
+        if firstDelivery {
+            firstDelivery = false
+            startContinuation?.resume()
+            startContinuation = nil
+            if !released {
+                await withCheckedContinuation { releaseContinuation = $0 }
+            }
+        }
+        activeDeliveries -= 1
+        finishContinuation?.resume()
+        finishContinuation = nil
+    }
+
+    func waitUntilDeliveryStarts() async {
+        guard deliveryStartCount == 0 else { return }
+        await withCheckedContinuation { startContinuation = $0 }
+    }
+
+    func releaseDelivery() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    func waitUntilDeliveryFinishes() async {
+        guard activeDeliveries > 0 else { return }
+        await withCheckedContinuation { finishContinuation = $0 }
+    }
+
+    func openSystemSettings() {}
+}
+
+@MainActor
+private final class BlockingAuthorizationReceiveNotificationCenter: ReceiveNotificationCenter {
+    private var queryContinuation: CheckedContinuation<ReceiveNotificationAuthorizationState, Never>?
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    private(set) var authorizationQueryCount = 0
+
+    func authorizationState() async -> ReceiveNotificationAuthorizationState {
+        authorizationQueryCount += 1
+        startContinuation?.resume()
+        startContinuation = nil
+        return await withCheckedContinuation { queryContinuation = $0 }
+    }
+
+    func waitUntilAuthorizationQueryStarts() async {
+        guard authorizationQueryCount == 0 else { return }
+        await withCheckedContinuation { startContinuation = $0 }
+    }
+
+    func releaseAuthorizationQuery(with state: ReceiveNotificationAuthorizationState) {
+        queryContinuation?.resume(returning: state)
+        queryContinuation = nil
+    }
+
+    func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .denied }
+    func deliver(_ request: ReceiveNotificationRequest) async throws {}
+    func openSystemSettings() {}
 }
 
 private enum TestError: Error {
