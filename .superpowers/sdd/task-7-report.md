@@ -149,3 +149,124 @@ and descriptor-relative receiver materialization over the audited
   cancellation races` (`a42687b`).
 - Final nonce/quarantine/commit-point hardening: `fix: prevent ambiguous transfer
   send and cleanup races` (this report is committed with that follow-up).
+
+---
+
+# Task 7 Release Acceptance Report: DropMesh 1.2.2 (15)
+
+Date: 2026-09-02 (Asia/Dubai)
+
+## Release decision
+
+**NOT PUBLISHED.** The automated, production-signing, notarization, and Mac A
+installed checks below passed, but no authorized remote-control path to Mac B was
+available and both configured peers were offline. The required real two-Mac LAN and
+forced-relay matrix therefore remains `NOT RUN`. This is a fail-closed release gate;
+local Docker networking and one-Mac UI evidence do not substitute for it.
+
+## Verification correction
+
+The first notarized candidate exposed a public-branding defect in the generated
+Sparkle feed: the RSS channel title was the transition bundle's raw display name
+instead of `DropMesh`. A regression assertion first failed on that exact value.
+`Scripts/build-update-feed.sh` now changes only the known transition title, re-signs
+the feed with Sparkle's verified `sign_update` tool, and fails closed for any unknown
+title. The corrected test passed, and the production-source audit was strengthened so
+the fix did not introduce a new ordinary legacy-brand literal.
+
+Correction commit:
+
+```text
+9a6c57ccae827881cdea2288fa6eb7b64968aebf fix: brand DropMesh update feed
+```
+
+## Automated verification on the corrected implementation
+
+- The complete Swift coverage passed as 619 non-network tests plus 21 network
+  integration tests, with no failures. The full Docker run had one deliberate skip in
+  the non-network partition and then ran all 21 network tests with no skips.
+- The local-only gate passed its direct-LAN integration and printed exactly one
+  `update-acceptance full-matrix-complete cases=17` marker.
+- The real Docker stack started PostgreSQL, rendezvous, STUN, and coturn on isolated
+  networks and shut them down through the gate's cleanup path.
+- Internet ICE gathered an actual server-reflexive candidate.
+- Direct LAN source and destination SHA-256 both equalled
+  `77beecbc3fec52949142c29b38f26665666491c29dbe7e8a79611dcdc673eab4`.
+- Forced relay reported `route=relay` with an opaque short-lived credential.
+- The forced-relay resume case transferred 1 GiB. Source and destination SHA-256 both
+  equalled `102bca71040977130e0a87f2e980dce728e34840a1cf5b5a3bc33f0e4f96902a`;
+  peak resident memory was 119,947,264 bytes.
+- Go race tests and `go vet` passed.
+- The production Developer ID signing contract passed for arm64 and x86_64, hardened
+  runtime, nested-code sealing, strict verification, designated requirement, and two
+  bounded accessory-app smoke launches.
+
+## Production candidate before this report commit
+
+The corrected implementation commit produced a notarized candidate with Apple
+submission ID `f41ade4e-2ae9-4dfb-848b-4f08d83b1566`. Its DMG SHA-256 was
+`a5e0658a1cada73be15f8130ceda40fe6ef3312d8f136124247ef9ef235bc6eb`.
+The manifest recorded `notarized`, version `1.2.2`, build `15`, Team ID
+`XKAZ67HN45`, and the exact correction commit above. Strict app/DMG code-signature
+checks, production designated-requirement matching, stapler validation, Gatekeeper,
+the signed Sparkle enclosure, and the signed appcast all passed. The appcast channel
+title was `DropMesh` and its sole item was version `1.2.2`, build `15`.
+
+After this tracked report is committed, the public candidate must be rebuilt from that
+new clean HEAD. The generated manifest, rather than this tracked file, is authoritative
+for the final candidate commit, Apple submission ID, byte length, and DMG digest.
+
+## Mac A upgrade and installed UI acceptance
+
+Before installation, the previous v1.2.1 (14) app, Application Support data, settings,
+trust data, and history database were copied to an owner-controlled temporary backup.
+There were no active transfers. The previous app was quit normally and the notarized
+candidate was installed over the transition-compatible `/Applications/MacChannel.app`
+path.
+
+Observed after launching the installed v1.2.2 (15) candidate:
+
+- Finder and LaunchServices displayed `DropMesh`; the 1024 px and 16 px icon assets
+  both showed the graphite document-and-green-nodes artwork, with no blank template or
+  paper-plane artwork.
+- The installed app passed strict code-signature and Gatekeeper execution assessment as
+  a notarized Developer ID application.
+- Settings displayed `DropMesh 1.2.2 (15)` and the real notification authorization
+  state (`not allowed` on this Mac).
+- The receive-directory setting, every settings field, two paired-device records,
+  13 history records, and trust database were preserved. Canonical settings, logical
+  history, and trust fingerprints were byte-stable across installation. The runtime
+  loaded the existing device state without exporting private key material.
+- The `Transfer & History`, `Paired Devices`, and `Settings` installed popovers were
+  each opened from the live status menu and disappeared when another application was
+  activated. Closing these idle UI surfaces did not change persisted state.
+- Controlled screenshots were kept only under temporary storage because they contain
+  unrelated desktop content and device labels; they are not release assets and were
+  not committed.
+
+## Mac B reachability and required items not run
+
+Read-only discovery found no concrete SSH host alias, no dedicated DropMesh/MacChannel
+remote-acceptance configuration, and no online configured peer. No endpoint, key, token,
+or private material was guessed or exported. Consequently the following acceptance
+items remain `NOT RUN`:
+
+- install this exact candidate on Mac B;
+- LAN-direct transfer in both directions on two physical Macs;
+- forced encrypted-relay transfer in both directions on two physical Macs;
+- destination existence and SHA-256 comparison on each physical receiver;
+- receiver-only notification, one green unread dot, and clear-on-menu-open behavior;
+- failed/cancelled transfers producing neither success notification nor unread dot;
+- denied notification permission still allowing a successful transfer and unread dot;
+- close and reopen the transfer popover during a live physical transfer while progress
+  continues.
+
+Because those checks are mandatory, no `v1.2.2` GitHub release/tag/assets were created
+or changed, and no `latest` feed was updated.
+
+## Safety and residue
+
+The historical protected UE PIDs `38136`, `49361`, `80713`, `82338`, `25679`,
+`28690`, and `29145` were not signaled or terminated. Test infrastructure used isolated
+temporary roots and uniquely named Docker resources; the E2E runner completed its own
+stack cleanup. Existing historical mounted volumes were left untouched.
