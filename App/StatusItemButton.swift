@@ -27,19 +27,19 @@ final class StatusItemButton: NSStatusBarButton {
         hasUnreadReceive
     }
 
-    var updateIndicatorRect: NSRect? {
-        guard showsUpdateIndicator else { return nil }
-        return indicatorRect(
+    var updateIndicatorRect: NSRect {
+        indicatorRect(
             diameter: 4,
             inset: 4,
             atUpperRight: !showsReceiveIndicator
         )
     }
 
-    var receiveIndicatorRect: NSRect? {
-        guard showsReceiveIndicator else { return nil }
-        return indicatorRect(diameter: 6, inset: 3, atUpperRight: true)
+    var receiveIndicatorRect: NSRect {
+        indicatorRect(diameter: 6, inset: 3, atUpperRight: true)
     }
+
+    var receiveIndicatorColor: NSColor { .systemGreen }
 
     var onDragEntered: ((DropIntent, StatusItemDragFingerprint) -> StatusItemDragToken?)?
     var onDragCancelled: ((StatusItemDragToken, StatusItemDragFingerprint) -> Void)?
@@ -114,15 +114,15 @@ final class StatusItemButton: NSStatusBarButton {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        if let updateIndicatorRect {
+        if showsUpdateIndicator {
             let indicator = NSBezierPath(ovalIn: updateIndicatorRect)
             NSColor.controlAccentColor.setFill()
             indicator.fill()
         }
 
-        if let receiveIndicatorRect {
+        if showsReceiveIndicator {
             let indicator = NSBezierPath(ovalIn: receiveIndicatorRect)
-            NSColor.systemGreen.setFill()
+            receiveIndicatorColor.setFill()
             indicator.fill()
         }
 

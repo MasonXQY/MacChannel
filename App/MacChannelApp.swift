@@ -97,7 +97,14 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private let receiveNotificationController: ReceiveNotificationController
     private let statusItemControllerFactory: (AppContainer) -> StatusItemController
     private var receiveEventTask: Task<Void, Never>?
+    private var pendingReceiveEventDrain: ReceiveEventDrain?
+    private var receiveEventDrainGeneration = 0
     private var containerReplacementGeneration = 0
+
+    private struct ReceiveEventDrain {
+        let generation: Int
+        let task: Task<Void, Never>
+    }
 
     var hasUnreadReceive: Bool { statusItemController?.hasUnreadReceive ?? false }
 
@@ -181,7 +188,6 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func install(_ container: AppContainer, status: AppRuntimeStatus) {
-        cancelReceiveEventObservation()
         self.container = container
         surfaceController?.invalidate()
         statusItemController?.invalidate()
@@ -237,9 +243,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         status: AppRuntimeStatus,
         generation: Int
     ) async -> Bool {
-        if let task = cancelReceiveEventObservation() {
-            await task.value
-        }
+        await drainReceiveEventObservation()
         guard generation == containerReplacementGeneration else { return false }
         install(container, status: status)
         return true
@@ -251,7 +255,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         networkMonitor?.cancel()
         networkMonitor = nil
         bootstrapTask?.cancel()
-        drainReceiveEventObservation()
+        beginReceiveEventDrain()
         updateController.stop()
         surfaceController?.invalidate()
         statusItemController?.invalidate()
@@ -263,15 +267,26 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let runtimeHost else { return .terminateNow }
         guard !runtimeShutdownComplete else { return .terminateNow }
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
         containerReplacementGeneration += 1
         bootstrapTask?.cancel()
-        drainReceiveEventObservation()
+        let receiveDrain = beginReceiveEventDrain()
+        let runtimeShutdownTask = runtimeHost.map { runtimeHost in
+            Task { await runtimeHost.shutdown() }
+        }
+        guard receiveDrain != nil || runtimeShutdownTask != nil else {
+            runtimeShutdownComplete = true
+            return .terminateNow
+        }
         Task {
-            await runtimeHost.shutdown()
+            if let receiveDrain {
+                await receiveDrain.task.value
+                finishReceiveEventDrain(receiveDrain)
+            }
+            await runtimeShutdownTask?.value
+            runtimeShutdownComplete = true
             self.finishProductionLaunchTestIfRequested()
             sender.reply(toApplicationShouldTerminate: true)
         }
@@ -279,7 +294,6 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observeReceiveEvents(from container: AppContainer) {
-        cancelReceiveEventObservation()
         guard let makeEvents = container.receiveEvents else { return }
         receiveEventTask = Task { [weak self] in
             let events = await makeEvents()
@@ -292,16 +306,32 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    private func cancelReceiveEventObservation() -> Task<Void, Never>? {
-        let task = receiveEventTask
-        task?.cancel()
-        receiveEventTask = nil
-        return task
+    private func beginReceiveEventDrain() -> ReceiveEventDrain? {
+        guard let observerTask = receiveEventTask else { return pendingReceiveEventDrain }
+        observerTask.cancel()
+        self.receiveEventTask = nil
+        receiveEventDrainGeneration += 1
+        let priorDrainTask = pendingReceiveEventDrain?.task
+        let drain = ReceiveEventDrain(
+            generation: receiveEventDrainGeneration,
+            task: Task {
+                await priorDrainTask?.value
+                await observerTask.value
+            }
+        )
+        pendingReceiveEventDrain = drain
+        return drain
     }
 
-    private func drainReceiveEventObservation() {
-        guard let task = cancelReceiveEventObservation() else { return }
-        Task { await task.value }
+    private func drainReceiveEventObservation() async {
+        guard let drain = beginReceiveEventDrain() else { return }
+        await drain.task.value
+        finishReceiveEventDrain(drain)
+    }
+
+    private func finishReceiveEventDrain(_ drain: ReceiveEventDrain) {
+        guard pendingReceiveEventDrain?.generation == drain.generation else { return }
+        pendingReceiveEventDrain = nil
     }
 
     private func completeLaunchSmokeTestIfRequested() {

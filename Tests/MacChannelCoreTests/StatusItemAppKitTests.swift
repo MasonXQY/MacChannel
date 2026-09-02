@@ -115,21 +115,15 @@ final class StatusItemAppKitTests: XCTestCase {
 
     @MainActor
     func testReceiveIndicatorUsesResolvableSystemGreenInLightAndDarkAppearances() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let source = try String(
-            contentsOf: root.appendingPathComponent("App/StatusItemButton.swift"),
-            encoding: .utf8
-        )
-        XCTAssertTrue(source.contains("NSColor.systemGreen"))
+        let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24))
+        button.hasUnreadReceive = true
+        XCTAssertTrue(button.showsReceiveIndicator)
 
         for name: NSAppearance.Name in [.aqua, .darkAqua] {
             let appearance = try XCTUnwrap(NSAppearance(named: name))
             var resolved: NSColor?
             appearance.performAsCurrentDrawingAppearance {
-                resolved = NSColor.systemGreen.usingColorSpace(.sRGB)
+                resolved = button.receiveIndicatorColor.usingColorSpace(.sRGB)
             }
             let color = try XCTUnwrap(
                 resolved,
@@ -146,16 +140,18 @@ final class StatusItemAppKitTests: XCTestCase {
         button.updateAvailable = true
         button.hasUnreadReceive = true
 
-        XCTAssertNotEqual(
-            try XCTUnwrap(button.updateIndicatorRect),
-            try XCTUnwrap(button.receiveIndicatorRect)
-        )
-        XCTAssertLessThan(
-            try XCTUnwrap(button.updateIndicatorRect).minY,
-            try XCTUnwrap(button.receiveIndicatorRect).minY
-        )
-        XCTAssertEqual(try XCTUnwrap(button.updateIndicatorRect).width, 4)
-        XCTAssertEqual(try XCTUnwrap(button.receiveIndicatorRect).width, 6)
+        let phases: [StatusItemPhase] = [.idle, .ready, .transferring(progress: 0.42)]
+        for phase in phases {
+            button.phase = phase
+            let updateRect = button.updateIndicatorRect
+            let receiveRect = button.receiveIndicatorRect
+            XCTAssertTrue(
+                updateRect.intersection(receiveRect).isEmpty,
+                "indicator rectangles overlap during \(phase)"
+            )
+            XCTAssertEqual(updateRect.width, 4)
+            XCTAssertEqual(receiveRect.width, 6)
+        }
         XCTAssertTrue((button.accessibilityValue() as? String)?.contains("有新版本") == true)
         XCTAssertTrue((button.accessibilityValue() as? String)?.contains("有新接收文件") == true)
     }

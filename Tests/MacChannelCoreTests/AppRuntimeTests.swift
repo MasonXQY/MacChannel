@@ -736,7 +736,9 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testApplicationShellKeepsNewestConcurrentReplacement() async throws {
+    func testApplicationShellSerializesReplacementAndTerminationBehindPriorObserverWork()
+        async throws
+    {
         let firstEvents = ApplicationShellReceiveEventSource()
         let staleEvents = ApplicationShellReceiveEventSource()
         let currentEvents = ApplicationShellReceiveEventSource()
@@ -778,13 +780,31 @@ final class AppRuntimeTests: XCTestCase {
             await shell.replace(staleContainer, status: .ready)
         }
         await Task.yield()
-        let currentReplacementInstalled = await shell.replace(currentContainer, status: .ready)
-        await currentEvents.waitUntilSubscribed()
+        let currentReplacementFinished = AsyncCompletionProbe()
+        let currentReplacement = Task { @MainActor in
+            let installed = await shell.replace(currentContainer, status: .ready)
+            await currentReplacementFinished.finish()
+            return installed
+        }
+        for _ in 0..<100 where !(await currentReplacementFinished.isFinished()) {
+            await Task.yield()
+        }
+
+        let replacementFinishedBeforeDrain = await currentReplacementFinished.isFinished()
+        let currentSubscribedBeforeDrain = await currentEvents.isSubscribed()
+        XCTAssertFalse(
+            replacementFinishedBeforeDrain,
+            "a newer replacement must join the observer already draining for an earlier replacement"
+        )
+        XCTAssertFalse(currentSubscribedBeforeDrain)
+
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
         notificationCenter.releaseFirstDelivery()
         let staleReplacementInstalled = await staleReplacement.value
+        let currentReplacementInstalled = await currentReplacement.value
 
         XCTAssertFalse(staleReplacementInstalled)
-        XCTAssertTrue(currentReplacementInstalled)
+        XCTAssertFalse(currentReplacementInstalled)
 
         for _ in 0..<100 where notificationCenter.deliveredCount == 0 {
             await Task.yield()
@@ -800,19 +820,10 @@ final class AppRuntimeTests: XCTestCase {
         for _ in 0..<100 { await Task.yield() }
         XCTAssertEqual(notificationCenter.deliveredCount, 1)
 
-        await currentEvents.publish(
-            TransferReceiveResult(
-                transferID: TransferID(rawValue: UUID()),
-                receivedURLs: [URL(fileURLWithPath: "/tmp/current.pdf")]
-            )
-        )
-        for _ in 0..<100 where notificationCenter.deliveredCount < 2 {
-            await Task.yield()
-        }
-
-        XCTAssertEqual(notificationCenter.deliveredCount, 2)
+        let currentSubscribedAfterTermination = await currentEvents.isSubscribed()
+        XCTAssertFalse(currentSubscribedAfterTermination)
+        XCTAssertEqual(notificationCenter.deliveredCount, 1)
         XCTAssertTrue(shell.hasUnreadReceive)
-        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
     private func makeTrustedRuntimeFixture() throws -> TrustedRuntimeFixture {
@@ -889,6 +900,8 @@ private actor ApplicationShellReceiveEventSource {
         guard !subscribed else { return }
         await withCheckedContinuation { subscribedContinuation = $0 }
     }
+
+    func isSubscribed() -> Bool { subscribed }
 
     func waitUntilCancelled() async {
         guard !cancelled else { return }
