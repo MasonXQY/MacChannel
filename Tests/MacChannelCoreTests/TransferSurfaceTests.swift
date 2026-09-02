@@ -374,6 +374,61 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testInvalidatingSurfaceCancelsInFlightNotificationRefresh() async {
+        let notifications = SuspendingReceiveNotificationService()
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: SurfaceTransferCoordinator()
+            ),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            notificationService: notifications
+        )
+
+        let refresh = Task { @MainActor in
+            await surfaces.refreshReceiveNotifications()
+        }
+        await notifications.waitForRefreshes(1)
+
+        surfaces.invalidate()
+        notifications.resumeRefresh(at: 0)
+        await refresh.value
+
+        XCTAssertEqual(notifications.cancelledRefreshes, [0])
+    }
+
+    @MainActor
+    func testNewNotificationRefreshCancelsEarlierInFlightRefresh() async {
+        let notifications = SuspendingReceiveNotificationService()
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(
+                coordinator: SurfaceTransferCoordinator()
+            ),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            notificationService: notifications
+        )
+
+        let olderRefresh = Task { @MainActor in
+            await surfaces.refreshReceiveNotifications()
+        }
+        await notifications.waitForRefreshes(1)
+        let newerRefresh = Task { @MainActor in
+            await surfaces.refreshReceiveNotifications()
+        }
+        await notifications.waitForRefreshes(2)
+
+        notifications.resumeRefresh(at: 1)
+        await newerRefresh.value
+        notifications.resumeRefresh(at: 0)
+        await olderRefresh.value
+
+        XCTAssertEqual(notifications.cancelledRefreshes, [0])
+    }
+
+    @MainActor
     func testInvalidatingAndReobservingReceiveNotificationsRejectsOldSubscriptionEvents() async {
         let notifications = RecordingReceiveNotificationService(state: .authorized)
         let surfaces = AppSurfaceController(
@@ -1521,6 +1576,43 @@ private final class RecordingReceiveNotificationService: ReceiveNotificationServ
     func openSystemSettings() {
         openSettingsCount += 1
     }
+}
+
+@MainActor
+private final class SuspendingReceiveNotificationService: ReceiveNotificationServicing {
+    private(set) var cancelledRefreshes: [Int] = []
+    private var pendingRefreshes: [CheckedContinuation<Void, Never>?] = []
+
+    func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot> {
+        AsyncStream { continuation in
+            continuation.yield(ReceiveNotificationSnapshot(authorizationState: .notDetermined))
+        }
+    }
+
+    func refreshReceiveNotifications() async {
+        let index = pendingRefreshes.count
+        await withCheckedContinuation { continuation in
+            pendingRefreshes.append(continuation)
+        }
+        if Task.isCancelled {
+            cancelledRefreshes.append(index)
+        }
+    }
+
+    func waitForRefreshes(_ count: Int) async {
+        for _ in 0..<100 where pendingRefreshes.count < count {
+            await Task.yield()
+        }
+        XCTAssertEqual(pendingRefreshes.count, count)
+    }
+
+    func resumeRefresh(at index: Int) {
+        let continuation = pendingRefreshes[index]
+        pendingRefreshes[index] = nil
+        continuation?.resume()
+    }
+
+    func openSystemSettings() {}
 }
 
 private extension SoftwareUpdateSnapshot {

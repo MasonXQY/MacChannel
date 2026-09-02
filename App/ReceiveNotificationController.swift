@@ -62,6 +62,7 @@ final class ReceiveNotificationController {
     private var continuations: [UUID: AsyncStream<ReceiveNotificationSnapshot>.Continuation] = [:]
     private var notificationTargets: [String: [URL]] = [:]
     private var didRequestAuthorization = false
+    private var authorizationQueryGeneration: UInt = 0
     private var snapshot = ReceiveNotificationSnapshot(authorizationState: .notDetermined)
 
     convenience init() {
@@ -86,16 +87,21 @@ final class ReceiveNotificationController {
     }
 
     func prepare() async {
+        let generation = beginAuthorizationQuery()
         var state = await center.authorizationState()
         if state == .notDetermined, !didRequestAuthorization {
             didRequestAuthorization = true
             state = await center.requestAuthorization()
         }
+        guard !Task.isCancelled, generation == authorizationQueryGeneration else { return }
         publish(state)
     }
 
     func refreshAuthorizationState() async {
-        publish(await center.authorizationState())
+        let generation = beginAuthorizationQuery()
+        let state = await center.authorizationState()
+        guard !Task.isCancelled, generation == authorizationQueryGeneration else { return }
+        publish(state)
     }
 
     func notify(receive result: TransferReceiveResult) async {
@@ -149,6 +155,11 @@ final class ReceiveNotificationController {
     private func publish(_ authorizationState: ReceiveNotificationAuthorizationState) {
         snapshot = ReceiveNotificationSnapshot(authorizationState: authorizationState)
         continuations.values.forEach { $0.yield(snapshot) }
+    }
+
+    private func beginAuthorizationQuery() -> UInt {
+        authorizationQueryGeneration &+= 1
+        return authorizationQueryGeneration
     }
 
     private func notificationBody(for urls: [URL]) -> String {

@@ -887,3 +887,56 @@ swift test --scratch-path /tmp/macchannel-task4-review-green-surface.rRxQOE \
 ## Concerns
 
 No blocker. Permission status is refreshed whenever Settings is opened; it is not continuously polled while Settings remains open.
+
+---
+
+# Task 4 second reviewer remediation: stale refresh isolation
+
+## Outcome
+
+- Replaced the untracked Settings refresh task with an `AppSurfaceController`-owned task.
+- Each new refresh cancels the preceding refresh and advances a generation token; `invalidate()` also advances the token, cancels the task, and clears its reference.
+- `ReceiveNotificationController` now applies authorization results only when the query is still current and its task was not cancelled. A late older query therefore cannot overwrite a newer result or publish into a replacement surface observing the shared controller.
+- Settings still refresh notification permission every time the Settings popover opens. The denied/authorized presentation and transient popover behavior are unchanged.
+
+## RED evidence
+
+The controlled-delay regressions were added first and run with an isolated scratch path:
+
+```bash
+swift test --scratch-path /tmp/dropmesh-task4-red.x0vRfL \
+  --filter 'ReceiveNotificationControllerTests.testOutOfOrderAuthorizationRefreshPublishesOnlyNewestResult|TransferSurfaceTests.testInvalidatingSurfaceCancelsInFlightNotificationRefresh|TransferSurfaceTests.testNewNotificationRefreshCancelsEarlierInFlightRefresh'
+```
+
+- All three selected tests failed for the intended reasons before production changes:
+  - the older denied result overwrote the newer authorized result;
+  - invalidation did not cancel the in-flight refresh;
+  - a later refresh did not cancel the preceding refresh.
+- A separate process check immediately afterward showed only the pre-existing test PIDs 25679, 28690, and 29145.
+
+## GREEN evidence
+
+```bash
+swift test --scratch-path /tmp/dropmesh-task4-green.KBXHDT \
+  --filter 'ReceiveNotificationControllerTests|TransferSurfaceTests'
+swift test --scratch-path /tmp/dropmesh-task4-green.KBXHDT
+```
+
+- Focused suites: 60 tests, 0 failures.
+  - `ReceiveNotificationControllerTests`: 11 tests, including explicit cancelled-late-result and out-of-order-result coverage.
+  - `TransferSurfaceTests`: 49 tests, including invalidation and consecutive-refresh cancellation.
+- Full Swift suite: 634 tests, 3 Docker-only skips, 0 failures.
+- The direct-LAN integrity harness passed with identical source/destination SHA-256 values.
+- Both commands exited normally. Final residual-process checks showed only pre-existing PIDs 25679, 28690, and 29145. Protected PIDs 38136, 49361, 80713, 82338, 25679, 28690, and 29145 were not signalled or killed.
+- `git diff --check` passed.
+
+## Changed files
+
+- `App/AppSurfaceController.swift`
+- `App/ReceiveNotificationController.swift`
+- `Tests/MacChannelCoreTests/ReceiveNotificationControllerTests.swift`
+- `Tests/MacChannelCoreTests/TransferSurfaceTests.swift`
+
+## Concerns
+
+No blocker. The query generation is process-local by design; notification authorization remains the system source of truth and is re-queried on every Settings presentation.

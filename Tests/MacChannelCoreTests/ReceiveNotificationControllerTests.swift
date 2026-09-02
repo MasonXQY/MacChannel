@@ -101,6 +101,56 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(denied?.authorizationState, .denied)
     }
 
+    func testOutOfOrderAuthorizationRefreshPublishesOnlyNewestResult() async {
+        let center = ControllableReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer()
+        )
+        var snapshots = controller.snapshots().makeAsyncIterator()
+
+        let initial = await snapshots.next()
+        XCTAssertEqual(initial?.authorizationState, .notDetermined)
+
+        let olderRefresh = Task { @MainActor in
+            await controller.refreshAuthorizationState()
+        }
+        await waitForAuthorizationQueries(1, in: center)
+
+        let newerRefresh = Task { @MainActor in
+            await controller.refreshAuthorizationState()
+        }
+        await waitForAuthorizationQueries(2, in: center)
+
+        center.resolveAuthorizationQuery(at: 1, with: .authorized)
+        await newerRefresh.value
+        center.resolveAuthorizationQuery(at: 0, with: .denied)
+        await olderRefresh.value
+
+        let latest = await snapshots.next()
+        XCTAssertEqual(latest?.authorizationState, .authorized)
+    }
+
+    func testCancelledAuthorizationRefreshDoesNotPublishItsLateResult() async {
+        let center = ControllableReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer()
+        )
+
+        let refresh = Task { @MainActor in
+            await controller.refreshAuthorizationState()
+        }
+        await waitForAuthorizationQueries(1, in: center)
+        refresh.cancel()
+        center.resolveAuthorizationQuery(at: 0, with: .denied)
+        await refresh.value
+
+        var snapshots = controller.snapshots().makeAsyncIterator()
+        let current = await snapshots.next()
+        XCTAssertEqual(current?.authorizationState, .notDetermined)
+    }
+
     func testDeliveryFailurePublishesDeliveryUnavailableWithoutThrowing() async {
         let center = RecordingReceiveNotificationCenter(status: .authorized)
         center.deliveryError = TestError.deliveryUnavailable
@@ -168,6 +218,42 @@ final class ReceiveNotificationControllerTests: XCTestCase {
 
         await fulfillment(of: [completion], timeout: 1)
     }
+
+    private func waitForAuthorizationQueries(
+        _ count: Int,
+        in center: ControllableReceiveNotificationCenter
+    ) async {
+        for _ in 0..<100 where center.authorizationQueryCount < count {
+            await Task.yield()
+        }
+        XCTAssertEqual(center.authorizationQueryCount, count)
+    }
+}
+
+@MainActor
+private final class ControllableReceiveNotificationCenter: ReceiveNotificationCenter {
+    private(set) var authorizationQueryCount = 0
+    private var pendingQueries: [CheckedContinuation<ReceiveNotificationAuthorizationState, Never>?] = []
+
+    func authorizationState() async -> ReceiveNotificationAuthorizationState {
+        authorizationQueryCount += 1
+        return await withCheckedContinuation { continuation in
+            pendingQueries.append(continuation)
+        }
+    }
+
+    func resolveAuthorizationQuery(
+        at index: Int,
+        with state: ReceiveNotificationAuthorizationState
+    ) {
+        let continuation = pendingQueries[index]
+        pendingQueries[index] = nil
+        continuation?.resume(returning: state)
+    }
+
+    func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .denied }
+    func deliver(_ request: ReceiveNotificationRequest) async throws {}
+    func openSystemSettings() {}
 }
 
 @MainActor

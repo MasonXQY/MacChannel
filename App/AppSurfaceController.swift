@@ -64,6 +64,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private var historyTask: Task<Void, Never>?
     private var softwareUpdateTask: Task<Void, Never>?
     private var receiveNotificationTask: Task<Void, Never>?
+    private var receiveNotificationRefreshTask: Task<Void, Never>?
+    private var receiveNotificationRefreshGeneration: UInt = 0
 
     init(
         fanPanel: DeviceFanPanel = DeviceFanPanel(),
@@ -216,8 +218,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     func refreshReceiveNotifications() async {
-        guard let notificationService else { return }
-        await notificationService.refreshReceiveNotifications()
+        guard let task = startReceiveNotificationRefresh() else { return }
+        await task.value
     }
 
     func updatePresence(_ devices: [DeviceSummary]) {
@@ -438,9 +440,12 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         historyTask?.cancel()
         softwareUpdateTask?.cancel()
         receiveNotificationTask?.cancel()
+        receiveNotificationRefreshGeneration &+= 1
+        receiveNotificationRefreshTask?.cancel()
         historyTask = nil
         softwareUpdateTask = nil
         receiveNotificationTask = nil
+        receiveNotificationRefreshTask = nil
         transferTokens.removeAll()
         latestSnapshots.removeAll()
         lastLiveItems.removeAll()
@@ -484,9 +489,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     private func showSettings(relativeTo anchor: NSView) {
-        Task { [weak self] in
-            await self?.refreshReceiveNotifications()
-        }
+        startReceiveNotificationRefresh()
         let popover = configuredPopover()
         popover.contentViewController = NSHostingController(
             rootView: SettingsView(
@@ -499,6 +502,27 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
             )
         )
         show(popover, relativeTo: anchor)
+    }
+
+    @discardableResult
+    private func startReceiveNotificationRefresh() -> Task<Void, Never>? {
+        receiveNotificationRefreshGeneration &+= 1
+        let generation = receiveNotificationRefreshGeneration
+        receiveNotificationRefreshTask?.cancel()
+        guard let notificationService else {
+            receiveNotificationRefreshTask = nil
+            return nil
+        }
+        let task = Task { [weak self, notificationService] in
+            await notificationService.refreshReceiveNotifications()
+            guard !Task.isCancelled,
+                  let self,
+                  generation == receiveNotificationRefreshGeneration
+            else { return }
+            receiveNotificationRefreshTask = nil
+        }
+        receiveNotificationRefreshTask = task
+        return task
     }
 
     private func configuredPopover() -> NSPopover {
