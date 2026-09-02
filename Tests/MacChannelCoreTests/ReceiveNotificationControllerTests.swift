@@ -110,6 +110,42 @@ final class ReceiveNotificationControllerTests: XCTestCase {
 
         XCTAssertTrue(finder.revealedURLs.isEmpty)
     }
+
+    func testNotificationIdentifierCanRevealItsTargetOnlyOnce() async throws {
+        let center = RecordingReceiveNotificationCenter(status: .authorized)
+        let finder = RecordingReceiveTargetRevealer()
+        let controller = ReceiveNotificationController(center: center, revealer: finder)
+        let file = URL(fileURLWithPath: "/tmp/Downloads/plan.pdf")
+
+        await controller.notify(receive: TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [file]
+        ))
+
+        let identifier = try XCTUnwrap(center.requests.first?.identifier)
+        controller.openNotification(identifier: identifier)
+        controller.openNotification(identifier: identifier)
+
+        XCTAssertEqual(finder.revealedURLs, [[file]])
+    }
+
+    func testSystemResponseCompletesAfterItsMainActorHandler() async {
+        let completion = expectation(description: "system response completion")
+        var handledIdentifiers: [String] = []
+
+        SystemReceiveNotificationCenter.dispatchNotificationResponse(
+            identifier: "dropmesh.receive.test",
+            responseHandler: { identifier in
+                handledIdentifiers.append(identifier)
+            },
+            completionHandler: {
+                XCTAssertEqual(handledIdentifiers, ["dropmesh.receive.test"])
+                completion.fulfill()
+            }
+        )
+
+        await fulfillment(of: [completion], timeout: 1)
+    }
 }
 
 @MainActor

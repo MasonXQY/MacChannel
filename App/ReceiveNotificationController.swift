@@ -136,7 +136,9 @@ final class ReceiveNotificationController {
     }
 
     func openNotification(identifier: String) {
-        guard let urls = notificationTargets[identifier], !urls.isEmpty else { return }
+        guard let urls = notificationTargets.removeValue(forKey: identifier), !urls.isEmpty else {
+            return
+        }
         revealer.reveal(urls)
     }
 
@@ -193,6 +195,18 @@ final class SystemReceiveNotificationCenter: NSObject, ReceiveNotificationCenter
         responseHandler = handler
     }
 
+    nonisolated static func dispatchNotificationResponse(
+        identifier: String,
+        responseHandler: @escaping @MainActor (String) -> Void,
+        completionHandler: @escaping () -> Void
+    ) {
+        let completion = NotificationResponseCompletion(completionHandler)
+        Task { @MainActor in
+            responseHandler(identifier)
+            completion.call()
+        }
+    }
+
     func authorizationState() async -> ReceiveNotificationAuthorizationState {
         let settings = await center.notificationSettings()
         return Self.authorizationState(for: settings.authorizationStatus)
@@ -243,6 +257,18 @@ final class SystemReceiveNotificationCenter: NSObject, ReceiveNotificationCenter
     }
 }
 
+private final class NotificationResponseCompletion: @unchecked Sendable {
+    private let handler: () -> Void
+
+    init(_ handler: @escaping () -> Void) {
+        self.handler = handler
+    }
+
+    func call() {
+        handler()
+    }
+}
+
 extension SystemReceiveNotificationCenter: UNUserNotificationCenterDelegate {
     nonisolated func userNotificationCenter(
         _: UNUserNotificationCenter,
@@ -250,10 +276,13 @@ extension SystemReceiveNotificationCenter: UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let identifier = response.notification.request.identifier
-        Task { @MainActor [weak self] in
-            self?.responseHandler?(identifier)
-        }
-        completionHandler()
+        Self.dispatchNotificationResponse(
+            identifier: identifier,
+            responseHandler: { [weak self] identifier in
+                self?.responseHandler?(identifier)
+            },
+            completionHandler: completionHandler
+        )
     }
 }
 
