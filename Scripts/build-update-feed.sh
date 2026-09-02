@@ -26,8 +26,13 @@ if [[ "$update_testing" != 1 && \
       -n "${MACCHANNEL_UPDATE_TEST_MUTATION:-}" || \
       -n "${MACCHANNEL_UPDATE_SECURITY_COMMAND:-}" || \
       -n "${MACCHANNEL_UPDATE_CODESIGN_COMMAND:-}" || \
+      -n "${MACCHANNEL_UPDATE_STAPLER_COMMAND:-}" || \
+      -n "${MACCHANNEL_UPDATE_SPCTL_COMMAND:-}" || \
       -n "${MACCHANNEL_UPDATE_TEST_ED_KEY_FILE:-}" || \
-      -n "${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}" ) ]]; then
+      -n "${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}" || \
+      -n "${MACCHANNEL_UPDATE_TEST_KEY_ACCESS_MARKER:-}" || \
+      -n "${MACCHANNEL_UPDATE_VALIDATOR_MARKER:-}" || \
+      -n "${MACCHANNEL_UPDATE_VALIDATOR_FAIL:-}" ) ]]; then
     printf 'update-feed failure stage=test version=%s build=%s\n' \
         "$version" "$build_number" >&2
     exit 2
@@ -99,6 +104,16 @@ clean_codesign_tool() {
         MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT="${MACCHANNEL_CODESIGN_FIXTURE_REQUIREMENT:-}" \
         "$@"
 }
+clean_dmg_codesign_tool() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        /usr/bin/codesign "$@"
+}
+clean_dmg_validation_tool() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+        MACCHANNEL_UPDATE_VALIDATOR_MARKER="${MACCHANNEL_UPDATE_VALIDATOR_MARKER:-}" \
+        MACCHANNEL_UPDATE_VALIDATOR_FAIL="${MACCHANNEL_UPDATE_VALIDATOR_FAIL:-}" \
+        "$@"
+}
 clean_update_tool() {
     env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C "$@"
 }
@@ -129,6 +144,11 @@ if [[ -n "$requested_codesign_command" ]]; then
         fail_feed test 2
     codesign_command="$requested_codesign_command"
 fi
+requested_stapler_command="${MACCHANNEL_UPDATE_STAPLER_COMMAND:-}"
+requested_spctl_command="${MACCHANNEL_UPDATE_SPCTL_COMMAND:-}"
+test_key_access_marker="${MACCHANNEL_UPDATE_TEST_KEY_ACCESS_MARKER:-}"
+validator_marker="${MACCHANNEL_UPDATE_VALIDATOR_MARKER:-}"
+validator_failure="${MACCHANNEL_UPDATE_VALIDATOR_FAIL:-}"
 test_ed_key_file="${MACCHANNEL_UPDATE_TEST_ED_KEY_FILE:-}"
 test_public_key_path="${MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH:-}"
 if [[ "$update_testing" == 1 ]]; then
@@ -143,9 +163,44 @@ if [[ "$update_testing" == 1 ]]; then
     [[ -z "$requested_codesign_command" ]] || \
         macchannel_require_contained_regular_file "${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
             "$requested_codesign_command" || fail_feed test 2
+    [[ -n "$requested_stapler_command" && -n "$requested_spctl_command" && \
+        -n "$test_key_access_marker" && -n "$validator_marker" ]] || fail_feed test 2
+    for requested_validator in "$requested_stapler_command" "$requested_spctl_command"; do
+        macchannel_require_contained_regular_file "${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
+            "$requested_validator" || fail_feed test 2
+        [[ -x "$requested_validator" ]] || fail_feed test 2
+    done
+    [[ "$test_key_access_marker" == \
+        "${MACCHANNEL_UPDATE_TEST_ROOT:-}/private-key-access.marker" ]] || fail_feed test 2
+    macchannel_require_direct_child_path "${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
+        "$test_key_access_marker" private-key-access.marker || fail_feed test 2
+    [[ "$validator_marker" == \
+        "${MACCHANNEL_UPDATE_TEST_ROOT:-}/dmg-validation.marker" ]] || fail_feed test 2
+    macchannel_require_direct_child_path "${MACCHANNEL_UPDATE_TEST_ROOT:-}" \
+        "$validator_marker" dmg-validation.marker || fail_feed test 2
+    case "$validator_failure" in
+        ""|stapler|gatekeeper) ;;
+        *) fail_feed test 2 ;;
+    esac
 elif [[ -n "$test_ed_key_file" || -n "$test_public_key_path" ]]; then
     fail_feed test 2
 fi
+run_stapler_validate() {
+    if [[ -n "$requested_stapler_command" ]]; then
+        clean_dmg_validation_tool "$requested_stapler_command" validate "$dmg_path"
+    else
+        clean_dmg_validation_tool /usr/bin/xcrun stapler validate "$dmg_path"
+    fi
+}
+run_spctl_open() {
+    if [[ -n "$requested_spctl_command" ]]; then
+        clean_dmg_validation_tool "$requested_spctl_command" --assess --type open \
+            --context context:primary-signature --verbose=2 "$dmg_path"
+    else
+        clean_dmg_validation_tool /usr/sbin/spctl --assess --type open \
+            --context context:primary-signature --verbose=2 "$dmg_path"
+    fi
+}
 [[ -f "$dmg_path" && ! -L "$dmg_path" ]] || fail_feed assets
 [[ -f "$manifest_path" && ! -L "$manifest_path" ]] || fail_feed assets
 [[ -f "$release_notes" && ! -L "$release_notes" && -s "$release_notes" ]] || fail_feed input
@@ -184,6 +239,19 @@ expected_anchor_requirement='identifier "com.mason.macchannel" and anchor apple 
     "$manifest_requirement" == "$anchor_requirement" ]] || fail_feed manifest
 actual_dmg_sha="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
 [[ "$actual_dmg_sha" == "$manifest_dmg_sha" ]] || fail_feed manifest
+
+# releaseState is audit metadata only. The container itself must independently
+# prove its production signer, stapled notarization ticket, and Gatekeeper state
+# before the Sparkle private-key boundary is reached.
+clean_dmg_codesign_tool --verify --strict --verbose=2 "$dmg_path" || fail_feed identity
+if ! dmg_identity="$(clean_dmg_codesign_tool -dvvv "$dmg_path" 2>&1)"; then
+    fail_feed identity
+fi
+actual_dmg_team_id="$(sed -n 's/^TeamIdentifier=//p' <<<"$dmg_identity" | tail -n 1)"
+unset dmg_identity
+[[ "$actual_dmg_team_id" == "$anchor_team_id" ]] || fail_feed identity
+run_stapler_validate || fail_feed identity
+run_spctl_open || fail_feed identity
 
 identity_mount_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-update-identity.XXXXXX")"
 chmod 700 "$identity_mount_root"
@@ -254,6 +322,7 @@ public_key="$(tr -d '\r\n' <"$public_key_source")"
 public_key_length="$(printf '%s' "$public_key" | base64 -D 2>/dev/null | wc -c | tr -d ' ')"
 [[ "$public_key_length" == 32 ]] || fail_feed key
 if [[ "$update_testing" == 1 ]]; then
+    : >"$test_key_access_marker"
     [[ "$(stat -f %Lp "$test_ed_key_file")" =~ ^[0-7]*00$ ]] || fail_feed key
     signing_key_arguments=(--ed-key-file "$test_ed_key_file")
 else

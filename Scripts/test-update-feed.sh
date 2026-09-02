@@ -9,11 +9,17 @@ if [[ ! -x Scripts/build-update-feed.sh ]]; then
     echo "Scripts/build-update-feed.sh is missing or not executable" >&2
     exit 1
 fi
+grep -F '/usr/bin/codesign "$@"' Scripts/build-update-feed.sh >/dev/null
+grep -F '/usr/bin/xcrun stapler validate "$dmg_path"' \
+    Scripts/build-update-feed.sh >/dev/null
+grep -F '/usr/sbin/spctl --assess --type open' Scripts/build-update-feed.sh >/dev/null
 
 version=1.2.2
 build_number=15
 account=com.mason.macchannel.updates
 generate_appcast="$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast"
+signing_home="${HOME:?}"
+signing_tmp="${TMPDIR:-/tmp}"
 
 test_root="$(macchannel_create_test_root macchannel-update-feed-test)"
 macchannel_require_canonical_test_root "$test_root"
@@ -25,11 +31,16 @@ release_notes="$repo_root/Distribution/ReleaseNotes/v1.2.2.md"
 security_shim="$test_root/security-missing-key"
 fake_login_keychain="$test_root/fake-login.keychain-db"
 codesign_shim="$test_root/codesign-update-fixture"
+stapler_shim="$test_root/stapler-update-fixture"
+spctl_shim="$test_root/spctl-update-fixture"
+validator_marker="$test_root/dmg-validation.marker"
+key_access_marker="$test_root/private-key-access.marker"
 test_private_pem="$test_root/sparkle-private.pem"
 test_private_key="$test_root/sparkle-private.key"
 test_public_key="$test_root/sparkle-public.key"
 fixture_team_id=XKAZ67HN45
 fixture_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = XKAZ67HN45'
+primary_identity='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)'
 
 snapshot_dist() {
     local root="$1"
@@ -78,6 +89,9 @@ chmod 700 "$test_root" "$fixture_root" "$test_dist"
 clean_fixture_tool() {
     env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$test_root/" LANG=C LC_ALL=C "$@"
 }
+clean_signing_tool() {
+    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C "$@"
+}
 
 # Characterize the shared resolver against a synthetic repository that already
 # contains uploadable-looking formal assets. Test output must resolve elsewhere.
@@ -119,10 +133,30 @@ ln -s /Applications "$test_root/applications-alias"
 test "$outside_sha" = "$(shasum -a 256 "$outside_root/sentinel" | awk '{print $1}')"
 cp Tests/Fixtures/security-missing-key.sh "$security_shim"
 cp Tests/Fixtures/codesign-update-fixture.sh "$codesign_shim"
-chmod 700 "$security_shim"
-chmod 700 "$codesign_shim"
+cat >"$stapler_shim" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -eq 2 && "$1" == validate && -f "$2" ]]
+printf 'stapler\t%s\n' "$2" >>"$MACCHANNEL_UPDATE_VALIDATOR_MARKER"
+[[ "${MACCHANNEL_UPDATE_VALIDATOR_FAIL:-}" != stapler ]]
+SH
+cat >"$spctl_shim" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -ge 7 && "$1" == --assess && "$2" == --type && "$3" == open ]]
+[[ "$4" == --context && "$5" == context:primary-signature && "$6" == --verbose=2 ]]
+[[ -f "${@: -1}" ]]
+printf 'spctl-open\t%s\n' "${@: -1}" >>"$MACCHANNEL_UPDATE_VALIDATOR_MARKER"
+[[ "${MACCHANNEL_UPDATE_VALIDATOR_FAIL:-}" != gatekeeper ]]
+SH
+chmod 700 "$security_shim" "$codesign_shim" "$stapler_shim" "$spctl_shim"
 : >"$fake_login_keychain"
 chmod 600 "$fake_login_keychain"
+if ! /usr/bin/security find-identity -v -p codesigning | \
+    grep -F "\"$primary_identity\"" >/dev/null; then
+    echo "update-feed adversarial test requires the production identity" >&2
+    exit 2
+fi
 clean_fixture_tool openssl genpkey -algorithm Ed25519 -out "$test_private_pem" >/dev/null 2>&1
 clean_fixture_tool openssl pkey -in "$test_private_pem" -outform DER 2>/dev/null | tail -c 32 | \
     base64 >"$test_private_key"
@@ -147,7 +181,13 @@ plutil -insert CFBundleDisplayName -string DropMesh "$fixture_localized_info"
 plutil -insert CFBundleName -string DropMesh "$fixture_localized_info"
 plutil -replace SUPublicEDKey -string "$public_key" "$fixture_plist"
 plutil -replace SURequireSignedFeed -bool true "$fixture_plist"
-clean_fixture_tool codesign --remove-signature "$fixture_root/app/MacChannel.app" >/dev/null 2>&1 || true
+/bin/mv "$fixture_root/app/MacChannel.app/Contents/MacOS/Sparkle Test App" \
+    "$fixture_root/app/MacChannel.app/Contents/MacOS/MacChannelApp"
+clean_fixture_tool xattr -cr "$fixture_root/app/MacChannel.app"
+clean_signing_tool /usr/bin/codesign --force --deep --options runtime --timestamp=none \
+    --sign "$primary_identity" "$fixture_root/app/MacChannel.app" >/dev/null 2>&1
+clean_signing_tool /usr/bin/codesign --verify --deep --strict \
+    --test-requirement "=$fixture_requirement" "$fixture_root/app/MacChannel.app"
 clean_fixture_tool hdiutil create \
     -srcfolder "$fixture_root/app" \
     -volname "DropMesh" \
@@ -155,6 +195,8 @@ clean_fixture_tool hdiutil create \
     -format UDZO \
     -ov \
     "$fixture_dmg" >/dev/null
+clean_signing_tool /usr/bin/codesign --force --sign "$primary_identity" --timestamp=none \
+    "$fixture_dmg" >/dev/null 2>&1
 
 if [[ ! -s "$release_notes" ]]; then
     echo "tracked Chinese release notes are missing" >&2
@@ -213,9 +255,14 @@ run_feed_builder() {
         MACCHANNEL_UPDATE_TEST_FAIL_STAGE="${MACCHANNEL_TEST_FAIL_STAGE:-}" \
         MACCHANNEL_UPDATE_TEST_MUTATION="${MACCHANNEL_TEST_MUTATION:-}" \
         MACCHANNEL_UPDATE_SECURITY_COMMAND="${MACCHANNEL_TEST_SECURITY_COMMAND:-$security_shim}" \
-        MACCHANNEL_UPDATE_CODESIGN_COMMAND="${MACCHANNEL_TEST_CODESIGN_COMMAND:-$codesign_shim}" \
+        MACCHANNEL_UPDATE_CODESIGN_COMMAND="${MACCHANNEL_TEST_CODESIGN_COMMAND:-}" \
+        MACCHANNEL_UPDATE_STAPLER_COMMAND="${MACCHANNEL_TEST_STAPLER_COMMAND:-$stapler_shim}" \
+        MACCHANNEL_UPDATE_SPCTL_COMMAND="${MACCHANNEL_TEST_SPCTL_COMMAND:-$spctl_shim}" \
         MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$ed_key_file" \
         MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$public_key_path" \
+        MACCHANNEL_UPDATE_TEST_KEY_ACCESS_MARKER="${MACCHANNEL_TEST_KEY_ACCESS_MARKER:-$key_access_marker}" \
+        MACCHANNEL_UPDATE_VALIDATOR_MARKER="$validator_marker" \
+        MACCHANNEL_UPDATE_VALIDATOR_FAIL="${MACCHANNEL_TEST_VALIDATOR_FAIL:-}" \
         MACCHANNEL_SECURITY_SHIM_MARKER="${MACCHANNEL_TEST_SECURITY_MARKER:-}" \
         MACCHANNEL_SECURITY_SHIM_NOISE="${MACCHANNEL_TEST_SECURITY_NOISE:-}" \
         MACCHANNEL_SECURITY_SHIM_LOGIN_KEYCHAIN="$fake_login_keychain" \
@@ -297,6 +344,16 @@ expect_failure() {
     assert_redacted_output "$test_root/expected-failure.log"
 }
 
+assert_pre_key_identity_failure() {
+    local label="$1"
+    rm -f "$key_access_marker" "$validator_marker"
+    MACCHANNEL_EXPECT_LABEL="$label" expect_failure identity run_feed_builder
+    [[ ! -e "$key_access_marker" ]]
+    [[ ! -e "$test_dist/appcast.xml" && ! -e "$test_dist/.appcast.xml.new" ]]
+    test -z "$(find "$test_root" -maxdepth 1 -type d \
+        -name 'macchannel-update-identity.*' -print -quit)"
+}
+
 prepare_fixture
 mv "$test_dist/DropMesh.dmg" "$test_root/missing.dmg"
 expect_failure assets run_feed_builder
@@ -320,6 +377,40 @@ plutil -replace dmgSHA256 -string \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     "$test_dist/DropMesh.manifest.json"
 expect_failure manifest run_feed_builder
+
+# RED on the vulnerable standalone feed builder: releaseState was only unsigned
+# metadata, so a repackaged container around the genuine production-anchored App
+# reached the Sparkle private-key boundary when its forged manifest hash agreed.
+prepare_fixture
+unsigned_stage="$test_root/repackaged-unsigned-stage"
+mkdir -p "$unsigned_stage"
+ditto "$fixture_root/app/MacChannel.app" "$unsigned_stage/MacChannel.app"
+clean_fixture_tool hdiutil create -srcfolder "$unsigned_stage" -volname DropMesh -fs HFS+ \
+    -format UDZO -ov "$test_dist/DropMesh.dmg" >/dev/null
+plutil -replace dmgSHA256 -string \
+    "$(shasum -a 256 "$test_dist/DropMesh.dmg" | awk '{print $1}')" \
+    "$test_dist/DropMesh.manifest.json"
+assert_pre_key_identity_failure repackaged-unsigned-dmg
+
+prepare_fixture
+clean_signing_tool /usr/bin/codesign --force --sign - \
+    "$test_dist/DropMesh.dmg" >/dev/null 2>&1
+plutil -replace dmgSHA256 -string \
+    "$(shasum -a 256 "$test_dist/DropMesh.dmg" | awk '{print $1}')" \
+    "$test_dist/DropMesh.manifest.json"
+assert_pre_key_identity_failure non-production-team-dmg
+
+for validator_failure in stapler gatekeeper; do
+    prepare_fixture
+    rm -f "$key_access_marker" "$validator_marker"
+    MACCHANNEL_TEST_VALIDATOR_FAIL="$validator_failure" \
+    MACCHANNEL_EXPECT_LABEL="$validator_failure" \
+        expect_failure identity run_feed_builder
+    [[ ! -e "$key_access_marker" ]]
+    test -f "$validator_marker"
+    test -z "$(find "$test_root" -maxdepth 1 -type d \
+        -name 'macchannel-update-identity.*' -print -quit)"
+done
 
 prepare_fixture
 MACCHANNEL_TEST_RELEASE_NOTES="$test_root/missing.md" expect_failure input run_feed_builder
@@ -361,6 +452,25 @@ MACCHANNEL_TEST_SECURITY_COMMAND="$repo_root/Tests/Fixtures/security-missing-key
 MACCHANNEL_EXPECT_LABEL=external-security-shim \
     expect_failure test run_feed_builder
 
+for external_validator in stapler spctl; do
+    prepare_fixture
+    if [[ "$external_validator" == stapler ]]; then
+        MACCHANNEL_TEST_STAPLER_COMMAND=/usr/bin/xcrun \
+        MACCHANNEL_EXPECT_LABEL=external-stapler-shim \
+            expect_failure test run_feed_builder
+    else
+        MACCHANNEL_TEST_SPCTL_COMMAND=/usr/sbin/spctl \
+        MACCHANNEL_EXPECT_LABEL=external-spctl-shim \
+            expect_failure test run_feed_builder
+    fi
+done
+
+prepare_fixture
+MACCHANNEL_TEST_KEY_ACCESS_MARKER="$repo_root/private-key-access.marker" \
+MACCHANNEL_EXPECT_LABEL=external-key-access-marker \
+    expect_failure test run_feed_builder
+[[ ! -e "$repo_root/private-key-access.marker" ]]
+
 prepare_fixture
 wrong_team=WRONGTEAM2
 wrong_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate leaf[subject.OU] = "WRONGTEAM2"'
@@ -376,6 +486,7 @@ MACCHANNEL_TEST_CODESIGN_ANCHOR_MATCH=fail \
     expect_failure manifest run_feed_builder
 [[ ! -e "$pre_key_marker" ]]
 prepare_fixture
+MACCHANNEL_TEST_CODESIGN_COMMAND="$codesign_shim" \
 MACCHANNEL_TEST_CODESIGN_REQUIREMENT='identifier "com.mason.macchannel" and anchor apple generic and certificate leaf[subject.OU] = "TESTTEAM01" and true' \
 MACCHANNEL_TEST_CODESIGN_ANCHOR_MATCH=fail \
     expect_failure identity run_feed_builder
@@ -383,6 +494,7 @@ MACCHANNEL_TEST_CODESIGN_ANCHOR_MATCH=fail \
 prepare_fixture
 development_anchor_marker="$test_root/apple-development-anchor-checked"
 development_key_marker="$test_root/apple-development-key-accessed"
+MACCHANNEL_TEST_CODESIGN_COMMAND="$codesign_shim" \
 MACCHANNEL_TEST_CODESIGN_CERT_CLASS=apple-development \
 MACCHANNEL_TEST_ANCHOR_MARKER="$development_anchor_marker" \
 MACCHANNEL_TEST_SECURITY_MARKER="$development_key_marker" \
@@ -408,6 +520,8 @@ rebuild_fixture_dmg() {
     esac
     clean_fixture_tool hdiutil create -srcfolder "$variant_root/app" -volname "DropMesh" -fs HFS+ \
         -format UDZO -ov "$fixture_dmg" >/dev/null
+    clean_signing_tool /usr/bin/codesign --force --sign "$primary_identity" --timestamp=none \
+        "$fixture_dmg" >/dev/null 2>&1
     plutil -replace dmgSHA256 -string \
         "$(shasum -a 256 "$fixture_dmg" | awk '{print $1}')" "$fixture_manifest"
 }
@@ -420,6 +534,7 @@ expect_post_mount_identity_failure() {
     local key_marker="$test_root/post-mount-$name-key-accessed"
     MACCHANNEL_TEST_POST_MOUNT_MARKER="$post_mount_marker" \
     MACCHANNEL_TEST_SECURITY_MARKER="$key_marker" \
+    MACCHANNEL_TEST_CODESIGN_COMMAND="$codesign_shim" \
     MACCHANNEL_TEST_CODESIGN_BUNDLE_ID="$actual_bundle" \
     MACCHANNEL_TEST_CODESIGN_TEAM_ID="$actual_team" \
     MACCHANNEL_TEST_CODESIGN_REQUIREMENT="$actual_requirement" \
@@ -570,8 +685,12 @@ env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$test_root/" LANG=C LC_ALL=C 
     MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
     MACCHANNEL_UPDATE_SECURITY_COMMAND="$security_shim" \
     MACCHANNEL_UPDATE_CODESIGN_COMMAND="$codesign_shim" \
+    MACCHANNEL_UPDATE_STAPLER_COMMAND="$stapler_shim" \
+    MACCHANNEL_UPDATE_SPCTL_COMMAND="$spctl_shim" \
     MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$test_private_key" \
     MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$test_public_key" \
+    MACCHANNEL_UPDATE_TEST_KEY_ACCESS_MARKER="$key_access_marker" \
+    MACCHANNEL_UPDATE_VALIDATOR_MARKER="$validator_marker" \
     MACCHANNEL_CODESIGN_FIXTURE_VERIFY=pass \
     MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MATCH=pass \
     MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID=com.mason.macchannel \
@@ -603,8 +722,12 @@ env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$test_root/" LANG=C LC_ALL=C 
     MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT="$fixture_root" \
     MACCHANNEL_UPDATE_SECURITY_COMMAND="$security_shim" \
     MACCHANNEL_UPDATE_CODESIGN_COMMAND="$codesign_shim" \
+    MACCHANNEL_UPDATE_STAPLER_COMMAND="$stapler_shim" \
+    MACCHANNEL_UPDATE_SPCTL_COMMAND="$spctl_shim" \
     MACCHANNEL_UPDATE_TEST_ED_KEY_FILE="$test_private_key" \
     MACCHANNEL_UPDATE_TEST_PUBLIC_KEY_PATH="$test_public_key" \
+    MACCHANNEL_UPDATE_TEST_KEY_ACCESS_MARKER="$key_access_marker" \
+    MACCHANNEL_UPDATE_VALIDATOR_MARKER="$validator_marker" \
     MACCHANNEL_CODESIGN_FIXTURE_VERIFY=pass \
     MACCHANNEL_CODESIGN_FIXTURE_ANCHOR_MATCH=pass \
     MACCHANNEL_CODESIGN_FIXTURE_BUNDLE_ID=com.mason.macchannel \
