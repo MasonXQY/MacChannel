@@ -151,6 +151,47 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(current?.authorizationState, .notDetermined)
     }
 
+    func testRefreshDuringAuthorizationRequestCannotSuppressFirstNotification() async {
+        let center = ControllableReceiveNotificationCenter()
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer()
+        )
+        let file = URL(fileURLWithPath: "/tmp/Downloads/plan.pdf")
+
+        let notification = Task { @MainActor in
+            await controller.notify(receive: TransferReceiveResult(
+                transferID: TransferID(rawValue: UUID()),
+                receivedURLs: [file]
+            ))
+        }
+        await waitForAuthorizationQueries(1, in: center)
+        center.resolveAuthorizationQuery(at: 0, with: .notDetermined)
+        await waitForAuthorizationRequests(1, in: center)
+
+        let refresh = Task { @MainActor in
+            await controller.refreshAuthorizationState()
+        }
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+
+        let refreshStartedASecondQuery = center.authorizationQueryCount > 1
+        if refreshStartedASecondQuery {
+            center.resolveAuthorizationQuery(at: 1, with: .notDetermined)
+        }
+        center.resolveAuthorizationRequest(at: 0, with: .authorized)
+        await notification.value
+        await refresh.value
+
+        XCTAssertFalse(refreshStartedASecondQuery)
+        XCTAssertEqual(center.requests.count, 1)
+        XCTAssertEqual(center.requests.first?.content.body, "plan.pdf 已保存到接收文件夹")
+        var snapshots = controller.snapshots().makeAsyncIterator()
+        let current = await snapshots.next()
+        XCTAssertEqual(current?.authorizationState, .authorized)
+    }
+
     func testDeliveryFailurePublishesDeliveryUnavailableWithoutThrowing() async {
         let center = RecordingReceiveNotificationCenter(status: .authorized)
         center.deliveryError = TestError.deliveryUnavailable
@@ -228,12 +269,25 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         }
         XCTAssertEqual(center.authorizationQueryCount, count)
     }
+
+    private func waitForAuthorizationRequests(
+        _ count: Int,
+        in center: ControllableReceiveNotificationCenter
+    ) async {
+        for _ in 0..<100 where center.authorizationRequestCount < count {
+            await Task.yield()
+        }
+        XCTAssertEqual(center.authorizationRequestCount, count)
+    }
 }
 
 @MainActor
 private final class ControllableReceiveNotificationCenter: ReceiveNotificationCenter {
     private(set) var authorizationQueryCount = 0
+    private(set) var authorizationRequestCount = 0
+    private(set) var requests: [ReceiveNotificationRequest] = []
     private var pendingQueries: [CheckedContinuation<ReceiveNotificationAuthorizationState, Never>?] = []
+    private var pendingAuthorizationRequests: [CheckedContinuation<ReceiveNotificationAuthorizationState, Never>?] = []
 
     func authorizationState() async -> ReceiveNotificationAuthorizationState {
         authorizationQueryCount += 1
@@ -251,8 +305,25 @@ private final class ControllableReceiveNotificationCenter: ReceiveNotificationCe
         continuation?.resume(returning: state)
     }
 
-    func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .denied }
-    func deliver(_ request: ReceiveNotificationRequest) async throws {}
+    func requestAuthorization() async -> ReceiveNotificationAuthorizationState {
+        authorizationRequestCount += 1
+        return await withCheckedContinuation { continuation in
+            pendingAuthorizationRequests.append(continuation)
+        }
+    }
+
+    func resolveAuthorizationRequest(
+        at index: Int,
+        with state: ReceiveNotificationAuthorizationState
+    ) {
+        let continuation = pendingAuthorizationRequests[index]
+        pendingAuthorizationRequests[index] = nil
+        continuation?.resume(returning: state)
+    }
+
+    func deliver(_ request: ReceiveNotificationRequest) async throws {
+        requests.append(request)
+    }
     func openSystemSettings() {}
 }
 

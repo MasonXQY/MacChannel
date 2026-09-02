@@ -63,6 +63,8 @@ final class ReceiveNotificationController {
     private var notificationTargets: [String: [URL]] = [:]
     private var didRequestAuthorization = false
     private var authorizationQueryGeneration: UInt = 0
+    private var authorizationRequestGeneration: UInt = 0
+    private var authorizationRequestTask: Task<ReceiveNotificationAuthorizationState, Never>?
     private var snapshot = ReceiveNotificationSnapshot(authorizationState: .notDetermined)
 
     convenience init() {
@@ -87,20 +89,46 @@ final class ReceiveNotificationController {
     }
 
     func prepare() async {
-        let generation = beginAuthorizationQuery()
-        var state = await center.authorizationState()
-        if state == .notDetermined, !didRequestAuthorization {
-            didRequestAuthorization = true
-            state = await center.requestAuthorization()
+        if let authorizationRequestTask {
+            _ = await authorizationRequestTask.value
+            return
         }
-        guard !Task.isCancelled, generation == authorizationQueryGeneration else { return }
+
+        let generation = beginAuthorizationQuery()
+        let state = await center.authorizationState()
+        guard !Task.isCancelled else { return }
+
+        if let authorizationRequestTask {
+            _ = await authorizationRequestTask.value
+            return
+        }
+
+        if state == .notDetermined, !didRequestAuthorization {
+            let task = beginAuthorizationRequest()
+            _ = await task.value
+            return
+        }
+
+        guard generation == authorizationQueryGeneration else { return }
         publish(state)
     }
 
     func refreshAuthorizationState() async {
+        if let authorizationRequestTask {
+            _ = await authorizationRequestTask.value
+            return
+        }
+
         let generation = beginAuthorizationQuery()
         let state = await center.authorizationState()
-        guard !Task.isCancelled, generation == authorizationQueryGeneration else { return }
+        guard !Task.isCancelled else { return }
+
+        if let authorizationRequestTask {
+            _ = await authorizationRequestTask.value
+            return
+        }
+
+        guard generation == authorizationQueryGeneration else { return }
         publish(state)
     }
 
@@ -160,6 +188,35 @@ final class ReceiveNotificationController {
     private func beginAuthorizationQuery() -> UInt {
         authorizationQueryGeneration &+= 1
         return authorizationQueryGeneration
+    }
+
+    private func beginAuthorizationRequest() -> Task<ReceiveNotificationAuthorizationState, Never> {
+        if let authorizationRequestTask {
+            return authorizationRequestTask
+        }
+
+        didRequestAuthorization = true
+        authorizationRequestGeneration &+= 1
+        let requestGeneration = authorizationRequestGeneration
+        _ = beginAuthorizationQuery()
+        let center = center
+        let task = Task { @MainActor [weak self] in
+            let state = await center.requestAuthorization()
+            self?.completeAuthorizationRequest(state, generation: requestGeneration)
+            return state
+        }
+        authorizationRequestTask = task
+        return task
+    }
+
+    private func completeAuthorizationRequest(
+        _ state: ReceiveNotificationAuthorizationState,
+        generation: UInt
+    ) {
+        guard generation == authorizationRequestGeneration else { return }
+        authorizationRequestTask = nil
+        _ = beginAuthorizationQuery()
+        publish(state)
     }
 
     private func notificationBody(for urls: [URL]) -> String {

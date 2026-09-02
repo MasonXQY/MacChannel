@@ -940,3 +940,48 @@ swift test --scratch-path /tmp/dropmesh-task4-green.KBXHDT
 ## Concerns
 
 No blocker. The query generation is process-local by design; notification authorization remains the system source of truth and is re-queried on every Settings presentation.
+
+---
+
+# Task 4 third reviewer remediation: authorization request and refresh serialization
+
+## Outcome
+
+- Added a shared in-flight authorization request to `ReceiveNotificationController`. Every concurrent `prepare()` or Settings refresh now waits for the same system authorization result instead of launching a competing read-only query.
+- The request completion publishes its authoritative result before waiting notification flows resume, and advances the existing query generation so any older read-only refresh cannot overwrite it.
+- Preserved the existing refresh-vs-refresh latest-result guard, task-cancellation guard, and `AppSurfaceController.invalidate()` generation isolation.
+- Added a controlled interleaving regression that pauses both the initial authorization query and the system authorization request, starts a Settings refresh during the request, and proves the refresh does not suppress the first notification or its authorized snapshot.
+
+## RED evidence
+
+```bash
+swift test --scratch-path /tmp/dropmesh-task4-fix3-red.Ac7jYL \
+  --filter ReceiveNotificationControllerTests.testRefreshDuringAuthorizationRequestCannotSuppressFirstNotification
+```
+
+- Exit 1 before the production change, with four expected failures.
+- The refresh launched a second authorization query, no notification was delivered, and the final snapshot remained `.notDetermined` after the authorized request result was discarded.
+- No new residual test process remained after the run.
+
+## GREEN evidence
+
+```bash
+swift test --scratch-path /tmp/dropmesh-task4-fix3-green.BYJ7uV \
+  --filter 'ReceiveNotificationControllerTests|TransferSurfaceTests'
+swift test --scratch-path /tmp/dropmesh-task4-fix3-green.BYJ7uV
+```
+
+- Focused suites: 61 tests, 0 failures (`ReceiveNotificationControllerTests` 12/12 and `TransferSurfaceTests` 49/49).
+- Full Swift suite: 635 tests, 3 Docker-only skips, 0 failures.
+- The direct-LAN integrity harness passed with identical source and destination SHA-256 values.
+- The new controlled concurrency regression also passed 20 consecutive `--skip-build` runs.
+- `git diff --check` passed. Final residual-process checks showed only the pre-existing UE PIDs 25679, 28690, and 29145. Protected PIDs 38136, 49361, 80713, 82338, 25679, 28690, and 29145 were not signalled or killed.
+
+## Changed files
+
+- `App/ReceiveNotificationController.swift`
+- `Tests/MacChannelCoreTests/ReceiveNotificationControllerTests.swift`
+
+## Concerns
+
+No blocker. The system authorization prompt remains single-shot per process, and notification authorization remains system-owned; subsequent Settings presentations continue to refresh the external state.
