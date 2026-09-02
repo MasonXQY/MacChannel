@@ -5,13 +5,13 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-version="${MACCHANNEL_VERSION:-1.2.0}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
+version="${MACCHANNEL_VERSION:-1.2.2}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-15}"
 notary_profile="${MACCHANNEL_NOTARY_PROFILE:-}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 signing_home="${HOME:?}"
 signing_tmp="${TMPDIR:-/tmp}"
-volume_name="Mac 通道"
+volume_name="DropMesh"
 source "$repo_root/Scripts/update-test-paths.sh"
 [[ "$signing_home" == /* && -d "$signing_home" && ! -L "$signing_home" ]] || exit 2
 
@@ -58,11 +58,11 @@ fi
 mkdir -p "$dist_root"
 chmod 700 "$dist_root"
 rm -f \
-    "$dist_root/MacChannel.dmg" \
-    "$dist_root/MacChannel.manifest.json" \
+    "$dist_root/DropMesh.dmg" \
+    "$dist_root/DropMesh.manifest.json" \
     "$dist_root/appcast.xml" \
-    "$dist_root/.MacChannel.dmg.new" \
-    "$dist_root/.MacChannel.manifest.json.new" \
+    "$dist_root/.DropMesh.dmg.new" \
+    "$dist_root/.DropMesh.manifest.json.new" \
     "$dist_root/.appcast.xml.new"
 
 [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || \
@@ -73,14 +73,14 @@ rm -f \
 update_fixture_root="${MACCHANNEL_UPDATE_TEST_FIXTURE_ROOT:-}"
 if [[ "$update_testing" == 1 && -n "$update_fixture_root" ]]; then
     [[ -n "$release_notes" ]] || fail_usage "MACCHANNEL_RELEASE_NOTES is required"
-    fixture_dmg="$update_fixture_root/MacChannel.dmg"
-    fixture_manifest="$update_fixture_root/MacChannel.manifest.json"
+    fixture_dmg="$update_fixture_root/DropMesh.dmg"
+    fixture_manifest="$update_fixture_root/DropMesh.manifest.json"
     [[ -f "$fixture_dmg" && ! -L "$fixture_dmg" ]] || fail_usage "invalid update fixture"
     [[ -f "$fixture_manifest" && ! -L "$fixture_manifest" ]] || fail_usage "invalid update fixture"
-    cp "$fixture_dmg" "$dist_root/.MacChannel.dmg.new"
-    cp "$fixture_manifest" "$dist_root/.MacChannel.manifest.json.new"
-    mv "$dist_root/.MacChannel.dmg.new" "$dist_root/MacChannel.dmg"
-    mv "$dist_root/.MacChannel.manifest.json.new" "$dist_root/MacChannel.manifest.json"
+    cp "$fixture_dmg" "$dist_root/.DropMesh.dmg.new"
+    cp "$fixture_manifest" "$dist_root/.DropMesh.manifest.json.new"
+    mv "$dist_root/.DropMesh.dmg.new" "$dist_root/DropMesh.dmg"
+    mv "$dist_root/.DropMesh.manifest.json.new" "$dist_root/DropMesh.manifest.json"
     if ! env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
         MACCHANNEL_VERSION="$version" \
         MACCHANNEL_BUILD_NUMBER="$build_number" \
@@ -149,8 +149,8 @@ build_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-distribution.XXXXXX")"
 chmod 700 "$build_root"
 app_path="$build_root/MacChannel.app"
 stage_path="$build_root/stage"
-image_path="$build_root/MacChannel.dmg"
-manifest_path="$build_root/MacChannel.manifest.json"
+image_path="$build_root/DropMesh.dmg"
+manifest_path="$build_root/DropMesh.manifest.json"
 mount_path="$build_root/mounted"
 mounted=0
 published=0
@@ -164,11 +164,11 @@ cleanup() {
     rm -rf "$build_root"
     if [[ "$published" -ne 1 && "$base_assets_published" -ne 1 ]]; then
         rm -f \
-            "$dist_root/MacChannel.dmg" \
-            "$dist_root/MacChannel.manifest.json" \
+            "$dist_root/DropMesh.dmg" \
+            "$dist_root/DropMesh.manifest.json" \
             "$dist_root/appcast.xml" \
-            "$dist_root/.MacChannel.dmg.new" \
-            "$dist_root/.MacChannel.manifest.json.new" \
+            "$dist_root/.DropMesh.dmg.new" \
+            "$dist_root/.DropMesh.manifest.json.new" \
             "$dist_root/.appcast.xml.new"
     fi
     if [[ "$base_assets_published" -eq 1 && "$published" -ne 1 ]]; then
@@ -211,6 +211,10 @@ test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/
     "$version"
 test "$(plutil -extract CFBundleVersion raw -o - "$app_path/Contents/Info.plist")" = \
     "$build_number"
+test "$(plutil -extract CFBundleExecutable raw -o - "$app_path/Contents/Info.plist")" = \
+    MacChannelApp
+test "$(plutil -extract CFBundleName raw -o - "$app_path/Contents/Info.plist")" = DropMesh
+test "$(plutil -extract CFBundleDisplayName raw -o - "$app_path/Contents/Info.plist")" = DropMesh
 inject_failure app-verified
 
 mkdir -p "$stage_path"
@@ -314,7 +318,7 @@ dmg_sha="$(shasum -a 256 "$image_path" | awk '{print $1}')"
 git_commit="$(git rev-parse HEAD)"
 created_at="$(date -u -r "$source_epoch" +%Y-%m-%dT%H:%M:%SZ)"
 plutil -create xml1 "$manifest_path"
-plutil -insert product -string MacChannel "$manifest_path"
+plutil -insert product -string DropMesh "$manifest_path"
 plutil -insert bundleIdentifier -string com.mason.macchannel "$manifest_path"
 plutil -insert version -string "$version" "$manifest_path"
 plutil -insert build -string "$build_number" "$manifest_path"
@@ -334,11 +338,11 @@ plutil -insert containerReproducibility -string \
 plutil -convert json "$manifest_path"
 inject_failure manifest-ready
 
-mv "$image_path" "$dist_root/.MacChannel.dmg.new"
-mv "$manifest_path" "$dist_root/.MacChannel.manifest.json.new"
-mv "$dist_root/.MacChannel.dmg.new" "$dist_root/MacChannel.dmg"
-if ! mv "$dist_root/.MacChannel.manifest.json.new" "$dist_root/MacChannel.manifest.json"; then
-    rm -f "$dist_root/MacChannel.dmg" "$dist_root/.MacChannel.manifest.json.new"
+mv "$image_path" "$dist_root/.DropMesh.dmg.new"
+mv "$manifest_path" "$dist_root/.DropMesh.manifest.json.new"
+mv "$dist_root/.DropMesh.dmg.new" "$dist_root/DropMesh.dmg"
+if ! mv "$dist_root/.DropMesh.manifest.json.new" "$dist_root/DropMesh.manifest.json"; then
+    rm -f "$dist_root/DropMesh.dmg" "$dist_root/.DropMesh.manifest.json.new"
     exit 1
 fi
 base_assets_published=1

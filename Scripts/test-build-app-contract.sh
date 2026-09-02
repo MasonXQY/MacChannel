@@ -100,6 +100,8 @@ fi
 test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
 test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = DropMesh
 test "$(plutil -extract CFBundleIconFile raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.2.2
+test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 15
 test -s "$output_app/Contents/Resources/DropMesh.icns"
 
 iconset="$test_root/DropMesh.iconset"

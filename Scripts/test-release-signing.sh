@@ -2,8 +2,8 @@
 set -euo pipefail
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-version="${MACCHANNEL_VERSION:-1.2.0}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
+version="${MACCHANNEL_VERSION:-1.2.2}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-15}"
 signing_home="${HOME:?}"
 signing_tmp="${TMPDIR:-/tmp}"
 if [[ -z "$identity" ]]; then
@@ -75,6 +75,8 @@ if [[ "$bundle_identifier" != com.mason.macchannel ]]; then
     echo "CFBundleIdentifier changed: expected com.mason.macchannel, got $bundle_identifier" >&2
     exit 1
 fi
+test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = DropMesh
 test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
     "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
 test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$plist")" = true

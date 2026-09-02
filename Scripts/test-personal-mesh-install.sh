@@ -51,8 +51,8 @@ printf 'preserve-me\n' >"$data_root/settings.json"
 MACCHANNEL_INSTALL_TESTING=1 \
 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
     bash Scripts/install-personal-mesh.sh \
-    --dmg dist/MacChannel.dmg \
-    --manifest dist/MacChannel.manifest.json \
+    --dmg dist/DropMesh.dmg \
+    --manifest dist/DropMesh.manifest.json \
     --applications-dir "$applications" \
     --tailscale-cli "$fake_cli" \
     --expected-commit "$(git rev-parse HEAD)"
@@ -66,8 +66,8 @@ MACCHANNEL_INSTALL_TESTING=1 \
 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
 MACCHANNEL_INSTALL_FAIL_AT=after-backup \
     bash Scripts/install-personal-mesh.sh \
-    --dmg dist/MacChannel.dmg \
-    --manifest dist/MacChannel.manifest.json \
+    --dmg dist/DropMesh.dmg \
+    --manifest dist/DropMesh.manifest.json \
     --applications-dir "$applications" \
     --tailscale-cli "$fake_cli" \
     --expected-commit "$(git rev-parse HEAD)" >/dev/null 2>&1
@@ -87,37 +87,37 @@ expect_failure() {
 }
 
 expect_failure 2 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
-    bash Scripts/install-personal-mesh.sh --dmg dist/MacChannel.dmg \
-    --manifest dist/MacChannel.manifest.json --applications-dir "$applications" \
+    bash Scripts/install-personal-mesh.sh --dmg dist/DropMesh.dmg \
+    --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
     --tailscale-cli "$fake_cli" --expected-commit 0000000000000000000000000000000000000000
 
 logged_out="$test_root/tailscale-logged-out"
 sed 's/Running/Stopped/' "$fake_cli" >"$logged_out"
 chmod +x "$logged_out"
 expect_failure 2 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
-    bash Scripts/install-personal-mesh.sh --dmg dist/MacChannel.dmg \
-    --manifest dist/MacChannel.manifest.json --applications-dir "$applications" \
+    bash Scripts/install-personal-mesh.sh --dmg dist/DropMesh.dmg \
+    --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
     --tailscale-cli "$logged_out" --expected-commit "$(git rev-parse HEAD)"
 
 conflict="$test_root/tailscale-conflict"
 sed 's/{}/{"TCP":{"51337":{"TCPForward":"127.0.0.1:9999"}}}/' "$fake_cli" >"$conflict"
 chmod +x "$conflict"
 expect_failure 2 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
-    bash Scripts/install-personal-mesh.sh --dmg dist/MacChannel.dmg \
-    --manifest dist/MacChannel.manifest.json --applications-dir "$applications" \
+    bash Scripts/install-personal-mesh.sh --dmg dist/DropMesh.dmg \
+    --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
     --tailscale-cli "$conflict" --expected-commit "$(git rev-parse HEAD)"
 
 mv "$fake_cli" "$test_root/tailscale-missing"
 expect_failure 2 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
-    bash Scripts/install-personal-mesh.sh --dmg dist/MacChannel.dmg \
-    --manifest dist/MacChannel.manifest.json --applications-dir "$applications" \
+    bash Scripts/install-personal-mesh.sh --dmg dist/DropMesh.dmg \
+    --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
     --tailscale-cli "$fake_cli" --expected-commit "$(git rev-parse HEAD)"
 
-cp dist/MacChannel.dmg "$test_root/mutated.dmg"
+cp dist/DropMesh.dmg "$test_root/mutated.dmg"
 printf 'mutation' >>"$test_root/mutated.dmg"
 expect_failure 1 env MACCHANNEL_INSTALL_TESTING=1 MACCHANNEL_INSTALL_SKIP_LAUNCH=1 \
     bash Scripts/install-personal-mesh.sh --dmg "$test_root/mutated.dmg" \
-    --manifest dist/MacChannel.manifest.json --applications-dir "$applications" \
+    --manifest dist/DropMesh.manifest.json --applications-dir "$applications" \
     --tailscale-cli "$test_root/tailscale-missing" --expected-commit "$(git rev-parse HEAD)"
 
 if rg -n -i 'spctl[^\n]*master-disable|csrutil|xattr[^\n]*quarantine' \

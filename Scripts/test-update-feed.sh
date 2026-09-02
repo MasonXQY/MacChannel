@@ -10,8 +10,8 @@ if [[ ! -x Scripts/build-update-feed.sh ]]; then
     exit 1
 fi
 
-version=1.2.0
-build_number=13
+version=1.2.2
+build_number=15
 account=com.mason.macchannel.updates
 generate_appcast="$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast"
 
@@ -19,9 +19,9 @@ test_root="$(macchannel_create_test_root macchannel-update-feed-test)"
 macchannel_require_canonical_test_root "$test_root"
 fixture_root="$test_root/fixture"
 test_dist="$test_root/dist"
-fixture_dmg="$fixture_root/MacChannel.dmg"
-fixture_manifest="$fixture_root/MacChannel.manifest.json"
-release_notes="$repo_root/Distribution/ReleaseNotes/v1.2.0.md"
+fixture_dmg="$fixture_root/DropMesh.dmg"
+fixture_manifest="$fixture_root/DropMesh.manifest.json"
+release_notes="$repo_root/Distribution/ReleaseNotes/v1.2.2.md"
 security_shim="$test_root/security-missing-key"
 fake_login_keychain="$test_root/fake-login.keychain-db"
 codesign_shim="$test_root/codesign-update-fixture"
@@ -84,8 +84,8 @@ clean_fixture_tool() {
 sentinel_repo="$test_root/sentinel-repo"
 mkdir -p "$sentinel_repo/dist"
 chmod 700 "$sentinel_repo" "$sentinel_repo/dist"
-printf 'formal-dmg-sentinel\n' >"$sentinel_repo/dist/MacChannel.dmg"
-printf 'formal-manifest-sentinel\n' >"$sentinel_repo/dist/MacChannel.manifest.json"
+printf 'formal-dmg-sentinel\n' >"$sentinel_repo/dist/DropMesh.dmg"
+printf 'formal-manifest-sentinel\n' >"$sentinel_repo/dist/DropMesh.manifest.json"
 printf 'formal-feed-sentinel\n' >"$sentinel_repo/dist/appcast.xml"
 synthetic_dist_before="$(snapshot_dist "$sentinel_repo/dist")"
 resolved_test_dist="$(MACCHANNEL_UPDATE_TESTING=1 \
@@ -136,12 +136,15 @@ fixture_plist="$fixture_root/app/MacChannel.app/Contents/Info.plist"
 plutil -replace CFBundleIdentifier -string com.mason.macchannel "$fixture_plist"
 plutil -replace CFBundleShortVersionString -string "$version" "$fixture_plist"
 plutil -replace CFBundleVersion -string "$build_number" "$fixture_plist"
+plutil -replace CFBundleExecutable -string MacChannelApp "$fixture_plist"
+plutil -replace CFBundleName -string DropMesh "$fixture_plist"
+plutil -replace CFBundleDisplayName -string DropMesh "$fixture_plist"
 plutil -replace SUPublicEDKey -string "$public_key" "$fixture_plist"
 plutil -replace SURequireSignedFeed -bool true "$fixture_plist"
 clean_fixture_tool codesign --remove-signature "$fixture_root/app/MacChannel.app" >/dev/null 2>&1 || true
 clean_fixture_tool hdiutil create \
     -srcfolder "$fixture_root/app" \
-    -volname "Mac 通道" \
+    -volname "DropMesh" \
     -fs HFS+ \
     -format UDZO \
     -ov \
@@ -155,7 +158,7 @@ release_notes_sha_before="$(shasum -a 256 "$release_notes" | awk '{print $1}')"
 
 dmg_sha="$(shasum -a 256 "$fixture_dmg" | awk '{print $1}')"
 plutil -create xml1 "$fixture_manifest"
-plutil -insert product -string MacChannel "$fixture_manifest"
+plutil -insert product -string DropMesh "$fixture_manifest"
 plutil -insert version -string "$version" "$fixture_manifest"
 plutil -insert build -string "$build_number" "$fixture_manifest"
 plutil -insert releaseState -string notarized "$fixture_manifest"
@@ -165,8 +168,8 @@ plutil -insert designatedRequirement -string "$fixture_requirement" "$fixture_ma
 plutil -convert json "$fixture_manifest"
 
 prepare_fixture() {
-    cp "$fixture_dmg" "$test_dist/MacChannel.dmg"
-    cp "$fixture_manifest" "$test_dist/MacChannel.manifest.json"
+    cp "$fixture_dmg" "$test_dist/DropMesh.dmg"
+    cp "$fixture_manifest" "$test_dist/DropMesh.manifest.json"
     rm -f "$test_dist/appcast.xml" "$test_dist/.appcast.xml.new"
 }
 
@@ -253,7 +256,7 @@ assert_redacted_output() {
     local output_path="$1"
     local release_note_text='此版本包含安全更新与稳定性改进。'
     for forbidden in "$repo_root" "$test_root" "$release_note_text" \
-        MacChannel.dmg MacChannel.manifest.json appcast.xml .appcast.xml.new; do
+        DropMesh.dmg DropMesh.manifest.json appcast.xml .appcast.xml.new; do
         if grep -F "$forbidden" "$output_path" >/dev/null; then
             echo "release output exposed prohibited metadata" >&2
             exit 1
@@ -288,16 +291,16 @@ expect_failure() {
 }
 
 prepare_fixture
-mv "$test_dist/MacChannel.dmg" "$test_root/missing.dmg"
+mv "$test_dist/DropMesh.dmg" "$test_root/missing.dmg"
 expect_failure assets run_feed_builder
 
-hostile_payload="$repo_root/MacChannel.dmg"$'\n''此版本包含安全更新与稳定性改进。'$'\033[31m$(touch /tmp/never-run)\001'
+hostile_payload="$repo_root/DropMesh.dmg"$'\n''此版本包含安全更新与稳定性改进。'$'\033[31m$(touch /tmp/never-run)\001'
 expect_unvalidated_input_failure version "$hostile_payload"
 expect_unvalidated_input_failure build_number "$hostile_payload"
 
 prepare_fixture
 plutil -replace releaseState -string internalSignedNotNotarized \
-    "$test_dist/MacChannel.manifest.json"
+    "$test_dist/DropMesh.manifest.json"
 expect_failure manifest run_feed_builder
 
 prepare_fixture
@@ -308,7 +311,7 @@ MACCHANNEL_TEST_BUILD_NUMBER=14 expect_failure manifest run_feed_builder
 prepare_fixture
 plutil -replace dmgSHA256 -string \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-    "$test_dist/MacChannel.manifest.json"
+    "$test_dist/DropMesh.manifest.json"
 expect_failure manifest run_feed_builder
 
 prepare_fixture
@@ -326,11 +329,11 @@ set -e
 [[ "$unguarded_feed_status" -eq 2 ]]
 grep -Fx "update-feed failure stage=test version=$version build=$build_number" \
     "$test_root/unguarded-feed-seam.log" >/dev/null
-[[ ! -e "$repo_root/dist/MacChannel.dmg" || "$formal_dist_before" != absent ]]
+[[ ! -e "$repo_root/dist/DropMesh.dmg" || "$formal_dist_before" != absent ]]
 
 prepare_fixture
 security_marker="$test_root/security-shim-called"
-security_noise="$repo_root/MacChannel.dmg 此版本包含安全更新与稳定性改进。"
+security_noise="$repo_root/DropMesh.dmg 此版本包含安全更新与稳定性改进。"
 MACCHANNEL_TESTING=1 \
 MACCHANNEL_TEST_USE_DISPOSABLE_KEY=0 \
 MACCHANNEL_TEST_SECURITY_COMMAND="$security_shim" \
@@ -354,9 +357,9 @@ MACCHANNEL_EXPECT_LABEL=external-security-shim \
 prepare_fixture
 wrong_team=WRONGTEAM2
 wrong_requirement='identifier "com.mason.macchannel" and anchor apple generic and certificate leaf[subject.OU] = "WRONGTEAM2"'
-plutil -replace teamID -string "$wrong_team" "$test_dist/MacChannel.manifest.json"
+plutil -replace teamID -string "$wrong_team" "$test_dist/DropMesh.manifest.json"
 plutil -replace designatedRequirement -string "$wrong_requirement" \
-    "$test_dist/MacChannel.manifest.json"
+    "$test_dist/DropMesh.manifest.json"
 pre_key_marker="$test_root/wrong-team-key-accessed"
 MACCHANNEL_TEST_SECURITY_COMMAND="$security_shim" \
 MACCHANNEL_TEST_SECURITY_MARKER="$pre_key_marker" \
@@ -396,7 +399,7 @@ rebuild_fixture_dmg() {
         build) plutil -replace CFBundleVersion -string "$value" "$variant_plist" ;;
         *) return 64 ;;
     esac
-    clean_fixture_tool hdiutil create -srcfolder "$variant_root/app" -volname "Mac 通道" -fs HFS+ \
+    clean_fixture_tool hdiutil create -srcfolder "$variant_root/app" -volname "DropMesh" -fs HFS+ \
         -format UDZO -ov "$fixture_dmg" >/dev/null
     plutil -replace dmgSHA256 -string \
         "$(shasum -a 256 "$fixture_dmg" | awk '{print $1}')" "$fixture_manifest"
@@ -483,20 +486,21 @@ description_value="$(xmllint --xpath \
 test "$version_value" = "$build_number"
 test "$short_value" = "$version"
 test "$enclosure_url" = \
-    "https://github.com/MasonXQY/MacChannel/releases/download/v$version/MacChannel.dmg"
-test "$enclosure_length" = "$(stat -f %z "$test_dist/MacChannel.dmg")"
+    "https://github.com/MasonXQY/MacChannel/releases/download/v$version/DropMesh.dmg"
+test "$enclosure_length" = "$(stat -f %z "$test_dist/DropMesh.dmg")"
 test -n "$enclosure_signature"
-grep -F "此版本包含安全更新与稳定性改进。" <<<"$description_value" >/dev/null
-grep -F "releases/download/v$version/MacChannel.dmg" "$test_dist/appcast.xml" >/dev/null
+grep -F "MacChannel 现在更名为 DropMesh" <<<"$description_value" >/dev/null
+grep -F "releases/download/v$version/DropMesh.dmg" "$test_dist/appcast.xml" >/dev/null
 grep -F 'sparkle:edSignature=' "$test_dist/appcast.xml" >/dev/null
 grep -F '<!-- sparkle-signatures:' "$test_dist/appcast.xml" >/dev/null
 grep -F 'edSignature: ' "$test_dist/appcast.xml" >/dev/null
 
-test "$(shasum -a 256 "$test_dist/MacChannel.dmg" | awk '{print $1}')" = \
-    "$(plutil -extract dmgSHA256 raw -o - "$test_dist/MacChannel.manifest.json")"
-test "$(plutil -extract version raw -o - "$test_dist/MacChannel.manifest.json")" = "$version"
-test "$(plutil -extract build raw -o - "$test_dist/MacChannel.manifest.json")" = "$build_number"
-test "$(plutil -extract releaseState raw -o - "$test_dist/MacChannel.manifest.json")" = notarized
+test "$(shasum -a 256 "$test_dist/DropMesh.dmg" | awk '{print $1}')" = \
+    "$(plutil -extract dmgSHA256 raw -o - "$test_dist/DropMesh.manifest.json")"
+test "$(plutil -extract version raw -o - "$test_dist/DropMesh.manifest.json")" = "$version"
+test "$(plutil -extract build raw -o - "$test_dist/DropMesh.manifest.json")" = "$build_number"
+test "$(plutil -extract releaseState raw -o - "$test_dist/DropMesh.manifest.json")" = notarized
+test "$(plutil -extract product raw -o - "$test_dist/DropMesh.manifest.json")" = DropMesh
 
 for forbidden_metadata in \
     "$repo_root" \
@@ -511,12 +515,12 @@ for forbidden_metadata in \
 done
 
 assert_exact_release_assets() {
-    for required in MacChannel.dmg MacChannel.manifest.json appcast.xml; do
+    for required in DropMesh.dmg DropMesh.manifest.json appcast.xml; do
         [[ -f "$test_dist/$required" && ! -L "$test_dist/$required" ]] || return 1
     done
     local actual
     actual="$(find "$test_dist" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)"
-    [[ "$actual" == $'MacChannel.dmg\nMacChannel.manifest.json\nappcast.xml' ]]
+    [[ "$actual" == $'DropMesh.dmg\nDropMesh.manifest.json\nappcast.xml' ]]
 }
 assert_exact_release_assets
 
@@ -529,7 +533,7 @@ expect_asset_contract_failure() {
 mkdir "$test_dist/extra-directory"
 expect_asset_contract_failure
 rmdir "$test_dist/extra-directory"
-ln -s MacChannel.dmg "$test_dist/extra-link"
+ln -s DropMesh.dmg "$test_dist/extra-link"
 expect_asset_contract_failure
 rm "$test_dist/extra-link"
 mkfifo "$test_dist/extra-fifo"
@@ -544,7 +548,7 @@ assert_exact_release_assets
 
 # Exercise build-distribution.sh's guarded notarized-assets handoff into the real
 # feed builder without invoking Apple's live notary service.
-rm -f "$test_dist/MacChannel.dmg" "$test_dist/MacChannel.manifest.json" \
+rm -f "$test_dist/DropMesh.dmg" "$test_dist/DropMesh.manifest.json" \
     "$test_dist/appcast.xml" "$test_dist/.appcast.xml.new"
 env -i PATH="$PATH" HOME="$test_root/home" TMPDIR="$test_root/" LANG=C LC_ALL=C \
     MACCHANNEL_UPDATE_TESTING=1 \
@@ -571,8 +575,8 @@ grep -Fx "distribution success state=notarized version=$version build=$build_num
     "$test_root/handoff-success.log" >/dev/null
 assert_exact_release_assets
 
-handoff_dmg_sha="$(shasum -a 256 "$test_dist/MacChannel.dmg" | awk '{print $1}')"
-handoff_manifest_sha="$(shasum -a 256 "$test_dist/MacChannel.manifest.json" | awk '{print $1}')"
+handoff_dmg_sha="$(shasum -a 256 "$test_dist/DropMesh.dmg" | awk '{print $1}')"
+handoff_manifest_sha="$(shasum -a 256 "$test_dist/DropMesh.manifest.json" | awk '{print $1}')"
 printf '%s\n' stale-feed >"$test_dist/appcast.xml"
 printf '%s\n' stale-pending >"$test_dist/.appcast.xml.new"
 set +e
@@ -601,11 +605,11 @@ set -e
 assert_redacted_output "$test_root/handoff-failure.log"
 grep -Fx "update-feed failure stage=test version=$version build=$build_number" \
     "$test_root/handoff-failure.log" >/dev/null
-[[ -f "$test_dist/MacChannel.dmg" && ! -L "$test_dist/MacChannel.dmg" ]]
-[[ -f "$test_dist/MacChannel.manifest.json" && ! -L "$test_dist/MacChannel.manifest.json" ]]
-test "$handoff_dmg_sha" = "$(shasum -a 256 "$test_dist/MacChannel.dmg" | awk '{print $1}')"
+[[ -f "$test_dist/DropMesh.dmg" && ! -L "$test_dist/DropMesh.dmg" ]]
+[[ -f "$test_dist/DropMesh.manifest.json" && ! -L "$test_dist/DropMesh.manifest.json" ]]
+test "$handoff_dmg_sha" = "$(shasum -a 256 "$test_dist/DropMesh.dmg" | awk '{print $1}')"
 test "$handoff_manifest_sha" = \
-    "$(shasum -a 256 "$test_dist/MacChannel.manifest.json" | awk '{print $1}')"
+    "$(shasum -a 256 "$test_dist/DropMesh.manifest.json" | awk '{print $1}')"
 [[ ! -e "$test_dist/appcast.xml" && ! -L "$test_dist/appcast.xml" ]]
 [[ ! -e "$test_dist/.appcast.xml.new" && ! -L "$test_dist/.appcast.xml.new" ]]
 

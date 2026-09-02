@@ -64,7 +64,7 @@ struct TransferSurfaceItem: Identifiable, Sendable {
 
     var failureHelpText: String? {
         guard snapshot.phase == .failed else { return nil }
-        return "请确认对方 Mac 通道已打开并显示“安全服务已连接”，然后重试。"
+        return "请确认对方 DropMesh 已打开并显示“安全服务已连接”，然后重试。"
     }
 
     var speedText: String {

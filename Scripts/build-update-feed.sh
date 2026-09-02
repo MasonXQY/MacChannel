@@ -3,8 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
-version="${MACCHANNEL_VERSION:-1.2.0}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-13}"
+version="${MACCHANNEL_VERSION:-1.2.2}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-15}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 account="${MACCHANNEL_SPARKLE_ACCOUNT:-com.mason.macchannel.updates}"
 generate_appcast="${MACCHANNEL_SPARKLE_GENERATE_APPCAST:-$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast}"
@@ -37,8 +37,8 @@ if ! dist_root="$(macchannel_resolve_dist_root "$repo_root")"; then
     echo "update-feed failure stage=test version=unvalidated build=unvalidated" >&2
     exit 2
 fi
-dmg_path="$dist_root/MacChannel.dmg"
-manifest_path="$dist_root/MacChannel.manifest.json"
+dmg_path="$dist_root/DropMesh.dmg"
+manifest_path="$dist_root/DropMesh.manifest.json"
 feed_path="$dist_root/appcast.xml"
 pending_feed="$dist_root/.appcast.xml.new"
 expected_generate_appcast_sha256=b3b54ba3fb85ef1f25eb2f5a9ad90c32ba6e71af777b181c50ffb5d860bac6b7
@@ -151,13 +151,14 @@ fi
 [[ -f "$release_notes" && ! -L "$release_notes" && -s "$release_notes" ]] || fail_feed input
 while IFS= read -r release_entry; do
     case "$(basename "$release_entry")" in
-        MacChannel.dmg|MacChannel.manifest.json) ;;
+        DropMesh.dmg|DropMesh.manifest.json) ;;
         *) fail_feed assets ;;
     esac
 done < <(find "$dist_root" -mindepth 1 -maxdepth 1 -print)
 
 manifest_version="$(plutil -extract version raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_build="$(plutil -extract build raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
+manifest_product="$(plutil -extract product raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 release_state="$(plutil -extract releaseState raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_dmg_sha="$(plutil -extract dmgSHA256 raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
 manifest_team_id="$(plutil -extract teamID raw -o - "$manifest_path" 2>/dev/null)" || fail_feed manifest
@@ -170,7 +171,8 @@ anchor_requirement="$(plutil -extract designatedRequirement raw -o - "$anchor_pa
 expected_anchor_requirement='anchor apple generic and identifier "com.mason.macchannel" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "XKAZ67HN45"'
 [[ "$anchor_team_id" == XKAZ67HN45 && "$anchor_bundle_id" == com.mason.macchannel && \
     "$anchor_requirement" == "$expected_anchor_requirement" ]] || fail_feed identity
-[[ "$manifest_version" == "$version" && "$manifest_build" == "$build_number" && \
+[[ "$manifest_product" == DropMesh && "$manifest_version" == "$version" && \
+    "$manifest_build" == "$build_number" && \
     "$release_state" == notarized && "$manifest_dmg_sha" =~ ^[0-9a-f]{64}$ && \
     "$manifest_team_id" =~ ^[A-Z0-9]{10}$ && -n "$manifest_requirement" ]] || fail_feed manifest
 actual_dmg_sha="$(shasum -a 256 "$dmg_path" | awk '{print $1}')"
@@ -206,6 +208,9 @@ fi
 actual_team_id="$(sed -n 's/^TeamIdentifier=//p' <<<"$app_identity" | tail -n 1)"
 actual_requirement="$(sed -n 's/^designated => //p' <<<"$app_identity" | tail -n 1)"
 actual_bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
+actual_executable="$(plutil -extract CFBundleExecutable raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
+actual_bundle_name="$(plutil -extract CFBundleName raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
+actual_display_name="$(plutil -extract CFBundleDisplayName raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 actual_version="$(plutil -extract CFBundleShortVersionString raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 actual_build="$(plutil -extract CFBundleVersion raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)"
 unset app_identity
@@ -214,6 +219,8 @@ cleanup_identity_mount
     "$actual_requirement" == "$manifest_requirement" && \
     "$manifest_team_id" == "$actual_team_id" && \
     "$actual_bundle_id" == "$anchor_bundle_id" && \
+    "$actual_executable" == MacChannelApp && "$actual_bundle_name" == DropMesh && \
+    "$actual_display_name" == DropMesh && \
     "$actual_version" == "$version" && "$actual_build" == "$build_number" ]] || \
     fail_feed identity
 
@@ -249,9 +256,9 @@ fi
 
 updates_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-update-feed.XXXXXX")"
 chmod 700 "$updates_root"
-cp -p "$dmg_path" "$updates_root/MacChannel.dmg"
-cp -p "$release_notes" "$updates_root/MacChannel.md"
-chmod 600 "$updates_root/MacChannel.dmg" "$updates_root/MacChannel.md"
+cp -p "$dmg_path" "$updates_root/DropMesh.dmg"
+cp -p "$release_notes" "$updates_root/DropMesh.md"
+chmod 600 "$updates_root/DropMesh.dmg" "$updates_root/DropMesh.md"
 tool_log="$updates_root/tool.log"
 if ! (
     cd "$updates_root"
@@ -295,7 +302,7 @@ enclosure_length="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-
 enclosure_signature="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="enclosure"]/@*[local-name()="edSignature"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
 embedded_release_notes="$(xmllint --xpath 'string(//*[local-name()="item"][1]/*[local-name()="description"])' "$generated_feed" 2>>"$tool_log")" || fail_feed verify
 [[ "$item_count" == 1 && "$feed_build" == "$build_number" && "$feed_version" == "$version" ]] || fail_feed verify
-expected_url="https://github.com/MasonXQY/MacChannel/releases/download/v$version/MacChannel.dmg"
+expected_url="https://github.com/MasonXQY/MacChannel/releases/download/v$version/DropMesh.dmg"
 [[ "$enclosure_url" == "$expected_url" ]] || fail_feed verify
 [[ "$enclosure_length" == "$(stat -f %z "$dmg_path")" ]] || fail_feed verify
 [[ -n "$enclosure_signature" && -n "$embedded_release_notes" ]] || fail_feed verify

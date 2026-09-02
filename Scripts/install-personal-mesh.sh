@@ -2,8 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
-dmg="$repo_root/dist/MacChannel.dmg"
-manifest="$repo_root/dist/MacChannel.manifest.json"
+dmg="$repo_root/dist/DropMesh.dmg"
+manifest="$repo_root/dist/DropMesh.manifest.json"
 applications_dir="/Applications"
 tailscale_cli=""
 expected_commit=""
@@ -149,7 +149,7 @@ if [[ -w "$applications_dir" ]]; then
     mv "$new_path" "$target_path"
     new_installed=1
 else
-    echo "“应用程序”目录需要管理员授权，请在打开的 DMG 中把 MacChannel 拖到“应用程序”。" >&2
+    echo "“应用程序”目录需要管理员授权，请在打开的 DMG 中把 DropMesh 拖到“应用程序”。" >&2
     open "$dmg"
     exit 2
 fi
@@ -163,8 +163,8 @@ if [[ "${MACCHANNEL_INSTALL_SKIP_LAUNCH:-}" != 1 ]]; then
     /usr/bin/open -n "$target_path"
 fi
 
-echo "MacChannel 已安装到“应用程序”"
+echo "DropMesh 已安装到“应用程序”"
 if [[ "$release_state" == internalSignedNotNotarized ]]; then
-    echo "此版本已签名但未公证。若 macOS 首次阻止打开，请在 Finder 中右键 MacChannel，选择一次“打开”；不要关闭 Gatekeeper 或 SIP。"
+    echo "此版本已签名但未公证。若 macOS 首次阻止打开，请在 Finder 中右键 DropMesh，选择一次“打开”；不要关闭 Gatekeeper 或 SIP。"
 fi
 echo "下一步：打开设置，选择“个人网络（推荐）”，点击“启用个人网络通道”。"

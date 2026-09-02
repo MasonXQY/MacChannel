@@ -14,6 +14,53 @@ grep -F 'spctl --assess --type open --context context:primary-signature' \
 grep -F 'MACCHANNEL_RELEASE_NOTES' Scripts/build-distribution.sh >/dev/null
 grep -F 'bash Scripts/build-update-feed.sh' Scripts/build-distribution.sh >/dev/null
 
+# Public branding must not leak the legacy product name. This is the complete
+# source-level compatibility allowlist for legacy string literals; test fixtures
+# and historical release notes are audited by their own contracts.
+while IFS=: read -r source_file source_line source_text; do
+    allowed=0
+    case "$source_file" in
+        App/ProductionAppRuntime.swift)
+            [[ "$source_text" == *'appendingPathComponent("MacChannel", isDirectory: true)'* ]] \
+                && allowed=1
+            ;;
+        Sources/MacChannelCore/Storage/DownloadDirectory.swift)
+            [[ "$source_text" == *'appendingPathComponent("Mac 通道", isDirectory: true)'* ]] \
+                && allowed=1
+            ;;
+        Sources/MacChannelCore/Storage/ReceiveStore.swift)
+            [[ "$source_text" == *'appendingPathComponent("MacChannel", isDirectory: true)'* || \
+               "$source_text" == *'appendingPathComponent("MacChannel/Incoming", isDirectory: true)'* ]] \
+                && allowed=1
+            ;;
+        Sources/MacChannelCore/Orchestration/OutgoingTransferPackage.swift)
+            [[ "$source_text" == *'"MacChannel Transfer"'* || \
+               "$source_text" == *'appendingPathComponent("MacChannel/Outgoing", isDirectory: true)'* ]] \
+                && allowed=1
+            ;;
+        Sources/MacChannelCore/Pairing/PairingCoordinator.swift)
+            [[ "$source_text" == *'Data("MacChannel pairing v1".utf8)'* ]] && allowed=1
+            ;;
+    esac
+    if [[ "$allowed" -ne 1 ]]; then
+        echo "legacy product literal outside compatibility allowlist: $source_file:$source_line" >&2
+        exit 1
+    fi
+done < <(rg -n --no-heading '"[^"\n]*(Mac 通道|MacChannel)' App Sources || true)
+
+if rg -n 'MacChannel\.(dmg|manifest\.json)|Mac 通道' \
+    Scripts/build-distribution.sh \
+    Scripts/build-update-feed.sh \
+    Distribution/README.txt; then
+    echo "current public distribution branding still contains the legacy product name" >&2
+    exit 1
+fi
+grep -F 'MacChannel.app' Scripts/build-distribution.sh >/dev/null
+grep -F 'MacChannelApp' Scripts/build-app.sh >/dev/null
+grep -F 'https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml' \
+    Scripts/build-app.sh >/dev/null
+grep -F 'com.mason.macchannel' Distribution/ProductionSigningAnchor.plist >/dev/null
+
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then
     echo "MACCHANNEL_CODESIGN_IDENTITY is required for distribution tests" >&2
@@ -104,8 +151,8 @@ expect_failure() {
         sed -n '1,120p' "$test_root/expected-failure.log" >&2
         exit 1
     fi
-    test ! -e $test_dist/MacChannel.dmg
-    test ! -e $test_dist/MacChannel.manifest.json
+    test ! -e $test_dist/DropMesh.dmg
+    test ! -e $test_dist/DropMesh.manifest.json
 }
 
 expect_distribution_failure() {
@@ -142,38 +189,38 @@ for fail_at in app-built app-verified stage-ready image-created image-verified m
 done
 
 "${clean_test_environment[@]}" MACCHANNEL_CODESIGN_IDENTITY="$identity" \
-MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
+MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.2.md" \
     bash Scripts/build-distribution.sh
 
-test -f "$test_dist/MacChannel.dmg"
-test -f "$test_dist/MacChannel.manifest.json"
+test -f "$test_dist/DropMesh.dmg"
+test -f "$test_dist/DropMesh.manifest.json"
 test ! -e "$test_dist/appcast.xml"
-clean_codesign --verify --strict --verbose=2 "$test_dist/MacChannel.dmg"
+clean_codesign --verify --strict --verbose=2 "$test_dist/DropMesh.dmg"
 
-cp $test_dist/MacChannel.manifest.json "$test_root/first-manifest.json"
-first_dmg_sha="$(shasum -a 256 $test_dist/MacChannel.dmg | awk '{print $1}')"
+cp $test_dist/DropMesh.manifest.json "$test_root/first-manifest.json"
+first_dmg_sha="$(shasum -a 256 $test_dist/DropMesh.dmg | awk '{print $1}')"
 "${clean_test_environment[@]}" MACCHANNEL_CODESIGN_IDENTITY="$identity" \
-MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.0.md" \
+MACCHANNEL_RELEASE_NOTES="$repo_root/Distribution/ReleaseNotes/v1.2.2.md" \
     bash Scripts/build-distribution.sh
 
 for manifest_key in \
     product bundleIdentifier version build gitCommit teamID designatedRequirement releaseState volumeName \
     stagedFilesystemSHA256 sourceDateEpoch createdAt; do
     first_value="$(plutil -extract "$manifest_key" raw -o - "$test_root/first-manifest.json")"
-    second_value="$(plutil -extract "$manifest_key" raw -o - $test_dist/MacChannel.manifest.json)"
+    second_value="$(plutil -extract "$manifest_key" raw -o - $test_dist/DropMesh.manifest.json)"
     test "$first_value" = "$second_value"
 done
-second_dmg_sha="$(shasum -a 256 $test_dist/MacChannel.dmg | awk '{print $1}')"
+second_dmg_sha="$(shasum -a 256 $test_dist/DropMesh.dmg | awk '{print $1}')"
 if [[ "$first_dmg_sha" != "$second_dmg_sha" ]]; then
     grep -F "Developer ID timestamps and UDIF metadata may change raw DMG bytes" \
-        $test_dist/MacChannel.manifest.json >/dev/null
+        $test_dist/DropMesh.manifest.json >/dev/null
 fi
-test -z "$(find "$test_dist" -mindepth 1 -maxdepth 1 ! -name MacChannel.dmg \
-    ! -name MacChannel.manifest.json -print -quit)"
+test -z "$(find "$test_dist" -mindepth 1 -maxdepth 1 ! -name DropMesh.dmg \
+    ! -name DropMesh.manifest.json -print -quit)"
 
 mounted_path="$test_root/mounted"
 mkdir -p "$mounted_path"
-hdiutil attach $test_dist/MacChannel.dmg -nobrowse -readonly -mountpoint "$mounted_path" -quiet
+hdiutil attach $test_dist/DropMesh.dmg -nobrowse -readonly -mountpoint "$mounted_path" -quiet
 
 mapfile_path="$test_root/entries.txt"
 find "$mounted_path" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort >"$mapfile_path"
@@ -181,17 +228,21 @@ printf '%s\n' Applications MacChannel.app README.txt | LC_ALL=C sort >"$test_roo
 cmp "$test_root/expected-entries.txt" "$mapfile_path"
 test -L "$mounted_path/Applications"
 test "$(readlink "$mounted_path/Applications")" = /Applications
-grep -F "版本 1.2.0 (13)" "$mounted_path/README.txt" >/dev/null
+grep -F "版本 1.2.2 (15)" "$mounted_path/README.txt" >/dev/null
 clean_codesign --verify --deep --strict --verbose=2 "$mounted_path/MacChannel.app"
 
 plist="$mounted_path/MacChannel.app/Contents/Info.plist"
 sparkle="$mounted_path/MacChannel.app/Contents/Frameworks/Sparkle.framework"
 test -d "$sparkle"
 test -x "$sparkle/Versions/Current/Sparkle"
-test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.2.0
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.2.2
 test -n "$(plutil -extract NSDownloadsFolderUsageDescription raw -o - "$plist")"
-test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 13
+test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 15
 test "$(plutil -extract CFBundlePackageType raw -o - "$plist")" = APPL
+test "$(plutil -extract CFBundleIdentifier raw -o - "$plist")" = com.mason.macchannel
+test "$(plutil -extract CFBundleExecutable raw -o - "$plist")" = MacChannelApp
+test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
+test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = DropMesh
 test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
     "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
 test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$plist")" = true
@@ -210,17 +261,19 @@ if clean_codesign --verify --deep --strict "$mutated_app" >/dev/null 2>&1; then
     exit 1
 fi
 
-manifest_sha="$(plutil -extract dmgSHA256 raw -o - $test_dist/MacChannel.manifest.json)"
-actual_sha="$(shasum -a 256 $test_dist/MacChannel.dmg | awk '{print $1}')"
+manifest_sha="$(plutil -extract dmgSHA256 raw -o - $test_dist/DropMesh.manifest.json)"
+actual_sha="$(shasum -a 256 $test_dist/DropMesh.dmg | awk '{print $1}')"
 test "$manifest_sha" = "$actual_sha"
-test "$(plutil -extract gitCommit raw -o - $test_dist/MacChannel.manifest.json)" = "$(git rev-parse HEAD)"
-test "$(plutil -extract version raw -o - $test_dist/MacChannel.manifest.json)" = 1.2.0
-test "$(plutil -extract build raw -o - $test_dist/MacChannel.manifest.json)" = 13
-test "$(plutil -extract releaseState raw -o - $test_dist/MacChannel.manifest.json)" = internalSignedNotNotarized
-test "$(plutil -extract teamID raw -o - $test_dist/MacChannel.manifest.json)" = "$expected_team_id"
+test "$(plutil -extract gitCommit raw -o - $test_dist/DropMesh.manifest.json)" = "$(git rev-parse HEAD)"
+test "$(plutil -extract version raw -o - $test_dist/DropMesh.manifest.json)" = 1.2.2
+test "$(plutil -extract build raw -o - $test_dist/DropMesh.manifest.json)" = 15
+test "$(plutil -extract releaseState raw -o - $test_dist/DropMesh.manifest.json)" = internalSignedNotNotarized
+test "$(plutil -extract product raw -o - $test_dist/DropMesh.manifest.json)" = DropMesh
+test "$(plutil -extract volumeName raw -o - $test_dist/DropMesh.manifest.json)" = DropMesh
+test "$(plutil -extract teamID raw -o - $test_dist/DropMesh.manifest.json)" = "$expected_team_id"
 actual_requirement="$(clean_codesign -d -r- "$mounted_path/MacChannel.app" 2>&1 | \
     sed -n 's/^designated => //p')"
-test "$(plutil -extract designatedRequirement raw -o - $test_dist/MacChannel.manifest.json)" = \
+test "$(plutil -extract designatedRequirement raw -o - $test_dist/DropMesh.manifest.json)" = \
     "$actual_requirement"
 
 hdiutil detach "$mounted_path" -quiet
@@ -230,7 +283,7 @@ install_root="$test_root/Applications"
 mkdir -p "$install_root"
 mounted_path="$test_root/install-source"
 mkdir -p "$mounted_path"
-hdiutil attach $test_dist/MacChannel.dmg -nobrowse -readonly -mountpoint "$mounted_path" -quiet
+hdiutil attach $test_dist/DropMesh.dmg -nobrowse -readonly -mountpoint "$mounted_path" -quiet
 ditto "$mounted_path/MacChannel.app" "$install_root/MacChannel.app"
 hdiutil detach "$mounted_path" -quiet
 mounted_path=""

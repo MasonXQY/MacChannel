@@ -15,7 +15,7 @@ final class StatusItemAppKitTests: XCTestCase {
             "idle template icons must let the menu bar choose a contrasting tint"
         )
         XCTAssertEqual(button.accessibilityRole(), .button)
-        XCTAssertEqual(button.accessibilityLabel(), "Mac 通道文件传输")
+        XCTAssertEqual(button.accessibilityLabel(), "DropMesh 文件传输")
         XCTAssertTrue(button.acceptsFirstResponder)
         XCTAssertEqual(button.focusRingType, .default)
 
@@ -28,12 +28,46 @@ final class StatusItemAppKitTests: XCTestCase {
         )
 
         button.phase = .transferring(progress: 0.42)
-        XCTAssertEqual(button.title, "42%")
+        XCTAssertEqual(button.title, "")
+        XCTAssertTrue(button.image?.isTemplate == true)
+        XCTAssertEqual(button.preferredWidth, 30)
+        XCTAssertTrue(button.showsTransferProgressIndicator)
         XCTAssertEqual(button.accessibilityValue() as? String, "正在传输，42%")
         XCTAssertNil(
             button.contentTintColor,
             "transfer icons must keep the menu bar's automatic contrasting tint"
         )
+    }
+
+    @MainActor
+    func testTransferProgressUsesCompactGreenBarWithoutCollidingWithUnreadDot() throws {
+        let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+        button.phase = .transferring(progress: 0.51)
+        button.hasUnreadReceive = true
+
+        XCTAssertTrue(button.showsTransferProgressIndicator)
+        XCTAssertEqual(button.transferProgressTrackRect.width, 14)
+        XCTAssertEqual(button.transferProgressTrackRect.height, 2)
+        XCTAssertEqual(button.transferProgressFillRect.width, 7.14, accuracy: 0.001)
+        XCTAssertTrue(
+            button.transferProgressTrackRect.intersection(button.receiveIndicatorRect).isEmpty
+        )
+
+        for name: NSAppearance.Name in [.aqua, .darkAqua] {
+            let appearance = try XCTUnwrap(NSAppearance(named: name))
+            var actual: NSColor?
+            var expected: NSColor?
+            appearance.performAsCurrentDrawingAppearance {
+                actual = button.transferProgressIndicatorColor.usingColorSpace(.sRGB)
+                expected = NSColor.systemGreen.usingColorSpace(.sRGB)
+            }
+            let resolvedActual = try XCTUnwrap(actual)
+            let resolvedExpected = try XCTUnwrap(expected)
+            XCTAssertEqual(resolvedActual.redComponent, resolvedExpected.redComponent, accuracy: 0.001)
+            XCTAssertEqual(resolvedActual.greenComponent, resolvedExpected.greenComponent, accuracy: 0.001)
+            XCTAssertEqual(resolvedActual.blueComponent, resolvedExpected.blueComponent, accuracy: 0.001)
+            XCTAssertEqual(resolvedActual.alphaComponent, resolvedExpected.alphaComponent, accuracy: 0.001)
+        }
     }
 
     @MainActor
@@ -384,7 +418,7 @@ final class StatusItemAppKitTests: XCTestCase {
         XCTAssertNotNil(nativeButton.action)
         XCTAssertTrue(nativeButton.isAccessibilityElement())
         XCTAssertEqual(nativeButton.accessibilityRole(), .button)
-        XCTAssertEqual(nativeButton.accessibilityLabel(), "Mac 通道文件传输")
+        XCTAssertEqual(nativeButton.accessibilityLabel(), "DropMesh 文件传输")
         XCTAssertEqual(nativeButton.accessibilityValue() as? String, "空闲")
         XCTAssertFalse(controller.button.isAccessibilityElement())
         XCTAssertEqual(nativeButton.focusRingType, .default)

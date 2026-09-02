@@ -409,7 +409,7 @@ struct SettingsView: View {
                             Button("选择…", action: chooseDefaultDirectory)
                                 .frame(minHeight: 40)
                         }
-                        Text("默认保存到“下载/Mac 通道”；可以改成任何文件夹。")
+                        Text("默认保存到下载文件夹；可以改成任何文件夹。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -427,7 +427,7 @@ struct SettingsView: View {
                     }
 
                     Section("启动") {
-                        Toggle("登录后自动启动 Mac 通道", isOn: launchAtLoginBinding)
+                        Toggle("登录后自动启动 DropMesh", isOn: launchAtLoginBinding)
                             .frame(minHeight: 40)
                     }
                 }
@@ -478,7 +478,7 @@ struct SettingsView: View {
         if !service.isAvailable {
             switch model.runtimeStatus {
             case .loading:
-                Label("正在启动 Mac 通道…", systemImage: "hourglass")
+                Label("正在启动 DropMesh…", systemImage: "hourglass")
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 12)
@@ -540,7 +540,7 @@ struct SettingsView: View {
     }
 
     private var defaultDirectoryText: String {
-        model.defaultDirectory?.path(percentEncoded: false) ?? "~/Downloads/Mac 通道"
+        model.defaultDirectory?.path(percentEncoded: false) ?? "~/Downloads"
     }
 
     private func saveLocalName() {
@@ -645,7 +645,7 @@ private struct SoftwareUpdateSection: View {
     private var actionHint: String {
         snapshot.phase.hasAvailableUpdate
             ? "打开软件更新窗口，查看版本说明和安装选项"
-            : "立即检查是否有新的 Mac 通道版本"
+            : "立即检查是否有新的 DropMesh 版本"
     }
 
     private var actionAccessibilityLabel: String {

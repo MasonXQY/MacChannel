@@ -7,12 +7,12 @@ final class SoftwareUpdateTests: XCTestCase {
     func testInstalledVersionUsesBundleValuesAndFallsBackWithoutCrashing() {
         XCTAssertEqual(
             InstalledAppVersion(info: [
-                "CFBundleShortVersionString": "1.2.0",
-                "CFBundleVersion": "13",
+                "CFBundleShortVersionString": "1.2.2",
+                "CFBundleVersion": "15",
             ]).localizedText,
-            "Mac 通道 1.2.0（13）"
+            "DropMesh 1.2.2（15）"
         )
-        XCTAssertEqual(InstalledAppVersion(info: [:]).localizedText, "Mac 通道，版本未知")
+        XCTAssertEqual(InstalledAppVersion(info: [:]).localizedText, "DropMesh，版本未知")
     }
 
     func testUpdatePhasesProvideLocalizedStatusAndAvailability() {

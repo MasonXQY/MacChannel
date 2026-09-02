@@ -14,8 +14,8 @@ struct InstalledAppVersion: Equatable, Sendable {
     }
 
     var localizedText: String {
-        guard let shortVersion, let build else { return "Mac 通道，版本未知" }
-        return "Mac 通道 \(shortVersion)（\(build)）"
+        guard let shortVersion, let build else { return "DropMesh，版本未知" }
+        return "DropMesh \(shortVersion)（\(build)）"
     }
 }
 

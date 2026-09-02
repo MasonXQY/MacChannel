@@ -25,7 +25,7 @@ final class TransferSurfaceTests: XCTestCase {
 
         XCTAssertEqual(
             item.failureHelpText,
-            "请确认对方 Mac 通道已打开并显示“安全服务已连接”，然后重试。"
+            "请确认对方 DropMesh 已打开并显示“安全服务已连接”，然后重试。"
         )
     }
 
@@ -189,7 +189,7 @@ final class TransferSurfaceTests: XCTestCase {
 
         XCTAssertEqual(
             model.updateSnapshot.installedVersion.localizedText,
-            "Mac 通道 1.2.0（13）"
+            "DropMesh 1.2.0（13）"
         )
         model.performUpdateAction(using: updates)
         XCTAssertEqual(updates.checkCount, 1)
@@ -593,7 +593,7 @@ final class TransferSurfaceTests: XCTestCase {
         )
 
         XCTAssertTrue(settings.contains("switch model.runtimeStatus"))
-        XCTAssertTrue(settings.contains("正在启动 Mac 通道"))
+        XCTAssertTrue(settings.contains("正在启动 DropMesh"))
         XCTAssertTrue(settings.contains("重试启动"))
     }
 
@@ -885,6 +885,7 @@ final class TransferSurfaceTests: XCTestCase {
         XCTAssertTrue(titles.contains("传输与历史"))
         XCTAssertTrue(titles.contains("配对设备"))
         XCTAssertTrue(titles.contains("设置"))
+        XCTAssertTrue(titles.contains("退出 DropMesh"))
         XCTAssertEqual(
             controller.statusMenu.items.first { $0.title == "传输与历史" }?.keyEquivalent,
             "t"

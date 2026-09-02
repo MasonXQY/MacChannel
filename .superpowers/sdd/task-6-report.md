@@ -1,159 +1,120 @@
-# Task 6 report: WebRTC data-channel gate and route fallback
+# Task 6 Report: DropMesh Public Rename and Distribution Migration
 
-Date: 2026-08-26
-Status: complete in the Task 6 scope
+## Scope
 
-## Artifact gate
+Renamed the current public macOS product surface to **DropMesh** while preserving the installed update identity and every existing data location:
 
-- Pinned `https://github.com/stasel/WebRTC.git` at exact version `150.0.0`.
-- Resolved revision: `6ed87f05368632f71dc95c89c14c051561710925`.
-- Release checksum declared by the pinned package:
-  `f9890492b0016e4c88ab20f07867b8b420054caedc8a692b2ec6ac041f3cf6b2`.
-- `swift package resolve`: exit 0.
-- `swift build`: exit 0.
-- The release's actual macOS directory is `macos-x86_64_arm64`; `lipo -archs`
-  on its WebRTC binary returned exactly `x86_64 arm64`.
-- The initial unsigned app load failed because the assembly script did not
-  embed the dynamic framework. The exact dyld failure and recovery are recorded
-  in `docs/technical/webRTC-gate.md`.
-- After fixing bundle assembly, `bash Scripts/build-app.sh` exited 0,
-  `open .build/MacChannel.app` exited 0, the executable exited 0, and
-  `DYLD_PRINT_LIBRARIES=1` showed the bundled
-  `Contents/MacOS/WebRTC.framework/Versions/A/WebRTC` load.
-- No equivalent artifact was selected: the requested pinned artifact passed the
-  slice, compile, link, bundle, and load gates.
+- current status-menu, Settings, transfer failure, startup, accessibility, version, installer, README, DMG, manifest, and appcast copy now use DropMesh;
+- public assets are `DropMesh.dmg`, `DropMesh.manifest.json`, and unchanged `appcast.xml`;
+- the DMG volume and manifest product are DropMesh;
+- the mounted transition bundle remains `MacChannel.app`, with executable `MacChannelApp` and Bundle ID `com.mason.macchannel`;
+- the GitHub release origin and Sparkle feed URL remain unchanged;
+- keychain identifiers, protocol salts, application-support/database/staging paths, legacy receive directory, and v1.2.0/v1.2.1 release notes were not modified;
+- v1.2.2 build 15 release notes explain the rename, icon, receive notification, unread dot, outside-click dismissal, and no-re-pairing upgrade behavior.
+
+The distribution test now contains an explicit source allowlist for the legacy literals required by storage, transfer recovery, and cryptographic compatibility. A legacy product literal outside that allowlist fails the contract.
 
 ## TDD evidence
 
-The task began with the requested red `ConnectionCoordinatorTests` compile
-failure naming the missing `ConnectionCoordinator`. Additional focused red
-tests exposed missing shared-session signal send, trusted-key lookup, WebRTC
-types, peer/factory lifetime, receive ordering, cancellation, incoming-offer
-acceptance, subscriber replacement, 64 KiB receive enforcement, candidate-kind
-separation, and the 128 KiB WebSocket transport envelope. Each was made green
-before the next behavior was added.
+### RED: public rename
 
-Review/stress regressions also caught and fixed:
+The Swift expectations were changed before production copy:
 
-- independent delegate tasks reordering otherwise ordered RTC frames;
-- application data beginning with handshake magic being parsed as control data;
-- the ObjC peer-connection factory being released before its live channels;
-- an offerer hello sent before the answerer's remote data-channel delegate was
-  ready; the answerer now speaks first after installing its delegate and the
-  offerer responds, avoiding retransmission and preserving arbitrary app data;
-- transcript-only exporter input that a signaling MITM could derive.
+```sh
+swift test --scratch-path /tmp/dropmesh-task6-red-status --filter StatusItemAppKitTests
+swift test --scratch-path /tmp/dropmesh-task6-red-surfaces --filter TransferSurfaceTests
+swift test --scratch-path /tmp/dropmesh-task6-red-updates --filter SoftwareUpdateTests
+```
 
-## Implemented behavior
+Observed failures were limited to the intended old branding:
 
-- `RendezvousWebRTCSignaling` multiplexes Task 5's single authenticated
-  `AuthenticatedPresenceSession.signalFrames()` stream and sends through that
-  same session. It creates no WebSocket.
-- Outbound and production inbound offer paths share connection-ID/peer demux.
-- `ConnectionCoordinator` attempts fresh connections in the exact order LAN,
-  Internet ICE, then TURN relay; cancellation is preserved.
-- Route plans and candidate filters enforce host-only LAN, server-reflexive-only
-  Internet direct, and relay-only TURN on outbound candidates, inbound trickled
-  candidates, and candidates embedded in SDP. TURN credentials are never
-  present in the first two attempts.
-- The answerer rejects an unexpected label/protocol or any unordered,
-  partially-reliable, or pre-negotiated data channel. Both send and receive
-  reject a message larger than 64 KiB.
-- Backpressure uses M150's buffered-amount callback with a 1 MiB high-water and
-  256 KiB software low-water mark because M150 exposes no settable native
-  threshold property.
-- Delegate delivery is serialized; signal, callback, application, incoming
-  offer, and listener queues have explicit bounds. Overflow fails the affected
-  session/channel rather than silently continuing after ordered data loss.
-- Inbound peer-connection setup is capped at eight concurrent acceptances and
-  two per remote device; excess offers remain bounded by the signaling router.
-- Close is idempotent, remote close terminates the frame stream, connection
-  cancellation returns promptly, and the ObjC factory is retained for the
-  channel lifetime.
-- Authentication uses fresh nonces and fresh P-256 key-agreement keys. The
-  complete transcript, including both long-term identity keys, both ephemeral
-  keys, connection ID, route, and offerer/answerer roles, is signed by both
-  long-term P-256 identities.
-- `exportKey(label:context:length:)` preserves the interface and derives from the
-  authenticated end-to-end ECDH shared secret with the transcript hash bound
-  into HKDF-SHA256. A two-leg signaling proxy with independent ephemeral keys
-  cannot derive the exporter.
-- Trust is checked before connection and again after authentication, so a
-  concurrent revocation closes the new channel.
+- status item: 2 failures for `Mac 通道文件传输` versus `DropMesh 文件传输`;
+- transfer/settings: 4 failures for the old receiver guidance, version row, startup copy, and quit item;
+- update presentation: 2 failures for the old version and unknown-version names.
 
-## Verification
+### RED: compact transfer progress
 
-- Focused Task 6 suite: an earlier 14-test gate passed five consecutive runs;
-  after the final review additions, the final focused suite passed 19/19 and
-  the 1 MiB authenticated loopback passed 20 consecutive isolated runs.
-- Final full Swift suite: 95 tests, 0 failures, 0 unexpected failures.
-- Real in-process WebRTC loopback transfers 1 MiB of deterministic bytes in
-  sixteen 64 KiB frames with byte-for-byte equality and `.lan` classification.
-- Loopback also verifies ordered/reliable flags, matching exporter keys, label
-  separation, delayed 80-frame ordering/losslessness, send/receive caps, remote
-  close, prompt cancellation, factory lifetime, handshake-magic application
-  data, two-leg MITM exporter inequality, inbound acceptance caps, strict
-  remote channel properties, and fail-closed authentication fallback.
-- `swift package resolve`: pass.
-- `swift build`: pass.
-- `bash Scripts/build-app.sh`: pass.
-- `git diff --check`: pass before commit.
-- App executable/load/open gates: pass as described above.
+After the user reported the blue circular `51%` transfer state, an AppKit contract was added first. The focused test failed to compile because the compact progress-bar API did not exist. The old behavior also still exposed the percentage as the button title.
 
-## Review disposition
+### GREEN: Swift
 
-The independent review initially found missing inbound acceptance, callback
-reordering, handshake-magic ambiguity, exact candidate separation, transcript-
-only key derivation, receive-side size enforcement, unbounded queues, listener
-stop races, and a WebSocket envelope-size mismatch. These findings were
-reproduced where applicable and corrected. The final review result is recorded
-as **Ready**, with no critical or important issues. Its one minor note about NUL
-ambiguity in exporter labels was also fixed by rejecting NUL-containing labels.
+```sh
+swift test --scratch-path /tmp/dropmesh-task6-red-status --filter StatusItemAppKitTests
+swift test --scratch-path /tmp/dropmesh-task6-red-status --filter TransferSurfaceTests
+swift test --scratch-path /tmp/dropmesh-task6-red-status --filter SoftwareUpdateTests
+swift test --scratch-path /tmp/dropmesh-task6-red-status
+```
 
-## Remaining integration boundary
+Results:
 
-No live two-Mac, public STUN, or deployed TURN/rendezvous path was available in
-this task. Those environment-dependent paths remain for the later integration
-harness; Task 6 verifies their exact attempt/candidate configuration, shared
-signaling ownership, real local WebRTC transport, authenticated key agreement,
-and forced relay policy in-process/unit scope.
+- StatusItemAppKitTests: 20/20 passed;
+- TransferSurfaceTests: 49/49 passed;
+- SoftwareUpdateTests: 35/35 passed;
+- complete Swift suite: 636 passed, 3 Docker-only tests skipped, 0 failures;
+- real direct-LAN integration SHA-256 matched;
+- no task-specific Swift test process remained.
 
-## Post-commit review follow-up — 2026-08-26
+The transfer state now keeps the template status icon, uses the normal 30-point width, hides the visible percentage text, and draws a 14-by-2-point `NSColor.systemGreen` progress bar. AppKit tests verify the bar color in light and dark appearances and verify it does not intersect the unread receive dot. VoiceOver retains the textual percentage.
 
-An independent review of commit `938ad1d71cdf5d4434f0618b02d14270b625c5c1`
-found two important resource-bound gaps and two minor lifecycle gaps. All four
-were reproduced with red tests before implementation and corrected:
+## Build, signing, and update-feed verification
 
-- pending and live rendezvous signals are now bounded at 128 messages and 512
-  KiB per connection, with unmatched traffic also covered by a 4 MiB global
-  bound. A dequeue-accounted mailbox replaces the bare `AsyncThrowingStream`
-  buffer, so the 128-frame boundary preserves exact order while a 129th frame or
-  byte overflow fails before partial delivery with `signalingOverflow`. The peer
-  driver preserves that typed error and closes even if its data channel exists;
-- remote ICE candidates received before the remote description are capped at
-  128 candidates and 512 KiB per attempt; count or byte flooding returns the
-  typed `remoteCandidateOverflow`, clears pending candidates, closes the peer,
-  and terminates the signaling reader;
-- `await WebRTCSecureChannel.close()` now awaits a shared, idempotent transport
-  teardown task. The peer closes, its signal reader and every tracked candidate
-  send are cancelled and drained, and the retained driver/factory ownership is
-  released before close returns. A cancellation-aware blocked-sender regression
-  proves that no candidate is delivered after the close barrier;
-- suspended backpressure sends are capped at 128 waiters and 4 MiB of retained
-  frames. Excess sends fail with typed `overloaded`; individual cancellation and
-  channel close remove/resume waiters and release byte accounting.
+```sh
+bash Scripts/test-build-app-contract.sh
+bash Scripts/test-update-feed.sh
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-release-signing.sh
+```
 
-Fresh follow-up verification:
+Results:
 
-- focused `ConnectionCoordinatorTests|WebRTCLoopbackTests`: 28 tests, 0 failures;
-- complete `swift test`: 104 tests, 0 failures, 0 unexpected failures;
-- authenticated 1 MiB ordered/reliable loopback: 20/20 consecutive passes;
-- `bash Scripts/build-app.sh`, direct bundled-framework load, `open`, XCFramework
-  `x86_64 arm64` slice check, and `git diff --check`: pass.
+- build app contract PASS;
+- update feed PASS with `DropMesh.dmg` enclosure and signed appcast;
+- Developer ID release signing PASS;
+- signed app remained universal (`arm64`, `x86_64`), retained hardened runtime, verified its designated requirement, and completed both bounded smoke launches.
 
-The final independent follow-up review returned **Ready** with no critical,
-important, or minor findings. It independently passed the 28-test focused suite,
-the 104-test full suite, `git diff --check`, and ten consecutive repetitions of
-the close, backpressure, and live-signaling-overflow regressions.
+The clean-worktree-only distribution and installer contracts were run after the implementation commit; their final results are recorded below.
 
-The live two-Mac/public STUN/deployed TURN/rendezvous integration boundary above
-is unchanged by this resource and lifecycle hardening.
+## Compatibility evidence
+
+The generated app/distribution contracts assert:
+
+```text
+CFBundleName        DropMesh
+CFBundleDisplayName DropMesh
+CFBundleExecutable  MacChannelApp
+CFBundleIdentifier  com.mason.macchannel
+SUFeedURL            https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml
+```
+
+The working diff does not modify the production signing anchor, keychain implementation, persistent storage types, receive store, download-directory implementation, or historical release notes.
+
+## Files changed
+
+- public AppKit copy and transfer progress rendering in `App/`;
+- public version and UI tests in `Tests/MacChannelCoreTests/`;
+- public build/distribution/update/installer scripts and their contracts in `Scripts/`;
+- `Distribution/README.txt` and `Distribution/ReleaseNotes/v1.2.2.md`;
+- the current project `README.md`.
+
+## Post-commit clean-worktree verification
+
+The implementation was committed once before the clean-worktree-only gates were run:
+
+```sh
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-distribution.sh
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-personal-mesh-install.sh
+```
+
+Results:
+
+- distribution contract PASS, including the legacy-literal source allowlist, clean-tree fail-closed behavior, signed DMG mount verification, DropMesh manifest schema, and preserved internal bundle identity;
+- personal mesh installer contract PASS, including the DropMesh public artifact CLI and installation into the transition `MacChannel.app` path;
+- generated state was `internalSignedNotNotarized`, version 1.2.2, build 15; notarization and publication remain a later release task.
+
+This report-only amendment does not change any compiled source, build contract, or release input exercised by those gates.
+
+## Process safety
+
+Protected historical UE PIDs `38136`, `49361`, `80713`, `82338`, `25679`, `28690`, and `29145` were not inspected, signaled, or terminated.

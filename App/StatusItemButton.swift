@@ -41,6 +41,26 @@ final class StatusItemButton: NSStatusBarButton {
 
     var receiveIndicatorColor: NSColor { .systemGreen }
 
+    var showsTransferProgressIndicator: Bool {
+        phase.presentation.progress != nil
+    }
+
+    var transferProgressIndicatorColor: NSColor { .systemGreen }
+
+    var transferProgressTrackRect: NSRect {
+        NSRect(x: bounds.midX - 7, y: 2, width: 14, height: 2)
+    }
+
+    var transferProgressFillRect: NSRect {
+        guard let progress = phase.presentation.progress else { return .zero }
+        return NSRect(
+            x: transferProgressTrackRect.minX,
+            y: transferProgressTrackRect.minY,
+            width: transferProgressTrackRect.width * progress,
+            height: transferProgressTrackRect.height
+        )
+    }
+
     var onDragEntered: ((DropIntent, StatusItemDragFingerprint) -> StatusItemDragToken?)?
     var onDragCancelled: ((StatusItemDragToken, StatusItemDragFingerprint) -> Void)?
     var onDropOutside: ((StatusItemDragToken, StatusItemDragFingerprint) -> Void)?
@@ -68,7 +88,7 @@ final class StatusItemButton: NSStatusBarButton {
         switch phase {
         case .idle: 30
         case .ready: 72
-        case .transferring: 62
+        case .transferring: 30
         }
     }
 
@@ -114,6 +134,26 @@ final class StatusItemButton: NSStatusBarButton {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
+        if showsTransferProgressIndicator {
+            let track = NSBezierPath(
+                roundedRect: transferProgressTrackRect,
+                xRadius: 1,
+                yRadius: 1
+            )
+            NSColor.quaternaryLabelColor.setFill()
+            track.fill()
+
+            if transferProgressFillRect.width > 0 {
+                let fill = NSBezierPath(
+                    roundedRect: transferProgressFillRect,
+                    xRadius: 1,
+                    yRadius: 1
+                )
+                transferProgressIndicatorColor.setFill()
+                fill.fill()
+            }
+        }
+
         if showsUpdateIndicator {
             let indicator = NSBezierPath(ovalIn: updateIndicatorRect)
             NSColor.controlAccentColor.setFill()
@@ -126,29 +166,6 @@ final class StatusItemButton: NSStatusBarButton {
             indicator.fill()
         }
 
-        guard let progress = phase.presentation.progress else { return }
-
-        let center = NSPoint(x: 13, y: bounds.midY)
-        let radius: CGFloat = 7
-        let track = NSBezierPath()
-        track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
-        track.lineWidth = 2
-        NSColor.quaternaryLabelColor.setStroke()
-        track.stroke()
-
-        guard progress > 0 else { return }
-        let ring = NSBezierPath()
-        ring.appendArc(
-            withCenter: center,
-            radius: radius,
-            startAngle: 90,
-            endAngle: 90 - CGFloat(progress * 360),
-            clockwise: true
-        )
-        ring.lineWidth = 2
-        ring.lineCapStyle = .round
-        NSColor.controlAccentColor.setStroke()
-        ring.stroke()
     }
 
     private func configure() {
@@ -161,20 +178,21 @@ final class StatusItemButton: NSStatusBarButton {
         registerForDraggedTypes([.fileURL])
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel("Mac 通道文件传输")
+        setAccessibilityLabel("DropMesh 文件传输")
         setAccessibilityHelp("打开状态菜单，或将本地文件拖到这里选择接收设备。")
         render()
     }
 
     private func render() {
         let presentation = phase.presentation
-        title = presentation.title
-        alignment = presentation.progress == nil ? .center : .right
-        image = presentation.symbolName.flatMap {
-            let symbol = NSImage(systemSymbolName: $0, accessibilityDescription: nil)
+        title = presentation.progress == nil ? presentation.title : ""
+        alignment = .center
+        let symbolName = presentation.symbolName ?? "paperplane"
+        image = {
+            let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
             symbol?.isTemplate = true
             return symbol
-        }
+        }()
         // Keep status-bar symbols as untinted templates so AppKit can choose
         // the correct contrasting color for the current menu-bar material and
         // highlighted state. Semantic label colors can resolve to black even

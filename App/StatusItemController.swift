@@ -71,7 +71,7 @@ final class StatusItemController: NSObject {
         self.transferCoordinator = transferCoordinator
         self.filePicker = filePicker ?? NativeStatusItemFilePicker()
         self.deviceMenuPresenter = deviceMenuPresenter ?? NativeStatusItemDeviceMenuPresenter()
-        statusMenu = NSMenu(title: "MacChannel")
+        statusMenu = NSMenu(title: "DropMesh")
         super.init()
         dragRegionSession = if let dragRegionSchedule {
             DragRegionSession(schedule: dragRegionSchedule)
@@ -435,7 +435,7 @@ final class StatusItemController: NSObject {
         statusMenu.addItem(.separator())
 
         let quit = NSMenuItem(
-            title: "退出 Mac 通道",
+            title: "退出 DropMesh",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -452,7 +452,7 @@ final class StatusItemController: NSObject {
         host.focusRingType = .default
         host.setAccessibilityElement(true)
         host.setAccessibilityRole(.button)
-        host.setAccessibilityLabel("Mac 通道文件传输")
+        host.setAccessibilityLabel("DropMesh 文件传输")
         host.setAccessibilityHelp(
             "打开状态菜单，或将本地文件拖到这里选择接收设备。"
         )

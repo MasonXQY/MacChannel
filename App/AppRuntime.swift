@@ -116,14 +116,14 @@ final class AppRuntimeHost {
     private static func failurePresentation(for error: Error) -> (message: String, canRetry: Bool) {
         if case .operationFailed = error as? KeychainStoreError {
             return (
-                "无法启动 Mac 通道。请先允许钥匙串访问，然后点“重试启动”。",
+                "无法启动 DropMesh。请先允许钥匙串访问，然后点“重试启动”。",
                 true
             )
         }
         if error is KeychainStoreError || error is DeviceIdentityError {
             return ("无法读取这台 Mac 的安全身份。现有身份和配对数据没有被更改。", false)
         }
-        return ("无法启动 Mac 通道。请检查本地存储权限，然后点“重试启动”。", true)
+        return ("无法启动 DropMesh。请检查本地存储权限，然后点“重试启动”。", true)
     }
 
     func shutdown() async {

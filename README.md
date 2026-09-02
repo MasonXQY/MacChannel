@@ -1,6 +1,6 @@
-# Mac 通道
+# DropMesh
 
-Mac 通道是一款原生 macOS 菜单栏文件传输工具。把文件或文件夹拖到菜单栏图标，
+DropMesh 是一款原生 macOS 菜单栏文件传输工具。把文件或文件夹拖到菜单栏图标，
 选择一台已配对且在线的 Mac，松手即可发送。它支持多台 Mac，但每次只发送到一个目标。
 
 > v1.2.0 是首个内置应用更新功能的版本。从 v1.1.10 升级需要最后一次手动下载
@@ -43,25 +43,25 @@ MACCHANNEL_CODESIGN_IDENTITY="Developer ID Application: 组织名称 (TEAMID)" \
 bash Scripts/build-distribution.sh
 ```
 
-完成后得到 `dist/MacChannel.dmg` 和对应的 `dist/MacChannel.manifest.json`。打开 DMG，
-把 MacChannel 拖到“应用程序”即可。若设置 `MACCHANNEL_NOTARY_PROFILE`，构建器还会等待
+完成后得到 `dist/DropMesh.dmg` 和对应的 `dist/DropMesh.manifest.json`。打开 DMG，
+把 DropMesh 拖到“应用程序”即可。若设置 `MACCHANNEL_NOTARY_PROFILE`，构建器还会等待
 Apple 公证、装订票据并执行 Gatekeeper 检查；未设置时清单会明确标为
 `internalSignedNotNotarized`。
 
 ## 在两台 Mac 上安装
 
-1. 在每台 Mac 打开同一个 `MacChannel.dmg`，把 MacChannel 拖入“应用程序”。
-2. 启动后在菜单栏找到纸飞机图标；应用没有主窗口。
+1. 在每台 Mac 打开同一个 `DropMesh.dmg`，把 DropMesh 拖入“应用程序”。
+2. 启动后在菜单栏找到 DropMesh 图标；应用没有主窗口。
 3. 在已有设备上选择“添加另一台 Mac”并显示六位码。
 4. 在新设备输入该号码，然后在已有设备点“允许”。
-5. 从 Finder 把文件或文件夹拖到纸飞机，再放到目标 Mac 图标上。
+5. 从 Finder 把文件或文件夹拖到 DropMesh 菜单栏图标，再放到目标 Mac 图标上。
 
 设置、信任、历史和未完成传输会在覆盖升级时保留。公开版本应当通过 Apple 公证；不要关闭
 Gatekeeper 或 SIP，也不需要修改系统网络设置。
 
 ## 软件更新
 
-设置会显示当前版本和构建号。Mac 通道每天最多在后台检查一次更新；没有更新或临时
+设置会显示当前版本和构建号。DropMesh 每天最多在后台检查一次更新；没有更新或临时
 离线时不会弹窗打扰。发现新版后，用户可以从设置或菜单栏主动查看发布说明并决定是否
 安装，不会静默强制更新。
 
@@ -84,7 +84,7 @@ Mac 的设置中移除它。
 ## 发送文件
 
 1. 在 Finder 中选中一个或多个文件或文件夹。
-2. 拖到菜单栏的 Mac 通道图标；图标显示“准备发送”。
+2. 拖到菜单栏的 DropMesh 图标；图标显示“准备发送”。
 3. 在线 Mac 设备扇展开后，把鼠标移到目标设备。
 4. 看到目标高亮和“松开发送”后松手。移出所有目标再松手会取消。
 5. 点击菜单栏图标可查看速度、剩余时间、连接方式、暂停、继续或取消。
@@ -93,7 +93,7 @@ Mac 的设置中移除它。
 
 ## 接收位置
 
-默认保存到 `~/Downloads/Mac 通道`。可在设置中更改全局目录，或为某个来源设备指定
+默认保存到下载文件夹中的现有接收目录（覆盖升级时保持不变）。可在设置中更改全局目录，或为某个来源设备指定
 单独目录。同名文件会自动编号，不会覆盖已有文件；未校验完成的内容不会以最终名称出现。
 
 ## 管理设备
