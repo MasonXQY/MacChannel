@@ -112,6 +112,7 @@ cat >"$stapler_shim" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$#" -eq 2 && "$1" == validate && -f "$2" ]]
+[[ "${MACCHANNEL_INSTALL_VALIDATOR_FAIL:-}" != stapler ]] || exit 71
 printf 'stapler\t%s\t%s\n' "$1" "$2" >>"$MACCHANNEL_INSTALL_TEST_MARKER"
 SH
 cat >"$spctl_shim" <<'SH'
@@ -119,8 +120,14 @@ cat >"$spctl_shim" <<'SH'
 set -euo pipefail
 [[ "$#" -ge 4 && "$1" == --assess && "$2" == --type ]]
 case "$3" in
-    open) [[ -f "${@: -1}" ]] ;;
-    execute) [[ -d "${@: -1}" ]] ;;
+    open)
+        [[ -f "${@: -1}" ]]
+        [[ "${MACCHANNEL_INSTALL_VALIDATOR_FAIL:-}" != open ]] || exit 72
+        ;;
+    execute)
+        [[ -d "${@: -1}" ]]
+        [[ "${MACCHANNEL_INSTALL_VALIDATOR_FAIL:-}" != execute ]] || exit 73
+        ;;
     *) exit 64 ;;
 esac
 printf 'spctl\t%s\t%s\n' "$3" "${@: -1}" >>"$MACCHANNEL_INSTALL_TEST_MARKER"
@@ -149,6 +156,25 @@ expect_failure() {
         sed -n '1,120p' "$test_root/failure.log" >&2
         exit 1
     fi
+}
+
+prepare_old_app() {
+    local label="$1"
+    rm -rf "$applications/MacChannel.app" "$test_root/expected-old.app"
+    mkdir -p "$applications/MacChannel.app/Contents/Resources"
+    printf 'old executable %s\n' "$label" >"$applications/MacChannel.app/Contents/MacChannelApp"
+    printf 'old resource %s\n' "$label" >"$applications/MacChannel.app/Contents/Resources/state.bin"
+    cp -R "$applications/MacChannel.app" "$test_root/expected-old.app"
+}
+
+assert_old_app_unchanged() {
+    [[ -d "$applications/MacChannel.app" && ! -L "$applications/MacChannel.app" ]]
+    diff -rq "$test_root/expected-old.app" "$applications/MacChannel.app" >/dev/null
+}
+
+assert_installed_app_valid() {
+    [[ -d "$applications/MacChannel.app" && ! -L "$applications/MacChannel.app" ]]
+    /usr/bin/codesign --verify --deep --strict "$applications/MacChannel.app"
 }
 
 primary_dmg="$test_root/primary/DropMesh.dmg"
@@ -220,16 +246,164 @@ expect_failure 1 "${installer_test_environment[@]}" \
     --applications-dir "$applications" \
     --expected-commit "$(git rev-parse HEAD)"
 
-mkdir -p "$applications/MacChannel.app/Contents"
-printf 'old-version\n' >"$applications/MacChannel.app/Contents/old.txt"
-expect_failure 70 "${installer_test_environment[@]}" \
-    MACCHANNEL_INSTALL_FAIL_AT=after-backup \
+# Every notarization and Gatekeeper failure is fail-closed and preserves the
+# exact old application bytes.
+for validator_failure in stapler open execute; do
+    prepare_old_app "validator-$validator_failure"
+    case "$validator_failure" in
+        stapler) expected_status=71 ;;
+        open) expected_status=72 ;;
+        execute) expected_status=73 ;;
+    esac
+    expect_failure "$expected_status" "${installer_test_environment[@]}" \
+        MACCHANNEL_INSTALL_VALIDATOR_FAIL="$validator_failure" \
+        bash Scripts/install-personal-mesh.sh \
+        --dmg "$primary_dmg" \
+        --manifest "$primary_manifest" \
+        --applications-dir "$applications" \
+        --expected-commit "$(git rev-parse HEAD)"
+    assert_old_app_unchanged
+done
+
+# A hostile process may pre-create the installer's former predictable PID-based
+# file names. Files, directories, and symlinks at those names must remain
+# byte-for-byte untouched and must never redirect a copy or cleanup operation.
+run_hostile_collision_case() {
+    local kind="$1"
+    local pid_file="$test_root/collision-$kind.pid"
+    local continue_file="$test_root/collision-$kind.continue"
+    local outside="$test_root/collision-$kind-outside"
+    local installer_pid install_collision backup_collision result
+
+    rm -f "$pid_file" "$continue_file"
+    mkdir -p "$outside"
+    printf 'outside-%s\n' "$kind" >"$outside/sentinel"
+
+    "${installer_test_environment[@]}" bash -c '
+        pid_file="$1"
+        continue_file="$2"
+        shift 2
+        printf "%s\n" "$$" >"$pid_file"
+        while [[ ! -e "$continue_file" ]]; do /bin/sleep 0.01; done
+        exec "$@"
+    ' bash "$pid_file" "$continue_file" \
+        bash Scripts/install-personal-mesh.sh \
+        --dmg "$primary_dmg" \
+        --manifest "$primary_manifest" \
+        --applications-dir "$applications" \
+        --expected-commit "$(git rev-parse HEAD)" &
+    installer_pid=$!
+
+    for _ in {1..500}; do
+        [[ -s "$pid_file" ]] && break
+        /bin/sleep 0.01
+    done
+    [[ -s "$pid_file" ]] || { echo "installer PID synchronization failed" >&2; exit 1; }
+    installer_pid="$(cat "$pid_file")"
+    install_collision="$applications/.DropMesh.install.$installer_pid"
+    backup_collision="$applications/.DropMesh.backup.$installer_pid"
+
+    case "$kind" in
+        file)
+            printf 'hostile-install-file\n' >"$install_collision"
+            printf 'hostile-backup-file\n' >"$backup_collision"
+            ;;
+        directory)
+            mkdir "$install_collision" "$backup_collision"
+            printf 'hostile-install-directory\n' >"$install_collision/sentinel"
+            printf 'hostile-backup-directory\n' >"$backup_collision/sentinel"
+            ;;
+        symlink)
+            ln -s "$outside" "$install_collision"
+            ln -s "$outside" "$backup_collision"
+            ;;
+        *) exit 64 ;;
+    esac
+    : >"$continue_file"
+    set +e
+    wait "$installer_pid"
+    result=$?
+    set -e
+    [[ "$result" -eq 0 ]] || { echo "collision install failed with $result" >&2; exit 1; }
+    assert_installed_app_valid
+    case "$kind" in
+        file)
+            grep -qx 'hostile-install-file' "$install_collision"
+            grep -qx 'hostile-backup-file' "$backup_collision"
+            ;;
+        directory)
+            grep -qx 'hostile-install-directory' "$install_collision/sentinel"
+            grep -qx 'hostile-backup-directory' "$backup_collision/sentinel"
+            ;;
+        symlink)
+            [[ -L "$install_collision" && "$(readlink "$install_collision")" == "$outside" ]]
+            [[ -L "$backup_collision" && "$(readlink "$backup_collision")" == "$outside" ]]
+            ;;
+    esac
+    grep -qx "outside-$kind" "$outside/sentinel"
+}
+
+run_hostile_collision_case file
+run_hostile_collision_case directory
+run_hostile_collision_case symlink
+
+# Unrecognized transaction orphans belong to another/terminated process. A new
+# run must not scan, adopt, or delete them.
+orphan_root="$applications/.DropMesh.transaction.orphan42"
+mkdir -m 700 "$orphan_root"
+printf 'do-not-adopt\n' >"$orphan_root/sentinel"
+"${installer_test_environment[@]}" \
     bash Scripts/install-personal-mesh.sh \
     --dmg "$primary_dmg" \
     --manifest "$primary_manifest" \
     --applications-dir "$applications" \
     --expected-commit "$(git rev-parse HEAD)"
-test -f "$applications/MacChannel.app/Contents/old.txt"
+grep -qx 'do-not-adopt' "$orphan_root/sentinel"
+
+# Ordinary failures before the commit boundary restore the exact old app. A
+# post-commit failure keeps the complete newly installed signed app.
+for failure_point in before-backup after-backup after-install; do
+    prepare_old_app "failure-$failure_point"
+    expect_failure 70 "${installer_test_environment[@]}" \
+        MACCHANNEL_INSTALL_FAIL_AT="$failure_point" \
+        bash Scripts/install-personal-mesh.sh \
+        --dmg "$primary_dmg" \
+        --manifest "$primary_manifest" \
+        --applications-dir "$applications" \
+        --expected-commit "$(git rev-parse HEAD)"
+    assert_old_app_unchanged
+done
+prepare_old_app failure-after-success
+expect_failure 70 "${installer_test_environment[@]}" \
+    MACCHANNEL_INSTALL_FAIL_AT=after-success \
+    bash Scripts/install-personal-mesh.sh \
+    --dmg "$primary_dmg" \
+    --manifest "$primary_manifest" \
+    --applications-dir "$applications" \
+    --expected-commit "$(git rev-parse HEAD)"
+assert_installed_app_valid
+
+# INT, TERM, and HUP received at either rename point are deferred until the
+# tiny commit section reaches a complete old-or-new state. The same signals at
+# the success boundary also leave a complete signed app.
+for signal_name in INT TERM HUP; do
+    case "$signal_name" in
+        INT) expected_status=130 ;;
+        TERM) expected_status=143 ;;
+        HUP) expected_status=129 ;;
+    esac
+    for signal_point in after-backup after-install after-success; do
+        prepare_old_app "signal-$signal_name-$signal_point"
+        expect_failure "$expected_status" "${installer_test_environment[@]}" \
+            MACCHANNEL_INSTALL_SIGNAL_AT="$signal_point:$signal_name" \
+            bash Scripts/install-personal-mesh.sh \
+            --dmg "$primary_dmg" \
+            --manifest "$primary_manifest" \
+            --applications-dir "$applications" \
+            --expected-commit "$(git rev-parse HEAD)"
+        assert_installed_app_valid
+    done
+done
 
 # Test validators are accepted only inside an owner-only canonical fixture root.
 # Merely setting the test flag must never expose them to /Applications.

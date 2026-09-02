@@ -71,3 +71,81 @@ The gate performed two release builds, recursively verified the signed applicati
 ## Process safety
 
 No notification source files were changed. No Unreal Engine process was signalled, stopped, or otherwise touched.
+
+## P1 transaction-path and rollback remediation
+
+The follow-up review identified a second trust-boundary issue in the replacement
+transaction. The old staging and backup names were derived from `$$` directly
+under the shared Applications directory, so a same-user process could pre-create
+either name as a file, directory, or symlink. The state flags also changed after
+each `mv`, leaving signal windows in which cleanup could misclassify the actual
+filesystem state.
+
+### RED evidence
+
+The new adversarial contract starts the installer behind a synchronization
+barrier, reads its real process ID, and creates
+`.DropMesh.install.<pid>` / `.DropMesh.backup.<pid>` before allowing it to
+continue. Against `447ab63`, the regular-file case reached the production copy
+operation and failed at the attacker-controlled destination:
+
+```text
+ditto: Can't copy directory .../MacChannel.app into a file .../.DropMesh.install.<pid>.
+collision install failed with 1
+```
+
+### Implementation
+
+- The installer creates a non-predictable `.DropMesh.transaction.XXXXXX`
+  directory with `mktemp` on the Applications filesystem. The transaction,
+  staging, and backup roots are owner-only mode `0700`; every root is checked
+  for exact canonical containment, ownership, mode, non-symlink type, and its
+  captured device/inode identity.
+- The staging application destination is created by the installer before
+  `ditto`. Its canonical parent, owner, non-symlink type, and device/inode are
+  checked both before and after the copy. The verified inode is then renamed to
+  the final application path on the same filesystem.
+- `INT`, `TERM`, and `HUP` received between the old-app rename and the new-app
+  rename are recorded and processed after the tiny commit section reaches a
+  complete state. Cleanup distinguishes the staged inode from the captured old
+  app inode, restores only the private backup on rollback, and recursively
+  removes only this process's validated private root. Unknown transaction
+  orphans are never scanned or adopted.
+- Failure injection now covers `before-backup`, `after-backup`, `after-install`,
+  and `after-success`. Signal injection covers all three signals at
+  `after-backup`, `after-install`, and `after-success`.
+- Stapler validation, DMG Gatekeeper-open assessment, and mounted-app
+  Gatekeeper-execute assessment each have an explicit fail-closed negative.
+  All three preserve an exact byte comparison of the pre-existing app.
+
+### Verification
+
+Fresh focused and signing checks passed after the remediation:
+
+```text
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-personal-mesh-install.sh                 PASS
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-release-signing.sh                       PASS
+bash Scripts/test-update-paths-contract.sh                   PASS
+bash -n Scripts/*.sh                                         PASS
+git diff --check                                             PASS
+```
+
+The focused matrix passed all three hostile collision types, the unrecognized
+orphan case, four ordinary failure points, nine signal/commit-point cases, and
+the three notarization/Gatekeeper failures. No installer mount or test root was
+left behind, and the protected Unreal Engine PID baseline was not inspected or
+signalled.
+
+After the remediation was committed, the required clean-worktree distribution
+gate also passed:
+
+```text
+MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
+  bash Scripts/test-distribution.sh                         PASS
+```
+
+That gate rebuilt the release application and DMG twice, verified their pinned
+Developer ID signatures and mounted contents, exercised all fail-closed build
+points, and left the formal repository `dist/` unchanged.

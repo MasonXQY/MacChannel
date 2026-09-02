@@ -27,6 +27,8 @@ installer_testing="${MACCHANNEL_INSTALL_TESTING:-0}"
 install_test_root="${MACCHANNEL_INSTALL_TEST_ROOT:-}"
 requested_stapler_command="${MACCHANNEL_INSTALL_STAPLER_COMMAND:-}"
 requested_spctl_command="${MACCHANNEL_INSTALL_SPCTL_COMMAND:-}"
+requested_failure_point="${MACCHANNEL_INSTALL_FAIL_AT:-}"
+requested_signal_point="${MACCHANNEL_INSTALL_SIGNAL_AT:-}"
 case "$installer_testing" in
     0|1) ;;
     *) echo "MACCHANNEL_INSTALL_TESTING must be 0 or 1" >&2; exit 2 ;;
@@ -53,11 +55,20 @@ if [[ "$installer_testing" == 1 ]]; then
             }
         fi
     done
+    case "$requested_failure_point" in
+        ""|before-backup|after-backup|after-install|after-success) ;;
+        *) echo "invalid installer failure injection point" >&2; exit 2 ;;
+    esac
+    case "$requested_signal_point" in
+        ""|after-backup:INT|after-backup:TERM|after-backup:HUP|after-install:INT|after-install:TERM|after-install:HUP|after-success:INT|after-success:TERM|after-success:HUP) ;;
+        *) echo "invalid installer signal injection point" >&2; exit 2 ;;
+    esac
 elif [[ "$applications_dir" != /Applications ]]; then
     echo "custom application directory is available only to the installer contract test" >&2
     exit 2
 elif [[ -n "$install_test_root" || -n "$requested_stapler_command" || \
-    -n "$requested_spctl_command" || -n "${MACCHANNEL_INSTALL_FAIL_AT:-}" ]]; then
+    -n "$requested_spctl_command" || -n "$requested_failure_point" || \
+    -n "$requested_signal_point" ]]; then
     echo "installer test controls require MACCHANNEL_INSTALL_TESTING=1" >&2
     exit 2
 fi
@@ -155,36 +166,192 @@ actual_dmg_team="$(sed -n 's/^TeamIdentifier=//p' <<<"$dmg_details" | tail -n 1)
 run_stapler_validate
 run_spctl_open
 
-check_root="$(mktemp -d "${TMPDIR:-/tmp}/macchannel-install.XXXXXX")"
-chmod 700 "$check_root"
+check_root="$(macchannel_create_test_root macchannel-install-mount)" || {
+    echo "无法创建安全的镜像检查目录" >&2
+    exit 1
+}
 mount_path="$check_root/mounted"
-backup_path="$applications_dir/.DropMesh.backup.$$"
-new_path="$applications_dir/.DropMesh.install.$$"
 target_path="$applications_dir/MacChannel.app"
+transaction_root=""
+staging_root=""
+backup_root=""
+staged_path=""
+backup_path=""
+transaction_identity=""
+staging_root_identity=""
+backup_root_identity=""
+staged_identity=""
+old_target_identity=""
+applications_dir_physical=""
+current_uid=""
 mounted=0
 backup_created=0
 new_installed=0
 success=0
+commit_critical=0
+pending_signal_status=0
+
+require_private_transaction_root() {
+    local root="$1"
+    local physical_root root_mode root_uid root_name actual_identity
+
+    [[ -n "$applications_dir_physical" && -n "$current_uid" ]] || return 1
+    [[ "$root" == "$applications_dir"/.DropMesh.transaction.?????? ]] || return 1
+    root_name="${root##*/}"
+    [[ "$root_name" =~ ^\.DropMesh\.transaction\.[A-Za-z0-9]{6}$ ]] || return 1
+    [[ "${root%/*}" == "$applications_dir" && -d "$root" && ! -L "$root" ]] || return 1
+    physical_root="$(cd "$root" 2>/dev/null && /bin/pwd -P)" || return 1
+    [[ "$physical_root" == "$root" ]] || return 1
+    [[ "$(cd "${root%/*}" 2>/dev/null && /bin/pwd -P)" == \
+        "$applications_dir_physical" ]] || return 1
+    root_mode="$(/usr/bin/stat -f %Lp "$root" 2>/dev/null)" || return 1
+    root_uid="$(/usr/bin/stat -f %u "$root" 2>/dev/null)" || return 1
+    actual_identity="$(/usr/bin/stat -f '%d:%i' "$root" 2>/dev/null)" || return 1
+    [[ "$root_mode" == 700 && "$root_uid" == "$current_uid" ]] || return 1
+    [[ -z "$transaction_identity" || "$actual_identity" == "$transaction_identity" ]]
+}
+
+require_private_child_root() {
+    local path="$1"
+    local required_name="$2"
+    local path_mode path_uid actual_identity expected_identity
+
+    require_private_transaction_root "$transaction_root" || return 1
+    [[ "$required_name" == staging || "$required_name" == backup ]] || return 1
+    [[ "$path" == "$transaction_root/$required_name" && -d "$path" && ! -L "$path" ]] || return 1
+    [[ "$(cd "$path" 2>/dev/null && /bin/pwd -P)" == "$path" ]] || return 1
+    [[ "$(cd "${path%/*}" 2>/dev/null && /bin/pwd -P)" == "$transaction_root" ]] || return 1
+    path_mode="$(/usr/bin/stat -f %Lp "$path" 2>/dev/null)" || return 1
+    path_uid="$(/usr/bin/stat -f %u "$path" 2>/dev/null)" || return 1
+    actual_identity="$(/usr/bin/stat -f '%d:%i' "$path" 2>/dev/null)" || return 1
+    if [[ "$required_name" == staging ]]; then
+        expected_identity="$staging_root_identity"
+    else
+        expected_identity="$backup_root_identity"
+    fi
+    [[ "$path_mode" == 700 && "$path_uid" == "$current_uid" ]] || return 1
+    [[ -z "$expected_identity" || "$actual_identity" == "$expected_identity" ]]
+}
+
+require_staged_destination() {
+    local path="$1"
+
+    require_private_child_root "$staging_root" staging || return 1
+    [[ "$path" == "$staging_root/MacChannel.app" && -d "$path" && ! -L "$path" ]] || return 1
+    [[ "$(cd "$path" 2>/dev/null && /bin/pwd -P)" == "$path" ]] || return 1
+    [[ "$(cd "${path%/*}" 2>/dev/null && /bin/pwd -P)" == "$staging_root" ]] || return 1
+    [[ "$(/usr/bin/stat -f %u "$path" 2>/dev/null)" == "$current_uid" ]] || return 1
+    [[ -z "$staged_identity" || \
+        "$(/usr/bin/stat -f '%d:%i' "$path" 2>/dev/null)" == "$staged_identity" ]]
+}
+
+inject_test_failure() {
+    local point="$1"
+    if [[ "$installer_testing" == 1 && "$requested_failure_point" == "$point" ]]; then
+        exit 70
+    fi
+}
+
+inject_test_signal() {
+    local point="$1"
+    local configured_point signal_name
+
+    [[ "$installer_testing" == 1 && -n "$requested_signal_point" ]] || return 0
+    configured_point="${requested_signal_point%%:*}"
+    [[ "$configured_point" == "$point" ]] || return 0
+    signal_name="${requested_signal_point##*:}"
+    /bin/kill -s "$signal_name" "$$"
+}
+
+inject_test_event() {
+    local point="$1"
+    inject_test_failure "$point"
+    inject_test_signal "$point"
+}
+
+handle_install_signal() {
+    local status="$1"
+    if [[ "$commit_critical" -eq 1 ]]; then
+        if [[ "$pending_signal_status" -eq 0 ]]; then
+            pending_signal_status="$status"
+        fi
+        return 0
+    fi
+    exit "$status"
+}
+
+process_pending_signal() {
+    local status
+    if [[ "$pending_signal_status" -ne 0 ]]; then
+        status="$pending_signal_status"
+        pending_signal_status=0
+        exit "$status"
+    fi
+}
 
 cleanup() {
     local result=$?
+    local cleanup_failed=0 target_identity
+    trap - EXIT
+    trap '' INT TERM HUP
+
     if [[ "$mounted" -eq 1 ]]; then
-        hdiutil detach "$mount_path" -quiet >/dev/null 2>&1 || true
+        /usr/bin/hdiutil detach "$mount_path" -quiet >/dev/null 2>&1 || true
     fi
-    if [[ "$success" -ne 1 && -w "$applications_dir" ]]; then
-        if [[ "$new_installed" -eq 1 && -e "$target_path" ]]; then rm -rf "$target_path"; fi
-        if [[ "$backup_created" -eq 1 && -e "$backup_path" ]]; then mv "$backup_path" "$target_path"; fi
-        if [[ -e "$new_path" ]]; then rm -rf "$new_path"; fi
+
+    if [[ "$success" -ne 1 && "$new_installed" -eq 1 ]]; then
+        if [[ -d "$target_path" && ! -L "$target_path" ]]; then
+            target_identity="$(/usr/bin/stat -f '%d:%i' "$target_path" 2>/dev/null || true)"
+            if [[ -n "$staged_identity" && "$target_identity" == "$staged_identity" ]]; then
+                /bin/rm -rf "$target_path" || cleanup_failed=1
+            else
+                cleanup_failed=1
+            fi
+        elif [[ -e "$target_path" || -L "$target_path" ]]; then
+            cleanup_failed=1
+        fi
+        [[ ! -e "$target_path" && ! -L "$target_path" ]] || cleanup_failed=1
     fi
-    case "$check_root" in
-        "${TMPDIR:-/tmp}"/macchannel-install.*) rm -rf "$check_root" ;;
-    esac
+
+    if [[ "$success" -ne 1 && "$backup_created" -eq 1 ]]; then
+        if [[ "$cleanup_failed" -eq 0 && ! -e "$target_path" && ! -L "$target_path" && \
+            -d "$backup_path" && ! -L "$backup_path" && \
+            "${backup_path%/*}" == "$backup_root" && \
+            "$(/usr/bin/stat -f '%d:%i' "$backup_path" 2>/dev/null)" == \
+                "$old_target_identity" ]]; then
+            /bin/mv "$backup_path" "$target_path" || cleanup_failed=1
+        else
+            cleanup_failed=1
+        fi
+    fi
+
+    if [[ -n "$transaction_root" ]]; then
+        if require_private_transaction_root "$transaction_root"; then
+            if [[ "$cleanup_failed" -eq 0 || "$success" -eq 1 ]]; then
+                /bin/rm -rf "$transaction_root" || cleanup_failed=1
+            fi
+        elif [[ -e "$transaction_root" || -L "$transaction_root" ]]; then
+            cleanup_failed=1
+        fi
+    fi
+    if macchannel_require_canonical_test_root "$check_root"; then
+        /bin/rm -rf "$check_root" || cleanup_failed=1
+    else
+        cleanup_failed=1
+    fi
+    if [[ "$cleanup_failed" -ne 0 ]]; then
+        echo "安装回滚或安全清理未能完成" >&2
+        result=70
+    fi
     exit "$result"
 }
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT
+trap 'handle_install_signal 130' INT
+trap 'handle_install_signal 143' TERM
+trap 'handle_install_signal 129' HUP
 
-mkdir -p "$mount_path"
-hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_path" -quiet
+/bin/mkdir -m 700 "$mount_path"
+/usr/bin/hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_path" -quiet
 mounted=1
 mounted_app="$mount_path/MacChannel.app"
 mounted_plist="$mounted_app/Contents/Info.plist"
@@ -220,32 +387,74 @@ if [[ ! -d "$applications_dir" ]]; then
 fi
 
 if [[ -w "$applications_dir" ]]; then
-    ditto --noextattr --noqtn "$mounted_app" "$new_path"
-    /usr/bin/codesign --verify --deep --strict "$new_path"
+    applications_dir_physical="$(cd "$applications_dir" 2>/dev/null && /bin/pwd -P)" || {
+        echo "“应用程序”目录无效" >&2
+        exit 1
+    }
+    [[ "$applications_dir_physical" == "$applications_dir" && ! -L "$applications_dir" ]] || {
+        echo "“应用程序”目录无效" >&2
+        exit 1
+    }
+
+    current_uid="$(/usr/bin/id -u)"
+    transaction_root="$(umask 077; /usr/bin/mktemp -d \
+        "$applications_dir/.DropMesh.transaction.XXXXXX")" || {
+        echo "无法创建安全安装事务" >&2
+        exit 1
+    }
+    /bin/chmod 700 "$transaction_root"
+    transaction_identity="$(/usr/bin/stat -f '%d:%i' "$transaction_root")" || exit 1
+    require_private_transaction_root "$transaction_root" || {
+        echo "安装事务目录无效" >&2
+        exit 1
+    }
+    staging_root="$transaction_root/staging"
+    backup_root="$transaction_root/backup"
+    /bin/mkdir -m 700 "$staging_root" "$backup_root"
+    staging_root_identity="$(/usr/bin/stat -f '%d:%i' "$staging_root")" || exit 1
+    backup_root_identity="$(/usr/bin/stat -f '%d:%i' "$backup_root")" || exit 1
+    require_private_child_root "$staging_root" staging || exit 1
+    require_private_child_root "$backup_root" backup || exit 1
+    staged_path="$staging_root/MacChannel.app"
+    backup_path="$backup_root/MacChannel.app"
+    /bin/mkdir -m 700 "$staged_path"
+    staged_identity="$(/usr/bin/stat -f '%d:%i' "$staged_path")" || exit 1
+    require_staged_destination "$staged_path" || exit 1
+
+    /usr/bin/ditto --noextattr --noqtn "$mounted_app" "$staged_path"
+    require_staged_destination "$staged_path" || exit 1
+    /usr/bin/codesign --verify --deep --strict "$staged_path"
     /usr/bin/codesign --verify --deep --strict \
-        --test-requirement "=$anchor_requirement" "$new_path"
-    if [[ -e "$target_path" ]]; then
-        mv "$target_path" "$backup_path"
+        --test-requirement "=$anchor_requirement" "$staged_path"
+    if [[ -L "$target_path" || ( -e "$target_path" && ! -d "$target_path" ) ]]; then
+        echo "现有应用路径无效，未进行替换" >&2
+        exit 1
+    fi
+
+    inject_test_failure before-backup
+    commit_critical=1
+    if [[ -d "$target_path" ]]; then
+        old_target_identity="$(/usr/bin/stat -f '%d:%i' "$target_path")" || exit 1
+        /bin/mv "$target_path" "$backup_path"
         backup_created=1
+        [[ "$(/usr/bin/stat -f '%d:%i' "$backup_path")" == "$old_target_identity" ]] || exit 1
     fi
-    if [[ "${MACCHANNEL_INSTALL_TESTING:-}" == 1 && \
-        "${MACCHANNEL_INSTALL_FAIL_AT:-}" == after-backup ]]; then
-        exit 70
-    fi
-    mv "$new_path" "$target_path"
+    inject_test_event after-backup
+    /bin/mv "$staged_path" "$target_path"
     new_installed=1
+    installed_identity="$(/usr/bin/stat -f '%d:%i' "$target_path")" || exit 1
+    [[ "$installed_identity" == "$staged_identity" && -d "$target_path" && \
+        ! -L "$target_path" ]] || exit 1
+    inject_test_event after-install
+    success=1
+    commit_critical=0
+    process_pending_signal
+    inject_test_event after-success
 else
     echo "“应用程序”目录需要管理员授权，请在打开的 DMG 中把 DropMesh 拖到“应用程序”。" >&2
     open "$dmg"
     exit 2
 fi
-
-/usr/bin/codesign --verify --deep --strict --verbose=2 "$target_path"
-/usr/bin/codesign --verify --deep --strict \
-    --test-requirement "=$anchor_requirement" "$target_path"
-if [[ "$backup_created" -eq 1 && -e "$backup_path" ]]; then rm -rf "$backup_path"; fi
-backup_created=0
-success=1
 
 if [[ "${MACCHANNEL_INSTALL_SKIP_LAUNCH:-}" != 1 ]]; then
     /usr/bin/open -n "$target_path"
