@@ -74,13 +74,19 @@ struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
         private var cancelled = false
         private let nextValue: @Sendable () async -> TransferReceiveResult?
         private let cancelSubscription: @Sendable () async -> Void
+        private let markRecordedValue: @Sendable (TransferReceiveResult) async -> Void
+        private let drainSubscription: @Sendable () async -> [TransferReceiveResult]
 
         init(
             next: @escaping @Sendable () async -> TransferReceiveResult?,
-            cancel: @escaping @Sendable () async -> Void
+            cancel: @escaping @Sendable () async -> Void,
+            markRecorded: @escaping @Sendable (TransferReceiveResult) async -> Void = { _ in },
+            drainAndCancel: @escaping @Sendable () async -> [TransferReceiveResult] = { [] }
         ) {
             nextValue = next
             cancelSubscription = cancel
+            markRecordedValue = markRecorded
+            drainSubscription = drainAndCancel
         }
 
         func next() async -> TransferReceiveResult? {
@@ -95,6 +101,21 @@ struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
                 return true
             }
             if shouldCancel { await cancelSubscription() }
+        }
+
+        func markRecorded(_ result: TransferReceiveResult) async {
+            guard !lock.withLock({ cancelled }) else { return }
+            await markRecordedValue(result)
+        }
+
+        func drainAndCancel() async -> [TransferReceiveResult] {
+            let shouldDrain = lock.withLock { () -> Bool in
+                guard !cancelled else { return false }
+                cancelled = true
+                return true
+            }
+            guard shouldDrain else { return [] }
+            return await drainSubscription()
         }
 
         deinit {
@@ -119,7 +140,14 @@ struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
         next: @escaping @Sendable () async -> TransferReceiveResult?,
         cancel: @escaping @Sendable () async -> Void
     ) {
-        subscription = Subscription(next: next, cancel: cancel)
+        subscription = Subscription(
+            next: next,
+            cancel: cancel,
+            drainAndCancel: {
+                await cancel()
+                return []
+            }
+        )
     }
 
     func makeAsyncIterator() -> AsyncIterator {
@@ -128,6 +156,14 @@ struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
 
     func cancel() async {
         await subscription.cancel()
+    }
+
+    func markRecorded(_ result: TransferReceiveResult) async {
+        await subscription.markRecorded(result)
+    }
+
+    func drainAndCancel() async -> [TransferReceiveResult] {
+        await subscription.drainAndCancel()
     }
 
     fileprivate static var finished: RuntimeReceiveEventStream {
@@ -151,12 +187,16 @@ actor RuntimeReceiveEventSource {
     private struct SubscriptionState {
         var buffered: [TransferReceiveResult]
         var nextWaiter: NextWaiter?
+        /// A yielded result stays owned by the source until the consumer marks
+        /// its durable recording, so an atomic cutoff can recover the handoff race.
+        var inFlight: TransferReceiveResult?
     }
 
     private struct PendingPublication {
         let token: UUID
         let result: TransferReceiveResult
-        let continuation: CheckedContinuation<Void, Never>
+        var recipientIDs: Set<UUID>?
+        var continuation: CheckedContinuation<Void, Never>?
     }
 
     private let bufferCapacity: Int
@@ -177,13 +217,22 @@ actor RuntimeReceiveEventSource {
         let initial = hasSubscribed ? [] : pendingFirstSubscription
         hasSubscribed = true
         pendingFirstSubscription.removeAll(keepingCapacity: false)
-        subscriptions[id] = SubscriptionState(buffered: initial, nextWaiter: nil)
+        subscriptions[id] = SubscriptionState(buffered: initial, nextWaiter: nil, inFlight: nil)
+        for index in pendingPublications.indices where pendingPublications[index].recipientIDs == nil {
+            pendingPublications[index].recipientIDs = [id]
+        }
         drainPendingPublications()
 
         return RuntimeReceiveEventStream(
             subscription: RuntimeReceiveEventStream.Subscription(
                 next: { [weak self] in await self?.next(subscription: id) },
-                cancel: { [weak self] in await self?.cancelSubscription(id) }
+                cancel: { [weak self] in await self?.cancelSubscription(id) },
+                markRecorded: { [weak self] result in
+                    await self?.markRecorded(result, subscription: id)
+                },
+                drainAndCancel: { [weak self] in
+                    await self?.drainAndCancel(subscription: id) ?? []
+                }
             )
         )
     }
@@ -191,8 +240,9 @@ actor RuntimeReceiveEventSource {
     func publish(_ result: TransferReceiveResult) async {
         guard !isFinished else { return }
         completionState.recordCompletion()
-        if pendingPublications.isEmpty, canAcceptPublication {
-            commitPublication(result)
+        let recipientIDs = hasSubscribed ? Set(subscriptions.keys) : nil
+        if pendingPublications.isEmpty, canAcceptPublication(for: recipientIDs) {
+            commitPublication(result, recipientIDs: recipientIDs)
             return
         }
 
@@ -207,6 +257,7 @@ actor RuntimeReceiveEventSource {
                     PendingPublication(
                         token: token,
                         result: result,
+                        recipientIDs: recipientIDs,
                         continuation: continuation
                     )
                 )
@@ -224,37 +275,46 @@ actor RuntimeReceiveEventSource {
         let publishers = pendingPublications
         pendingFirstSubscription.removeAll(keepingCapacity: false)
         pendingPublications.removeAll(keepingCapacity: false)
+        for publication in publishers where publication.recipientIDs != nil {
+            commitPublication(publication.result, recipientIDs: publication.recipientIDs)
+        }
         for id in Array(subscriptions.keys) {
-            guard var state = subscriptions[id], state.buffered.isEmpty else { continue }
+            guard var state = subscriptions[id],
+                  state.buffered.isEmpty,
+                  state.inFlight == nil
+            else { continue }
             let waiter = state.nextWaiter
             state.nextWaiter = nil
             subscriptions.removeValue(forKey: id)
             waiter?.continuation.resume(returning: nil)
         }
-        publishers.forEach { $0.continuation.resume() }
+        publishers.forEach { $0.continuation?.resume() }
     }
 
-    private var canAcceptPublication: Bool {
-        if !hasSubscribed {
+    private func canAcceptPublication(for recipientIDs: Set<UUID>?) -> Bool {
+        guard let recipientIDs else {
             return pendingFirstSubscription.count < bufferCapacity
         }
-        guard !subscriptions.isEmpty else { return true }
-        return subscriptions.values.allSatisfy {
-            $0.nextWaiter != nil || $0.buffered.count < bufferCapacity
+        return recipientIDs.allSatisfy { id in
+            guard let state = subscriptions[id] else { return true }
+            return state.nextWaiter != nil || state.buffered.count < bufferCapacity
         }
     }
 
-    private func commitPublication(_ result: TransferReceiveResult) {
-        if !hasSubscribed {
+    private func commitPublication(
+        _ result: TransferReceiveResult,
+        recipientIDs: Set<UUID>?
+    ) {
+        guard let recipientIDs else {
             pendingFirstSubscription.append(result)
             return
         }
-        guard !subscriptions.isEmpty else { return }
 
-        for id in Array(subscriptions.keys) {
+        for id in recipientIDs {
             guard var state = subscriptions[id] else { continue }
             if let waiter = state.nextWaiter {
                 state.nextWaiter = nil
+                state.inFlight = result
                 subscriptions[id] = state
                 waiter.continuation.resume(returning: result)
             } else {
@@ -265,10 +325,13 @@ actor RuntimeReceiveEventSource {
     }
 
     private func drainPendingPublications() {
-        while !isFinished, !pendingPublications.isEmpty, canAcceptPublication {
-            let publication = pendingPublications.removeFirst()
-            commitPublication(publication.result)
-            publication.continuation.resume()
+        while !isFinished,
+              let publication = pendingPublications.first,
+              canAcceptPublication(for: publication.recipientIDs)
+        {
+            _ = pendingPublications.removeFirst()
+            commitPublication(publication.result, recipientIDs: publication.recipientIDs)
+            publication.continuation?.resume()
         }
     }
 
@@ -280,13 +343,11 @@ actor RuntimeReceiveEventSource {
                     continuation.resume(returning: nil)
                     return
                 }
+                state.inFlight = nil
                 if !state.buffered.isEmpty {
                     let result = state.buffered.removeFirst()
-                    if isFinished, state.buffered.isEmpty {
-                        subscriptions.removeValue(forKey: id)
-                    } else {
-                        subscriptions[id] = state
-                    }
+                    state.inFlight = result
+                    subscriptions[id] = state
                     continuation.resume(returning: result)
                     drainPendingPublications()
                     return
@@ -319,13 +380,47 @@ actor RuntimeReceiveEventSource {
     private func cancelSubscription(_ id: UUID) {
         guard let state = subscriptions.removeValue(forKey: id) else { return }
         state.nextWaiter?.continuation.resume(returning: nil)
+        removeRecipient(id)
         drainPendingPublications()
     }
 
     private func cancelPublication(_ token: UUID) {
         guard let index = pendingPublications.firstIndex(where: { $0.token == token }) else { return }
-        let publication = pendingPublications.remove(at: index)
-        publication.continuation.resume()
+        let continuation = pendingPublications[index].continuation
+        pendingPublications[index].continuation = nil
+        // Cancellation releases the publisher, but cannot retract a result the
+        // source already accepted for live subscribers.
+        continuation?.resume()
+    }
+
+    private func markRecorded(_ result: TransferReceiveResult, subscription id: UUID) {
+        guard var state = subscriptions[id], state.inFlight?.transferID == result.transferID else {
+            return
+        }
+        state.inFlight = nil
+        subscriptions[id] = state
+    }
+
+    private func drainAndCancel(subscription id: UUID) -> [TransferReceiveResult] {
+        // Actor isolation makes removal and the pending-recipient snapshot one cutoff.
+        guard let state = subscriptions.removeValue(forKey: id) else { return [] }
+        state.nextWaiter?.continuation.resume(returning: nil)
+        var drained: [TransferReceiveResult] = []
+        if let inFlight = state.inFlight {
+            drained.append(inFlight)
+        }
+        drained.append(contentsOf: state.buffered)
+        for publication in pendingPublications where publication.recipientIDs?.contains(id) == true {
+            drained.append(publication.result)
+        }
+        removeRecipient(id)
         drainPendingPublications()
+        return drained
+    }
+
+    private func removeRecipient(_ id: UUID) {
+        for index in pendingPublications.indices {
+            pendingPublications[index].recipientIDs?.remove(id)
+        }
     }
 }

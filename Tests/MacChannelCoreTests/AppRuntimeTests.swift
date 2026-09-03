@@ -1073,7 +1073,7 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testApplicationShellReplacementDrainsCommittedOutgoingResultsThroughWatermark()
+    func testApplicationShellReplacementAtomicallyDrainsBufferedOutgoingResults()
         async
     {
         let outgoingEvents = RuntimeReceiveEventSource(bufferCapacity: 2)
@@ -1094,8 +1094,7 @@ final class AppRuntimeTests: XCTestCase {
         let outgoingContainer = AppContainer(
             deviceDirectory: base.deviceDirectory,
             transferCoordinator: base.transferCoordinator,
-            receiveEvents: { await outgoingEvents.stream() },
-            receiveCompletionState: outgoingEvents.completionState
+            receiveEvents: { await outgoingEvents.stream() }
         )
         let first = TransferReceiveResult(
             transferID: TransferID(rawValue: UUID()),
@@ -1110,32 +1109,15 @@ final class AppRuntimeTests: XCTestCase {
         await outgoingEvents.publish(first)
         await notificationCenter.waitUntilDeliveryStarts()
         await outgoingEvents.publish(second)
-        XCTAssertEqual(outgoingEvents.completionState.latestSequence, 2)
-
-        let staleReplacementFinished = AsyncCompletionProbe()
-        let staleReplacement = Task { @MainActor in
-            let installed = await shell.replace(AppContainer.localShell(), status: .ready)
-            await staleReplacementFinished.finish()
-            return installed
-        }
-        for _ in 0..<10 { await Task.yield() }
-        let currentReplacementFinished = AsyncCompletionProbe()
+        let currentReplacementFinished = expectation(description: "current replacement finishes")
         let currentReplacement = Task { @MainActor in
             let installed = await shell.replace(AppContainer.localShell(), status: .ready)
-            await currentReplacementFinished.finish()
+            currentReplacementFinished.fulfill()
             return installed
         }
-        for _ in 0..<100 { await Task.yield() }
-        let staleCompletedBeforeRelease = await staleReplacementFinished.isFinished()
-        let currentCompletedBeforeRelease = await currentReplacementFinished.isFinished()
-        XCTAssertFalse(staleCompletedBeforeRelease)
-        XCTAssertFalse(currentCompletedBeforeRelease)
-
-        notificationCenter.releaseFirstDelivery()
-        let staleReplacementInstalled = await staleReplacement.value
+        await fulfillment(of: [currentReplacementFinished], timeout: 1)
         let currentReplacementInstalled = await currentReplacement.value
 
-        XCTAssertFalse(staleReplacementInstalled)
         XCTAssertTrue(currentReplacementInstalled)
         XCTAssertEqual(shell.observedReceiveEventCount, 2)
         XCTAssertEqual(
@@ -1143,11 +1125,81 @@ final class AppRuntimeTests: XCTestCase {
             [second.transferID, first.transferID]
         )
         XCTAssertEqual(Set(shell.recentReceiveSnapshot.visible.map(\.id)).count, 2)
-        let streamlessReplacementInstalled = await shell.replace(
-            AppContainer.localShell(),
-            status: .ready
+        notificationCenter.releaseFirstDelivery()
+        let streamlessReplacementFinished = expectation(
+            description: "streamless replacement finishes"
         )
+        let streamlessReplacement = Task { @MainActor in
+            let installed = await shell.replace(AppContainer.localShell(), status: .ready)
+            streamlessReplacementFinished.fulfill()
+            return installed
+        }
+        await fulfillment(of: [streamlessReplacementFinished], timeout: 1)
+        let streamlessReplacementInstalled = await streamlessReplacement.value
         XCTAssertTrue(streamlessReplacementInstalled)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testApplicationShellReplacementRecordsYieldedResultExactlyOnce() async {
+        let outgoingEvents = RuntimeReceiveEventSource()
+        let recordGate = ReceiveResultRecordGate()
+        let notifier = ReceiveNotificationController(
+            center: ApplicationShellNotificationCenter(),
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            beforeReceiveResultRecord: { result in
+                await recordGate.pause(result)
+            },
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let base = AppContainer.localShell()
+        let outgoingContainer = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await outgoingEvents.stream() }
+        )
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/yielded-before-record.pdf")]
+        )
+
+        await shell.replace(outgoingContainer, status: .ready)
+        await outgoingEvents.publish(result)
+        await recordGate.waitUntilPaused()
+        let staleReplacementFinished = expectation(description: "stale replacement finishes")
+        let staleReplacement = Task { @MainActor in
+            let installed = await shell.replace(AppContainer.localShell(), status: .ready)
+            staleReplacementFinished.fulfill()
+            return installed
+        }
+        for _ in 0..<100 where shell.recentReceiveSnapshot.visible.isEmpty {
+            await Task.yield()
+        }
+        let currentReplacementFinished = expectation(description: "current replacement finishes")
+        let currentReplacement = Task { @MainActor in
+            let installed = await shell.replace(AppContainer.localShell(), status: .ready)
+            currentReplacementFinished.fulfill()
+            return installed
+        }
+
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [result.transferID])
+        await recordGate.release()
+        await fulfillment(
+            of: [staleReplacementFinished, currentReplacementFinished],
+            timeout: 1
+        )
+        let staleReplacementInstalled = await staleReplacement.value
+        let currentReplacementInstalled = await currentReplacement.value
+        XCTAssertFalse(staleReplacementInstalled)
+        XCTAssertTrue(currentReplacementInstalled)
+        XCTAssertEqual(shell.observedReceiveEventCount, 1)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [result.transferID])
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
@@ -1275,6 +1327,32 @@ private actor ApplicationShellReceiveEventSource {
         } onCancel: {
             Task { await self.markCancelled() }
         }
+    }
+}
+
+private actor ReceiveResultRecordGate {
+    private var isPaused = false
+    private var isReleased = false
+    private var pausedContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func pause(_ result: TransferReceiveResult) async {
+        isPaused = true
+        pausedContinuation?.resume()
+        pausedContinuation = nil
+        guard !isReleased else { return }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilPaused() async {
+        guard !isPaused else { return }
+        await withCheckedContinuation { pausedContinuation = $0 }
+    }
+
+    func release() {
+        isReleased = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }
 

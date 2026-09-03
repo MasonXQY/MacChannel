@@ -79,22 +79,25 @@ final class SoftwareUpdateLaunchCoordinator {
     }
 }
 
-private actor ReceiveEventObservationProgress {
-    private var observed: UInt64 = 0
-    private var drainWaiter: (watermark: UInt64, continuation: CheckedContinuation<Void, Never>)?
+private actor ReceiveEventObservation {
+    private var stream: RuntimeReceiveEventStream?
+    private var streamWaiters: [CheckedContinuation<RuntimeReceiveEventStream, Never>] = []
 
-    func record() {
-        observed &+= 1
-        guard let drainWaiter, observed >= drainWaiter.watermark else { return }
-        self.drainWaiter = nil
-        drainWaiter.continuation.resume()
+    func install(_ stream: RuntimeReceiveEventStream) {
+        self.stream = stream
+        let waiters = streamWaiters
+        streamWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume(returning: stream) }
     }
 
-    func waitUntilObserved(_ watermark: UInt64) async {
-        guard observed < watermark else { return }
-        await withCheckedContinuation { continuation in
-            drainWaiter = (watermark, continuation)
+    func drainAndCancel() async -> [TransferReceiveResult] {
+        let stream: RuntimeReceiveEventStream
+        if let installed = self.stream {
+            stream = installed
+        } else {
+            stream = await withCheckedContinuation { streamWaiters.append($0) }
         }
+        return await stream.drainAndCancel()
     }
 }
 
@@ -115,14 +118,15 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private lazy var updateLaunch = SoftwareUpdateLaunchCoordinator(controller: updateController)
     private let receiveNotificationController: ReceiveNotificationController
     private let transferSurfacePresentation: ((TransferSurfaceSection) -> Void)?
+    private let beforeReceiveResultRecord: (@MainActor (TransferReceiveResult) async -> Void)?
     private let statusItemControllerFactory: (AppContainer) -> StatusItemController
     private let recentReceiveStore = RecentReceiveStore()
     private var receiveEventTask: Task<Void, Never>?
-    private var receiveEventProgress: ReceiveEventObservationProgress?
-    private var receiveEventCompletionState: RuntimeReceiveCompletionState?
+    private var receiveEventObservation: ReceiveEventObservation?
     private var pendingReceiveEventDrain: ReceiveEventDrain?
     private var receiveEventDrainGeneration = 0
     private var containerReplacementGeneration = 0
+    private var recordedReceiveEventIDs: Set<TransferID> = []
     private(set) var observedReceiveEventCount = 0
 
     private struct ReceiveEventDrain {
@@ -139,6 +143,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         runtimeHost: AppRuntimeHost?,
         receiveNotificationController: ReceiveNotificationController = ReceiveNotificationController(),
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
+        beforeReceiveResultRecord: (@MainActor (TransferReceiveResult) async -> Void)? = nil,
         statusItemControllerFactory: @escaping (AppContainer) -> StatusItemController = { container in
             StatusItemController(
                 deviceDirectory: container.deviceDirectory,
@@ -151,6 +156,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         self.runtimeHost = runtimeHost
         self.receiveNotificationController = receiveNotificationController
         self.transferSurfacePresentation = transferSurfacePresentation
+        self.beforeReceiveResultRecord = beforeReceiveResultRecord
         self.statusItemControllerFactory = statusItemControllerFactory
     }
 
@@ -342,18 +348,17 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
 
     private func observeReceiveEvents(from container: AppContainer) {
         guard let makeEvents = container.receiveEvents else { return }
-        let progress = ReceiveEventObservationProgress()
-        receiveEventProgress = progress
-        receiveEventCompletionState = container.receiveCompletionState
+        let observation = ReceiveEventObservation()
+        receiveEventObservation = observation
         receiveEventTask = Task { [weak self] in
             let events = await makeEvents()
+            await observation.install(events)
             for await result in events {
-                guard !Task.isCancelled, let self else { break }
-                observedReceiveEventCount += 1
-                let sourceName = statusItemController?.sourceDisplayName(for: result.source)
-                    ?? "其他设备"
-                recentReceiveStore.record(result, sourceName: sourceName)
-                await progress.record()
+                guard let self else { break }
+                await beforeReceiveResultRecord?(result)
+                recordReceiveResult(result)
+                await events.markRecorded(result)
+                guard !Task.isCancelled else { break }
                 await receiveNotificationController.notify(receive: result)
             }
             await events.cancel()
@@ -363,20 +368,21 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     private func beginReceiveEventDrain() -> ReceiveEventDrain? {
         let observerTask = receiveEventTask
-        let progress = receiveEventProgress
-        let completionState = receiveEventCompletionState
+        let observation = receiveEventObservation
         guard observerTask != nil else { return pendingReceiveEventDrain }
         self.receiveEventTask = nil
-        receiveEventProgress = nil
-        receiveEventCompletionState = nil
+        receiveEventObservation = nil
         receiveEventDrainGeneration += 1
         let priorDrainTask = pendingReceiveEventDrain?.task
         let drain = ReceiveEventDrain(
             generation: receiveEventDrainGeneration,
             task: Task {
                 await priorDrainTask?.value
-                if let progress, let completionState {
-                    await progress.waitUntilObserved(completionState.latestSequence)
+                if let observation {
+                    let drained = await observation.drainAndCancel()
+                    for result in drained {
+                        recordReceiveResult(result)
+                    }
                 }
                 observerTask?.cancel()
                 await observerTask?.value
@@ -384,6 +390,13 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         )
         pendingReceiveEventDrain = drain
         return drain
+    }
+
+    private func recordReceiveResult(_ result: TransferReceiveResult) {
+        guard recordedReceiveEventIDs.insert(result.transferID).inserted else { return }
+        observedReceiveEventCount += 1
+        let sourceName = statusItemController?.sourceDisplayName(for: result.source) ?? "其他设备"
+        recentReceiveStore.record(result, sourceName: sourceName)
     }
 
     private func drainReceiveEventObservation() async {
