@@ -61,6 +61,23 @@ final class ClipboardTransferSourceTests: XCTestCase {
         XCTAssertEqual(prepared.urls, prepared.ownedTemporaryURLs)
         XCTAssertEqual(output.lastPathComponent, expectedName(kind: "文字", ext: "txt"))
         XCTAssertEqual(try String(contentsOf: output, encoding: .utf8), text)
+        let attributes = try FileManager.default.attributesOfItem(atPath: output.path)
+        let permissions = try XCTUnwrap(attributes[.posixPermissions] as? NSNumber).intValue
+        XCTAssertEqual(permissions & 0o777, 0o600)
+    }
+
+    @MainActor
+    func testWhitespaceOnlyTextIsAcceptedByteForByte() throws {
+        let pasteboard = makePasteboard()
+        let text = " \n\t "
+        pasteboard.setString(text, forType: .string)
+
+        let prepared = try makePreparer(pasteboard).prepare()
+
+        XCTAssertEqual(
+            try Data(contentsOf: XCTUnwrap(prepared.urls.first)),
+            Data(text.utf8)
+        )
     }
 
     @MainActor
@@ -75,6 +92,113 @@ final class ClipboardTransferSourceTests: XCTestCase {
             prepared.urls.first?.lastPathComponent,
             expectedName(kind: "文字", suffix: 2, ext: "txt")
         )
+    }
+
+    @MainActor
+    func testInterleavedPreparersReserveDifferentNamesWithoutOverwritingEitherPayload() throws {
+        let firstPasteboard = makePasteboard()
+        firstPasteboard.setString("first", forType: .string)
+        let secondPasteboard = makePasteboard()
+        secondPasteboard.setString("second", forType: .string)
+        var secondPrepared: PreparedClipboardTransfer?
+        let firstPreparer = NativeClipboardTransferPreparer(
+            pasteboard: firstPasteboard,
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            reservationHook: { _ in
+                secondPrepared = try NativeClipboardTransferPreparer(
+                    pasteboard: secondPasteboard,
+                    temporaryRoot: self.temporaryRoot,
+                    now: { self.fixedDate }
+                ).prepare()
+            }
+        )
+
+        let firstPrepared = try firstPreparer.prepare()
+        let secondOutput = try XCTUnwrap(secondPrepared?.urls.first)
+        let firstOutput = try XCTUnwrap(firstPrepared.urls.first)
+
+        XCTAssertNotEqual(firstOutput, secondOutput)
+        XCTAssertEqual(try String(contentsOf: firstOutput, encoding: .utf8), "first")
+        XCTAssertEqual(try String(contentsOf: secondOutput, encoding: .utf8), "second")
+    }
+
+    @MainActor
+    func testDiscardTemporaryFilesDeletesOnlyOwnedURLsAndIsIdempotent() throws {
+        let copiedSource = temporaryRoot.appendingPathComponent("copied-source.txt")
+        let ownedTemporary = temporaryRoot.appendingPathComponent("owned-temporary.txt")
+        try Data("source".utf8).write(to: copiedSource)
+        try Data("temporary".utf8).write(to: ownedTemporary)
+        let prepared = PreparedClipboardTransfer(
+            urls: [copiedSource, ownedTemporary],
+            ownedTemporaryURLs: [ownedTemporary]
+        )
+
+        prepared.discardTemporaryFiles()
+        prepared.discardTemporaryFiles()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: copiedSource.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ownedTemporary.path))
+    }
+
+    @MainActor
+    func testPreparationFailureCleansItsReservedPlaceholder() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("secret", forType: .string)
+        let preparer = NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            reservationHook: { _ in throw ClipboardTestFailure.expected }
+        )
+
+        XCTAssertThrowsError(try preparer.prepare()) {
+            XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: temporaryRoot.path), [])
+    }
+
+    @MainActor
+    func testSymlinkTemporaryRootIsRejectedWithoutWritingOutsideIt() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("secret", forType: .string)
+        let outsideRoot = temporaryRoot.appendingPathComponent("outside")
+        let symlinkRoot = temporaryRoot.appendingPathComponent("symlink-root")
+        try FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: symlinkRoot, withDestinationURL: outsideRoot)
+
+        XCTAssertThrowsError(
+            try NativeClipboardTransferPreparer(
+                pasteboard: pasteboard,
+                temporaryRoot: symlinkRoot,
+                now: { self.fixedDate }
+            ).prepare()
+        ) {
+            XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outsideRoot.path), [])
+    }
+
+    @MainActor
+    func testAncestorSymlinkIsRejectedWithoutCreatingAChildOutsideTheRoot() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("secret", forType: .string)
+        let outsideRoot = temporaryRoot.appendingPathComponent("outside")
+        let symlinkParent = temporaryRoot.appendingPathComponent("symlink-parent")
+        let requestedRoot = symlinkParent.appendingPathComponent("child")
+        try FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: symlinkParent, withDestinationURL: outsideRoot)
+
+        XCTAssertThrowsError(
+            try NativeClipboardTransferPreparer(
+                pasteboard: pasteboard,
+                temporaryRoot: requestedRoot,
+                now: { self.fixedDate }
+            ).prepare()
+        ) {
+            XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outsideRoot.path), [])
     }
 
     @MainActor
@@ -157,4 +281,8 @@ final class ClipboardTransferSourceTests: XCTestCase {
         let suffixText = suffix.map { " \($0)" } ?? ""
         return "剪贴板\(kind) \(formatter.string(from: fixedDate))\(suffixText).\(ext)"
     }
+}
+
+private enum ClipboardTestFailure: Error {
+    case expected
 }
