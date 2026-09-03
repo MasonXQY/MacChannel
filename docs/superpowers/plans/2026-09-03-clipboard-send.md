@@ -352,6 +352,8 @@ git commit -m "fix: clean clipboard files after transfer completion"
 - Modify: `App/ClipboardTransferSource.swift`
 - Modify: `Tests/Integration/TransferIntegrationTests.swift`
 - Modify: `Tests/MacChannelCoreTests/AppRuntimeTests.swift`
+- Create: `Tests/MacChannelCoreTests/SwiftPasteboardSourceAuditor.swift`
+- Create: `Tests/MacChannelCoreTests/SwiftPasteboardSourceAuditorTests.swift`
 - Modify: `docs/superpowers/plans/2026-09-03-clipboard-send.md`
 - Modify: `docs/superpowers/specs/2026-09-03-received-files-and-clipboard-send-design.md`
 - Modify: `docs/acceptance/real-mac-checklist.md`
@@ -364,7 +366,7 @@ git commit -m "fix: clean clipboard files after transfer completion"
 
 Use the existing two-client transfer harness to send a UTF-8 text fixture named like a clipboard file and a valid small PNG. Assert that both appear under `receiverDownloadRoot`, decoded text is identical, PNG can be decoded, and hashes match the sender's generated files.
 
-Add an AppKit smoke that sends a result through the production `RuntimeReceiveEventSource` and `MacChannelApplicationDelegate` receive-event path into `RecentReceiveStore`, receive notification, and the status-item unread surface. Inject a `StatusItemController` whose `NativeClipboardTransferPreparer` is bound to a uniquely named isolated receiver pasteboard. Assert that receive processing neither calls the preparer nor changes the pasteboard sentinel or change count. Add a source contract proving direct `NSPasteboard.general` access exists only in the explicit-send adapter file, so receive/app/notification code cannot bypass that injected boundary. Never touch the user's system pasteboard.
+Add an AppKit smoke that sends a result through the production `RuntimeReceiveEventSource` and `MacChannelApplicationDelegate` receive-event path into `RecentReceiveStore`, receive notification, and the status-item unread surface. Inject a `StatusItemController` whose `NativeClipboardTransferPreparer` is bound to a uniquely named isolated receiver pasteboard. Assert that receive processing neither calls the preparer nor changes the pasteboard sentinel or change count. Add a lexical source contract whose production roots are derived from `Package.swift` and cross-checked against every Swift file under `App/` and `Sources/`. It must ignore comments and string literals, detect qualified access even across comments/newlines, and detect `.general` when the surrounding declaration or assignment establishes an `NSPasteboard` type. Require every detected access to resolve to the explicit send adapter `App/ClipboardTransferSource.swift`, so receive/app/notification code cannot bypass that injected boundary. Never touch the user's system pasteboard.
 
 - [ ] **Step 2: Run focused integration tests and verify GREEN**
 
@@ -372,7 +374,7 @@ Run: `swift test --filter TransferIntegrationTests --no-parallel`
 
 Run: `swift test --filter 'AppRuntimeTests/test(SystemGeneralPasteboardReferenceIsConfinedToExplicitSendAdapter|ReceiveEventProcessingDoesNotReadOrChangeInjectedClipboard)' --no-parallel`
 
-Expected: direct receive integration passes for TXT and PNG; the full AppKit receive-event path leaves the injected isolated pasteboard untouched and never invokes the explicit-send preparer.
+Expected: direct receive integration passes for TXT and PNG; the full AppKit receive-event path leaves the injected isolated pasteboard untouched and never invokes the explicit-send preparer; lexical mutation fixtures reject qualified, comment-separated, shorthand typed, and `Sources/` access while allowing those spellings in comments and strings.
 
 - [ ] **Step 3: Run the complete deterministic suite**
 

@@ -694,30 +694,42 @@ final class AppRuntimeTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let appRoot = repositoryRoot.appendingPathComponent("App", isDirectory: true)
-        let sourcePaths = try FileManager.default.subpathsOfDirectory(atPath: appRoot.path)
-            .filter { $0.hasSuffix(".swift") }
-            .sorted()
-        XCTAssertFalse(sourcePaths.isEmpty)
-        let directGeneralReference = try NSRegularExpression(
-            pattern: #"NSPasteboard\s*\.\s*general"#
+        let packageManifest = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Package.swift"),
+            encoding: .utf8
         )
-        var references: [String] = []
+        let sourceRoots = SwiftPackageProductionSourceInventory.sourceRoots(
+            from: packageManifest
+        )
+        XCTAssertEqual(
+            sourceRoots,
+            ["App", "Sources/MacChannelApp", "Sources/MacChannelCore"]
+        )
 
-        for sourcePath in sourcePaths {
-            let fileURL = appRoot.appendingPathComponent(sourcePath)
-            let source = try String(contentsOf: fileURL, encoding: .utf8)
-            let range = NSRange(source.startIndex..<source.endIndex, in: source)
-            let matchCount = directGeneralReference.numberOfMatches(
-                in: source,
-                range: range
-            )
-            references.append(
-                contentsOf: repeatElement(sourcePath, count: matchCount)
-            )
+        var inventoriedSources: [String: String] = [:]
+        for sourceRoot in sourceRoots {
+            let rootURL = repositoryRoot.appendingPathComponent(sourceRoot, isDirectory: true)
+            for relativePath in try FileManager.default.subpathsOfDirectory(atPath: rootURL.path)
+            where relativePath.hasSuffix(".swift")
+            {
+                let repositoryPath = "\(sourceRoot)/\(relativePath)"
+                inventoriedSources[repositoryPath] = try String(
+                    contentsOf: repositoryRoot.appendingPathComponent(repositoryPath),
+                    encoding: .utf8
+                )
+            }
         }
+        let everyProductionSwiftPath = try ["App", "Sources"].flatMap { sourceRoot in
+            try FileManager.default.subpathsOfDirectory(
+                atPath: repositoryRoot.appendingPathComponent(sourceRoot).path
+            )
+            .filter { $0.hasSuffix(".swift") }
+            .map { "\(sourceRoot)/\($0)" }
+        }
+        XCTAssertEqual(Set(inventoriedSources.keys), Set(everyProductionSwiftPath))
 
-        XCTAssertEqual(references, ["ClipboardTransferSource.swift"])
+        let accesses = SwiftPasteboardSourceAuditor.accesses(in: inventoriedSources)
+        XCTAssertEqual(accesses.map(\.path), ["App/ClipboardTransferSource.swift"])
     }
 
     @MainActor
