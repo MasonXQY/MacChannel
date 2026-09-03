@@ -324,3 +324,90 @@ The historical protected UE PIDs `38136`, `49361`, `80713`, `82338`, `25679`,
 `28690`, and `29145` were not signaled or terminated. Test infrastructure used isolated
 temporary roots and uniquely named Docker resources; the E2E runner completed its own
 stack cleanup. Existing historical mounted volumes were left untouched.
+
+---
+
+# Publication Addendum: DropMesh 1.2.2 (15)
+
+Date: 2026-09-03 (Asia/Dubai)
+
+This addendum supersedes the earlier `NOT PUBLISHED` decision and the earlier candidate
+identity above. The user explicitly authorized publication and explicitly accepted the
+remaining Mac B verification limitation recorded below.
+
+## Published candidate
+
+- Release tag: annotated `v1.2.2`, peeled commit
+  `fedd2290e6f948d85794aaf23dd62aa33e317174`.
+- Version/build: `1.2.2` / `15`.
+- Bundle/Team: `com.mason.macchannel` / `XKAZ67HN45`.
+- Apple notarization: submission `6fd35e94-6c64-47bb-8c28-6f4aefb5c38e`, freshly
+  queried as `Accepted` before publication.
+- `DropMesh.dmg`: 19,775,506 bytes, SHA-256
+  `22ba82ffccf59525755cc84858a0930b35f9816c138546b589ff41a94f59e47f`.
+- `DropMesh.manifest.json`: SHA-256
+  `adcc47b9b1fb2d5b14382ae61a8d53b8bbb4159426565478ac92caaa02d343e3`.
+- `appcast.xml`: SHA-256
+  `10b6a7a9cd82886f99d7fb6ac6dacc4b6ad75f36cd242a947485fb4d943b83f4`.
+
+Before any remote mutation, the worktree was clean and the manifest's commit, DMG hash,
+product, bundle identifier, version, build, Team, release state, and designated
+requirement were checked against the candidate and the repository-owned production
+anchor. The DMG passed strict code-signing, signer-Team, stapler, and Gatekeeper-open
+checks. The mounted App passed deep/strict verification, the exact production
+designated requirement, Gatekeeper execution assessment, universal `x86_64` and
+`arm64` architecture checks, public bundle metadata, the full icon set, embedded
+Sparkle presence, and public-key/feed-URL checks. Sparkle's tool verified both the DMG
+enclosure signature and the signed appcast. Fresh installer and update-feed
+publication-boundary suites also passed.
+
+## Installed acceptance and accepted limitation
+
+The installed Mac A bundle at `/Applications/MacChannel.app` is version `1.2.2` build
+`15`, mode `0755`, passed deep/strict code-signing, the exact production designated
+requirement and Gatekeeper, and compared file-for-file identical with the published
+candidate's mounted App.
+
+The user confirmed that Mac B displays DropMesh `1.2.2 (15)`. The exact Mac B bundle
+hash and the click-notification-to-Finder behavior were not re-verified against this
+final `fedd229` binary after the last notification, installer, and feed hardening
+changes. The user explicitly chose to stop further Mac B testing, accepted this risk,
+and directed publication. Earlier two-Mac LAN/relay/negative-case evidence remains
+historical evidence for the prior candidate; it is not represented as a byte-for-byte
+acceptance of this final candidate.
+
+## GitHub publication and public re-download
+
+Both `origin/feature/mac-channel-v1` and `origin/main` were ordinary, non-forced
+fast-forwards from `20853fdf172747f1a06c31c8b0db68dd5f4af308` to the candidate. The
+annotated tag was created only after those ancestry checks and remains pinned to the
+candidate commit.
+
+The final, non-prerelease, non-draft latest GitHub Release is:
+
+`https://github.com/MasonXQY/MacChannel/releases/tag/v1.2.2`
+
+Its public asset list was checked to contain exactly:
+
+1. `DropMesh.dmg`
+2. `DropMesh.manifest.json`
+3. `appcast.xml`
+
+No screenshots, reports, or older artifacts were uploaded. All three assets and the
+`latest/download/appcast.xml` endpoint were downloaded anonymously from their public
+HTTPS URLs into an owner-only temporary directory. The downloaded bytes matched the
+three SHA-256 values above; `latest` matched the versioned appcast byte-for-byte. The
+public GitHub tag API resolved the annotated tag to the exact candidate commit. The
+downloaded appcast had channel title `DropMesh`, one item, version `1.2.2`, build `15`,
+the exact versioned DMG URL and byte length, and valid enclosure/appcast signatures.
+The downloaded DMG and mounted App then repeated all strict signature, Team, staple,
+Gatekeeper, designated-requirement, bundle, executable, version/build, icon, Sparkle,
+and architecture checks successfully.
+
+## Publication safety
+
+Public-download and mount verification used a newly created owner-`0700` temporary
+root and removed it after validation. No credential value was printed or persisted.
+No protected Unreal Engine process was inspected, signaled, or terminated. The release
+tag intentionally stays at the candidate commit; this report-only publication record
+is not part of the released binary.
