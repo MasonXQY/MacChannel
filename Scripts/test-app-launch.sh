@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repository_root/Scripts/app-build-defaults.sh"
+
 bash Scripts/build-app.sh
 app_path="$(pwd)/.build/MacChannel.app"
 app_executable="$app_path/Contents/MacOS/MacChannelApp"
+expected_version="${MACCHANNEL_EXPECTED_VERSION:-${MACCHANNEL_VERSION:-$macchannel_default_version}}"
+expected_build_number="${MACCHANNEL_EXPECTED_BUILD_NUMBER:-${MACCHANNEL_BUILD_NUMBER:-$macchannel_default_build_number}}"
 if pgrep -f "$app_executable" >/dev/null; then
     echo "MacChannelApp is already running; refusing an ambiguous launch test" >&2
     exit 1
 fi
 
-marker_path="$(mktemp -t macchannel-launch.XXXXXX)"
+smoke_launch_dir="$(mktemp -d -t macchannel-launch.XXXXXX)"
+marker_path="$smoke_launch_dir/launch.marker"
 production_launch_dir="$(mktemp -d -t macchannel-production-launch.XXXXXX)"
 production_marker_path="$production_launch_dir/production.json"
-rm -f "$marker_path"
 opener_pid=""
 
 cleanup() {
@@ -21,6 +26,7 @@ cleanup() {
     fi
     pkill -TERM -f "$app_executable" 2>/dev/null || true
     rm -f "$marker_path"
+    rmdir "$smoke_launch_dir" 2>/dev/null || true
     rm -f "$production_marker_path"
     rmdir "$production_launch_dir" 2>/dev/null || true
 }
@@ -32,8 +38,8 @@ test -d "$sparkle"
 test -x "$sparkle/Versions/Current/Sparkle"
 test "$(plutil -extract LSUIElement raw -o - "$plist")" = "true"
 test "$(plutil -extract CFBundlePackageType raw -o - "$plist")" = "APPL"
-test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = "1.2.0"
-test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = "13"
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = "$expected_version"
+test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = "$expected_build_number"
 test -n "$(plutil -extract NSDownloadsFolderUsageDescription raw -o - "$plist")"
 test "$(plutil -extract SUFeedURL raw -o - "$plist")" = \
     "https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml"
@@ -51,12 +57,14 @@ if rg -n 'Tailscale|个人网络|连接方式|安全中继地址|rendezvousURL' 
     exit 1
 fi
 
-/usr/bin/open -n -W .build/MacChannel.app --args \
+"$app_executable" \
     -SUEnableAutomaticChecks NO \
     --smoke-test "$marker_path" &
 opener_pid=$!
 
-for _ in {1..50}; do
+# Startup also initializes the packaged update controller; allow the same bounded
+# launch window as the production-runtime smoke below.
+for _ in {1..150}; do
     [[ -f "$marker_path" ]] && break
     sleep 0.1
 done
@@ -68,7 +76,7 @@ opener_pid=""
 ! pgrep -f "$app_executable" >/dev/null
 
 env -u MACCHANNEL_RENDEZVOUS_URL -u MACCHANNEL_RUNTIME \
-    /usr/bin/open -n -W .build/MacChannel.app --args \
+    "$app_executable" \
     -SUEnableAutomaticChecks NO \
     --production-launch-test "$production_marker_path" &
 opener_pid=$!

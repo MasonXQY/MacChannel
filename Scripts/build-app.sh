@@ -4,10 +4,12 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
 
+source "$repo_root/Scripts/app-build-defaults.sh"
+
 build_configuration="${MACCHANNEL_BUILD_CONFIGURATION:-debug}"
 codesign_identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-app_version="${MACCHANNEL_VERSION:-1.2.5}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-18}"
+app_version="${MACCHANNEL_VERSION:-$macchannel_default_version}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-$macchannel_default_build_number}"
 update_testing="${MACCHANNEL_UPDATE_TESTING:-0}"
 update_test_bundle_id="${MACCHANNEL_UPDATE_TEST_BUNDLE_ID:-}"
 update_test_feed_url="${MACCHANNEL_UPDATE_TEST_FEED_URL:-}"

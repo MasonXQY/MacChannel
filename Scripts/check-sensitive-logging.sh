@@ -2,8 +2,16 @@
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
-  echo "usage: $0 <source-file>..." >&2
-  exit 2
+  repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  source_files=()
+  while IFS= read -r source_file; do source_files+=("${source_file}"); done < <(
+    find "$repository_root/App" "$repository_root/Sources" \
+      "$repository_root/Services/rendezvous" "$repository_root/Scripts" -type f \
+      \( -name '*.swift' -o -name '*.go' -o -name '*.sh' \) \
+      ! -path "$repository_root/Scripts/test-*.sh" \
+      ! -name 'audit-privacy.sh' ! -name 'check-sensitive-logging.sh' -print
+  )
+  set -- "${source_files[@]}"
 fi
 
 sensitive='(payload|file_?name|filename|file_?path|filepath|path|content|pairing_?code|private_?key|privatekey|secret|credential|password|tailscale_?ip|mesh_?ip|magicdns|host_?name|hostname|fingerprint|cli_?stdout|cli_?stderr|command_?stdout|command_?stderr)'

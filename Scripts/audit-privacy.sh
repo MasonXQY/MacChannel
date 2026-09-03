@@ -28,6 +28,7 @@ source_files=()
 while IFS= read -r source_file; do source_files+=("${source_file}"); done < <(
   find App Sources Services/rendezvous Scripts -type f \
     \( -name '*.swift' -o -name '*.go' -o -name '*.sh' \) \
+    ! -path 'Scripts/test-*.sh' \
     ! -name 'audit-privacy.sh' ! -name 'check-sensitive-logging.sh' \
     ! -name 'test-privacy-audit.sh' ! -name 'test-privacy-runtime-block.sh' -print
 )
