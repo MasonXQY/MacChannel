@@ -13,7 +13,7 @@ release_consumers=(
 
 for consumer in "${release_consumers[@]}"; do
     source_path="$repository_root/$consumer"
-    if rg -q 'MACCHANNEL_VERSION:-1\.2\.5|MACCHANNEL_BUILD_NUMBER:-18' "$source_path"; then
+    if rg -q 'MACCHANNEL_VERSION:-[0-9]+\.[0-9]+\.[0-9]+|MACCHANNEL_BUILD_NUMBER:-[0-9]+' "$source_path"; then
         echo "release default is hard-coded in $consumer" >&2
         exit 1
     fi
@@ -22,6 +22,6 @@ for consumer in "${release_consumers[@]}"; do
     rg -q 'MACCHANNEL_BUILD_NUMBER:-\$macchannel_default_build_number' "$source_path"
 done
 
-test "$macchannel_default_version" = 1.2.5
-test "$macchannel_default_build_number" = 18
+test "$macchannel_default_version" = 1.2.6
+test "$macchannel_default_build_number" = 19
 echo "release defaults contract PASS"

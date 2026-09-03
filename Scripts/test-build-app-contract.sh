@@ -101,8 +101,8 @@ test "$(plutil -extract CFBundleName raw -o - "$plist")" = DropMesh
 test "$(plutil -extract CFBundleDisplayName raw -o - "$plist")" = MacChannel
 test "$(plutil -extract LSHasLocalizedDisplayName raw -o - "$plist")" = true
 test "$(plutil -extract CFBundleIconFile raw -o - "$plist")" = DropMesh
-test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.2.5
-test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 18
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.2.6
+test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 19
 test -s "$output_app/Contents/Resources/DropMesh.icns"
 localized_info="$output_app/Contents/Resources/en.lproj/InfoPlist.strings"
 test -f "$localized_info" && test ! -L "$localized_info"
