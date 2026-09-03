@@ -9,6 +9,13 @@ source "$repository_root/Scripts/launch-process-support.sh"
 bash "$repository_root/Scripts/build-app.sh"
 app_path="$repository_root/.build/MacChannel.app"
 app_executable="$app_path/Contents/MacOS/MacChannelApp"
+if [[ "${MACCHANNEL_LAUNCH_TESTING:-0}" == "1" ]]; then
+    app_executable="${MACCHANNEL_LAUNCH_TEST_EXECUTABLE:-}"
+    if [[ ! -n "$app_executable" || ! -x "$app_executable" ]]; then
+        echo "MACCHANNEL_LAUNCH_TEST_EXECUTABLE must name an executable test fixture" >&2
+        exit 1
+    fi
+fi
 expected_version="${MACCHANNEL_EXPECTED_VERSION:-$macchannel_default_version}"
 expected_build_number="${MACCHANNEL_EXPECTED_BUILD_NUMBER:-$macchannel_default_build_number}"
 if pgrep -f "$app_executable" >/dev/null; then
