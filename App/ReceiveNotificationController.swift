@@ -338,9 +338,8 @@ final class ReceiveNotificationController {
         else {
             return
         }
-        if reveal(target.urls) {
-            onReceiveOpened?(target.transferID)
-        }
+        _ = reveal(target.urls)
+        onReceiveOpened?(target.transferID)
     }
 
     private func publish(_ authorizationState: ReceiveNotificationAuthorizationState) {

@@ -804,6 +804,55 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testOpeningRecentReceiveAcknowledgesOnlyThatBatchWhenFinderRevealFails() async throws {
+        let events = ApplicationShellReceiveEventSource()
+        let notificationCenter = ApplicationShellNotificationCenter()
+        let revealer = ApplicationShellReceiveTargetRevealer(revealResult: false)
+        let notifier = ReceiveNotificationController(center: notificationCenter, revealer: revealer)
+        var statusController: StatusItemController?
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: { container in
+                let controller = makeApplicationShellStatusController(container)
+                statusController = controller
+                return controller
+            }
+        )
+        let first = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/first.pdf")]
+        )
+        let second = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/second.pdf")]
+        )
+
+        await shell.replace(makeApplicationShellContainer(receiveEvents: events), status: .ready)
+        await events.waitUntilSubscribed()
+        await events.publish(first)
+        await events.publish(second)
+        for _ in 0..<1_000 where shell.recentReceiveSnapshot.visible.count != 2 {
+            await Task.yield()
+        }
+        let controller = try XCTUnwrap(statusController)
+        var announcements: [String] = []
+        controller.onAnnouncement = { announcements.append($0) }
+        shell.prepareStatusMenuForTesting()
+
+        let item = try XCTUnwrap(controller.statusMenu.items.first { $0.title == "second.pdf" })
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
+
+        XCTAssertEqual(revealer.revealedURLs, [second.receivedURLs])
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [first.transferID])
+        XCTAssertTrue(shell.hasUnreadReceive)
+        XCTAssertEqual(announcements, ["找不到接收文件或接收文件夹。"])
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
     func testInstalledHistoryActionAcknowledgesAllReceivedResults() async throws {
         let events = ApplicationShellReceiveEventSource()
         let notificationCenter = ApplicationShellNotificationCenter()
@@ -1419,10 +1468,15 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
 @MainActor
 private final class ApplicationShellReceiveTargetRevealer: ReceiveTargetRevealing {
     private(set) var revealedURLs: [[URL]] = []
+    private let revealResult: Bool
+
+    init(revealResult: Bool = true) {
+        self.revealResult = revealResult
+    }
 
     func reveal(_ urls: [URL]) -> Bool {
         revealedURLs.append(urls)
-        return true
+        return revealResult
     }
 }
 

@@ -506,7 +506,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(opened, [result.transferID])
     }
 
-    func testNotificationDoesNotAcknowledgeWhenFinderCannotRevealTheTarget() async throws {
+    func testNotificationAcknowledgesOnceWhenFinderCannotRevealTheTarget() async throws {
         let center = RecordingReceiveNotificationCenter(status: .authorized)
         let finder = RecordingReceiveTargetRevealer(revealResult: false)
         let controller = ReceiveNotificationController(center: center, revealer: finder)
@@ -518,10 +518,12 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         controller.onReceiveOpened = { opened.append($0) }
 
         await controller.notify(receive: result)
-        controller.openNotification(identifier: try XCTUnwrap(center.requests.first?.identifier))
+        let identifier = try XCTUnwrap(center.requests.first?.identifier)
+        controller.openNotification(identifier: identifier)
+        controller.openNotification(identifier: identifier)
 
         XCTAssertEqual(finder.revealedURLs, [result.receivedURLs])
-        XCTAssertTrue(opened.isEmpty)
+        XCTAssertEqual(opened, [result.transferID])
     }
 
     func testNotificationTargetCacheEvictsOldestEntryAtCapacity() async throws {

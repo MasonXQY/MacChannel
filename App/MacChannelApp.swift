@@ -247,9 +247,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         statusController.bindRecentReceives(recentReceiveStore)
         statusController.onRevealRecentReceive = { [weak self] summary in
             guard let self else { return }
-            if receiveNotificationController.reveal(summary.receivedURLs) {
-                recentReceiveStore.acknowledge(summary.id)
-            } else {
+            let revealed = receiveNotificationController.reveal(summary.receivedURLs)
+            recentReceiveStore.acknowledge(summary.id)
+            if !revealed {
                 statusItemController?.reportReceiveRevealFailure()
             }
         }
