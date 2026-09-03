@@ -5,6 +5,45 @@ import XCTest
 @testable import MacChannelCore
 
 final class TransferProtocolTests: XCTestCase {
+    func testReceiveResultDefaultsUnknownSourceForLegacySessions() {
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/report.pdf")]
+        )
+
+        XCTAssertNil(result.source)
+    }
+
+    func testDurableReceiveResultIncludesAuthenticatedSource() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = root.appendingPathComponent("downloads", isDirectory: true)
+        let incoming = root.appendingPathComponent("incoming", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sourceURL = root.appendingPathComponent("report.pdf")
+        try Data("received report".utf8).write(to: sourceURL)
+        let manifest = try TransferManifest.build(from: sourceURL)
+        let source = DeviceID(rawValue: UUID())
+        let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
+        let channels = TestSecureChannelPair.make()
+        let receiver = ReceiveSession(
+            transferID: manifest.id,
+            source: source,
+            policy: ReceivePolicy(trustedSources: [source]),
+            directories: DownloadDirectory(globalDirectory: destination),
+            database: database,
+            incomingDirectory: incoming
+        )
+
+        async let result = receiver.run(on: channels.receiver)
+        _ = try await SendSession(manifest).run(on: channels.sender)
+
+        let received = try await result
+        XCTAssertEqual(received.source, source)
+    }
+
     func testManifestBuildsForAFileWithoutLoadingItIntoTheProtocol() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -5,7 +5,17 @@ import Foundation
 public struct TransferReceiveResult: Equatable, Sendable {
     public let transferID: TransferID
     public let receivedURLs: [URL]
+    public let source: DeviceID?
 
+    public init(
+        transferID: TransferID,
+        receivedURLs: [URL],
+        source: DeviceID? = nil
+    ) {
+        self.transferID = transferID
+        self.receivedURLs = receivedURLs
+        self.source = source
+    }
 }
 
 public struct ReceiveSession: Sendable {
@@ -399,7 +409,8 @@ public struct ReceiveSession: Sendable {
                     }
                     return TransferReceiveResult(
                         transferID: transferID,
-                        receivedURLs: receivedURLs
+                        receivedURLs: receivedURLs,
+                        source: durableStorage?.source
                     )
                 case .cancel:
                     throw TransferProtocolError.cancelled
