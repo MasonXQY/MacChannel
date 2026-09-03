@@ -127,7 +127,7 @@ final class StatusItemController: NSObject {
             announce("没有在线接收设备，请先完成配对并确认对方 Mac 已启动。")
             return nil
         }
-        let staleFan = currentFanToken
+        replacePendingSelection()
         guard let token = state.begin(intent: intent) else { return nil }
         dragRegionSession.begin(token: token, fingerprint: fingerprint, in: .icon)
         currentFanToken = token
@@ -135,9 +135,6 @@ final class StatusItemController: NSObject {
         announcedOfflineToken = nil
         renderPhase()
 
-        if let staleFan {
-            onDismissDeviceFan?(staleFan)
-        }
         onPresentDeviceFan?(
             DeviceFanRequest(
                 token: token,
@@ -187,20 +184,7 @@ final class StatusItemController: NSObject {
     }
 
     func cancelDrag(_ token: StatusItemDragToken) {
-        let phaseBefore = state.phase
-        state.cancelDrag(token: token)
-        guard state.phase != phaseBefore else { return }
-        dragRegionSession.invalidate(token: token)
-        if currentFanToken == token {
-            currentFanToken = nil
-        }
-        if activeSelectionToken == token {
-            activeSelectionToken = nil
-            announcedOfflineToken = nil
-        }
-        discardPreparedContent(for: token)
-        onDismissDeviceFan?(token)
-        renderPhase()
+        terminatePendingSelection(token)
     }
 
     func updateTransferProgress(_ progress: Double, token: StatusItemDragToken) {
@@ -258,16 +242,11 @@ final class StatusItemController: NSObject {
             return
         }
 
-        let staleFan = currentFanToken
+        replacePendingSelection()
         guard let token = state.begin(intent: intent) else {
             cleanup?()
             announce("已有传输正在进行。")
             return
-        }
-        if let staleFan {
-            dragRegionSession.invalidate(token: staleFan)
-            discardPreparedContent(for: staleFan)
-            onDismissDeviceFan?(staleFan)
         }
         if let cleanup {
             cleanupByToken[token] = cleanup
@@ -291,6 +270,10 @@ final class StatusItemController: NSObject {
 
     func invalidate() {
         deviceTask?.cancel()
+        if let token = activeSelectionToken ?? currentFanToken {
+            terminatePendingSelection(token)
+        }
+        discardAllPreparedContent()
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
             self.statusItem = nil
@@ -407,6 +390,36 @@ final class StatusItemController: NSObject {
 
     private func discardPreparedContent(for token: StatusItemDragToken) {
         cleanupByToken.removeValue(forKey: token)?()
+    }
+
+    private func discardAllPreparedContent() {
+        let cleanup = cleanupByToken
+        cleanupByToken.removeAll()
+        for action in cleanup.values {
+            action()
+        }
+    }
+
+    private func replacePendingSelection() {
+        guard let token = activeSelectionToken ?? currentFanToken else { return }
+        terminatePendingSelection(token)
+    }
+
+    private func terminatePendingSelection(_ token: StatusItemDragToken) {
+        guard activeSelectionToken == token || currentFanToken == token else { return }
+
+        state.cancelDrag(token: token)
+        dragRegionSession.invalidate(token: token)
+        if currentFanToken == token {
+            currentFanToken = nil
+        }
+        if activeSelectionToken == token {
+            activeSelectionToken = nil
+            announcedOfflineToken = nil
+        }
+        discardPreparedContent(for: token)
+        onDismissDeviceFan?(token)
+        renderPhase()
     }
 
     private func dragExitedFan(

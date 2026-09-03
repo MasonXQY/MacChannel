@@ -674,6 +674,217 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testReplacingPendingClipboardPickerWithClipboardDrainsOnlyOldOwnership() throws {
+        let target = DeviceID(rawValue: UUID())
+        let firstFileManager = RecordingRemovalFileManager()
+        let secondFileManager = RecordingRemovalFileManager()
+        let first = try ownedClipboardTransfer(fileManager: firstFileManager)
+        let second = try ownedClipboardTransfer(fileManager: secondFileManager)
+        defer {
+            first.discardTemporaryFiles()
+            second.discardTemporaryFiles()
+        }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: SequencedClipboardTransferPreparer(prepared: [first, second]),
+            deviceMenuPresenter: menu
+        )
+        var dismissedTokens: [StatusItemDragToken] = []
+        controller.onDismissDeviceFan = { dismissedTokens.append($0) }
+
+        controller.performClipboardSend()
+        let oldSelect = try XCTUnwrap(menu.selectionHistory.first)
+        let oldCancel = try XCTUnwrap(menu.cancellationHistory.first)
+        controller.performClipboardSend()
+
+        XCTAssertEqual(menu.presentCount, 2)
+        XCTAssertEqual(firstFileManager.removeCount, 1)
+        XCTAssertEqual(secondFileManager.removeCount, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.urls[0].path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.urls[0].path))
+        XCTAssertEqual(dismissedTokens.count, 1)
+
+        XCTAssertFalse(oldSelect(target))
+        oldCancel()
+
+        XCTAssertEqual(controller.phase, .ready)
+        XCTAssertEqual(firstFileManager.removeCount, 1)
+        XCTAssertEqual(secondFileManager.removeCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.urls[0].path))
+
+        try XCTUnwrap(menu.cancel)()
+        XCTAssertEqual(secondFileManager.removeCount, 1)
+    }
+
+    @MainActor
+    func testReplacingPendingClipboardPickerWithFilePickerDrainsOldOwnership() throws {
+        let target = DeviceID(rawValue: UUID())
+        let fileManager = RecordingRemovalFileManager()
+        let prepared = try ownedClipboardTransfer(fileManager: fileManager)
+        defer { prepared.discardTemporaryFiles() }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            filePicker: StubStatusItemFilePicker(result: [URL(fileURLWithPath: "/tmp/file.txt")]),
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+
+        controller.performClipboardSend()
+        let oldSelect = try XCTUnwrap(menu.selectionHistory.first)
+        let oldCancel = try XCTUnwrap(menu.cancellationHistory.first)
+        controller.performKeyboardSend()
+
+        XCTAssertEqual(menu.presentCount, 2)
+        XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+
+        XCTAssertFalse(oldSelect(target))
+        oldCancel()
+        XCTAssertEqual(controller.phase, .ready)
+        XCTAssertEqual(fileManager.removeCount, 1)
+
+        try XCTUnwrap(menu.cancel)()
+    }
+
+    @MainActor
+    func testReplacingPendingClipboardPickerWithDragIntentDrainsOldOwnership() throws {
+        let target = DeviceID(rawValue: UUID())
+        let fileManager = RecordingRemovalFileManager()
+        let prepared = try ownedClipboardTransfer(fileManager: fileManager)
+        defer { prepared.discardTemporaryFiles() }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+        var requests: [DeviceFanRequest] = []
+        controller.onPresentDeviceFan = { requests.append($0) }
+
+        controller.performClipboardSend()
+        let oldSelect = try XCTUnwrap(menu.selectionHistory.first)
+        let oldCancel = try XCTUnwrap(menu.cancellationHistory.first)
+        let dragToken = try XCTUnwrap(
+            controller.beginDrop(
+                try DropIntent(items: [.fileURL(URL(fileURLWithPath: "/tmp/drag.txt"))])
+            )
+        )
+
+        XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.token, dragToken)
+
+        XCTAssertFalse(oldSelect(target))
+        oldCancel()
+        XCTAssertEqual(controller.phase, .ready)
+        XCTAssertEqual(fileManager.removeCount, 1)
+
+        requests[0].cancel()
+    }
+
+    @MainActor
+    func testInvalidatingPendingClipboardPickerDismissesAndDrainsOwnershipExactlyOnce() throws {
+        let target = DeviceID(rawValue: UUID())
+        let fileManager = RecordingRemovalFileManager()
+        let prepared = try ownedClipboardTransfer(fileManager: fileManager)
+        defer { prepared.discardTemporaryFiles() }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+        var dismissedTokens: [StatusItemDragToken] = []
+        controller.onDismissDeviceFan = { dismissedTokens.append($0) }
+
+        controller.performClipboardSend()
+        let oldSelect = try XCTUnwrap(menu.select)
+        let oldCancel = try XCTUnwrap(menu.cancel)
+        controller.invalidate()
+        controller.invalidate()
+
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(dismissedTokens.count, 1)
+        XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+
+        XCTAssertFalse(oldSelect(target))
+        oldCancel()
+        XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertEqual(dismissedTokens.count, 1)
+    }
+
+    @MainActor
+    func testInvalidatingAcceptedClipboardTransferDrainsRetainedOwnershipExactlyOnce() async throws {
+        let target = DeviceID(rawValue: UUID())
+        let fileManager = RecordingRemovalFileManager()
+        let prepared = try ownedClipboardTransfer(fileManager: fileManager)
+        defer { prepared.discardTemporaryFiles() }
+        let transfer = RecordingTransferCoordinator()
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: transfer,
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+
+        controller.performClipboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        for _ in 0..<100 where await transfer.sentCount() == 0 {
+            await Task.yield()
+        }
+
+        controller.invalidate()
+        controller.invalidate()
+
+        XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+    }
+
+    @MainActor
+    func testClipboardCoordinatorRejectionDiscardsOwnedContentExactlyOnce() async throws {
+        let target = DeviceID(rawValue: UUID())
+        let fileManager = RecordingRemovalFileManager()
+        let prepared = try ownedClipboardTransfer(fileManager: fileManager)
+        defer { prepared.discardTemporaryFiles() }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: FailingTransferCoordinator(),
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+
+        controller.performClipboardSend()
+        let staleSelect = try XCTUnwrap(menu.select)
+        let staleCancel = try XCTUnwrap(menu.cancel)
+        XCTAssertTrue(staleSelect(target))
+        for _ in 0..<100 where controller.phase != .idle {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+        XCTAssertFalse(staleSelect(target))
+        staleCancel()
+        XCTAssertEqual(fileManager.removeCount, 1)
+    }
+
+    @MainActor
     func testDraggedFileWithNoOnlineDeviceNeverEntersReadyOrPresentsEmptyFan() throws {
         let controller = StatusItemController(
             button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
@@ -950,11 +1161,17 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
-    private func ownedClipboardTransfer() throws -> PreparedClipboardTransfer {
+    private func ownedClipboardTransfer(
+        fileManager: FileManager = .default
+    ) throws -> PreparedClipboardTransfer {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("StatusItemAppKitTests-\(UUID().uuidString).txt")
         try Data("clipboard".utf8).write(to: url)
-        return PreparedClipboardTransfer(urls: [url], ownedTemporaryURLs: [url])
+        return PreparedClipboardTransfer(
+            urls: [url],
+            ownedTemporaryURLs: [url],
+            fileManager: fileManager
+        )
     }
 
     private func receiveResult(named name: String) -> TransferReceiveResult {
@@ -1034,11 +1251,36 @@ private final class RecordingClipboardTransferPreparer: ClipboardTransferPrepari
 }
 
 @MainActor
+private final class SequencedClipboardTransferPreparer: ClipboardTransferPreparing {
+    private var prepared: [PreparedClipboardTransfer]
+
+    init(prepared: [PreparedClipboardTransfer]) {
+        self.prepared = prepared
+    }
+
+    func prepare() throws -> PreparedClipboardTransfer {
+        guard !prepared.isEmpty else { throw ClipboardPreparationTestError.failed }
+        return prepared.removeFirst()
+    }
+}
+
+private final class RecordingRemovalFileManager: FileManager {
+    private(set) var removeCount = 0
+
+    override func removeItem(at URL: URL) throws {
+        removeCount += 1
+        try super.removeItem(at: URL)
+    }
+}
+
+@MainActor
 private final class RecordingStatusItemDeviceMenuPresenter: StatusItemDeviceMenuPresenting {
     private(set) var presentCount = 0
     private(set) var presentedDevices: [DeviceSummary] = []
     private(set) var select: ((DeviceID) -> Bool)?
     private(set) var cancel: (() -> Void)?
+    private(set) var selectionHistory: [(DeviceID) -> Bool] = []
+    private(set) var cancellationHistory: [() -> Void] = []
 
     func present(
         devices: [DeviceSummary],
@@ -1050,5 +1292,7 @@ private final class RecordingStatusItemDeviceMenuPresenter: StatusItemDeviceMenu
         presentedDevices = devices
         self.select = select
         self.cancel = cancel
+        selectionHistory.append(select)
+        cancellationHistory.append(cancel)
     }
 }
