@@ -42,6 +42,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private let settingsService: any DeviceSettingsServicing
     private let directorySelector: any DirectorySelecting
     private let notificationService: (any ReceiveNotificationServicing)?
+    private let transferSurfacePresentation: ((TransferSurfaceSection) -> Void)?
     private let onRetryRuntime: () -> Void
     private let now: () -> Date
 
@@ -78,6 +79,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         settingsModel: SettingsSurfaceModel = SettingsSurfaceModel(),
         updateService: (any SoftwareUpdateServicing)? = nil,
         notificationService: (any ReceiveNotificationServicing)? = nil,
+        transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
         onRetryRuntime: @escaping () -> Void = {},
         now: @escaping () -> Date = Date.init
     ) {
@@ -91,6 +93,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         self.settingsModel = settingsModel
         self.updateService = updateService ?? InactiveSoftwareUpdateService()
         self.notificationService = notificationService
+        self.transferSurfacePresentation = transferSurfacePresentation
         self.onRetryRuntime = onRetryRuntime
         self.now = now
     }
@@ -474,6 +477,10 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         relativeTo anchor: NSView,
         initialSection: TransferSurfaceSection = .active
     ) {
+        if let transferSurfacePresentation {
+            transferSurfacePresentation(initialSection)
+            return
+        }
         let popover = configuredPopover()
         popover.contentViewController = NSHostingController(
             rootView: TransferPopover(

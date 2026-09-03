@@ -812,11 +812,13 @@ final class AppRuntimeTests: XCTestCase {
             revealer: ApplicationShellReceiveTargetRevealer()
         )
         var statusController: StatusItemController?
+        var presentedSection: TransferSurfaceSection?
         let shell = MacChannelApplicationDelegate(
             initialContainer: AppContainer.localShell(),
             initialStatus: .ready,
             runtimeHost: nil,
             receiveNotificationController: notifier,
+            transferSurfacePresentation: { presentedSection = $0 },
             statusItemControllerFactory: { container in
                 let controller = makeApplicationShellStatusController(container)
                 statusController = controller
@@ -837,8 +839,6 @@ final class AppRuntimeTests: XCTestCase {
         let historyItem = try XCTUnwrap(
             statusController?.statusMenu.items.first { $0.title == "查看全部历史…" }
         )
-        statusController?.onShowReceiveHistory = nil
-
         XCTAssertTrue(
             NSApp.sendAction(
                 try XCTUnwrap(historyItem.action),
@@ -849,6 +849,7 @@ final class AppRuntimeTests: XCTestCase {
 
         XCTAssertTrue(shell.recentReceiveSnapshot.visible.isEmpty)
         XCTAssertFalse(shell.hasUnreadReceive)
+        XCTAssertEqual(presentedSection, .history)
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
@@ -1069,6 +1070,85 @@ final class AppRuntimeTests: XCTestCase {
 
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
         await currentEvents.waitUntilCancelled()
+    }
+
+    @MainActor
+    func testApplicationShellReplacementDrainsCommittedOutgoingResultsThroughWatermark()
+        async
+    {
+        let outgoingEvents = RuntimeReceiveEventSource(bufferCapacity: 2)
+        let notificationCenter = BlockingApplicationShellNotificationCenter()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: ApplicationShellReceiveTargetRevealer(),
+            deliveryTimeout: .seconds(30)
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let base = AppContainer.localShell()
+        let outgoingContainer = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await outgoingEvents.stream() },
+            receiveCompletionState: outgoingEvents.completionState
+        )
+        let first = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/drain-first.pdf")]
+        )
+        let second = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/drain-second.pdf")]
+        )
+
+        await shell.replace(outgoingContainer, status: .ready)
+        await outgoingEvents.publish(first)
+        await notificationCenter.waitUntilDeliveryStarts()
+        await outgoingEvents.publish(second)
+        XCTAssertEqual(outgoingEvents.completionState.latestSequence, 2)
+
+        let staleReplacementFinished = AsyncCompletionProbe()
+        let staleReplacement = Task { @MainActor in
+            let installed = await shell.replace(AppContainer.localShell(), status: .ready)
+            await staleReplacementFinished.finish()
+            return installed
+        }
+        for _ in 0..<10 { await Task.yield() }
+        let currentReplacementFinished = AsyncCompletionProbe()
+        let currentReplacement = Task { @MainActor in
+            let installed = await shell.replace(AppContainer.localShell(), status: .ready)
+            await currentReplacementFinished.finish()
+            return installed
+        }
+        for _ in 0..<100 { await Task.yield() }
+        let staleCompletedBeforeRelease = await staleReplacementFinished.isFinished()
+        let currentCompletedBeforeRelease = await currentReplacementFinished.isFinished()
+        XCTAssertFalse(staleCompletedBeforeRelease)
+        XCTAssertFalse(currentCompletedBeforeRelease)
+
+        notificationCenter.releaseFirstDelivery()
+        let staleReplacementInstalled = await staleReplacement.value
+        let currentReplacementInstalled = await currentReplacement.value
+
+        XCTAssertFalse(staleReplacementInstalled)
+        XCTAssertTrue(currentReplacementInstalled)
+        XCTAssertEqual(shell.observedReceiveEventCount, 2)
+        XCTAssertEqual(
+            shell.recentReceiveSnapshot.visible.map(\.id),
+            [second.transferID, first.transferID]
+        )
+        XCTAssertEqual(Set(shell.recentReceiveSnapshot.visible.map(\.id)).count, 2)
+        let streamlessReplacementInstalled = await shell.replace(
+            AppContainer.localShell(),
+            status: .ready
+        )
+        XCTAssertTrue(streamlessReplacementInstalled)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
     private func makeTrustedRuntimeFixture() throws -> TrustedRuntimeFixture {
