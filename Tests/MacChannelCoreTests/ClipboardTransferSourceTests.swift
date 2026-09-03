@@ -126,6 +126,76 @@ final class ClipboardTransferSourceTests: XCTestCase {
     }
 
     @MainActor
+    func testPruneRemovesOnlyExpiredRegularFilesDirectlyInsideTemporaryRoot() throws {
+        let fileManager = FileManager.default
+        let oldOwned = temporaryRoot.appendingPathComponent("old-owned.txt")
+        let recentOwned = temporaryRoot.appendingPathComponent("recent-owned.txt")
+        let nestedDirectory = temporaryRoot.appendingPathComponent("nested", isDirectory: true)
+        let nestedFile = nestedDirectory.appendingPathComponent("old-nested.txt")
+        let symlink = temporaryRoot.appendingPathComponent("old-link.txt")
+        let outside = temporaryRoot.deletingLastPathComponent().appendingPathComponent("old-owned.txt")
+        let oldDate = fixedDate.addingTimeInterval(-25 * 60 * 60)
+        let recentDate = fixedDate.addingTimeInterval(-23 * 60 * 60)
+
+        try Data("old".utf8).write(to: oldOwned)
+        try Data("recent".utf8).write(to: recentOwned)
+        try fileManager.createDirectory(at: nestedDirectory, withIntermediateDirectories: true)
+        try Data("nested".utf8).write(to: nestedFile)
+        try Data("outside".utf8).write(to: outside)
+        try fileManager.createSymbolicLink(at: symlink, withDestinationURL: outside)
+        try setDates(oldDate, on: oldOwned)
+        try setDates(recentDate, on: recentOwned)
+        try setDates(oldDate, on: nestedFile)
+
+        let preparer = NativeClipboardTransferPreparer(
+            pasteboard: makePasteboard(),
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate }
+        )
+
+        try preparer.pruneAbandonedFiles(olderThan: .seconds(24 * 60 * 60))
+
+        XCTAssertFalse(fileManager.fileExists(atPath: oldOwned.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: recentOwned.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: outside.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: nestedDirectory.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: nestedFile.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: symlink.path))
+    }
+
+    @MainActor
+    func testProductionInitializerPrunesOnceWithoutPruningAgainDuringPreparation() throws {
+        let fileManager = FileManager.default
+        let cacheDirectory = temporaryRoot.appendingPathComponent("cache", isDirectory: true)
+        let dedicatedRoot = cacheDirectory
+            .appendingPathComponent("MacChannel", isDirectory: true)
+            .appendingPathComponent("ClipboardTransfers", isDirectory: true)
+        let abandoned = dedicatedRoot.appendingPathComponent("abandoned.txt")
+        let laterAbandoned = dedicatedRoot.appendingPathComponent("later-abandoned.txt")
+        let outside = cacheDirectory.appendingPathComponent("abandoned.txt")
+        let oldDate = fixedDate.addingTimeInterval(-25 * 60 * 60)
+        try fileManager.createDirectory(at: dedicatedRoot, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: abandoned)
+        try Data("outside".utf8).write(to: outside)
+        try setDates(oldDate, on: abandoned)
+
+        let preparer = NativeClipboardTransferPreparer(
+            pasteboard: makePasteboard(),
+            now: { self.fixedDate },
+            cacheDirectory: cacheDirectory
+        )
+
+        XCTAssertFalse(fileManager.fileExists(atPath: abandoned.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: outside.path))
+
+        try Data("later".utf8).write(to: laterAbandoned)
+        try setDates(oldDate, on: laterAbandoned)
+        XCTAssertThrowsError(try preparer.prepare())
+
+        XCTAssertTrue(fileManager.fileExists(atPath: laterAbandoned.path))
+    }
+
+    @MainActor
     func testInterleavedPreparersReserveDifferentNamesWithoutOverwritingEitherPayload() throws {
         let firstPasteboard = makePasteboard()
         firstPasteboard.setString("first", forType: .string)
@@ -400,6 +470,13 @@ final class ClipboardTransferSourceTests: XCTestCase {
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
         let suffixText = suffix.map { " \($0)" } ?? ""
         return "剪贴板\(kind) \(formatter.string(from: fixedDate))\(suffixText).\(ext)"
+    }
+
+    private func setDates(_ date: Date, on url: URL) throws {
+        try FileManager.default.setAttributes(
+            [.creationDate: date, .modificationDate: date],
+            ofItemAtPath: url.path
+        )
     }
 
     private func isStrictDescendant(_ child: URL, of ancestor: URL) -> Bool {

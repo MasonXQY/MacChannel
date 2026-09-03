@@ -75,12 +75,18 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
     ) {
         let cacheDirectory = cacheDirectory
             ?? fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let usesProductionTemporaryRoot = temporaryRoot == nil
         self.pasteboard = pasteboard
         self.temporaryRoot = temporaryRoot ?? Self.defaultTemporaryRoot(in: cacheDirectory)
         self.now = now
         self.fileManager = fileManager
         self.cacheDirectory = cacheDirectory
         self.reservationHook = reservationHook
+
+        if usesProductionTemporaryRoot {
+            try? pruneAbandonedFiles(olderThan: .seconds(24 * 60 * 60))
+        }
+
     }
 
     func prepare() throws -> PreparedClipboardTransfer {
@@ -102,6 +108,27 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         }
 
         throw ClipboardTransferPreparationError.noSupportedContent
+    }
+
+    func pruneAbandonedFiles(olderThan age: Duration) throws {
+        let rootDescriptor = try openTemporaryRoot()
+        defer { _ = Darwin.close(rootDescriptor) }
+
+        let cutoff = now().addingTimeInterval(-Self.timeInterval(for: age))
+        let children = try fileManager.contentsOfDirectory(
+            at: temporaryRoot,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
+        for child in children {
+            let name = child.lastPathComponent
+            guard name != ".", name != "..", !name.contains("/") else { continue }
+            removeIfExpiredRegularFile(
+                named: name,
+                rootDescriptor: rootDescriptor,
+                cutoff: cutoff
+            )
+        }
     }
 
     private func fileURLsFromPasteboard() -> [URL] {
@@ -212,6 +239,43 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         cacheDirectory
             .appendingPathComponent("MacChannel", isDirectory: true)
             .appendingPathComponent("ClipboardTransfers", isDirectory: true)
+    }
+
+    private func removeIfExpiredRegularFile(
+        named name: String,
+        rootDescriptor: Int32,
+        cutoff: Date
+    ) {
+        var metadata = stat()
+        guard Darwin.fstatat(
+            rootDescriptor,
+            name,
+            &metadata,
+            AT_SYMLINK_NOFOLLOW
+        ) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG,
+              creationOrModificationDate(for: metadata) < cutoff
+        else {
+            return
+        }
+
+        _ = Darwin.unlinkat(rootDescriptor, name, 0)
+    }
+
+    private func creationOrModificationDate(for metadata: stat) -> Date {
+        let birthTime = metadata.st_birthtimespec
+        let modificationTime = metadata.st_mtimespec
+        let timestamp = birthTime.tv_sec == 0 ? modificationTime : birthTime
+        return Date(
+            timeIntervalSince1970: TimeInterval(timestamp.tv_sec)
+                + TimeInterval(timestamp.tv_nsec) / 1_000_000_000
+        )
+    }
+
+    private static func timeInterval(for duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return TimeInterval(components.seconds)
+            + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
     }
 
     private func reserveNextAvailableName(
