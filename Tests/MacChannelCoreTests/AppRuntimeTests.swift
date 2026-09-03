@@ -729,7 +729,13 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(Set(inventoriedSources.keys), Set(everyProductionSwiftPath))
 
         let accesses = SwiftPasteboardSourceAuditor.accesses(in: inventoriedSources)
-        XCTAssertEqual(accesses.map(\.path), ["App/ClipboardTransferSource.swift"])
+        XCTAssertTrue(
+            SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
+                in: inventoriedSources,
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+            ),
+            "Unexpected .general accesses: \(accesses)"
+        )
     }
 
     @MainActor

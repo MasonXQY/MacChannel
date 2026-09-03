@@ -39,6 +39,80 @@ final class SwiftPasteboardSourceAuditorTests: XCTestCase {
         XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
     }
 
+    func testNormalStringInterpolationCodeIsAudited() {
+        let source = ##"""
+        let description = "pasteboard: \(NSPasteboard.general)"
+        """##
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
+    }
+
+    func testMultilineStringInterpolationCodeIsAudited() {
+        let source = ##"""
+        let description = """
+        pasteboard:
+        \(NSPasteboard /* executable interpolation */ .general)
+        """
+        """##
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
+    }
+
+    func testRawStringInterpolationCodeIsAudited() {
+        let source = ###"""
+        let description = #"pasteboard: \#(NSPasteboard.general)"#
+        """###
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
+    }
+
+    func testNestedStringInterpolationCodeIsAuditedRecursively() {
+        let source = ##"""
+        let description = "\(wrapper((1 + 2), "nested \(NSPasteboard.general)")) then \(NSPasteboard.general)"
+        """##
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 2)
+    }
+
+    func testReturnShorthandGeneralIsDetectedWithoutLocalTypeFlow() {
+        let source = "func current() -> NSPasteboard { .general }"
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
+    }
+
+    func testMemberAssignmentShorthandGeneralIsDetectedWithoutLocalTypeFlow() {
+        let source = "other.stored = .general"
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
+    }
+
+    func testFailClosedPolicyAllowsExactlyOneExplicitSendAdapterAccess() {
+        let sources = [
+            "App/ClipboardTransferSource.swift":
+                "let pasteboard: NSPasteboard = NSPasteboard.general",
+        ]
+
+        XCTAssertTrue(
+            SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
+                in: sources,
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+            )
+        )
+    }
+
+    func testFailClosedPolicyDoesNotExemptShorthandInAllowlistedFile() {
+        let sources = [
+            "App/ClipboardTransferSource.swift": "let pasteboard: NSPasteboard = .general",
+        ]
+
+        XCTAssertFalse(
+            SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
+                in: sources,
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+            )
+        )
+    }
+
     func testSourcesFileAccessIsReportedOutsideExplicitSendAdapter() {
         let sources = [
             "App/ClipboardTransferSource.swift": "let allowed = NSPasteboard.general",

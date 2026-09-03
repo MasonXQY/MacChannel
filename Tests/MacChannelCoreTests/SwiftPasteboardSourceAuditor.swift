@@ -1,8 +1,14 @@
 import Foundation
 
 struct SwiftPasteboardGeneralAccess: Equatable {
+    enum Kind: Equatable {
+        case explicitNSPasteboard
+        case shorthandOrOtherMember
+    }
+
     let path: String
     let tokenOffset: Int
+    let kind: Kind
 }
 
 enum SwiftPasteboardSourceAuditor {
@@ -17,121 +23,37 @@ enum SwiftPasteboardSourceAuditor {
         }
     }
 
+    static func satisfiesFailClosedPolicy(
+        in sources: [String: String],
+        allowingSingleExplicitAccessAt allowedPath: String
+    ) -> Bool {
+        let detectedAccesses = accesses(in: sources)
+        return detectedAccesses.count == 1
+            && detectedAccesses[0].path == allowedPath
+            && detectedAccesses[0].kind == .explicitNSPasteboard
+    }
+
     private static func accesses(
         in tokens: [SwiftSourceToken],
         path: String
     ) -> [SwiftPasteboardGeneralAccess] {
-        let pasteboardTypedNames = knownPasteboardTypedNames(in: tokens)
         var accesses: [SwiftPasteboardGeneralAccess] = []
 
         for index in tokens.indices {
-            if token(tokens, at: index, isIdentifier: "NSPasteboard"),
-               token(tokens, at: index + 1, isSymbol: "."),
-               token(tokens, at: index + 2, isIdentifier: "general")
-            {
-                accesses.append(
-                    SwiftPasteboardGeneralAccess(
-                        path: path,
-                        tokenOffset: tokens[index].offset
-                    )
-                )
-                continue
-            }
-
             guard token(tokens, at: index, isSymbol: "."),
-                  token(tokens, at: index + 1, isIdentifier: "general"),
-                  token(tokens, at: index - 1, isSymbol: "=")
-            else {
-                continue
-            }
-            let equalsIndex = index - 1
-            let assignedName = identifierBeforeAssignment(tokens, equalsIndex: equalsIndex)
-            if hasPasteboardTypeAnnotation(tokens, equalsIndex: equalsIndex)
-                || assignedName.map(pasteboardTypedNames.contains) == true
-            {
-                accesses.append(
-                    SwiftPasteboardGeneralAccess(
-                        path: path,
-                        tokenOffset: tokens[index].offset
-                    )
+                  token(tokens, at: index + 1, isIdentifier: "general")
+            else { continue }
+            accesses.append(
+                SwiftPasteboardGeneralAccess(
+                    path: path,
+                    tokenOffset: tokens[index].offset,
+                    kind: token(tokens, at: index - 1, isIdentifier: "NSPasteboard")
+                        ? .explicitNSPasteboard
+                        : .shorthandOrOtherMember
                 )
-            }
+            )
         }
         return accesses
-    }
-
-    private static func knownPasteboardTypedNames(in tokens: [SwiftSourceToken]) -> Set<String> {
-        var names: Set<String> = []
-        for index in tokens.indices {
-            guard case let .identifier(name) = tokens[index].kind,
-                  token(tokens, at: index + 1, isSymbol: ":")
-            else {
-                continue
-            }
-            var cursor = index + 2
-            var isPasteboardType = false
-            while tokens.indices.contains(cursor), cursor <= index + 12 {
-                if token(tokens, at: cursor, isIdentifier: "NSPasteboard") {
-                    isPasteboardType = true
-                }
-                if isTypeAnnotationBoundary(tokens[cursor]) { break }
-                cursor += 1
-            }
-            if isPasteboardType { names.insert(name) }
-        }
-        return names
-    }
-
-    private static func hasPasteboardTypeAnnotation(
-        _ tokens: [SwiftSourceToken],
-        equalsIndex: Int
-    ) -> Bool {
-        var cursor = equalsIndex - 1
-        var colonIndex: Int?
-        while tokens.indices.contains(cursor), cursor >= max(0, equalsIndex - 16) {
-            if isDeclarationBoundary(tokens[cursor]) { break }
-            if token(tokens, at: cursor, isSymbol: ":") {
-                colonIndex = cursor
-                break
-            }
-            cursor -= 1
-        }
-        guard let colonIndex else { return false }
-        return tokens[(colonIndex + 1)..<equalsIndex].contains { token in
-            if case .identifier("NSPasteboard") = token.kind { return true }
-            return false
-        }
-    }
-
-    private static func identifierBeforeAssignment(
-        _ tokens: [SwiftSourceToken],
-        equalsIndex: Int
-    ) -> String? {
-        guard tokens.indices.contains(equalsIndex - 1),
-              case let .identifier(name) = tokens[equalsIndex - 1].kind
-        else {
-            return nil
-        }
-        return name
-    }
-
-    private static func isTypeAnnotationBoundary(_ token: SwiftSourceToken) -> Bool {
-        switch token.kind {
-        case .symbol("="), .symbol(","), .symbol(")"), .symbol(";"),
-             .symbol("{"), .symbol("}"):
-            true
-        default:
-            false
-        }
-    }
-
-    private static func isDeclarationBoundary(_ token: SwiftSourceToken) -> Bool {
-        switch token.kind {
-        case .symbol(","), .symbol(";"), .symbol("{"), .symbol("}"), .symbol("="):
-            true
-        default:
-            false
-        }
     }
 
     private static func token(
@@ -247,8 +169,28 @@ private struct SwiftSourceToken: Equatable {
 private enum SwiftSourceLexer {
     static func tokenize(_ source: String) -> [SwiftSourceToken] {
         let characters = Array(source)
+        return scanCode(in: characters, from: 0, untilInterpolationEnd: false).tokens
+    }
+
+    private struct CodeScan {
+        let tokens: [SwiftSourceToken]
+        let endIndex: Int
+    }
+
+    private struct StringScan {
+        let literalValue: String
+        let interpolationTokens: [SwiftSourceToken]
+        let endIndex: Int
+    }
+
+    private static func scanCode(
+        in characters: [Character],
+        from start: Int,
+        untilInterpolationEnd: Bool
+    ) -> CodeScan {
         var tokens: [SwiftSourceToken] = []
-        var index = 0
+        var index = start
+        var parenthesisDepth = untilInterpolationEnd ? 1 : 0
 
         while index < characters.count {
             if characters[index].isWhitespace {
@@ -264,14 +206,15 @@ private enum SwiftSourceLexer {
                 index = skipBlockComment(startingAt: index, in: characters)
                 continue
             }
-            if let stringToken = stringLiteral(startingAt: index, in: characters) {
+            if let stringScan = scanStringLiteral(startingAt: index, in: characters) {
                 tokens.append(
                     SwiftSourceToken(
-                        kind: .stringLiteral(stringToken.value),
+                        kind: .stringLiteral(stringScan.literalValue),
                         offset: index
                     )
                 )
-                index = stringToken.endIndex
+                tokens.append(contentsOf: stringScan.interpolationTokens)
+                index = stringScan.endIndex
                 continue
             }
             if isIdentifierStart(characters[index]) {
@@ -288,12 +231,21 @@ private enum SwiftSourceLexer {
                 )
                 continue
             }
+
+            if untilInterpolationEnd, characters[index] == "(" {
+                parenthesisDepth += 1
+            } else if untilInterpolationEnd, characters[index] == ")" {
+                parenthesisDepth -= 1
+                if parenthesisDepth == 0 {
+                    return CodeScan(tokens: tokens, endIndex: index + 1)
+                }
+            }
             tokens.append(
                 SwiftSourceToken(kind: .symbol(characters[index]), offset: index)
             )
             index += 1
         }
-        return tokens
+        return CodeScan(tokens: tokens, endIndex: index)
     }
 
     private static func skipBlockComment(startingAt start: Int, in source: [Character]) -> Int {
@@ -313,10 +265,10 @@ private enum SwiftSourceLexer {
         return index
     }
 
-    private static func stringLiteral(
+    private static func scanStringLiteral(
         startingAt start: Int,
         in source: [Character]
-    ) -> (value: String, endIndex: Int)? {
+    ) -> StringScan? {
         var quoteIndex = start
         while quoteIndex < source.count, source[quoteIndex] == "#" { quoteIndex += 1 }
         guard quoteIndex < source.count, source[quoteIndex] == "\"" else { return nil }
@@ -325,24 +277,83 @@ private enum SwiftSourceLexer {
         let quoteCount = isMultiline ? 3 : 1
         let contentStart = quoteIndex + quoteCount
         var index = contentStart
+        var literalCharacters: [Character] = []
+        var interpolationTokens: [SwiftSourceToken] = []
 
         while index < source.count {
-            if hashCount == 0, source[index] == "\\" {
-                index = min(source.count, index + 2)
-                continue
-            }
             if startsWithStringTerminator(
                 at: index,
                 quoteCount: quoteCount,
                 hashCount: hashCount,
                 in: source
             ) {
-                let value = String(source[contentStart..<index])
-                return (value, index + quoteCount + hashCount)
+                return StringScan(
+                    literalValue: String(literalCharacters),
+                    interpolationTokens: interpolationTokens,
+                    endIndex: index + quoteCount + hashCount
+                )
             }
+            if let expressionStart = interpolationExpressionStart(
+                at: index,
+                hashCount: hashCount,
+                in: source
+            ) {
+                let expression = scanCode(
+                    in: source,
+                    from: expressionStart,
+                    untilInterpolationEnd: true
+                )
+                interpolationTokens.append(contentsOf: expression.tokens)
+                index = expression.endIndex
+                continue
+            }
+            if let escapedEnd = escapedSequenceEnd(
+                at: index,
+                hashCount: hashCount,
+                in: source
+            ) {
+                literalCharacters.append(contentsOf: source[index..<escapedEnd])
+                index = escapedEnd
+                continue
+            }
+            literalCharacters.append(source[index])
             index += 1
         }
-        return (String(source[contentStart..<source.count]), source.count)
+        return StringScan(
+            literalValue: String(literalCharacters),
+            interpolationTokens: interpolationTokens,
+            endIndex: source.count
+        )
+    }
+
+    private static func interpolationExpressionStart(
+        at index: Int,
+        hashCount: Int,
+        in source: [Character]
+    ) -> Int? {
+        guard index < source.count, source[index] == "\\" else { return nil }
+        var cursor = index + 1
+        for _ in 0..<hashCount {
+            guard cursor < source.count, source[cursor] == "#" else { return nil }
+            cursor += 1
+        }
+        guard cursor < source.count, source[cursor] == "(" else { return nil }
+        return cursor + 1
+    }
+
+    private static func escapedSequenceEnd(
+        at index: Int,
+        hashCount: Int,
+        in source: [Character]
+    ) -> Int? {
+        guard index < source.count, source[index] == "\\" else { return nil }
+        var cursor = index + 1
+        for _ in 0..<hashCount {
+            guard cursor < source.count, source[cursor] == "#" else { return nil }
+            cursor += 1
+        }
+        guard cursor < source.count else { return source.count }
+        return cursor + 1
     }
 
     private static func startsWithStringTerminator(
