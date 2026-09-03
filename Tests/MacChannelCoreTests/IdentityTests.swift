@@ -6,6 +6,55 @@ import XCTest
 @testable import MacChannelCore
 
 final class IdentityTests: XCTestCase {
+    func testIssuerSequenceReservationSurvivesClockRollbackAndStoreRecreation() async throws {
+        let secrets = MemorySecretStore()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let firstStore = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
+
+        let first = try await firstStore.reserveIssuerSequence(after: 2_100_000)
+        let recreatedStore = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
+        let afterClockRollback = try await recreatedStore.reserveIssuerSequence(after: 1_900_000)
+
+        XCTAssertEqual(first, 2_100_001)
+        XCTAssertEqual(afterClockRollback, 2_100_002)
+    }
+
+    func testIssuerSequenceReservationRejectsExhaustion() async throws {
+        let secrets = MemorySecretStore()
+        let store = AuthenticatedTrustSnapshotStore(
+            url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            secrets: secrets
+        )
+
+        do {
+            _ = try await store.reserveIssuerSequence(after: UInt64.max)
+            XCTFail("Expected issuer sequence exhaustion")
+        } catch {
+            XCTAssertEqual(
+                error as? AuthenticatedTrustSnapshotStoreError,
+                .issuerSequenceExhausted
+            )
+        }
+    }
+
+    func testIssuerSequenceReservationIsAtomicAcrossStoreInstances() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let secrets = CoordinatedSequenceSecretStore(initialSequence: 100)
+        let url = directory.appendingPathComponent("trust.json")
+        let firstStore = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
+        let secondStore = AuthenticatedTrustSnapshotStore(url: url, secrets: secrets)
+
+        async let first = firstStore.reserveIssuerSequence(after: 100)
+        async let second = secondStore.reserveIssuerSequence(after: 100)
+        let reserved = try await [first, second]
+
+        XCTAssertEqual(Set(reserved), [101, 102])
+    }
+
     func testKeychainStoreMigratesLegacyAccessibilityWithoutChangingIdentity() throws {
         let service = "com.mason.macchannel.identity.test.\(UUID().uuidString)"
         let account = "p256-signing-private-key"
@@ -600,5 +649,39 @@ private final class MemorySecretStore: SecretStore, @unchecked Sendable {
     func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
         requestedPolicies.append(policy)
         secrets[account] = data
+    }
+}
+
+private final class CoordinatedSequenceSecretStore: SecretStore, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var sequenceData: Data
+    private var sequenceReads = 0
+
+    init(initialSequence: UInt64) {
+        sequenceData = Data(
+            (0..<8).reversed().map { shift in
+                UInt8(truncatingIfNeeded: initialSequence >> UInt64(shift * 8))
+            })
+    }
+
+    func data(for account: String, policy: KeychainPolicy) throws -> Data? {
+        condition.lock()
+        defer { condition.unlock() }
+        guard account == "trust-issuer-sequence" else { return nil }
+        sequenceReads += 1
+        if sequenceReads == 1 {
+            _ = condition.wait(until: Date().addingTimeInterval(0.2))
+        } else {
+            condition.broadcast()
+        }
+        return sequenceData
+    }
+
+    func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
+        condition.lock()
+        defer { condition.unlock() }
+        if account == "trust-issuer-sequence" {
+            sequenceData = data
+        }
     }
 }

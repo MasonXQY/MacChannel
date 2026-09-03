@@ -3,10 +3,81 @@ import Foundation
 
 public enum AuthenticatedTrustSnapshotStoreError: Error, Equatable, Sendable {
     case invalidGeneration
+    case invalidIssuerSequence
+    case invalidIssuerSequenceLock
+    case issuerSequenceExhausted
 }
 
 public protocol TrustSnapshotPersisting: Sendable {
     func persistLatest(from repository: TrustRepository) async throws
+}
+
+private final class DurableIssuerSequenceReserver<Secrets: SecretStore & Sendable>:
+    IssuerSequenceReserving, @unchecked Sendable
+{
+    private let secrets: Secrets
+    private let policy: KeychainPolicy
+    private let lockURL: URL
+    private let account = "trust-issuer-sequence"
+
+    init(secrets: Secrets, policy: KeychainPolicy, lockURL: URL) {
+        self.secrets = secrets
+        self.policy = policy
+        self.lockURL = lockURL
+    }
+
+    func reserveIssuerSequence(after floor: UInt64) throws -> UInt64 {
+        try withExclusiveFileLock {
+            let stored: UInt64
+            if let data = try secrets.data(for: account, policy: policy) {
+                guard data.count == MemoryLayout<UInt64>.size else {
+                    throw AuthenticatedTrustSnapshotStoreError.invalidIssuerSequence
+                }
+                stored = data.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+            } else {
+                stored = 0
+            }
+            let base = max(stored, floor)
+            guard base < UInt64.max else {
+                throw AuthenticatedTrustSnapshotStoreError.issuerSequenceExhausted
+            }
+            let reserved = base + 1
+            let data = Data(
+                (0..<8).reversed().map { shift in
+                    UInt8(truncatingIfNeeded: reserved >> UInt64(shift * 8))
+                })
+            try secrets.store(data, for: account, policy: policy)
+            return reserved
+        }
+    }
+
+    private func withExclusiveFileLock<T>(_ operation: () throws -> T) throws -> T {
+        let descriptor = Darwin.open(
+            lockURL.path,
+            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR
+        )
+        guard descriptor >= 0 else {
+            throw AuthenticatedTrustSnapshotStoreError.invalidIssuerSequenceLock
+        }
+        defer { _ = Darwin.close(descriptor) }
+        var information = stat()
+        guard fstat(descriptor, &information) == 0,
+              information.st_mode & S_IFMT == S_IFREG,
+              information.st_uid == geteuid(),
+              information.st_nlink == 1,
+              fchmod(descriptor, S_IRUSR | S_IWUSR) == 0
+        else {
+            throw AuthenticatedTrustSnapshotStoreError.invalidIssuerSequenceLock
+        }
+        while flock(descriptor, LOCK_EX) != 0 {
+            guard errno == EINTR else {
+                throw AuthenticatedTrustSnapshotStoreError.invalidIssuerSequenceLock
+            }
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        return try operation()
+    }
 }
 
 /// Persists an owner-signed trust snapshot beside a monotonic generation
@@ -25,6 +96,7 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
     private let url: URL
     private let secrets: Secrets
     private let policy: KeychainPolicy
+    private let issuerSequenceReserver: DurableIssuerSequenceReserver<Secrets>
 
     public init(
         url: URL,
@@ -34,6 +106,11 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
         self.url = url.standardizedFileURL
         self.secrets = secrets
         self.policy = policy
+        issuerSequenceReserver = DurableIssuerSequenceReserver(
+            secrets: secrets,
+            policy: policy,
+            lockURL: url.appendingPathExtension("issuer-sequence.lock")
+        )
     }
 
     public func load(identity: DeviceIdentity) throws -> TrustRepository {
@@ -62,7 +139,8 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
                 ownerIdentity: identity,
                 trustStore: store,
                 persistedGeneration: snapshot.generation,
-                authenticationRecords: decoded?.authenticationRecords ?? []
+                authenticationRecords: decoded?.authenticationRecords ?? [],
+                issuerSequenceReserver: issuerSequenceReserver
             )
         }
         guard generation == 0 else {
@@ -71,8 +149,15 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
         return try TrustRepository(
             ownerIdentity: identity,
             trustStore: TrustStore(owner: identity.id),
-            persistedGeneration: 0
+            persistedGeneration: 0,
+            issuerSequenceReserver: issuerSequenceReserver
         )
+    }
+
+    /// Reserves before signing so a record exposed to a peer is never reused,
+    /// even if local app data is later rebuilt or the system clock moves back.
+    public func reserveIssuerSequence(after floor: UInt64) throws -> UInt64 {
+        try issuerSequenceReserver.reserveIssuerSequence(after: floor)
     }
 
     public func persistLatest(from repository: TrustRepository) async throws {
@@ -100,10 +185,14 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
     }
 
     private func storeGeneration(_ generation: UInt64) throws {
+        try storeUInt64(generation, account: Self.generationAccount)
+    }
+
+    private func storeUInt64(_ value: UInt64, account: String) throws {
         let data = Data(
             (0..<8).reversed().map { shift in
-                UInt8(truncatingIfNeeded: generation >> UInt64(shift * 8))
+                UInt8(truncatingIfNeeded: value >> UInt64(shift * 8))
             })
-        try secrets.store(data, for: Self.generationAccount, policy: policy)
+        try secrets.store(data, for: account, policy: policy)
     }
 }

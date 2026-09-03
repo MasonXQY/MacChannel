@@ -49,6 +49,98 @@ final class PairingTests: XCTestCase {
         XCTAssertTrue(joinerTrustedAfterApproval)
     }
 
+    func testPairingSucceedsWhenPeerKeepsIdentityAfterItsTrustStateWasReset() async throws {
+        let clock = TestClock(now: Date(timeIntervalSince1970: 2_000))
+        let server = MemoryPairingServer(clock: clock)
+        let hostIdentity = try DeviceIdentity.ephemeral()
+        let joinerIdentity = try DeviceIdentity.ephemeral()
+
+        var joinerStore = TrustStore(owner: joinerIdentity.id)
+        try joinerStore.bootstrapFromConfirmedPairing(
+            SignedTrustRecord.authorizing(
+                joinerIdentity,
+                signedBy: hostIdentity,
+                sequence: 2_100_000,
+                timestamp: Date(timeIntervalSince1970: 2_100)
+            ),
+            localIdentity: joinerIdentity
+        )
+        _ = try joinerStore.revoke(hostIdentity.id, signedBy: joinerIdentity)
+
+        let hostRepository = try TrustRepository(
+            ownerIdentity: hostIdentity,
+            trustStore: TrustStore(owner: hostIdentity.id),
+            persistedGeneration: 0,
+            issuerSequenceReserver: TestIssuerSequenceReserver(initialValue: 2_100_000)
+        )
+        let joinerRepository = try TrustRepository(
+            ownerIdentity: joinerIdentity,
+            trustStore: joinerStore,
+            persistedGeneration: 0
+        )
+        let host = try PairingCoordinator(
+            identity: hostIdentity,
+            displayName: "Reset Mac",
+            trustRepository: hostRepository,
+            transport: MemoryPairingTransport(server: server, observedSource: "reset-host"),
+            clock: clock
+        )
+        let joiner = try PairingCoordinator(
+            identity: joinerIdentity,
+            displayName: "Remembering Mac",
+            trustRepository: joinerRepository,
+            transport: MemoryPairingTransport(server: server, observedSource: "remembering-joiner"),
+            clock: clock
+        )
+
+        _ = try await joiner.join(code: try await host.createCode())
+        let joinerCompletion = Task { try await joiner.awaitHostApproval() }
+        await Task.yield()
+        _ = try await host.approvePendingPairing()
+        _ = try await joinerCompletion.value
+
+        let hostTrustsJoiner = await host.isTrusted(joinerIdentity.id)
+        let joinerTrustsHost = await joiner.isTrusted(hostIdentity.id)
+        XCTAssertTrue(hostTrustsJoiner)
+        XCTAssertTrue(joinerTrustsHost)
+    }
+
+    func testDurableIssuerSequenceAdvancesPastRevocationAfterTrustStateReset() async throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let revokedPeer = try DeviceIdentity.ephemeral()
+        let newPeer = try DeviceIdentity.ephemeral()
+        let sequenceReserver = TestIssuerSequenceReserver(initialValue: 2_100_000)
+        var originalStore = TrustStore(owner: owner.id)
+        try originalStore.authorize(
+            SignedTrustRecord.authorizing(
+                revokedPeer,
+                signedBy: owner,
+                sequence: 2_100_000
+            )
+        )
+        let originalRepository = try TrustRepository(
+            ownerIdentity: owner,
+            trustStore: originalStore,
+            persistedGeneration: 0,
+            issuerSequenceReserver: sequenceReserver
+        )
+
+        let revocation = try await originalRepository.revoke(revokedPeer.id)
+        let rebuiltRepository = try TrustRepository(
+            ownerIdentity: owner,
+            trustStore: TrustStore(owner: owner.id),
+            persistedGeneration: 0,
+            issuerSequenceReserver: sequenceReserver
+        )
+        let authorization = try await rebuiltRepository.issueAuthorization(
+            subject: newPeer.id,
+            subjectPublicKey: newPeer.publicKey.rawRepresentation,
+            timestamp: Date(timeIntervalSince1970: 1_900)
+        )
+
+        XCTAssertGreaterThan(authorization.issuerSequence, revocation.issuerSequence)
+    }
+
     func testHostRejectionNotifiesWaitingJoinerAndLeavesBothSidesUntrusted() async throws {
         let context = try PairingTestContext()
         _ = try await context.joiner.join(code: try await context.host.createCode())
@@ -861,6 +953,26 @@ final class PairingTests: XCTestCase {
         }
         let result = try await context.joiner.join(code: newCode)
         XCTAssertEqual(result.fingerprint.count, 12)
+    }
+}
+
+private final class TestIssuerSequenceReserver: IssuerSequenceReserving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64
+
+    init(initialValue: UInt64) {
+        value = initialValue
+    }
+
+    func reserveIssuerSequence(after floor: UInt64) throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let base = max(value, floor)
+        guard base < UInt64.max else {
+            throw AuthenticatedTrustSnapshotStoreError.issuerSequenceExhausted
+        }
+        value = base + 1
+        return value
     }
 }
 

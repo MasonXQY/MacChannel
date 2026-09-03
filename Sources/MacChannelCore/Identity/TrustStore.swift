@@ -171,6 +171,10 @@ public struct TrustStore: Sendable {
         snapshotGeneration
     }
 
+    func issuerSequence(for issuer: DeviceID) -> UInt64 {
+        issuerSequences[issuer] ?? 0
+    }
+
     public func nextIssuerSequence(for issuer: DeviceIdentity) throws -> UInt64 {
         guard isTrusted(issuer.id) else {
             throw TrustStoreError.untrustedIssuer(issuer.id)
@@ -254,21 +258,37 @@ public struct TrustStore: Sendable {
 
     @discardableResult
     public mutating func revoke(_ device: DeviceID, signedBy issuer: DeviceIdentity) throws -> SignedTrustRecord {
+        let currentSequence = issuerSequences[issuer.id] ?? 0
+        guard currentSequence < UInt64.max else {
+            throw TrustStoreError.sequenceExhausted(issuer.id)
+        }
+        return try revoke(
+            device,
+            signedBy: issuer,
+            sequence: currentSequence + 1,
+            timestamp: Date()
+        )
+    }
+
+    @discardableResult
+    mutating func revoke(
+        _ device: DeviceID,
+        signedBy issuer: DeviceIdentity,
+        sequence: UInt64,
+        timestamp: Date
+    ) throws -> SignedTrustRecord {
         guard device != owner else {
             throw TrustStoreError.cannotRevokeOwner
         }
         guard let subjectPublicKey = trustedPublicKeys[device] else {
             throw TrustStoreError.unknownSubject(device)
         }
-        let currentSequence = issuerSequences[issuer.id] ?? 0
-        guard currentSequence < UInt64.max else {
-            throw TrustStoreError.sequenceExhausted(issuer.id)
-        }
         let record = try SignedTrustRecord.revoking(
             device,
             subjectPublicKey: subjectPublicKey,
             signedBy: issuer,
-            sequence: currentSequence + 1
+            sequence: sequence,
+            timestamp: timestamp
         )
         try ingest(record)
         return record

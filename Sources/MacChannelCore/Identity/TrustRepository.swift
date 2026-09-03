@@ -6,6 +6,10 @@ public enum TrustRepositoryError: Error, Equatable, Sendable {
     case noPersistedSnapshot
 }
 
+public protocol IssuerSequenceReserving: Sendable {
+    func reserveIssuerSequence(after floor: UInt64) throws -> UInt64
+}
+
 /// Shared, actor-isolated trust state. Every mutation also advances and signs
 /// the durable snapshot, so issuer sequences and trusted peers cannot be lost
 /// when a coordinator is replaced.
@@ -18,6 +22,7 @@ public actor TrustRepository {
     public nonisolated let ownerID: DeviceID
 
     private let ownerIdentity: DeviceIdentity
+    private let issuerSequenceReserver: (any IssuerSequenceReserving)?
     private var store: TrustStore
     private var latestSnapshot: TrustStoreSnapshot?
     private var authenticationRecordsByPair: [RecordKey: SignedTrustRecord]
@@ -27,7 +32,8 @@ public actor TrustRepository {
         ownerIdentity: DeviceIdentity,
         trustStore: TrustStore,
         persistedGeneration: UInt64,
-        authenticationRecords: [SignedTrustRecord] = []
+        authenticationRecords: [SignedTrustRecord] = [],
+        issuerSequenceReserver: (any IssuerSequenceReserving)? = nil
     ) throws {
         guard trustStore.isOwned(by: ownerIdentity) else {
             throw TrustRepositoryError.invalidOwner
@@ -37,6 +43,7 @@ public actor TrustRepository {
         }
         self.ownerID = ownerIdentity.id
         self.ownerIdentity = ownerIdentity
+        self.issuerSequenceReserver = issuerSequenceReserver
         self.store = trustStore
         var records: [RecordKey: SignedTrustRecord] = [:]
         for record in authenticationRecords {
@@ -108,7 +115,7 @@ public actor TrustRepository {
         timestamp: Date
     ) throws -> SignedTrustRecord {
         var candidate = store
-        let sequence = try candidate.nextIssuerSequence(for: ownerIdentity)
+        let sequence = try reserveIssuerSequence(for: candidate, timestamp: timestamp)
         let authorization = try SignedTrustRecord.authorizing(
             subject: subject,
             subjectPublicKey: subjectPublicKey,
@@ -133,13 +140,35 @@ public actor TrustRepository {
         timestamp: Date
     ) throws -> SignedTrustRecord {
         let candidate = store
-        let sequence = try candidate.nextIssuerSequence(for: ownerIdentity)
+        let sequence = try reserveIssuerSequence(for: candidate, timestamp: timestamp)
         return try SignedTrustRecord.authorizing(
             subject: subject,
             subjectPublicKey: subjectPublicKey,
             signedBy: ownerIdentity,
             sequence: sequence,
             timestamp: timestamp
+        )
+    }
+
+    private func reserveIssuerSequence(
+        for candidate: TrustStore,
+        timestamp: Date
+    ) throws -> UInt64 {
+        guard let issuerSequenceReserver else {
+            return try candidate.nextIssuerSequence(for: ownerIdentity)
+        }
+        let milliseconds = timestamp.timeIntervalSince1970 * 1_000
+        guard milliseconds.isFinite,
+              milliseconds > Double(Int64.min),
+              milliseconds < Double(Int64.max)
+        else {
+            throw TrustRecordValidationError.invalidTimestamp
+        }
+        let timestampFloor = milliseconds > 0
+            ? UInt64(milliseconds.rounded(.down))
+            : 0
+        return try issuerSequenceReserver.reserveIssuerSequence(
+            after: max(candidate.issuerSequence(for: ownerID), timestampFloor)
         )
     }
 
@@ -192,9 +221,18 @@ public actor TrustRepository {
     }
 
     @discardableResult
-    public func revoke(_ device: DeviceID) throws -> SignedTrustRecord {
+    public func revoke(
+        _ device: DeviceID,
+        timestamp: Date = Date()
+    ) throws -> SignedTrustRecord {
         var candidate = store
-        let record = try candidate.revoke(device, signedBy: ownerIdentity)
+        let sequence = try reserveIssuerSequence(for: candidate, timestamp: timestamp)
+        let record = try candidate.revoke(
+            device,
+            signedBy: ownerIdentity,
+            sequence: sequence,
+            timestamp: timestamp
+        )
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
         store = candidate
         latestSnapshot = snapshot
