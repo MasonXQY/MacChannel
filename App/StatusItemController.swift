@@ -27,6 +27,8 @@ final class StatusItemController: NSObject {
     var onShowSettings: (() -> Void)?
     var onRetryRuntime: (() -> Void)?
     var onAcknowledgeReceive: (() -> Void)?
+    var onRevealRecentReceive: ((RecentReceiveSummary) -> Void)?
+    var onShowReceiveHistory: (() -> Void)?
 
     var phase: StatusItemPhase { state.phase }
     var nativeButton: NSStatusBarButton? { statusItem?.button }
@@ -49,6 +51,13 @@ final class StatusItemController: NSObject {
     private var runtimeRetryItem: NSMenuItem?
     private var availableUpdateItem: NSMenuItem?
     private var availableUpdateAction: (() -> Void)?
+    private var recentReceiveStore: RecentReceiveStore?
+    private var recentReceiveHeadingItem: NSMenuItem?
+    private var recentReceiveItems: [NSMenuItem] = []
+    private var recentReceiveOverflowItem: NSMenuItem?
+    private var recentReceiveHistoryItem: NSMenuItem?
+    private var recentReceiveSeparatorItem: NSMenuItem?
+    private var visibleRecentReceives: [RecentReceiveSummary] = []
 
     init(
         button: StatusItemButton,
@@ -257,8 +266,25 @@ final class StatusItemController: NSObject {
     }
 
     func prepareToOpenStatusMenu() {
-        onAcknowledgeReceive?()
-        setUnreadReceive(false)
+    }
+
+    func bindRecentReceives(_ store: RecentReceiveStore) {
+        recentReceiveStore = store
+        store.onChange = { [weak self] snapshot in
+            self?.renderRecentReceives(snapshot)
+        }
+        renderRecentReceives(store.snapshot)
+    }
+
+    func sourceDisplayName(for source: DeviceID?) -> String {
+        guard let source else { return "其他设备" }
+        return preferredDeviceNames[source]
+            ?? devices.first(where: { $0.id == source })?.userFacingDisplayName
+            ?? "其他设备"
+    }
+
+    func reportReceiveRevealFailure() {
+        announce("找不到接收文件或接收文件夹。")
     }
 
     func setRuntimeStatus(_ status: AppRuntimeStatus) {
@@ -382,6 +408,50 @@ final class StatusItemController: NSObject {
         runtimeRetryItem = retry
         statusMenu.addItem(retry)
         statusMenu.addItem(.separator())
+
+        let recentHeading = NSMenuItem(title: "刚刚收到", action: nil, keyEquivalent: "")
+        recentHeading.isEnabled = false
+        recentHeading.isHidden = true
+        recentReceiveHeadingItem = recentHeading
+        statusMenu.addItem(recentHeading)
+
+        recentReceiveItems = (0..<RecentReceiveStore.maximumVisibleCount).map { index in
+            let item = NSMenuItem(
+                title: "",
+                action: #selector(revealRecentReceive(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = index
+            item.isHidden = true
+            item.image = NSImage(
+                systemSymbolName: "tray.and.arrow.down",
+                accessibilityDescription: "在 Finder 中显示"
+            )
+            statusMenu.addItem(item)
+            return item
+        }
+
+        let recentOverflow = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        recentOverflow.isEnabled = false
+        recentOverflow.isHidden = true
+        recentReceiveOverflowItem = recentOverflow
+        statusMenu.addItem(recentOverflow)
+
+        let recentHistory = NSMenuItem(
+            title: "查看全部历史…",
+            action: #selector(showReceiveHistory(_:)),
+            keyEquivalent: ""
+        )
+        recentHistory.target = self
+        recentHistory.isHidden = true
+        recentReceiveHistoryItem = recentHistory
+        statusMenu.addItem(recentHistory)
+
+        let recentSeparator = NSMenuItem.separator()
+        recentSeparator.isHidden = true
+        recentReceiveSeparatorItem = recentSeparator
+        statusMenu.addItem(recentSeparator)
 
         let send = NSMenuItem(
             title: "发送文件…",
@@ -510,6 +580,36 @@ final class StatusItemController: NSObject {
         statusItem?.length = button.preferredWidth
     }
 
+    private func renderRecentReceives(_ snapshot: RecentReceiveSnapshot) {
+        visibleRecentReceives = snapshot.visible
+        let hasUnread = snapshot.hasUnread
+        recentReceiveHeadingItem?.isHidden = !hasUnread
+        recentReceiveHistoryItem?.isHidden = !hasUnread
+        recentReceiveSeparatorItem?.isHidden = !hasUnread
+
+        for (index, item) in recentReceiveItems.enumerated() {
+            guard snapshot.visible.indices.contains(index) else {
+                item.isHidden = true
+                continue
+            }
+            let summary = snapshot.visible[index]
+            item.title = summary.title
+            item.setAccessibilityLabel(
+                "来自\(summary.sourceName)的\(summary.title)，在 Finder 中显示"
+            )
+            item.isHidden = false
+        }
+
+        if snapshot.overflowCount > 0 {
+            recentReceiveOverflowItem?.title = "另有 \(snapshot.overflowCount) 个新接收项目…"
+            recentReceiveOverflowItem?.isHidden = false
+        } else {
+            recentReceiveOverflowItem?.isHidden = true
+        }
+
+        setUnreadReceive(hasUnread)
+    }
+
     private func announce(_ message: String) {
         onAnnouncement?(message)
         NSAccessibility.post(
@@ -529,6 +629,15 @@ final class StatusItemController: NSObject {
             at: NSPoint(x: 0, y: button.bounds.maxY + 2),
             in: button
         )
+    }
+
+    @objc private func revealRecentReceive(_ sender: NSMenuItem) {
+        guard visibleRecentReceives.indices.contains(sender.tag) else { return }
+        onRevealRecentReceive?(visibleRecentReceives[sender.tag])
+    }
+
+    @objc private func showReceiveHistory(_ sender: NSMenuItem) {
+        onShowReceiveHistory?()
     }
 
     @objc private func chooseFiles(_ sender: Any?) {

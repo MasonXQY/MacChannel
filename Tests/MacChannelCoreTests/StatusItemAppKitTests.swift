@@ -127,15 +127,21 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
-    func testReceiveIndicatorAppearsAndOpeningMenuClearsIt() {
+    func testRecentReceiveMenuRevealsSelectedBatchWithoutClearingOthers() throws {
         let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24))
         let controller = StatusItemController(
             button: button,
             devices: [],
             transferCoordinator: RecordingTransferCoordinator()
         )
-
-        controller.setUnreadReceive(true)
+        let store = RecentReceiveStore()
+        controller.bindRecentReceives(store)
+        let first = receiveResult(named: "first.pdf")
+        let second = receiveResult(named: "second.pdf")
+        store.record(first, sourceName: "Mac mini")
+        store.record(second, sourceName: "Mason")
+        var selected: RecentReceiveSummary?
+        controller.onRevealRecentReceive = { selected = $0 }
 
         XCTAssertTrue(controller.hasUnreadReceive)
         XCTAssertTrue(button.showsReceiveIndicator)
@@ -143,8 +149,46 @@ final class StatusItemAppKitTests: XCTestCase {
 
         controller.prepareToOpenStatusMenu()
 
-        XCTAssertFalse(controller.hasUnreadReceive)
-        XCTAssertFalse(button.showsReceiveIndicator)
+        XCTAssertTrue(controller.hasUnreadReceive)
+        let item = try XCTUnwrap(controller.statusMenu.items.first { $0.title == "second.pdf" })
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
+        XCTAssertEqual(selected?.id, second.transferID)
+        XCTAssertTrue(store.hasUnread)
+    }
+
+    @MainActor
+    func testRecentReceiveMenuUsesFiveNewestFixedSlotsAndShowsOverflow() throws {
+        let controller = makeController()
+        let store = RecentReceiveStore()
+        controller.bindRecentReceives(store)
+        let results = (0..<6).map { receiveResult(named: "file-\($0).pdf") }
+
+        for result in results {
+            store.record(result, sourceName: "Mason")
+        }
+
+        XCTAssertEqual(
+            controller.statusMenu.items.filter { $0.title.hasPrefix("file-") }.map(\.title),
+            ["file-5.pdf", "file-4.pdf", "file-3.pdf", "file-2.pdf", "file-1.pdf"]
+        )
+        XCTAssertEqual(controller.statusMenu.items.first { $0.title == "另有 1 个新接收项目…" }?.isHidden, false)
+        XCTAssertEqual(controller.statusMenu.items.first { $0.title == "刚刚收到" }?.isHidden, false)
+    }
+
+    @MainActor
+    func testRecentReceiveHistoryItemEmitsCallback() throws {
+        let controller = makeController()
+        let store = RecentReceiveStore()
+        controller.bindRecentReceives(store)
+        store.record(receiveResult(named: "report.pdf"), sourceName: "Mason")
+        var historyShown = 0
+        controller.onShowReceiveHistory = { historyShown += 1 }
+
+        let item = try XCTUnwrap(
+            controller.statusMenu.items.first { $0.title == "查看全部历史…" }
+        )
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
+        XCTAssertEqual(historyShown, 1)
     }
 
     @MainActor
@@ -615,6 +659,22 @@ final class StatusItemAppKitTests: XCTestCase {
         XCTAssertEqual(reenteredToken, token)
         XCTAssertEqual(controller.phase, .ready)
         XCTAssertEqual(request?.dragExited(fingerprint), false)
+    }
+
+    @MainActor
+    private func makeController() -> StatusItemController {
+        StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: RecordingTransferCoordinator()
+        )
+    }
+
+    private func receiveResult(named name: String) -> TransferReceiveResult {
+        TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/\(name)")]
+        )
     }
 }
 
