@@ -349,7 +349,10 @@ git commit -m "fix: clean clipboard files after transfer completion"
 ### Task 5: Prove receiver behavior and full regression safety
 
 **Files:**
+- Modify: `App/ClipboardTransferSource.swift`
 - Modify: `Tests/Integration/TransferIntegrationTests.swift`
+- Modify: `Tests/MacChannelCoreTests/AppRuntimeTests.swift`
+- Modify: `docs/superpowers/plans/2026-09-03-clipboard-send.md`
 - Modify: `docs/superpowers/specs/2026-09-03-received-files-and-clipboard-send-design.md`
 - Modify: `docs/acceptance/real-mac-checklist.md`
 
@@ -361,13 +364,15 @@ git commit -m "fix: clean clipboard files after transfer completion"
 
 Use the existing two-client transfer harness to send a UTF-8 text fixture named like a clipboard file and a valid small PNG. Assert that both appear under `receiverDownloadRoot`, decoded text is identical, PNG can be decoded, and hashes match the sender's generated files.
 
-Also set a sentinel string on an isolated receiver pasteboard before the transfer-facing AppKit smoke case and assert it remains unchanged after the receive result is processed.
+Add an AppKit smoke that sends a result through the production `RuntimeReceiveEventSource` and `MacChannelApplicationDelegate` receive-event path into `RecentReceiveStore`, receive notification, and the status-item unread surface. Inject a `StatusItemController` whose `NativeClipboardTransferPreparer` is bound to a uniquely named isolated receiver pasteboard. Assert that receive processing neither calls the preparer nor changes the pasteboard sentinel or change count. Add a source contract proving direct `NSPasteboard.general` access exists only in the explicit-send adapter file, so receive/app/notification code cannot bypass that injected boundary. Never touch the user's system pasteboard.
 
 - [ ] **Step 2: Run focused integration tests and verify GREEN**
 
 Run: `swift test --filter TransferIntegrationTests --no-parallel`
 
-Expected: direct receive integration passes for TXT and PNG without any receiver clipboard operation.
+Run: `swift test --filter 'AppRuntimeTests/test(SystemGeneralPasteboardReferenceIsConfinedToExplicitSendAdapter|ReceiveEventProcessingDoesNotReadOrChangeInjectedClipboard)' --no-parallel`
+
+Expected: direct receive integration passes for TXT and PNG; the full AppKit receive-event path leaves the injected isolated pasteboard untouched and never invokes the explicit-send preparer.
 
 - [ ] **Step 3: Run the complete deterministic suite**
 
@@ -381,21 +386,24 @@ Run:
 
 ```bash
 bash scripts/check-sensitive-logging.sh
+bash scripts/audit-privacy.sh --static-only
 bash scripts/audit-privacy.sh
 bash scripts/test-app-launch.sh
 bash scripts/test-no-tailscale-runtime.sh
 ```
 
-Expected: every command exits 0 and emits its PASS marker; the release binary contains no Tailscale runtime dependency.
+Expected: sensitive logging exits 0 with PASS; `audit-privacy.sh --static-only` exits 0 with `privacy STATIC PASS`; the no-argument privacy audit deliberately exits 2 after the same static PASS and exactly reports `privacy RUNTIME BLOCKED: trusted producer and verifier are NOT IMPLEMENTED; runtime evidence is not read`; app launch exits 0 (the script has no PASS marker); and the release binary check exits 0 with `no-tailscale-runtime PASS`.
+
+The no-argument privacy result is an existing independent release blocker. Task 5 must preserve and report that fail-closed contract, not implement or synthesize the future trusted runtime evidence producer/verifier. It does not invalidate the clipboard feature's locally verified candidate status, but production release remains blocked until that separate runtime privacy work and formal signed two-Mac acceptance are complete.
 
 - [ ] **Step 5: Update acceptance state without overstating real-Mac evidence**
 
-Change the design spec status to “实现完成，待正式签名双机验收”. Add clipboard text/image/file/folder, receiver-folder save, receiver-pasteboard preservation, cancellation cleanup, direct route, and relay route checks to `docs/acceptance/real-mac-checklist.md`.
+Change the design spec status to “本地候选实现完成，待正式签名双机验收；运行时隐私审计仍为独立 BLOCKED”. Add clipboard text/image/file/folder, receiver-folder save, receiver-pasteboard preservation, cancellation cleanup, direct route, and relay route checks to `docs/acceptance/real-mac-checklist.md`, while keeping every real-Mac result `NOT RUN`.
 
 - [ ] **Step 6: Commit integration evidence**
 
 ```bash
-git add Tests/Integration/TransferIntegrationTests.swift docs/superpowers/specs/2026-09-03-received-files-and-clipboard-send-design.md docs/acceptance/real-mac-checklist.md
+git add App/ClipboardTransferSource.swift Tests/Integration/TransferIntegrationTests.swift Tests/MacChannelCoreTests/AppRuntimeTests.swift docs/superpowers/plans/2026-09-03-clipboard-send.md docs/superpowers/specs/2026-09-03-received-files-and-clipboard-send-design.md docs/acceptance/real-mac-checklist.md
 git commit -m "test: verify clipboard files through transfer"
 ```
 

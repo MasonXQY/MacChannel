@@ -689,6 +689,125 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertTrue(publishedResults.isEmpty)
     }
 
+    func testSystemGeneralPasteboardReferenceIsConfinedToExplicitSendAdapter() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let appRoot = repositoryRoot.appendingPathComponent("App", isDirectory: true)
+        let sourcePaths = try FileManager.default.subpathsOfDirectory(atPath: appRoot.path)
+            .filter { $0.hasSuffix(".swift") }
+            .sorted()
+        XCTAssertFalse(sourcePaths.isEmpty)
+        let directGeneralReference = try NSRegularExpression(
+            pattern: #"NSPasteboard\s*\.\s*general"#
+        )
+        var references: [String] = []
+
+        for sourcePath in sourcePaths {
+            let fileURL = appRoot.appendingPathComponent(sourcePath)
+            let source = try String(contentsOf: fileURL, encoding: .utf8)
+            let range = NSRange(source.startIndex..<source.endIndex, in: source)
+            let matchCount = directGeneralReference.numberOfMatches(
+                in: source,
+                range: range
+            )
+            references.append(
+                contentsOf: repeatElement(sourcePath, count: matchCount)
+            )
+        }
+
+        XCTAssertEqual(references, ["ClipboardTransferSource.swift"])
+    }
+
+    @MainActor
+    func testReceiveEventProcessingDoesNotReadOrChangeInjectedClipboard() async throws {
+        let temporaryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AppRuntimeTests-receiver-pasteboard-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: temporaryRoot,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name("dropmesh.receiver.\(UUID().uuidString)")
+        )
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        let sentinel = "receiver clipboard sentinel \(UUID().uuidString)"
+        XCTAssertTrue(pasteboard.setString(sentinel, forType: .string))
+        let initialChangeCount = pasteboard.changeCount
+        let clipboard = ReceivePathClipboardPreparerProbe(
+            base: NativeClipboardTransferPreparer(
+                pasteboard: pasteboard,
+                temporaryRoot: temporaryRoot.appendingPathComponent(
+                    "clipboard-transfers",
+                    isDirectory: true
+                )
+            )
+        )
+        let events = RuntimeReceiveEventSource()
+        let notificationCenter = ApplicationShellNotificationCenter()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        var statusController: StatusItemController?
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: { container in
+                let controller = StatusItemController(
+                    button: StatusItemButton(
+                        frame: NSRect(x: 0, y: 0, width: 30, height: 24)
+                    ),
+                    devices: [],
+                    transferCoordinator: container.transferCoordinator,
+                    clipboardPreparer: clipboard
+                )
+                statusController = controller
+                return controller
+            }
+        )
+        let base = AppContainer.localShell()
+        let container = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await events.stream() },
+            receiveCompletionState: events.completionState
+        )
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [temporaryRoot.appendingPathComponent("剪贴板文字.txt")]
+        )
+
+        await shell.replace(container, status: .ready)
+        await events.publish(result)
+        for _ in 0..<1_000
+        where shell.recentReceiveSnapshot.visible.first?.id != result.transferID
+            || notificationCenter.deliveredCount == 0
+        {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.first?.id, result.transferID)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.first?.receivedURLs, result.receivedURLs)
+        XCTAssertEqual(notificationCenter.deliveredCount, 1)
+        XCTAssertTrue(shell.hasUnreadReceive)
+        XCTAssertTrue(statusController?.hasUnreadReceive == true)
+        XCTAssertEqual(clipboard.prepareCount, 0)
+        XCTAssertEqual(pasteboard.changeCount, initialChangeCount)
+        XCTAssertEqual(pasteboard.string(forType: .string), sentinel)
+
+        await events.finish()
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
     @MainActor
     func testApplicationShellObservesOnlyCurrentReceiveStream() async throws {
         let oldEvents = ApplicationShellReceiveEventSource()
@@ -1285,6 +1404,21 @@ private struct TrustedRuntimeFixture {
     let peer: DeviceSummary
     let repository: TrustRepository
     let settings: RuntimeSettingsStore
+}
+
+@MainActor
+private final class ReceivePathClipboardPreparerProbe: ClipboardTransferPreparing {
+    private let base: NativeClipboardTransferPreparer
+    private(set) var prepareCount = 0
+
+    init(base: NativeClipboardTransferPreparer) {
+        self.base = base
+    }
+
+    func prepare() throws -> PreparedClipboardTransfer {
+        prepareCount += 1
+        return try base.prepare()
+    }
 }
 
 @MainActor

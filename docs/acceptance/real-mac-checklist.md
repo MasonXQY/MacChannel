@@ -4,6 +4,11 @@
 规则：所有行必须在相同 Git commit 的签名、公证构建上完成。不得用模拟器、单机
 loopback、单元测试或 Docker 内部流量替代。失败必须重开对应实现任务，不接受 waiver。
 
+独立发布阻塞：仓库的可信运行时隐私证据 producer/verifier 尚未实现，无参数
+`audit-privacy.sh` 必须 fail closed 并返回 `RUNTIME BLOCKED`。Task 5 的本地候选只要求
+`audit-privacy.sh --static-only` 通过；这不等于运行时隐私验收，也不改变本表正式签名
+双机验收仍为 **NOT RUN**。即使本表全部通过，生产发布仍需另行真实解除运行时隐私阻塞。
+
 ## 测试批次
 
 | 字段 | 实测值 |

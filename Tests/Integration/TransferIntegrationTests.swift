@@ -190,38 +190,6 @@ final class TransferIntegrationTests: XCTestCase {
         XCTAssertEqual(routes, [.lan])
     }
 
-    func testReceiverProcessingPreservesItsIsolatedPasteboard() async throws {
-        let harness = try await makeHarness(routePolicy: .lanOnly)
-        let pasteboardName = "dropmesh.receiver.\(UUID().uuidString)"
-        let sentinel = "receiver clipboard sentinel \(UUID().uuidString)"
-        let initialChangeCount = await MainActor.run {
-            let pasteboard = NSPasteboard(name: NSPasteboard.Name(pasteboardName))
-            pasteboard.clearContents()
-            XCTAssertTrue(pasteboard.setString(sentinel, forType: .string))
-            return pasteboard.changeCount
-        }
-        addTeardownBlock {
-            await MainActor.run {
-                NSPasteboard(name: NSPasteboard.Name(pasteboardName)).releaseGlobally()
-            }
-        }
-        let source = try Self.makeUTF8ClipboardTextFixture(
-            "clipboard receive smoke",
-            in: harness.senderDownloadRoot
-        )
-
-        let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
-        try await harness.waitForCompletion(transfer, timeout: .seconds(30))
-
-        await MainActor.run {
-            let pasteboard = NSPasteboard(name: NSPasteboard.Name(pasteboardName))
-            XCTAssertEqual(pasteboard.changeCount, initialChangeCount)
-            XCTAssertEqual(pasteboard.string(forType: .string), sentinel)
-        }
-        let routes = await harness.actualRoutes()
-        XCTAssertEqual(routes, [.lan])
-    }
-
     func testTransferCompletesAfterReceiveListenerRestarts() async throws {
         let harness = try await makeHarness(routePolicy: .lanOnly)
         await harness.restartReceiverListener()

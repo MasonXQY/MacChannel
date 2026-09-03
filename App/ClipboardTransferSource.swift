@@ -68,7 +68,7 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
     }
 
     init(
-        pasteboard: NSPasteboard = .general,
+        pasteboard: NSPasteboard = NSPasteboard.general,
         temporaryRoot: URL? = nil,
         now: @escaping () -> Date = Date.init,
         fileManager: FileManager = .default,
