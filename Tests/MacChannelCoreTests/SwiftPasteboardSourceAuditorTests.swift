@@ -72,6 +72,39 @@ final class SwiftPasteboardSourceAuditorTests: XCTestCase {
         XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
     }
 
+    func testEscapedTrailingSpaceBareRegexDoesNotHideLaterStringInterpolationCode() {
+        let sources = [
+            "App/ClipboardTransferSource.swift": "let allowed = NSPasteboard.general",
+            "App/ReceiveNotificationController.swift": ##"""
+                let hidden = "\(String(describing: /\)\ /) + String(NSPasteboard.general.changeCount))"
+                """##,
+        ]
+
+        XCTAssertFalse(
+            SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
+                in: sources,
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+            )
+        )
+    }
+
+    func testPureBareRegexWithEscapedTrailingSpaceIsIgnored() {
+        let source = #"let pattern = /\.general\ /"#
+
+        XCTAssertTrue(SwiftPasteboardSourceAuditor.accesses(in: source).isEmpty)
+    }
+
+    func testMultipleBackslashesBeforeEscapedTrailingSpaceRemainInsideBareRegex() {
+        let source = ###"""
+        let one = /\.general\ /
+        let two = /\.general\\ /
+        let three = /\.general\\\ /
+        let four = /\.general\\\\ /
+        """###
+
+        XCTAssertTrue(SwiftPasteboardSourceAuditor.accesses(in: source).isEmpty)
+    }
+
     func testRegexInterpolationCodeIsAuditedForBareAndExtendedDelimiters() {
         let source = ###"""
         let bare = /count=\#(String(NSPasteboard.`general`.changeCount))/

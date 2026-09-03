@@ -391,12 +391,10 @@ private enum SwiftSourceLexer {
 
         var interpolationTokens: [SwiftSourceToken] = []
         var index = slashIndex + 1
+        var endsWithUnescapedWhitespace = false
         while index < source.count {
             if startsWithRegexTerminator(at: index, hashCount: hashCount, in: source) {
-                if hashCount == 0,
-                   index > slashIndex + 1,
-                   source[index - 1].isWhitespace
-                {
+                if hashCount == 0, endsWithUnescapedWhitespace {
                     return nil
                 }
                 return RegexScan(
@@ -416,15 +414,45 @@ private enum SwiftSourceLexer {
                 )
                 interpolationTokens.append(contentsOf: expression.tokens)
                 index = expression.endIndex
+                endsWithUnescapedWhitespace = false
                 continue
             }
             if source[index] == "\\" {
-                index = min(source.count, index + 2)
+                if hashCount == 0,
+                   let escapedSpaceEnd = escapedBareRegexSpaceEnd(
+                       startingAt: index,
+                       in: source
+                   )
+                {
+                    index = escapedSpaceEnd
+                    endsWithUnescapedWhitespace = false
+                    continue
+                }
+                let escapedEnd = min(source.count, index + 2)
+                endsWithUnescapedWhitespace = hashCount == 0
+                    && escapedEnd > index + 1
+                    && source[index + 1].isWhitespace
+                index = escapedEnd
                 continue
+            }
+            if hashCount == 0 {
+                endsWithUnescapedWhitespace = source[index].isWhitespace
             }
             index += 1
         }
         return nil
+    }
+
+    private static func escapedBareRegexSpaceEnd(
+        startingAt start: Int,
+        in source: [Character]
+    ) -> Int? {
+        var index = start
+        while index < source.count, source[index] == "\\" {
+            index += 1
+        }
+        guard index < source.count, source[index] == " " else { return nil }
+        return index + 1
     }
 
     private static func startsWithRegexTerminator(
