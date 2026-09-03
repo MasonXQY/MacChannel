@@ -334,6 +334,78 @@ final class IdentityTests: XCTestCase {
         )
     }
 
+    func testTrustRepositoryDoesNotTreatForgedStaleRecordAsIdempotent() async throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let issuer = try DeviceIdentity.ephemeral()
+        let subject = try DeviceIdentity.ephemeral()
+        var restoredStore = TrustStore(owner: owner.id)
+        try restoredStore.ingest(
+            SignedTrustRecord.authorizing(issuer, signedBy: owner, sequence: 1)
+        )
+        let validRecord = try SignedTrustRecord.authorizing(
+            subject,
+            signedBy: issuer,
+            sequence: 2
+        )
+        try restoredStore.ingest(validRecord)
+        let repository = try TrustRepository(
+            ownerIdentity: owner,
+            trustStore: restoredStore,
+            persistedGeneration: 0
+        )
+        let forgedRecord = SignedTrustRecord(
+            issuer: validRecord.issuer,
+            issuerPublicKey: validRecord.issuerPublicKey,
+            subject: validRecord.subject,
+            subjectPublicKey: validRecord.subjectPublicKey,
+            action: validRecord.action,
+            issuerSequence: validRecord.issuerSequence,
+            epochMilliseconds: validRecord.epochMilliseconds,
+            signature: Data(repeating: 0, count: validRecord.signature.count)
+        )
+
+        do {
+            _ = try await repository.ingestIfNew(forgedRecord)
+            XCTFail("Expected forged stale record to be rejected")
+        } catch {
+            XCTAssertEqual(error as? TrustRecordValidationError, .invalidSignature)
+        }
+    }
+
+    func testTrustRepositoryDoesNotTreatUntrustedStaleIssuerAsIdempotent() async throws {
+        let owner = try DeviceIdentity.ephemeral()
+        let issuer = try DeviceIdentity.ephemeral()
+        let subject = try DeviceIdentity.ephemeral()
+        var restoredStore = TrustStore(owner: owner.id)
+        try restoredStore.ingest(
+            SignedTrustRecord.authorizing(issuer, signedBy: owner, sequence: 1)
+        )
+        let staleRecord = try SignedTrustRecord.authorizing(
+            subject,
+            signedBy: issuer,
+            sequence: 2
+        )
+        try restoredStore.ingest(staleRecord)
+        _ = try restoredStore.revoke(
+            issuer.id,
+            signedBy: owner,
+            sequence: 2,
+            timestamp: Date()
+        )
+        let repository = try TrustRepository(
+            ownerIdentity: owner,
+            trustStore: restoredStore,
+            persistedGeneration: 0
+        )
+
+        do {
+            _ = try await repository.ingestIfNew(staleRecord)
+            XCTFail("Expected stale record from an untrusted issuer to be rejected")
+        } catch {
+            XCTAssertEqual(error as? TrustStoreError, .untrustedIssuer(issuer.id))
+        }
+    }
+
     func testRestoredStoreRetainsRevocation() throws {
         let owner = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()

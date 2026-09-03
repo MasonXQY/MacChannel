@@ -257,7 +257,18 @@ public actor TrustRepository {
             return false
         }
         var candidate = store
-        try candidate.ingest(record)
+        do {
+            try candidate.ingest(record)
+        } catch TrustStoreError.nonIncreasingSequence(let issuer)
+            where issuer == record.issuer
+        {
+            // `TrustStore.apply` reaches this error only after validating the
+            // signature, issuer trust and pinned key. A graph catch-up may
+            // legitimately resend a third-party edge whose effect is already
+            // covered by the persisted issuer high-water, even though that
+            // auxiliary proof was intentionally not retained after restart.
+            return false
+        }
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
         store = candidate
         latestSnapshot = snapshot

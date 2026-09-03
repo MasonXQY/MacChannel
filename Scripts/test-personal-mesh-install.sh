@@ -65,8 +65,8 @@ make_fixture() {
 
     MACCHANNEL_BUILD_CONFIGURATION=release \
     MACCHANNEL_CODESIGN_IDENTITY="$fixture_identity" \
-    MACCHANNEL_VERSION=1.2.4 \
-    MACCHANNEL_BUILD_NUMBER=17 \
+    MACCHANNEL_VERSION=1.2.5 \
+    MACCHANNEL_BUILD_NUMBER=18 \
     MACCHANNEL_APP_OUTPUT="$app" \
         bash Scripts/build-app.sh >/dev/null
     ln -s /Applications "$stage/Applications"

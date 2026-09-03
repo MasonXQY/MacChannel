@@ -277,6 +277,71 @@ final class DeviceDirectoryTests: XCTestCase {
         await session.stop()
     }
 
+    func testRendezvousSessionIgnoresValidGraphRecordAlreadyCoveredByIssuerHighWater()
+        async throws
+    {
+        let local = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        let third = try DeviceIdentity.ephemeral()
+        let peerToLocal = try SignedTrustRecord.authorizing(
+            local,
+            signedBy: peer,
+            sequence: 1
+        )
+        let peerToThird = try SignedTrustRecord.authorizing(
+            third,
+            signedBy: peer,
+            sequence: 2
+        )
+        var restoredStore = TrustStore(owner: local.id)
+        try restoredStore.bootstrapFromConfirmedPairing(peerToLocal, localIdentity: local)
+        try restoredStore.ingest(peerToThird)
+        let repository = try TrustRepository(
+            ownerIdentity: local,
+            trustStore: restoredStore,
+            persistedGeneration: 0,
+            authenticationRecords: [peerToLocal]
+        )
+        let socket = MemoryPresenceSocket(incoming: [
+            try frame([
+                "type": "challenge",
+                "nonce": Data(repeating: 15, count: 32).base64EncodedString(),
+                "expiresAt": 9_999_999_999_999,
+            ]),
+            try frame([
+                "type": "auth-ok",
+                "deviceID": local.id.rawValue.uuidString.lowercased(),
+            ]),
+            try trustRecordFrame(peerToThird),
+            try frame([
+                "type": "presence",
+                "deviceID": peer.id.rawValue.uuidString.lowercased(),
+                "availability": "internet",
+            ]),
+        ])
+        let session = try AuthenticatedPresenceSession(
+            identity: local,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: PresenceClient(
+                directory: DeviceDirectory(trust: .allowing(local.id, peer.id, third.id))
+            ),
+            trustRepository: repository
+        )
+        let presences = await session.presenceEvents()
+        var iterator = presences.makeAsyncIterator()
+
+        try await session.connect()
+        _ = try? await session.run()
+
+        let receivedPresence = await iterator.next()
+        XCTAssertEqual(
+            receivedPresence,
+            .availability(device: peer.id, isOnline: true)
+        )
+        await session.stop()
+    }
+
     func testRendezvousSessionAssociatesSignalErrorWithTargetDevice() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let peer = DeviceID(rawValue: UUID())

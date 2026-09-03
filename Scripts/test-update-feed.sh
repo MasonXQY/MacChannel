@@ -14,8 +14,8 @@ grep -F '/usr/bin/xcrun stapler validate "$dmg_path"' \
     Scripts/build-update-feed.sh >/dev/null
 grep -F '/usr/sbin/spctl --assess --type open' Scripts/build-update-feed.sh >/dev/null
 
-version=1.2.4
-build_number=17
+version=1.2.5
+build_number=18
 account=com.mason.macchannel.updates
 generate_appcast="$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast"
 signing_home="${HOME:?}"
@@ -27,7 +27,7 @@ fixture_root="$test_root/fixture"
 test_dist="$test_root/dist"
 fixture_dmg="$fixture_root/DropMesh.dmg"
 fixture_manifest="$fixture_root/DropMesh.manifest.json"
-release_notes="$repo_root/Distribution/ReleaseNotes/v1.2.4.md"
+release_notes="$repo_root/Distribution/ReleaseNotes/v1.2.5.md"
 security_shim="$test_root/security-missing-key"
 fake_login_keychain="$test_root/fake-login.keychain-db"
 codesign_shim="$test_root/codesign-update-fixture"
@@ -368,9 +368,9 @@ plutil -replace releaseState -string internalSignedNotNotarized \
 expect_failure manifest run_feed_builder
 
 prepare_fixture
-MACCHANNEL_TEST_VERSION=1.2.3 expect_failure manifest run_feed_builder
+MACCHANNEL_TEST_VERSION=1.2.4 expect_failure manifest run_feed_builder
 prepare_fixture
-MACCHANNEL_TEST_BUILD_NUMBER=16 expect_failure manifest run_feed_builder
+MACCHANNEL_TEST_BUILD_NUMBER=17 expect_failure manifest run_feed_builder
 
 prepare_fixture
 plutil -replace dmgSHA256 -string \
@@ -615,7 +615,7 @@ test "$enclosure_url" = \
     "https://github.com/MasonXQY/MacChannel/releases/download/v$version/DropMesh.dmg"
 test "$enclosure_length" = "$(stat -f %z "$test_dist/DropMesh.dmg")"
 test -n "$enclosure_signature"
-grep -F "重新配对时出现单边成功" <<<"$description_value" >/dev/null
+grep -F "已成功配对的设备在应用重启后全部显示离线" <<<"$description_value" >/dev/null
 grep -F "releases/download/v$version/DropMesh.dmg" "$test_dist/appcast.xml" >/dev/null
 grep -F 'sparkle:edSignature=' "$test_dist/appcast.xml" >/dev/null
 grep -F '<!-- sparkle-signatures:' "$test_dist/appcast.xml" >/dev/null
