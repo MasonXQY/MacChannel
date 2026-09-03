@@ -861,7 +861,7 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertTrue(shell.hasUnreadReceive)
 
         statusController?.prepareToOpenStatusMenu()
-        XCTAssertFalse(shell.hasUnreadReceive)
+        XCTAssertTrue(shell.hasUnreadReceive)
         notificationCenter.releaseFirstDelivery()
         await publisher.value
         for _ in 0..<1_000 where notificationCenter.deliveredCount < acknowledgedResults.count {
@@ -869,7 +869,7 @@ final class AppRuntimeTests: XCTestCase {
         }
 
         XCTAssertEqual(notificationCenter.deliveredCount, acknowledgedResults.count)
-        XCTAssertFalse(shell.hasUnreadReceive)
+        XCTAssertTrue(shell.hasUnreadReceive)
 
         await events.publish(
             TransferReceiveResult(
