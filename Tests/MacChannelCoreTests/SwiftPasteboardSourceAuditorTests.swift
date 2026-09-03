@@ -5,12 +5,14 @@ final class SwiftPasteboardSourceAuditorTests: XCTestCase {
         let source = ##"""
         // NSPasteboard.general
         let ordinary = "NSPasteboard.general"
+        let backticked = "NSPasteboard.`general`"
         let raw = #"let value: NSPasteboard = .general"#
         let multiline = """
         NSPasteboard /* comment */ .general
         """
         /*
          NSPasteboard.general
+         NSPasteboard.`general`
          /* let nested: NSPasteboard = .general */
         */
         """##
@@ -37,6 +39,99 @@ final class SwiftPasteboardSourceAuditorTests: XCTestCase {
         """
 
         XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
+    }
+
+    func testBacktickedGeneralIdentifierIsNormalizedInEveryCodeContext() {
+        let source = ##"""
+        let direct = NSPasteboard.`general`
+        let qualified = AppKit.NSPasteboard.`general`
+        let interpolated = "\(NSPasteboard.`general`.changeCount)"
+        """##
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 3)
+    }
+
+    func testPureBareExtendedAndMultilineRegexContentsAreIgnored() {
+        let source = ###"""
+        let bare = /\.general\/\/\/*\"\)/
+        let extended = #/NSPasteboard.general \.general // /* " \)/#
+        let multipleHashes = ##/
+          NSPasteboard.`general` \.general
+          // /* " ((( )))
+        /##
+        """###
+
+        XCTAssertTrue(SwiftPasteboardSourceAuditor.accesses(in: source).isEmpty)
+    }
+
+    func testRegexClosingParenthesisDoesNotHideLaterStringInterpolationCode() {
+        let source = ##"""
+        let value = "\(String(describing: #/\)/#) + String(NSPasteboard.general.changeCount))"
+        """##
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
+    }
+
+    func testRegexInterpolationCodeIsAuditedForBareAndExtendedDelimiters() {
+        let source = ###"""
+        let bare = /count=\#(String(NSPasteboard.`general`.changeCount))/
+        let extended = #/count=\#(String(NSPasteboard.`general`.changeCount))/#
+        let multipleHashes = ##/count=\##(String(NSPasteboard.`general`.changeCount))/##
+        """###
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 3)
+    }
+
+    func testRawStringNestedRegexAndBacktickedAccessAreAudited() {
+        let source = ###"""
+        let value = #"\#(String(describing: ##/\)/##) + String(NSPasteboard.`general`.changeCount))"#
+        """###
+
+        XCTAssertEqual(SwiftPasteboardSourceAuditor.accesses(in: source).count, 1)
+    }
+
+    func testFailClosedPolicyRejectsBacktickedAccessInForbiddenFile() {
+        let sources = [
+            "App/ClipboardTransferSource.swift": "let allowed = NSPasteboard.general",
+            "App/ReceiveNotificationController.swift":
+                "let forbidden = NSPasteboard.`general`",
+        ]
+
+        XCTAssertFalse(
+            SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
+                in: sources,
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+            )
+        )
+    }
+
+    func testFailClosedPolicyDoesNotTreatBacktickedAllowlistAccessAsExplicit() {
+        let sources = [
+            "App/ClipboardTransferSource.swift": "let forbidden = NSPasteboard.`general`",
+        ]
+
+        XCTAssertFalse(
+            SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
+                in: sources,
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+            )
+        )
+    }
+
+    func testFailClosedPolicyRejectsAccessAfterRegexParenthesisInForbiddenFile() {
+        let sources = [
+            "App/ClipboardTransferSource.swift": "let allowed = NSPasteboard.general",
+            "App/ReceiveNotificationController.swift": ##"""
+                let forbidden = "\(String(describing: #/\)/#) + String(NSPasteboard.general.changeCount))"
+                """##,
+        ]
+
+        XCTAssertFalse(
+            SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
+                in: sources,
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+            )
+        )
     }
 
     func testNormalStringInterpolationCodeIsAudited() {

@@ -47,7 +47,8 @@ enum SwiftPasteboardSourceAuditor {
                 SwiftPasteboardGeneralAccess(
                     path: path,
                     tokenOffset: tokens[index].offset,
-                    kind: token(tokens, at: index - 1, isIdentifier: "NSPasteboard")
+                    kind: token(tokens, at: index - 1, isPlainIdentifier: "NSPasteboard")
+                        && token(tokens, at: index + 1, isPlainIdentifier: "general")
                         ? .explicitNSPasteboard
                         : .shorthandOrOtherMember
                 )
@@ -60,6 +61,20 @@ enum SwiftPasteboardSourceAuditor {
         _ tokens: [SwiftSourceToken],
         at index: Int,
         isIdentifier expected: String
+    ) -> Bool {
+        guard tokens.indices.contains(index) else { return false }
+        switch tokens[index].kind {
+        case let .identifier(value), let .backtickedIdentifier(value):
+            return value == expected
+        case .symbol, .stringLiteral, .regexLiteral:
+            return false
+        }
+    }
+
+    private static func token(
+        _ tokens: [SwiftSourceToken],
+        at index: Int,
+        isPlainIdentifier expected: String
     ) -> Bool {
         guard tokens.indices.contains(index), case let .identifier(value) = tokens[index].kind
         else { return false }
@@ -158,8 +173,10 @@ enum SwiftPackageProductionSourceInventory {
 private struct SwiftSourceToken: Equatable {
     enum Kind: Equatable {
         case identifier(String)
+        case backtickedIdentifier(String)
         case symbol(Character)
         case stringLiteral(String)
+        case regexLiteral
     }
 
     let kind: Kind
@@ -179,6 +196,11 @@ private enum SwiftSourceLexer {
 
     private struct StringScan {
         let literalValue: String
+        let interpolationTokens: [SwiftSourceToken]
+        let endIndex: Int
+    }
+
+    private struct RegexScan {
         let interpolationTokens: [SwiftSourceToken]
         let endIndex: Int
     }
@@ -215,6 +237,31 @@ private enum SwiftSourceLexer {
                 )
                 tokens.append(contentsOf: stringScan.interpolationTokens)
                 index = stringScan.endIndex
+                continue
+            }
+            if let regexScan = scanRegexLiteral(
+                startingAt: index,
+                in: characters,
+                canStartBareRegex: canStartBareRegex(after: tokens.last)
+            ) {
+                tokens.append(
+                    SwiftSourceToken(kind: .regexLiteral, offset: index)
+                )
+                tokens.append(contentsOf: regexScan.interpolationTokens)
+                index = regexScan.endIndex
+                continue
+            }
+            if let backtickedIdentifier = scanBacktickedIdentifier(
+                startingAt: index,
+                in: characters
+            ) {
+                tokens.append(
+                    SwiftSourceToken(
+                        kind: .backtickedIdentifier(backtickedIdentifier.value),
+                        offset: index
+                    )
+                )
+                index = backtickedIdentifier.endIndex
                 continue
             }
             if isIdentifierStart(characters[index]) {
@@ -324,6 +371,117 @@ private enum SwiftSourceLexer {
             interpolationTokens: interpolationTokens,
             endIndex: source.count
         )
+    }
+
+    private static func scanRegexLiteral(
+        startingAt start: Int,
+        in source: [Character],
+        canStartBareRegex: Bool
+    ) -> RegexScan? {
+        var slashIndex = start
+        while slashIndex < source.count, source[slashIndex] == "#" { slashIndex += 1 }
+        guard slashIndex < source.count, source[slashIndex] == "/" else { return nil }
+        let hashCount = slashIndex - start
+        if hashCount == 0 {
+            guard canStartBareRegex,
+                  slashIndex + 1 < source.count,
+                  !source[slashIndex + 1].isWhitespace
+            else { return nil }
+        }
+
+        var interpolationTokens: [SwiftSourceToken] = []
+        var index = slashIndex + 1
+        while index < source.count {
+            if startsWithRegexTerminator(at: index, hashCount: hashCount, in: source) {
+                if hashCount == 0,
+                   index > slashIndex + 1,
+                   source[index - 1].isWhitespace
+                {
+                    return nil
+                }
+                return RegexScan(
+                    interpolationTokens: interpolationTokens,
+                    endIndex: index + 1 + hashCount
+                )
+            }
+            if let expressionStart = regexInterpolationExpressionStart(
+                at: index,
+                hashCount: hashCount,
+                in: source
+            ) {
+                let expression = scanCode(
+                    in: source,
+                    from: expressionStart,
+                    untilInterpolationEnd: true
+                )
+                interpolationTokens.append(contentsOf: expression.tokens)
+                index = expression.endIndex
+                continue
+            }
+            if source[index] == "\\" {
+                index = min(source.count, index + 2)
+                continue
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    private static func startsWithRegexTerminator(
+        at index: Int,
+        hashCount: Int,
+        in source: [Character]
+    ) -> Bool {
+        guard index < source.count, source[index] == "/",
+              index + 1 + hashCount <= source.count
+        else { return false }
+        for offset in 0..<hashCount where source[index + 1 + offset] != "#" {
+            return false
+        }
+        return true
+    }
+
+    private static func regexInterpolationExpressionStart(
+        at index: Int,
+        hashCount: Int,
+        in source: [Character]
+    ) -> Int? {
+        guard index < source.count, source[index] == "\\" else { return nil }
+        var cursor = index + 1
+        let interpolationHashCount = max(1, hashCount)
+        for _ in 0..<interpolationHashCount {
+            guard cursor < source.count, source[cursor] == "#" else { return nil }
+            cursor += 1
+        }
+        guard cursor < source.count, source[cursor] == "(" else { return nil }
+        return cursor + 1
+    }
+
+    private static func canStartBareRegex(after token: SwiftSourceToken?) -> Bool {
+        guard let token else { return true }
+        switch token.kind {
+        case let .symbol(symbol):
+            return "=([{,:;!?&|+-*%^~<>".contains(symbol)
+        case let .identifier(identifier):
+            return ["return", "case", "throw", "try", "await", "yield", "in"]
+                .contains(identifier)
+        case .backtickedIdentifier, .stringLiteral, .regexLiteral:
+            return false
+        }
+    }
+
+    private static func scanBacktickedIdentifier(
+        startingAt start: Int,
+        in source: [Character]
+    ) -> (value: String, endIndex: Int)? {
+        guard start < source.count, source[start] == "`" else { return nil }
+        var index = start + 1
+        while index < source.count, source[index] != "`" {
+            guard !source[index].isWhitespace else { return nil }
+            index += 1
+        }
+        guard index < source.count, index > start + 1 else { return nil }
+        return (String(source[(start + 1)..<index]), index + 1)
     }
 
     private static func interpolationExpressionStart(
