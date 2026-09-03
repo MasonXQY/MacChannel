@@ -1125,7 +1125,7 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
 
 @MainActor
 private final class ApplicationShellReceiveTargetRevealer: ReceiveTargetRevealing {
-    func reveal(_ urls: [URL]) {}
+    func reveal(_ urls: [URL]) -> Bool { true }
 }
 
 private actor FailingTrustSnapshotPersister: TrustSnapshotPersisting {

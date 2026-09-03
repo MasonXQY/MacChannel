@@ -65,7 +65,7 @@ protocol ReceiveNotificationCenter: AnyObject {
 
 @MainActor
 protocol ReceiveTargetRevealing: AnyObject {
-    func reveal(_ urls: [URL])
+    func reveal(_ urls: [URL]) -> Bool
 }
 
 private actor ReceiveNotificationOperationSignal<Value: Sendable> {
@@ -181,6 +181,7 @@ final class ReceiveNotificationController {
     }
 
     private struct NotificationTarget {
+        let transferID: TransferID
         let urls: [URL]
         let createdAt: Date
         let order: UInt64
@@ -202,6 +203,8 @@ final class ReceiveNotificationController {
     private var authorizationRequestOperation: AuthorizationOperation?
     private var deliveryOperation: DeliveryOperation?
     private var snapshot = ReceiveNotificationSnapshot(authorizationState: .notDetermined)
+
+    var onReceiveOpened: ((TransferID) -> Void)?
 
     convenience init() {
         self.init(
@@ -282,7 +285,11 @@ final class ReceiveNotificationController {
             publishDeliveryState(.temporarilyUnavailable)
             return
         }
-        let operation = startDelivery(request: request, urls: urls)
+        let operation = startDelivery(
+            request: request,
+            transferID: result.transferID,
+            urls: urls
+        )
         let outcome = await withTaskCancellationHandler {
             await waitForReceiveNotificationOperation(
                 operation.signal,
@@ -319,6 +326,11 @@ final class ReceiveNotificationController {
         center.openSystemSettings()
     }
 
+    @discardableResult
+    func reveal(_ urls: [URL]) -> Bool {
+        revealer.reveal(urls)
+    }
+
     func openNotification(identifier: String) {
         pruneNotificationTargets()
         guard let target = notificationTargets.removeValue(forKey: identifier),
@@ -326,7 +338,9 @@ final class ReceiveNotificationController {
         else {
             return
         }
-        revealer.reveal(target.urls)
+        if reveal(target.urls) {
+            onReceiveOpened?(target.transferID)
+        }
     }
 
     private func publish(_ authorizationState: ReceiveNotificationAuthorizationState) {
@@ -440,6 +454,7 @@ final class ReceiveNotificationController {
 
     private func startDelivery(
         request: ReceiveNotificationRequest,
+        transferID: TransferID,
         urls: [URL]
     ) -> DeliveryOperation {
         let id = UUID()
@@ -457,6 +472,7 @@ final class ReceiveNotificationController {
                 id: id,
                 outcome: outcome,
                 identifier: request.identifier,
+                transferID: transferID,
                 urls: urls
             )
             await signal.resolve(outcome)
@@ -470,13 +486,18 @@ final class ReceiveNotificationController {
         id: UUID,
         outcome: DeliveryOutcome,
         identifier: String,
+        transferID: TransferID,
         urls: [URL]
     ) {
         guard deliveryOperation?.id == id else { return }
         deliveryOperation = nil
         switch outcome {
         case .delivered:
-            storeNotificationTarget(urls, identifier: identifier)
+            storeNotificationTarget(
+                urls,
+                transferID: transferID,
+                identifier: identifier
+            )
             publishDeliveryState(.available)
         case .failed:
             publishDeliveryState(.temporarilyUnavailable)
@@ -490,7 +511,11 @@ final class ReceiveNotificationController {
         return "已收到 \(urls.count) 个文件，已保存到接收文件夹"
     }
 
-    private func storeNotificationTarget(_ urls: [URL], identifier: String) {
+    private func storeNotificationTarget(
+        _ urls: [URL],
+        transferID: TransferID,
+        identifier: String
+    ) {
         guard !urls.isEmpty else { return }
         pruneNotificationTargets()
         while notificationTargets.count >= notificationTargetCapacity,
@@ -500,6 +525,7 @@ final class ReceiveNotificationController {
         }
         notificationTargetOrder &+= 1
         notificationTargets[identifier] = NotificationTarget(
+            transferID: transferID,
             urls: urls,
             createdAt: now(),
             order: notificationTargetOrder
@@ -683,22 +709,24 @@ final class WorkspaceReceiveTargetRevealer: ReceiveTargetRevealing {
         self.fileExists = fileExists
     }
 
-    func reveal(_ urls: [URL]) {
-        guard let first = urls.first else { return }
+    func reveal(_ urls: [URL]) -> Bool {
+        guard let first = urls.first else { return false }
         if urls.count == 1 {
             if fileExists(first) {
                 workspace.select([first])
-                return
+                return true
             }
             let parent = first.deletingLastPathComponent()
-            if fileExists(parent) { workspace.open(parent) }
-            return
+            guard fileExists(parent) else { return false }
+            workspace.open(parent)
+            return true
         }
 
         guard let commonParent = commonParentDirectory(for: urls), fileExists(commonParent) else {
-            return
+            return false
         }
         workspace.open(commonParent)
+        return true
     }
 
     private func commonParentDirectory(for urls: [URL]) -> URL? {

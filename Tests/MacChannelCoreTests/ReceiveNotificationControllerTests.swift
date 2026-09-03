@@ -27,11 +27,14 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         let finder = RecordingReceiveTargetRevealer()
         let controller = ReceiveNotificationController(center: center, revealer: finder)
         let file = URL(fileURLWithPath: "/tmp/Downloads/plan.pdf")
-
-        await controller.notify(receive: TransferReceiveResult(
+        let result = TransferReceiveResult(
             transferID: TransferID(rawValue: UUID()),
             receivedURLs: [file]
-        ))
+        )
+        var opened: [TransferID] = []
+        controller.onReceiveOpened = { opened.append($0) }
+
+        await controller.notify(receive: result)
 
         XCTAssertEqual(center.requests.count, 1)
         XCTAssertEqual(center.requests[0].content.title, "已收到新文件")
@@ -40,6 +43,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertTrue(center.requests[0].content.userInfo.isEmpty)
         controller.openNotification(identifier: center.requests[0].identifier)
         XCTAssertEqual(finder.revealedURLs, [[file]])
+        XCTAssertEqual(opened, [result.transferID])
     }
 
     func testMultipleFilesNotificationUsesCountAndRevealsTheirParentDirectory() async {
@@ -416,7 +420,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
             fileExists: { $0 == file }
         )
 
-        revealer.reveal([file])
+        XCTAssertTrue(revealer.reveal([file]))
 
         XCTAssertEqual(workspace.selectedURLs, [[file]])
         XCTAssertTrue(workspace.openedURLs.isEmpty)
@@ -432,7 +436,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
             fileExists: { $0 == directory || $0 == first || $0 == second }
         )
 
-        revealer.reveal([first, second])
+        XCTAssertTrue(revealer.reveal([first, second]))
 
         XCTAssertTrue(workspace.selectedURLs.isEmpty)
         XCTAssertEqual(workspace.openedURLs, [directory])
@@ -447,10 +451,22 @@ final class ReceiveNotificationControllerTests: XCTestCase {
             fileExists: { $0.standardizedFileURL.path == directory.path }
         )
 
-        revealer.reveal([movedFile])
+        XCTAssertTrue(revealer.reveal([movedFile]))
 
         XCTAssertTrue(workspace.selectedURLs.isEmpty)
         XCTAssertEqual(workspace.openedURLs.map(\.path), [directory.path])
+    }
+
+    func testWorkspaceRevealerDoesNotAcknowledgeAnUnavailableTarget() {
+        let workspace = RecordingReceiveWorkspace()
+        let revealer = WorkspaceReceiveTargetRevealer(
+            workspace: workspace,
+            fileExists: { _ in false }
+        )
+
+        XCTAssertFalse(revealer.reveal([URL(fileURLWithPath: "/Downloads/missing.pdf")]))
+        XCTAssertTrue(workspace.selectedURLs.isEmpty)
+        XCTAssertTrue(workspace.openedURLs.isEmpty)
     }
 
     func testUnknownNotificationIdentifierDoesNotRevealAnyTarget() {
@@ -459,10 +475,13 @@ final class ReceiveNotificationControllerTests: XCTestCase {
             center: RecordingReceiveNotificationCenter(status: .authorized),
             revealer: finder
         )
+        var opened: [TransferID] = []
+        controller.onReceiveOpened = { opened.append($0) }
 
         controller.openNotification(identifier: "dropmesh.receive.unknown")
 
         XCTAssertTrue(finder.revealedURLs.isEmpty)
+        XCTAssertTrue(opened.isEmpty)
     }
 
     func testNotificationIdentifierCanRevealItsTargetOnlyOnce() async throws {
@@ -470,17 +489,39 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         let finder = RecordingReceiveTargetRevealer()
         let controller = ReceiveNotificationController(center: center, revealer: finder)
         let file = URL(fileURLWithPath: "/tmp/Downloads/plan.pdf")
-
-        await controller.notify(receive: TransferReceiveResult(
+        let result = TransferReceiveResult(
             transferID: TransferID(rawValue: UUID()),
             receivedURLs: [file]
-        ))
+        )
+        var opened: [TransferID] = []
+        controller.onReceiveOpened = { opened.append($0) }
+
+        await controller.notify(receive: result)
 
         let identifier = try XCTUnwrap(center.requests.first?.identifier)
         controller.openNotification(identifier: identifier)
         controller.openNotification(identifier: identifier)
 
         XCTAssertEqual(finder.revealedURLs, [[file]])
+        XCTAssertEqual(opened, [result.transferID])
+    }
+
+    func testNotificationDoesNotAcknowledgeWhenFinderCannotRevealTheTarget() async throws {
+        let center = RecordingReceiveNotificationCenter(status: .authorized)
+        let finder = RecordingReceiveTargetRevealer(revealResult: false)
+        let controller = ReceiveNotificationController(center: center, revealer: finder)
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/plan.pdf")]
+        )
+        var opened: [TransferID] = []
+        controller.onReceiveOpened = { opened.append($0) }
+
+        await controller.notify(receive: result)
+        controller.openNotification(identifier: try XCTUnwrap(center.requests.first?.identifier))
+
+        XCTAssertEqual(finder.revealedURLs, [result.receivedURLs])
+        XCTAssertTrue(opened.isEmpty)
     }
 
     func testNotificationTargetCacheEvictsOldestEntryAtCapacity() async throws {
@@ -669,9 +710,15 @@ private final class RecordingReceiveNotificationCenter: ReceiveNotificationCente
 @MainActor
 private final class RecordingReceiveTargetRevealer: ReceiveTargetRevealing {
     private(set) var revealedURLs: [[URL]] = []
+    private let revealResult: Bool
 
-    func reveal(_ urls: [URL]) {
+    init(revealResult: Bool = true) {
+        self.revealResult = revealResult
+    }
+
+    func reveal(_ urls: [URL]) -> Bool {
         revealedURLs.append(urls)
+        return revealResult
     }
 }
 
