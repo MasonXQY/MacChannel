@@ -36,6 +36,7 @@ final class StatusItemController: NSObject {
 
     private let transferCoordinator: any TransferCoordinating
     private let filePicker: any StatusItemFilePicking
+    private let clipboardPreparer: any ClipboardTransferPreparing
     private let deviceMenuPresenter: any StatusItemDeviceMenuPresenting
     private var state = StatusItemDropStateMachine()
     private var devices: [DeviceSummary]
@@ -58,12 +59,14 @@ final class StatusItemController: NSObject {
     private var recentReceiveHistoryItem: NSMenuItem?
     private var recentReceiveSeparatorItem: NSMenuItem?
     private var visibleRecentReceives: [RecentReceiveSummary] = []
+    private var cleanupByToken: [StatusItemDragToken: @MainActor () -> Void] = [:]
 
     init(
         button: StatusItemButton,
         devices: [DeviceSummary],
         transferCoordinator: any TransferCoordinating,
         filePicker: (any StatusItemFilePicking)? = nil,
+        clipboardPreparer: (any ClipboardTransferPreparing)? = nil,
         deviceMenuPresenter: (any StatusItemDeviceMenuPresenting)? = nil,
         dragRegionSchedule: DragRegionSchedule? = nil
     ) {
@@ -80,6 +83,7 @@ final class StatusItemController: NSObject {
         }
         self.transferCoordinator = transferCoordinator
         self.filePicker = filePicker ?? NativeStatusItemFilePicker()
+        self.clipboardPreparer = clipboardPreparer ?? NativeClipboardTransferPreparer()
         self.deviceMenuPresenter = deviceMenuPresenter ?? NativeStatusItemDeviceMenuPresenter()
         statusMenu = NSMenu(title: "DropMesh")
         super.init()
@@ -194,6 +198,7 @@ final class StatusItemController: NSObject {
             activeSelectionToken = nil
             announcedOfflineToken = nil
         }
+        discardPreparedContent(for: token)
         onDismissDeviceFan?(token)
         renderPhase()
     }
@@ -210,8 +215,34 @@ final class StatusItemController: NSObject {
 
     func performKeyboardSend() {
         guard let urls = filePicker.chooseFiles() else { return }
+        presentKeyboardSend(urls: urls)
+    }
+
+    func performClipboardSend() {
+        let prepared: PreparedClipboardTransfer
+        do {
+            prepared = try clipboardPreparer.prepare()
+        } catch ClipboardTransferPreparationError.noSupportedContent {
+            announce("剪贴板中没有可发送的内容。")
+            return
+        } catch {
+            announce("无法准备剪贴板内容，请重试。")
+            return
+        }
+
+        presentKeyboardSend(
+            urls: prepared.urls,
+            cleanup: { prepared.discardTemporaryFiles() }
+        )
+    }
+
+    private func presentKeyboardSend(
+        urls: [URL],
+        cleanup: (@MainActor () -> Void)? = nil
+    ) {
         guard let intent = try? DropIntent(items: urls.map(DropItem.fileURL)) else {
-            announce("所选项目无法发送。")
+            cleanup?()
+            announce("所选内容无法发送。")
             return
         }
 
@@ -220,20 +251,26 @@ final class StatusItemController: NSObject {
             .sorted {
                 $0.userFacingDisplayName.localizedStandardCompare($1.userFacingDisplayName)
                     == .orderedAscending
-            }
+        }
         guard !onlineDevices.isEmpty else {
+            cleanup?()
             announce("没有在线设备。")
             return
         }
 
         let staleFan = currentFanToken
         guard let token = state.begin(intent: intent) else {
+            cleanup?()
             announce("已有传输正在进行。")
             return
         }
         if let staleFan {
             dragRegionSession.invalidate(token: staleFan)
+            discardPreparedContent(for: staleFan)
             onDismissDeviceFan?(staleFan)
+        }
+        if let cleanup {
+            cleanupByToken[token] = cleanup
         }
         currentFanToken = nil
         activeSelectionToken = token
@@ -353,6 +390,7 @@ final class StatusItemController: NSObject {
                 self?.onTransferStarted?(transferID, token)
             } catch {
                 self?.announce("无法开始传输，请检查连接和设备状态。")
+                self?.discardPreparedContent(for: token)
                 self?.completeTransfer(token: token)
             }
         }
@@ -365,6 +403,10 @@ final class StatusItemController: NSObject {
     ) -> Bool {
         guard currentFanToken == token, state.phase == .ready else { return false }
         return dragRegionSession.enter(.fan, token: token, fingerprint: fingerprint)
+    }
+
+    private func discardPreparedContent(for token: StatusItemDragToken) {
+        cleanupByToken.removeValue(forKey: token)?()
     }
 
     private func dragExitedFan(
@@ -461,6 +503,15 @@ final class StatusItemController: NSObject {
         send.keyEquivalentModifierMask = [.command, .shift]
         send.target = self
         statusMenu.addItem(send)
+
+        let clipboard = NSMenuItem(
+            title: "发送剪贴板…",
+            action: #selector(chooseClipboard(_:)),
+            keyEquivalent: "c"
+        )
+        clipboard.keyEquivalentModifierMask = [.command, .shift]
+        clipboard.target = self
+        statusMenu.addItem(clipboard)
         statusMenu.addItem(.separator())
 
         let transfers = NSMenuItem(
@@ -643,6 +694,10 @@ final class StatusItemController: NSObject {
 
     @objc private func chooseFiles(_ sender: Any?) {
         performKeyboardSend()
+    }
+
+    @objc private func chooseClipboard(_ sender: Any?) {
+        performClipboardSend()
     }
 
     @objc private func showTransfers(_ sender: Any?) {

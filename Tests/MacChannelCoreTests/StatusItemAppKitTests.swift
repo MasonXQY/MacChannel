@@ -84,6 +84,114 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testClipboardMenuReadsOnlyAfterExplicitActionAndPresentsSortedOnlineDevices() throws {
+        _ = NSApplication.shared
+        let preparer = RecordingClipboardTransferPreparer(
+            prepared: PreparedClipboardTransfer(
+                urls: [URL(fileURLWithPath: "/tmp/clipboard.txt")],
+                ownedTemporaryURLs: []
+            )
+        )
+        let desk = DeviceID(rawValue: UUID())
+        let studio = DeviceID(rawValue: UUID())
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [
+                DeviceSummary(id: studio, displayName: "Studio Mac", availability: .lan),
+                DeviceSummary(id: desk, displayName: "Desk Mac", availability: .internet),
+                DeviceSummary(
+                    id: DeviceID(rawValue: UUID()),
+                    displayName: "Offline Mac",
+                    availability: .offline
+                ),
+            ],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: preparer,
+            deviceMenuPresenter: menu
+        )
+
+        XCTAssertEqual(preparer.prepareCount, 0)
+        controller.prepareToOpenStatusMenu()
+        controller.setUnreadReceive(true)
+        controller.updateDeviceNames([desk: "Desk Mac"])
+        XCTAssertEqual(preparer.prepareCount, 0)
+
+        let clipboardItem = try XCTUnwrap(
+            controller.statusMenu.items.first { $0.title == "发送剪贴板…" }
+        )
+        let fileItemIndex = try XCTUnwrap(
+            controller.statusMenu.items.firstIndex { $0.title == "发送文件…" }
+        )
+        let clipboardItemIndex = try XCTUnwrap(
+            controller.statusMenu.items.firstIndex { $0.title == "发送剪贴板…" }
+        )
+        XCTAssertEqual(clipboardItemIndex, fileItemIndex + 1)
+        XCTAssertEqual(clipboardItem.keyEquivalent, "c")
+        XCTAssertEqual(clipboardItem.keyEquivalentModifierMask, [.command, .shift])
+
+        XCTAssertTrue(
+            NSApp.sendAction(
+                try XCTUnwrap(clipboardItem.action),
+                to: clipboardItem.target,
+                from: clipboardItem
+            )
+        )
+
+        XCTAssertEqual(preparer.prepareCount, 1)
+        XCTAssertEqual(menu.presentCount, 1)
+        XCTAssertEqual(menu.presentedDevices.map(\.id), [desk, studio])
+    }
+
+    @MainActor
+    func testClipboardSendReportsEmptyClipboardWithoutPresentingTargetPicker() {
+        let preparer = RecordingClipboardTransferPreparer(
+            failure: ClipboardTransferPreparationError.noSupportedContent
+        )
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: preparer,
+            deviceMenuPresenter: menu
+        )
+        var announcements: [String] = []
+        controller.onAnnouncement = { announcements.append($0) }
+
+        controller.performClipboardSend()
+
+        XCTAssertEqual(preparer.prepareCount, 1)
+        XCTAssertEqual(menu.presentCount, 0)
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(announcements, ["剪贴板中没有可发送的内容。"])
+    }
+
+    @MainActor
+    func testClipboardSendReportsPreparationFailureWithoutPresentingTargetPicker() {
+        let preparer = RecordingClipboardTransferPreparer(
+            failure: ClipboardPreparationTestError.failed
+        )
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: preparer,
+            deviceMenuPresenter: menu
+        )
+        var announcements: [String] = []
+        controller.onAnnouncement = { announcements.append($0) }
+
+        controller.performClipboardSend()
+
+        XCTAssertEqual(preparer.prepareCount, 1)
+        XCTAssertEqual(menu.presentCount, 0)
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(announcements, ["无法准备剪贴板内容，请重试。"])
+    }
+
+    @MainActor
     func testAvailableUpdateAddsAccessibleMenuActionAndIndicator() throws {
         _ = NSApplication.shared
         let controller = StatusItemController(
@@ -402,6 +510,170 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testClipboardSendWithNoOnlineDeviceDiscardsOwnedTemporaryContent() throws {
+        let prepared = try ownedClipboardTransfer()
+        defer { prepared.discardTemporaryFiles() }
+        let preparer = RecordingClipboardTransferPreparer(prepared: prepared)
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [
+                DeviceSummary(
+                    id: DeviceID(rawValue: UUID()),
+                    displayName: "Offline Mac",
+                    availability: .offline
+                )
+            ],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: preparer,
+            deviceMenuPresenter: menu
+        )
+        var announcements: [String] = []
+        controller.onAnnouncement = { announcements.append($0) }
+
+        controller.performClipboardSend()
+
+        XCTAssertEqual(preparer.prepareCount, 1)
+        XCTAssertEqual(menu.presentCount, 0)
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+        XCTAssertEqual(announcements, ["没有在线设备。"])
+    }
+
+    @MainActor
+    func testClipboardSendWithInvalidPreparedURLsDiscardsOwnedTemporaryContent() throws {
+        let ownedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StatusItemAppKitTests-\(UUID().uuidString).txt")
+        try Data("clipboard".utf8).write(to: ownedURL)
+        let prepared = PreparedClipboardTransfer(urls: [], ownedTemporaryURLs: [ownedURL])
+        defer { prepared.discardTemporaryFiles() }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+        var announcements: [String] = []
+        controller.onAnnouncement = { announcements.append($0) }
+
+        controller.performClipboardSend()
+
+        XCTAssertEqual(menu.presentCount, 0)
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ownedURL.path))
+        XCTAssertEqual(announcements, ["所选内容无法发送。"])
+    }
+
+    @MainActor
+    func testClipboardSendWithExistingTransferDiscardsOwnedTemporaryContent() throws {
+        let target = DeviceID(rawValue: UUID())
+        let prepared = try ownedClipboardTransfer()
+        defer { prepared.discardTemporaryFiles() }
+        let preparer = RecordingClipboardTransferPreparer(prepared: prepared)
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            filePicker: StubStatusItemFilePicker(result: [URL(fileURLWithPath: "/tmp/file.txt")]),
+            clipboardPreparer: preparer,
+            deviceMenuPresenter: menu
+        )
+        var announcements: [String] = []
+        controller.onAnnouncement = { announcements.append($0) }
+
+        controller.performKeyboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        controller.performClipboardSend()
+
+        XCTAssertEqual(preparer.prepareCount, 1)
+        XCTAssertEqual(menu.presentCount, 1)
+        XCTAssertEqual(controller.phase, .transferring(progress: 0))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+        XCTAssertEqual(announcements, ["已有传输正在进行。"])
+    }
+
+    @MainActor
+    func testCancelledClipboardTargetSelectionDiscardsOwnedTemporaryContent() throws {
+        let target = DeviceID(rawValue: UUID())
+        let prepared = try ownedClipboardTransfer()
+        defer { prepared.discardTemporaryFiles() }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+
+        controller.performClipboardSend()
+        try XCTUnwrap(menu.cancel)()
+
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+    }
+
+    @MainActor
+    func testClipboardTargetSelectionUsesExistingTransferCoordinatorAndRetainsTemporaryContent() async throws {
+        let transfer = RecordingTransferCoordinator()
+        let target = DeviceID(rawValue: UUID())
+        let prepared = try ownedClipboardTransfer()
+        defer { prepared.discardTemporaryFiles() }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: transfer,
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+
+        controller.performClipboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        for _ in 0..<100 where await transfer.sentCount() == 0 {
+            await Task.yield()
+        }
+
+        let sends = await transfer.sentItems()
+        XCTAssertEqual(sends.first?.0, prepared.urls)
+        XCTAssertEqual(sends.first?.1, target)
+        XCTAssertEqual(controller.phase, .transferring(progress: 0))
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: prepared.urls[0].path),
+            "Task 4 owns terminal-state cleanup after a transfer has started."
+        )
+    }
+
+    @MainActor
+    func testClipboardTargetThatGoesOfflineCanBeCancelledAndDiscardsOwnedTemporaryContent() throws {
+        let online = DeviceID(rawValue: UUID())
+        let unavailable = DeviceID(rawValue: UUID())
+        let prepared = try ownedClipboardTransfer()
+        defer { prepared.discardTemporaryFiles() }
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: online, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+        var announcements: [String] = []
+        controller.onAnnouncement = { announcements.append($0) }
+
+        controller.performClipboardSend()
+        XCTAssertFalse(try XCTUnwrap(menu.select)(unavailable))
+        try XCTUnwrap(menu.cancel)()
+
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+        XCTAssertEqual(announcements, ["目标设备已离线，请重新选择。"])
+    }
+
+    @MainActor
     func testDraggedFileWithNoOnlineDeviceNeverEntersReadyOrPresentsEmptyFan() throws {
         let controller = StatusItemController(
             button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
@@ -677,6 +949,14 @@ final class StatusItemAppKitTests: XCTestCase {
         )
     }
 
+    @MainActor
+    private func ownedClipboardTransfer() throws -> PreparedClipboardTransfer {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StatusItemAppKitTests-\(UUID().uuidString).txt")
+        try Data("clipboard".utf8).write(to: url)
+        return PreparedClipboardTransfer(urls: [url], ownedTemporaryURLs: [url])
+    }
+
     private func receiveResult(named name: String) -> TransferReceiveResult {
         TransferReceiveResult(
             transferID: TransferID(rawValue: UUID()),
@@ -723,6 +1003,33 @@ private final class StubStatusItemFilePicker: StatusItemFilePicking {
     func chooseFiles() -> [URL]? {
         chooseCount += 1
         return result
+    }
+}
+
+private enum ClipboardPreparationTestError: Error {
+    case failed
+}
+
+@MainActor
+private final class RecordingClipboardTransferPreparer: ClipboardTransferPreparing {
+    private let prepared: PreparedClipboardTransfer?
+    private let failure: (any Error)?
+    private(set) var prepareCount = 0
+
+    init(prepared: PreparedClipboardTransfer) {
+        self.prepared = prepared
+        failure = nil
+    }
+
+    init(failure: any Error) {
+        prepared = nil
+        self.failure = failure
+    }
+
+    func prepare() throws -> PreparedClipboardTransfer {
+        prepareCount += 1
+        if let failure { throw failure }
+        return prepared!
     }
 }
 
