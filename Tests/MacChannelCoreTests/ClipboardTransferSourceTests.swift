@@ -67,6 +67,37 @@ final class ClipboardTransferSourceTests: XCTestCase {
     }
 
     @MainActor
+    func testDefaultRootIsAClipboardTransfersChildOfTheUserCachesDirectory() {
+        let cachesDirectory = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        )[0].standardizedFileURL
+        let defaultRoot = NativeClipboardTransferPreparer.defaultTemporaryRoot.standardizedFileURL
+
+        XCTAssertTrue(isStrictDescendant(defaultRoot, of: cachesDirectory))
+        XCTAssertEqual(defaultRoot.lastPathComponent, "ClipboardTransfers")
+        XCTAssertEqual(defaultRoot.deletingLastPathComponent().lastPathComponent, "MacChannel")
+    }
+
+    @MainActor
+    func testCacheDefaultPreparesUTF8ContentUsingAnInjectedCacheDirectory() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("cache payload", forType: .string)
+        let cacheDirectory = temporaryRoot.appendingPathComponent("cache-root")
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+
+        let prepared = try NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            now: { self.fixedDate },
+            cacheDirectory: cacheDirectory
+        ).prepare()
+        let output = try XCTUnwrap(prepared.urls.first)
+
+        XCTAssertTrue(isStrictDescendant(output, of: cacheDirectory))
+        XCTAssertEqual(try String(contentsOf: output, encoding: .utf8), "cache payload")
+    }
+
+    @MainActor
     func testWhitespaceOnlyTextIsAcceptedByteForByte() throws {
         let pasteboard = makePasteboard()
         let text = " \n\t "
@@ -202,6 +233,95 @@ final class ClipboardTransferSourceTests: XCTestCase {
     }
 
     @MainActor
+    func testOutsideApprovedAnchorsAreRejectedWithoutCreatingFiles() {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("secret", forType: .string)
+        let outsideRoot = URL(fileURLWithPath: "/private/var/tmp/DropMesh-\(UUID().uuidString)")
+
+        XCTAssertThrowsError(
+            try NativeClipboardTransferPreparer(
+                pasteboard: pasteboard,
+                temporaryRoot: outsideRoot,
+                now: { self.fixedDate }
+            ).prepare()
+        ) {
+            XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outsideRoot.path))
+    }
+
+    @MainActor
+    func testCacheRootFinalSymlinkIsRejectedWithoutWritingOutsideIt() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("secret", forType: .string)
+        let cacheDirectory = temporaryRoot.appendingPathComponent("cache-root")
+        let outsideRoot = temporaryRoot.appendingPathComponent("outside")
+        let namespace = cacheDirectory.appendingPathComponent("MacChannel")
+        let requestedRoot = namespace.appendingPathComponent("ClipboardTransfers")
+        try FileManager.default.createDirectory(at: namespace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: requestedRoot, withDestinationURL: outsideRoot)
+
+        XCTAssertThrowsError(
+            try NativeClipboardTransferPreparer(
+                pasteboard: pasteboard,
+                temporaryRoot: requestedRoot,
+                now: { self.fixedDate },
+                cacheDirectory: cacheDirectory
+            ).prepare()
+        ) {
+            XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outsideRoot.path), [])
+    }
+
+    @MainActor
+    func testCacheRootAncestorSymlinkIsRejectedWithoutWritingOutsideIt() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("secret", forType: .string)
+        let cacheDirectory = temporaryRoot.appendingPathComponent("cache-root")
+        let outsideRoot = temporaryRoot.appendingPathComponent("outside")
+        let namespace = cacheDirectory.appendingPathComponent("MacChannel")
+        let requestedRoot = namespace.appendingPathComponent("ClipboardTransfers")
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: namespace, withDestinationURL: outsideRoot)
+
+        XCTAssertThrowsError(
+            try NativeClipboardTransferPreparer(
+                pasteboard: pasteboard,
+                temporaryRoot: requestedRoot,
+                now: { self.fixedDate },
+                cacheDirectory: cacheDirectory
+            ).prepare()
+        ) {
+            XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outsideRoot.path), [])
+    }
+
+    @MainActor
+    func testInjectedCacheAnchorSymlinkIsRejectedWithoutWritingOutsideIt() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("secret", forType: .string)
+        let cacheDirectory = temporaryRoot.appendingPathComponent("cache-root")
+        let outsideRoot = temporaryRoot.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: cacheDirectory, withDestinationURL: outsideRoot)
+
+        XCTAssertThrowsError(
+            try NativeClipboardTransferPreparer(
+                pasteboard: pasteboard,
+                now: { self.fixedDate },
+                cacheDirectory: cacheDirectory
+            ).prepare()
+        ) {
+            XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outsideRoot.path), [])
+    }
+
+    @MainActor
     func testPreexistingTemporaryRootIsRestrictedToOwner() throws {
         let pasteboard = makePasteboard()
         pasteboard.setString("secret", forType: .string)
@@ -280,6 +400,12 @@ final class ClipboardTransferSourceTests: XCTestCase {
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
         let suffixText = suffix.map { " \($0)" } ?? ""
         return "剪贴板\(kind) \(formatter.string(from: fixedDate))\(suffixText).\(ext)"
+    }
+
+    private func isStrictDescendant(_ child: URL, of ancestor: URL) -> Bool {
+        let childPath = child.standardizedFileURL.path
+        let ancestorPath = ancestor.standardizedFileURL.path
+        return childPath.hasPrefix(ancestorPath + "/")
     }
 }
 

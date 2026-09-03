@@ -56,19 +56,30 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
     private let temporaryRoot: URL
     private let now: () -> Date
     private let fileManager: FileManager
+    private let cacheDirectory: URL
     private let reservationHook: (@MainActor (URL) throws -> Void)?
+
+    static var defaultTemporaryRoot: URL {
+        defaultTemporaryRoot(
+            in: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        )
+    }
 
     init(
         pasteboard: NSPasteboard = .general,
-        temporaryRoot: URL,
+        temporaryRoot: URL? = nil,
         now: @escaping () -> Date = Date.init,
         fileManager: FileManager = .default,
+        cacheDirectory: URL? = nil,
         reservationHook: (@MainActor (URL) throws -> Void)? = nil
     ) {
+        let cacheDirectory = cacheDirectory
+            ?? fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         self.pasteboard = pasteboard
-        self.temporaryRoot = temporaryRoot
+        self.temporaryRoot = temporaryRoot ?? Self.defaultTemporaryRoot(in: cacheDirectory)
         self.now = now
         self.fileManager = fileManager
+        self.cacheDirectory = cacheDirectory
         self.reservationHook = reservationHook
     }
 
@@ -148,12 +159,13 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
     }
 
     private func openTemporaryRoot() throws -> Int32 {
-        let trustedBase = fileManager.temporaryDirectory.standardizedFileURL
         let requestedRoot = temporaryRoot.standardizedFileURL
+        guard let trustedBase = approvedAnchor(for: requestedRoot) else {
+            throw MaterializationFailure.failed
+        }
         let prefix = trustedBase.path + "/"
-        guard requestedRoot.path.hasPrefix(prefix) else { throw MaterializationFailure.failed }
 
-        var descriptor = Darwin.open(trustedBase.path, O_RDONLY | O_DIRECTORY)
+        var descriptor = Darwin.open(trustedBase.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         guard descriptor >= 0 else { throw MaterializationFailure.failed }
         let relativeComponents = requestedRoot.path.dropFirst(prefix.count)
             .split(separator: "/")
@@ -188,6 +200,18 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
             throw MaterializationFailure.failed
         }
         return descriptor
+    }
+
+    private func approvedAnchor(for requestedRoot: URL) -> URL? {
+        [cacheDirectory.standardizedFileURL, fileManager.temporaryDirectory.standardizedFileURL]
+            .filter { anchor in requestedRoot.path.hasPrefix(anchor.path + "/") }
+            .max { $0.path.count < $1.path.count }
+    }
+
+    private static func defaultTemporaryRoot(in cacheDirectory: URL) -> URL {
+        cacheDirectory
+            .appendingPathComponent("MacChannel", isDirectory: true)
+            .appendingPathComponent("ClipboardTransfers", isDirectory: true)
     }
 
     private func reserveNextAvailableName(
