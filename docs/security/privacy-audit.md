@@ -97,3 +97,16 @@ PA-01 至 PA-06。任一敏感值命中均为发布阻断问题，不能通过�
 
 包含上述本轮审计目标、UTC 时间和四个脚本哈希的不可变文档版本为
 `b453dd45e7924980cea5e5e1b270c442940be3a3`。
+
+2026-09-04 追加静态审计 provenance：本轮审计脚本修订提交为
+`83a616fd140e2339a168e43656f85d79cb10fddb`。下列 SHA-256 对应该提交中的脚本字节；
+它们只证明静态检查，不能替代运行时证据。
+
+- `Scripts/audit-privacy.sh`: `2719d8a56bcb5054cb3f7a2e8b99eb3ad67f9ed8cb89e61e6ce8c7f129dc2cfb`
+- `Scripts/check-sensitive-logging.sh`: `c6cf7ef300aac14c8929c68a913b4c28e6e451eab38f2b912d1431a5fb7827b7`
+- `Scripts/test-sensitive-logging-contract.sh`: `c1cd8de11ff2f73823463b83b92d6aba15467d402afb34f6292a8626a94025e3`
+- `Scripts/test-privacy-audit-contract.sh`: `1beb66d9f21cd02c9321bc82786f5b64ec9913cf30ab8894df2a86a8a1171eda`
+
+本轮在该提交运行 `bash Scripts/audit-privacy.sh --static-only` 得到 `STATIC PASS`。
+无参数审计在完成相同静态检查后仍以状态 2 返回 `RUNTIME BLOCKED`；运行时 producer/verifier
+仍未实现，PA-01 至 PA-06、真实双机以及签名/公证运行时证据均未由本条 provenance 声称为已完成。
