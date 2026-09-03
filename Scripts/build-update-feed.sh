@@ -3,8 +3,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
-version="${MACCHANNEL_VERSION:-1.2.5}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-18}"
+source "$repo_root/Scripts/app-build-defaults.sh"
+version="${MACCHANNEL_VERSION:-$macchannel_default_version}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-$macchannel_default_build_number}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 account="${MACCHANNEL_SPARKLE_ACCOUNT:-com.mason.macchannel.updates}"
 generate_appcast="${MACCHANNEL_SPARKLE_GENERATE_APPCAST:-$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast}"

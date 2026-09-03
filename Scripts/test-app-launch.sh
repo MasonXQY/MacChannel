@@ -2,13 +2,15 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repository_root"
 source "$repository_root/Scripts/app-build-defaults.sh"
+source "$repository_root/Scripts/launch-process-support.sh"
 
-bash Scripts/build-app.sh
-app_path="$(pwd)/.build/MacChannel.app"
+bash "$repository_root/Scripts/build-app.sh"
+app_path="$repository_root/.build/MacChannel.app"
 app_executable="$app_path/Contents/MacOS/MacChannelApp"
-expected_version="${MACCHANNEL_EXPECTED_VERSION:-${MACCHANNEL_VERSION:-$macchannel_default_version}}"
-expected_build_number="${MACCHANNEL_EXPECTED_BUILD_NUMBER:-${MACCHANNEL_BUILD_NUMBER:-$macchannel_default_build_number}}"
+expected_version="${MACCHANNEL_EXPECTED_VERSION:-$macchannel_default_version}"
+expected_build_number="${MACCHANNEL_EXPECTED_BUILD_NUMBER:-$macchannel_default_build_number}"
 if pgrep -f "$app_executable" >/dev/null; then
     echo "MacChannelApp is already running; refusing an ambiguous launch test" >&2
     exit 1
@@ -21,10 +23,10 @@ production_marker_path="$production_launch_dir/production.json"
 opener_pid=""
 
 cleanup() {
-    if [[ -n "$opener_pid" ]] && kill -0 "$opener_pid" 2>/dev/null; then
-        kill "$opener_pid" 2>/dev/null || true
+    if [[ -n "$opener_pid" ]]; then
+        launch_terminate_process_tree "$opener_pid" 20 || true
+        opener_pid=""
     fi
-    pkill -TERM -f "$app_executable" 2>/dev/null || true
     rm -f "$marker_path"
     rmdir "$smoke_launch_dir" 2>/dev/null || true
     rm -f "$production_marker_path"
@@ -52,7 +54,7 @@ test "$(plutil -extract SURequireSignedFeed raw -o - "$plist")" = true
 test -n "$(plutil -extract SUPublicEDKey raw -o - "$plist")"
 
 if rg -n 'Tailscale|个人网络|连接方式|安全中继地址|rendezvousURL' \
-    App/SettingsView.swift App/PairingView.swift; then
+    "$repository_root/App/SettingsView.swift" "$repository_root/App/PairingView.swift"; then
     echo "旧的网络配置仍然出现在普通用户界面" >&2
     exit 1
 fi
@@ -62,16 +64,11 @@ fi
     --smoke-test "$marker_path" &
 opener_pid=$!
 
-# Startup also initializes the packaged update controller; allow the same bounded
-# launch window as the production-runtime smoke below.
-for _ in {1..150}; do
-    [[ -f "$marker_path" ]] && break
-    sleep 0.1
-done
+launch_wait_for_marker "$marker_path" "$opener_pid" 300
 
 test -f "$marker_path"
 grep -qx "ready accessory" "$marker_path"
-wait "$opener_pid"
+launch_require_process_exit "$opener_pid" 150
 opener_pid=""
 ! pgrep -f "$app_executable" >/dev/null
 
@@ -81,10 +78,7 @@ env -u MACCHANNEL_RENDEZVOUS_URL -u MACCHANNEL_RUNTIME \
     --production-launch-test "$production_marker_path" &
 opener_pid=$!
 
-for _ in {1..150}; do
-    [[ -f "$production_marker_path" ]] && break
-    sleep 0.1
-done
+launch_wait_for_marker "$production_marker_path" "$opener_pid" 150
 
 test -f "$production_marker_path"
 jq -e '
@@ -95,6 +89,6 @@ jq -e '
     .statusInstalled == true and
     .shutdownComplete == true
 ' "$production_marker_path" >/dev/null
-wait "$opener_pid"
+launch_require_process_exit "$opener_pid" 150
 opener_pid=""
 ! pgrep -f "$app_executable" >/dev/null

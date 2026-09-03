@@ -3,10 +3,11 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
+source "$repo_root/Scripts/app-build-defaults.sh"
 
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-version="${MACCHANNEL_VERSION:-1.2.5}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-18}"
+version="${MACCHANNEL_VERSION:-$macchannel_default_version}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-$macchannel_default_build_number}"
 notary_profile="${MACCHANNEL_NOTARY_PROFILE:-}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 signing_home="${HOME:?}"

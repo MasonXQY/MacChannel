@@ -8,7 +8,6 @@ if [[ $# -eq 0 ]]; then
     find "$repository_root/App" "$repository_root/Sources" \
       "$repository_root/Services/rendezvous" "$repository_root/Scripts" -type f \
       \( -name '*.swift' -o -name '*.go' -o -name '*.sh' \) \
-      ! -path "$repository_root/Scripts/test-*.sh" \
       ! -name 'audit-privacy.sh' ! -name 'check-sensitive-logging.sh' -print
   )
   set -- "${source_files[@]}"
@@ -19,6 +18,18 @@ swift_sink='(^|[^[:alnum:]_])(print|NSLog|os_log)[[:space:]]*\(|Logger\.[[:alnum
 go_sink='(^|[^[:alnum:]_])(log\.(Print|Printf|Println|Fatal|Fatalf|Panic|Panicf)|fmt\.(Print|Printf|Println|Fprint|Fprintf|Fprintln))[[:space:]]*\('
 shell_sink='^[[:space:]]*(echo|printf|logger)([[:space:]]|$)'
 found=false
+
+remove_fixture_data_write() {
+  local matches="$1"
+  local fixture_path="$2"
+  local line
+  while IFS= read -r line; do
+    if [[ "$line" == *"printf "* && "$line" == *">"* && "$line" == *"$fixture_path"* ]]; then
+      continue
+    fi
+    printf '%s\n' "$line"
+  done <<< "$matches"
+}
 
 for source_file in "$@"; do
   [[ -f "${source_file}" ]] || continue
@@ -36,6 +47,21 @@ for source_file in "$@"; do
       ;;
     *.sh)
       matches="$(rg -n -i "(${shell_sink}).*(\\$\\{?${sensitive}|%[a-z].*${sensitive})" "${source_file}" || true)"
+      case "${source_file}" in
+        */Scripts/test-privacy-audit.sh)
+          matches="$(remove_fixture_data_write "$matches" '${test_root}/')"
+          ;;
+        */Scripts/test-update-acceptance.sh)
+          matches="$(remove_fixture_data_write "$matches" 'UpdateAcceptancePayload.txt')"
+          ;;
+        */Scripts/test-personal-mesh-install.sh)
+          matches="$(remove_fixture_data_write "$matches" 'MacChannel.app/Contents/MacChannelApp')"
+          matches="$(remove_fixture_data_write "$matches" 'MacChannel.app/Contents/Resources/state.bin')"
+          ;;
+        */Scripts/test-sensitive-logging-contract.sh|*/Scripts/test-privacy-audit-contract.sh)
+          matches="$(remove_fixture_data_write "$matches" '"$mutation_path"')"
+          ;;
+      esac
       ;;
   esac
   if [[ -n "${matches}" ]]; then
