@@ -637,6 +637,7 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func showReceiveHistory(_ sender: NSMenuItem) {
+        recentReceiveStore?.acknowledgeAll()
         onShowReceiveHistory?()
     }
 

@@ -176,19 +176,26 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
-    func testRecentReceiveHistoryItemEmitsCallback() throws {
+    func testRecentReceiveHistoryItemAcknowledgesAllEntriesBeforeEmittingCallback() throws {
         let controller = makeController()
         let store = RecentReceiveStore()
         controller.bindRecentReceives(store)
         store.record(receiveResult(named: "report.pdf"), sourceName: "Mason")
+        store.record(receiveResult(named: "photo.jpg"), sourceName: "Mason")
         var historyShown = 0
-        controller.onShowReceiveHistory = { historyShown += 1 }
+        var wasAcknowledgedWhenHistoryWasShown: Bool?
+        controller.onShowReceiveHistory = {
+            historyShown += 1
+            wasAcknowledgedWhenHistoryWasShown = !store.hasUnread
+        }
 
         let item = try XCTUnwrap(
             controller.statusMenu.items.first { $0.title == "查看全部历史…" }
         )
         XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
         XCTAssertEqual(historyShown, 1)
+        XCTAssertEqual(wasAcknowledgedWhenHistoryWasShown, true)
+        XCTAssertFalse(store.hasUnread)
     }
 
     @MainActor
