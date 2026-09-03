@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Darwin
 import Foundation
@@ -142,6 +143,83 @@ final class TransferIntegrationTests: XCTestCase {
             "direct-lan PASS source-sha256=\(try SHA256.hash(file: source)) "
                 + "destination-sha256=\(try SHA256.hash(file: harness.receivedFile(named: source.lastPathComponent)))"
         )
+    }
+
+    func testClipboardUTF8TextArrivesInReceiverDownloadRootByteForByte() async throws {
+        let harness = try await makeHarness(routePolicy: .lanOnly)
+        let expectedText = "DropMesh 剪贴板\n第二行 🌏\n"
+        let source = try Self.makeUTF8ClipboardTextFixture(
+            expectedText,
+            in: harness.senderDownloadRoot
+        )
+
+        let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
+        try await harness.waitForCompletion(transfer, timeout: .seconds(30))
+
+        let destination = harness.receivedFile(named: source.lastPathComponent)
+        XCTAssertEqual(
+            destination.deletingLastPathComponent().standardizedFileURL,
+            harness.receiverDownloadRoot.standardizedFileURL
+        )
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), expectedText)
+        try assertMatchingHashes(source, destination)
+        let routes = await harness.actualRoutes()
+        XCTAssertEqual(routes, [.lan])
+    }
+
+    func testClipboardPNGArrivesInReceiverDownloadRootAndRemainsDecodable() async throws {
+        let harness = try await makeHarness(routePolicy: .lanOnly)
+        let source = try await MainActor.run {
+            try Self.makeClipboardPNGFixture(in: harness.senderDownloadRoot)
+        }
+
+        let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
+        try await harness.waitForCompletion(transfer, timeout: .seconds(30))
+
+        let destination = harness.receivedFile(named: source.lastPathComponent)
+        XCTAssertEqual(
+            destination.deletingLastPathComponent().standardizedFileURL,
+            harness.receiverDownloadRoot.standardizedFileURL
+        )
+        let imageIsDecodable = try await MainActor.run {
+            NSBitmapImageRep(data: try Data(contentsOf: destination)) != nil
+        }
+        XCTAssertTrue(imageIsDecodable)
+        try assertMatchingHashes(source, destination)
+        let routes = await harness.actualRoutes()
+        XCTAssertEqual(routes, [.lan])
+    }
+
+    func testReceiverProcessingPreservesItsIsolatedPasteboard() async throws {
+        let harness = try await makeHarness(routePolicy: .lanOnly)
+        let pasteboardName = "dropmesh.receiver.\(UUID().uuidString)"
+        let sentinel = "receiver clipboard sentinel \(UUID().uuidString)"
+        let initialChangeCount = await MainActor.run {
+            let pasteboard = NSPasteboard(name: NSPasteboard.Name(pasteboardName))
+            pasteboard.clearContents()
+            XCTAssertTrue(pasteboard.setString(sentinel, forType: .string))
+            return pasteboard.changeCount
+        }
+        addTeardownBlock {
+            await MainActor.run {
+                NSPasteboard(name: NSPasteboard.Name(pasteboardName)).releaseGlobally()
+            }
+        }
+        let source = try Self.makeUTF8ClipboardTextFixture(
+            "clipboard receive smoke",
+            in: harness.senderDownloadRoot
+        )
+
+        let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
+        try await harness.waitForCompletion(transfer, timeout: .seconds(30))
+
+        await MainActor.run {
+            let pasteboard = NSPasteboard(name: NSPasteboard.Name(pasteboardName))
+            XCTAssertEqual(pasteboard.changeCount, initialChangeCount)
+            XCTAssertEqual(pasteboard.string(forType: .string), sentinel)
+        }
+        let routes = await harness.actualRoutes()
+        XCTAssertEqual(routes, [.lan])
     }
 
     func testTransferCompletesAfterReceiveListenerRestarts() async throws {
@@ -426,6 +504,52 @@ final class TransferIntegrationTests: XCTestCase {
 
     private func assertMatchingHashes(_ left: URL, _ right: URL) throws {
         XCTAssertEqual(try SHA256.hash(file: left), try SHA256.hash(file: right))
+    }
+
+    private static func makeUTF8ClipboardTextFixture(_ text: String, in root: URL) throws -> URL {
+        let sourceDirectory = root.appendingPathComponent("clipboard-sources", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sourceDirectory,
+            withIntermediateDirectories: true
+        )
+        let url = sourceDirectory.appendingPathComponent(
+            "剪贴板文字 2026-09-04 02.30.00.txt"
+        )
+        try Data(text.utf8).write(to: url, options: .atomic)
+        return url
+    }
+
+    @MainActor
+    private static func makeClipboardPNGFixture(in root: URL) throws -> URL {
+        let sourceDirectory = root.appendingPathComponent("clipboard-sources", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: sourceDirectory,
+            withIntermediateDirectories: true
+        )
+        let bitmap = try XCTUnwrap(
+            NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: 2,
+                pixelsHigh: 2,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 8,
+                bitsPerPixel: 32
+            )
+        )
+        bitmap.setColor(NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1), atX: 0, y: 0)
+        bitmap.setColor(NSColor(deviceRed: 0, green: 1, blue: 0, alpha: 1), atX: 1, y: 0)
+        bitmap.setColor(NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1), atX: 0, y: 1)
+        bitmap.setColor(NSColor(deviceRed: 0, green: 0, blue: 0, alpha: 0), atX: 1, y: 1)
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let url = sourceDirectory.appendingPathComponent(
+            "剪贴板图片 2026-09-04 02.30.00.png"
+        )
+        try png.write(to: url, options: .atomic)
+        return url
     }
 
     private func fileHashes(in root: URL) throws -> [String: String] {

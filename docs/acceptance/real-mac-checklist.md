@@ -49,6 +49,17 @@ loopback、单元测试或 Docker 内部流量替代。失败必须重开对应�
 | RM-11 | 接收磁盘空间不足，预检失败且无最终文件 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
 | RM-12 | 撤销 B 后，B 无法建立新连接；A/C 状态收敛 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | NOT RUN |
 | RM-13 | 接收后从第一层菜单路径“菜单栏图标 → 刚刚收到 → 文件项”在 Finder 中显示；验证绿点、最近 5 项、逐项确认，以及“查看全部历史…”直接打开历史分段 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | NOT RUN |
+| RM-14 | 发送剪贴板 UTF-8 文字；接收端保存到已配置接收目录，解码逐字一致 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-15 | 发送剪贴板截图图片；接收端保存有效 PNG 到已配置接收目录 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-16 | 发送 Finder 中复制的文件；源文件不被删除，接收文件哈希一致 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-17 | 发送 Finder 中复制的文件夹；空目录、Unicode 名称、目录树与文件哈希一致 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-18 | 局域网直连重复发送剪贴板文字、图片、文件、文件夹；界面观察 route 均为“局域网直连” | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-19 | 阻断直连后通过加密中继重复发送剪贴板文字、图片、文件、文件夹；界面观察 route 均为“加密中继” | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-20 | 接收前在 Mac B 放置唯一剪贴板哨兵；处理文字、图片、文件、文件夹接收结果后哨兵与 change count 均不变 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
+| RM-21 | 选择目标前取消剪贴板发送；未产生传输、接收文件或遗留临时文件 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | 目标选择器 | 不适用 | 不适用 | NOT RUN | NOT RUN |
+| RM-22 | 传输中取消文字与图片发送；接收端无最终文件，发送端受控临时文件清理完成 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | NOT RUN | 传输中 | NOT RUN | 不适用 | NOT RUN | NOT RUN |
+| RM-23 | 传输中取消已复制文件与文件夹；接收端无最终文件，发送端原始项目保持完整 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | NOT RUN | 传输中 | NOT RUN | 不适用 | NOT RUN | NOT RUN |
+| RM-24 | 为来源设备设置自定义接收目录后发送剪贴板文字与图片；两者只落入该目录，不落入全局目录 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
 
 ## 每行执行要求
 
@@ -61,5 +72,5 @@ loopback、单元测试或 Docker 内部流量替代。失败必须重开对应�
 
 ## 完成判定
 
-只有 RM-01 至 RM-13 全部为 `PASS`，且批次字段完整、哈希一致、证据可追溯，
+只有 RM-01 至 RM-24 全部为 `PASS`，且批次字段完整、哈希一致、证据可追溯，
 真实 Mac 验收才可签字。当前状态为 **NOT RUN**。
