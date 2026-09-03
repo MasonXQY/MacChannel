@@ -28,7 +28,7 @@ final class AppRuntimeTests: XCTestCase {
         await lifecycle.stop()
     }
 
-    func testConcurrentReconnectRequestsNeverOverlapPublicConnectAttempts() async throws {
+    func testConcurrentReconnectRequestsStartFreshConnectionWithoutOverlap() async throws {
         let connector = SequencedPublicServiceConnector(connectResults: [true, true, true])
         let lifecycle = PublicServiceLifecycle(
             connectionFactory: { await connector.makeConnection() },
@@ -46,8 +46,12 @@ final class AppRuntimeTests: XCTestCase {
             await Task.yield()
         }
 
+        let attempts = await connector.attemptCount()
         let maximumConcurrentAttempts = await connector.maximumConcurrentAttempts()
+        let state = await lifecycle.currentState()
+        XCTAssertEqual(attempts, 2)
         XCTAssertEqual(maximumConcurrentAttempts, 1)
+        XCTAssertEqual(state, .online)
         await lifecycle.stop()
     }
 

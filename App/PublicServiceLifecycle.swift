@@ -173,13 +173,10 @@ actor PublicServiceLifecycle {
                 try await created.run()
                 guard !Task.isCancelled else { throw CancellationError() }
                 throw PublicServiceLifecycleError.sessionEnded
-            } catch is CancellationError {
-                if let candidate { await candidate.stop() }
-                connection = nil
-                break
             } catch {
                 if let candidate { await candidate.stop() }
                 connection = nil
+                if Task.isCancelled { break }
                 failureCount += 1
                 transition(to: .degraded)
                 await waitForRetry(failureCount: failureCount)

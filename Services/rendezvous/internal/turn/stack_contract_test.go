@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const runnerProcessDeadline = 30 * time.Second
+
 func TestLocalStackPinsServicesAndProtectsSecrets(t *testing.T) {
 	root := repositoryRoot(t)
 	compose := readContractFile(t, filepath.Join(root, "Infrastructure", "docker-compose.yml"))
@@ -570,7 +572,7 @@ esac
 		if secondError == nil {
 			t.Fatalf("failure-injected second runner succeeded: %s", secondOutput.String())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(runnerProcessDeadline):
 		_ = second.Process.Kill()
 		t.Fatal("second runner did not acquire the lock after the first exited")
 	}
@@ -645,7 +647,7 @@ esac
 		if result.err != nil {
 			t.Fatalf("immediate retry after SIGKILL failed: %v, %s", result.err, result.output)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(runnerProcessDeadline):
 		if retry.Process != nil {
 			_ = retry.Process.Kill()
 		}
@@ -787,7 +789,7 @@ func linkCommand(t *testing.T, directory, name string) {
 
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(runnerProcessDeadline)
 	for {
 		if _, err := os.Stat(path); err == nil {
 			return

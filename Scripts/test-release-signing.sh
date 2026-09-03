@@ -3,8 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 identity="${MACCHANNEL_CODESIGN_IDENTITY:-}"
-version="${MACCHANNEL_VERSION:-1.2.2}"
-build_number="${MACCHANNEL_BUILD_NUMBER:-15}"
+version="${MACCHANNEL_VERSION:-1.2.3}"
+build_number="${MACCHANNEL_BUILD_NUMBER:-16}"
 signing_home="${HOME:?}"
 signing_tmp="${TMPDIR:-/tmp}"
 if [[ -z "$identity" ]]; then
