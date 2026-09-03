@@ -39,11 +39,10 @@ launch_snapshot_matches() {
     local snapshot="$1"
     local process_id
     local expected_start
-    local expected_command
-    IFS=$'\t' read -r process_id expected_start expected_command <<< "$snapshot"
+    local diagnostic_command
+    IFS=$'\t' read -r process_id expected_start diagnostic_command <<< "$snapshot"
     launch_process_running "$process_id" || return 1
-    [[ "$(launch_process_start_identity "$process_id")" == "$expected_start" ]] || return 1
-    [[ "$(launch_process_command_identity "$process_id")" == "$expected_command" ]]
+    [[ "$(launch_process_start_identity "$process_id")" == "$expected_start" ]]
 }
 
 launch_signal_snapshots() {
@@ -110,6 +109,8 @@ launch_wait_for_exit() {
 
 launch_reap_process() {
     local process_id="$1"
+    # wait is only safe after polling established that the child exited or is a zombie.
+    launch_process_running "$process_id" && return 124
     if wait "$process_id" 2>/dev/null; then
         return 0
     else
