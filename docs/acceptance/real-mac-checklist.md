@@ -48,6 +48,7 @@ loopback、单元测试或 Docker 内部流量替代。失败必须重开对应�
 | RM-10 | 同名文件连续发送，产生编号且不覆盖 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
 | RM-11 | 接收磁盘空间不足，预检失败且无最终文件 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | NOT RUN | 不适用 | 不适用 | NOT RUN | NOT RUN | NOT RUN |
 | RM-12 | 撤销 B 后，B 无法建立新连接；A/C 状态收敛 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | NOT RUN |
+| RM-13 | 接收后从第一层菜单路径“菜单栏图标 → 刚刚收到 → 文件项”在 Finder 中显示；验证绿点、最近 5 项、逐项确认，以及“查看全部历史…”直接打开历史分段 | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | 不适用 | 不适用 | NOT RUN | 不适用 | 不适用 | 不适用 | NOT RUN | NOT RUN |
 
 ## 每行执行要求
 
@@ -60,5 +61,5 @@ loopback、单元测试或 Docker 内部流量替代。失败必须重开对应�
 
 ## 完成判定
 
-只有 RM-01 至 RM-12 全部为 `PASS`，且批次字段完整、哈希一致、证据可追溯，
+只有 RM-01 至 RM-13 全部为 `PASS`，且批次字段完整、哈希一致、证据可追溯，
 真实 Mac 验收才可签字。当前状态为 **NOT RUN**。
