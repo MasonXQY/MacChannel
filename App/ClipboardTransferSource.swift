@@ -58,6 +58,8 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
     private let fileManager: FileManager
     private let cacheDirectory: URL
     private let reservationHook: (@MainActor (URL) throws -> Void)?
+    private let pruneBeforeQuarantineHook: (@MainActor (String) throws -> Void)?
+    private let pruneRootOpenedHook: (@MainActor () throws -> Void)?
 
     static var defaultTemporaryRoot: URL {
         defaultTemporaryRoot(
@@ -71,7 +73,9 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         now: @escaping () -> Date = Date.init,
         fileManager: FileManager = .default,
         cacheDirectory: URL? = nil,
-        reservationHook: (@MainActor (URL) throws -> Void)? = nil
+        reservationHook: (@MainActor (URL) throws -> Void)? = nil,
+        pruneBeforeQuarantineHook: (@MainActor (String) throws -> Void)? = nil,
+        pruneRootOpenedHook: (@MainActor () throws -> Void)? = nil
     ) {
         let cacheDirectory = cacheDirectory
             ?? fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -82,6 +86,8 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         self.fileManager = fileManager
         self.cacheDirectory = cacheDirectory
         self.reservationHook = reservationHook
+        self.pruneBeforeQuarantineHook = pruneBeforeQuarantineHook
+        self.pruneRootOpenedHook = pruneRootOpenedHook
 
         if usesProductionTemporaryRoot {
             try? pruneAbandonedFiles(olderThan: .seconds(24 * 60 * 60))
@@ -115,15 +121,9 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         defer { _ = Darwin.close(rootDescriptor) }
 
         let cutoff = now().addingTimeInterval(-Self.timeInterval(for: age))
-        let children = try fileManager.contentsOfDirectory(
-            at: temporaryRoot,
-            includingPropertiesForKeys: nil,
-            options: []
-        )
-        for child in children {
-            let name = child.lastPathComponent
-            guard name != ".", name != "..", !name.contains("/") else { continue }
-            removeIfExpiredRegularFile(
+        try pruneRootOpenedHook?()
+        for name in try directChildNames(rootDescriptor: rootDescriptor) {
+            quarantineAndRemoveExpiredRegularFile(
                 named: name,
                 rootDescriptor: rootDescriptor,
                 cutoff: cutoff
@@ -241,25 +241,110 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
             .appendingPathComponent("ClipboardTransfers", isDirectory: true)
     }
 
-    private func removeIfExpiredRegularFile(
+    private func directChildNames(rootDescriptor: Int32) throws -> [String] {
+        let independentDescriptor = Darwin.openat(
+            rootDescriptor,
+            ".",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard independentDescriptor >= 0,
+              let directory = Darwin.fdopendir(independentDescriptor)
+        else {
+            if independentDescriptor >= 0 { _ = Darwin.close(independentDescriptor) }
+            throw MaterializationFailure.failed
+        }
+
+        var names: [String] = []
+        errno = 0
+        while let entry = Darwin.readdir(directory) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+                    String(cString: $0)
+                }
+            }
+            if name != ".", name != ".." { names.append(name) }
+        }
+        let readError = errno
+        guard Darwin.closedir(directory) == 0, readError == 0 else {
+            throw MaterializationFailure.failed
+        }
+        return names
+    }
+
+    private func quarantineAndRemoveExpiredRegularFile(
         named name: String,
         rootDescriptor: Int32,
         cutoff: Date
     ) {
-        var metadata = stat()
+        var expected = stat()
         guard Darwin.fstatat(
             rootDescriptor,
             name,
-            &metadata,
+            &expected,
             AT_SYMLINK_NOFOLLOW
         ) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
-              creationOrModificationDate(for: metadata) < cutoff
+              isExpiredRegularFile(expected, before: cutoff)
         else {
             return
         }
 
-        _ = Darwin.unlinkat(rootDescriptor, name, 0)
+        do {
+            try pruneBeforeQuarantineHook?(name)
+        } catch {
+            return
+        }
+
+        let quarantineName = ".dropmesh-clipboard-prune-\(UUID().uuidString.lowercased())"
+        guard Darwin.renameatx_np(
+            rootDescriptor,
+            name,
+            rootDescriptor,
+            quarantineName,
+            UInt32(RENAME_EXCL)
+        ) == 0
+        else {
+            return
+        }
+
+        var moved = stat()
+        guard Darwin.fstatat(
+            rootDescriptor,
+            quarantineName,
+            &moved,
+            AT_SYMLINK_NOFOLLOW
+        ) == 0,
+              moved.st_dev == expected.st_dev,
+              moved.st_ino == expected.st_ino,
+              isExpiredRegularFile(moved, before: cutoff)
+        else {
+            restoreQuarantinedCandidate(
+                named: name,
+                quarantineName: quarantineName,
+                rootDescriptor: rootDescriptor
+            )
+            return
+        }
+
+        _ = Darwin.unlinkat(rootDescriptor, quarantineName, 0)
+    }
+
+    private func restoreQuarantinedCandidate(
+        named name: String,
+        quarantineName: String,
+        rootDescriptor: Int32
+    ) {
+        _ = Darwin.renameatx_np(
+            rootDescriptor,
+            quarantineName,
+            rootDescriptor,
+            name,
+            UInt32(RENAME_EXCL)
+        )
+    }
+
+    private func isExpiredRegularFile(_ metadata: stat, before cutoff: Date) -> Bool {
+        (metadata.st_mode & S_IFMT) == S_IFREG
+            && creationOrModificationDate(for: metadata) < cutoff
     }
 
     private func creationOrModificationDate(for metadata: stat) -> Date {

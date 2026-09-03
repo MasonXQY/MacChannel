@@ -164,6 +164,92 @@ final class ClipboardTransferSourceTests: XCTestCase {
     }
 
     @MainActor
+    func testPruneRestoresNewFileReplacedAfterMetadataCheck() throws {
+        let fileManager = FileManager.default
+        let oldOwned = temporaryRoot.appendingPathComponent("old-owned.txt")
+        let displacedOld = temporaryRoot.appendingPathComponent("displaced-old.txt")
+        let oldDate = fixedDate.addingTimeInterval(-25 * 60 * 60)
+        try Data("old".utf8).write(to: oldOwned)
+        try setDates(oldDate, on: oldOwned)
+
+        let preparer = NativeClipboardTransferPreparer(
+            pasteboard: makePasteboard(),
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            pruneBeforeQuarantineHook: { name in
+                guard name == oldOwned.lastPathComponent else { return }
+                try fileManager.moveItem(at: oldOwned, to: displacedOld)
+                try Data("new".utf8).write(to: oldOwned)
+            }
+        )
+
+        try preparer.pruneAbandonedFiles(olderThan: .seconds(24 * 60 * 60))
+
+        XCTAssertEqual(try String(contentsOf: oldOwned, encoding: .utf8), "new")
+        XCTAssertEqual(try String(contentsOf: displacedOld, encoding: .utf8), "old")
+    }
+
+    @MainActor
+    func testPruneRestoresSymlinkReplacedAfterMetadataCheck() throws {
+        let fileManager = FileManager.default
+        let oldOwned = temporaryRoot.appendingPathComponent("old-owned.txt")
+        let displacedOld = temporaryRoot.appendingPathComponent("displaced-old.txt")
+        let outside = temporaryRoot.deletingLastPathComponent().appendingPathComponent("outside.txt")
+        let oldDate = fixedDate.addingTimeInterval(-25 * 60 * 60)
+        try Data("old".utf8).write(to: oldOwned)
+        try Data("outside".utf8).write(to: outside)
+        try setDates(oldDate, on: oldOwned)
+
+        let preparer = NativeClipboardTransferPreparer(
+            pasteboard: makePasteboard(),
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            pruneBeforeQuarantineHook: { name in
+                guard name == oldOwned.lastPathComponent else { return }
+                try fileManager.moveItem(at: oldOwned, to: displacedOld)
+                try fileManager.createSymbolicLink(at: oldOwned, withDestinationURL: outside)
+            }
+        )
+
+        try preparer.pruneAbandonedFiles(olderThan: .seconds(24 * 60 * 60))
+
+        XCTAssertTrue(fileManager.fileExists(atPath: oldOwned.path))
+        XCTAssertEqual(try fileManager.destinationOfSymbolicLink(atPath: oldOwned.path), outside.path)
+        XCTAssertEqual(try String(contentsOf: outside, encoding: .utf8), "outside")
+        XCTAssertEqual(try String(contentsOf: displacedOld, encoding: .utf8), "old")
+    }
+
+    @MainActor
+    func testPruneEnumeratesTheOpenedRootWhenItsPathIsReplaced() throws {
+        let fileManager = FileManager.default
+        let originalRoot = temporaryRoot!
+        let relocatedRoot = originalRoot.deletingLastPathComponent()
+            .appendingPathComponent("relocated-root", isDirectory: true)
+        let oldOwned = originalRoot.appendingPathComponent("old-owned.txt")
+        let replacementOwned = originalRoot.appendingPathComponent("replacement.txt")
+        let oldDate = fixedDate.addingTimeInterval(-25 * 60 * 60)
+        defer { try? fileManager.removeItem(at: relocatedRoot) }
+        try Data("old".utf8).write(to: oldOwned)
+        try setDates(oldDate, on: oldOwned)
+
+        let preparer = NativeClipboardTransferPreparer(
+            pasteboard: makePasteboard(),
+            temporaryRoot: originalRoot,
+            now: { self.fixedDate },
+            pruneRootOpenedHook: {
+                try fileManager.moveItem(at: originalRoot, to: relocatedRoot)
+                try fileManager.createDirectory(at: originalRoot, withIntermediateDirectories: true)
+                try Data("replacement".utf8).write(to: replacementOwned)
+            }
+        )
+
+        try preparer.pruneAbandonedFiles(olderThan: .seconds(24 * 60 * 60))
+
+        XCTAssertFalse(fileManager.fileExists(atPath: relocatedRoot.appendingPathComponent("old-owned.txt").path))
+        XCTAssertEqual(try String(contentsOf: replacementOwned, encoding: .utf8), "replacement")
+    }
+
+    @MainActor
     func testProductionInitializerPrunesOnceWithoutPruningAgainDuringPreparation() throws {
         let fileManager = FileManager.default
         let cacheDirectory = temporaryRoot.appendingPathComponent("cache", isDirectory: true)
