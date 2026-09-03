@@ -19,6 +19,10 @@ grep -F 'bash Scripts/build-update-feed.sh' Scripts/build-distribution.sh >/dev/
 while IFS=: read -r source_file source_line source_text; do
     allowed=0
     case "$source_file" in
+        App/ClipboardTransferSource.swift)
+            [[ "$source_text" == *'appendingPathComponent("MacChannel", isDirectory: true)'* ]] \
+                && allowed=1
+            ;;
         App/ProductionAppRuntime.swift)
             [[ "$source_text" == *'appendingPathComponent("MacChannel", isDirectory: true)'* ]] \
                 && allowed=1
