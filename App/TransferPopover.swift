@@ -159,17 +159,32 @@ final class TransferSurfaceModel: ObservableObject {
     }
 }
 
-struct TransferPopover: View {
-    private enum Section: String, CaseIterable, Identifiable {
-        case active = "进行中"
-        case history = "历史"
-        var id: String { rawValue }
-    }
+enum TransferSurfaceSection: String, CaseIterable, Identifiable {
+    case active = "进行中"
+    case history = "历史"
 
+    var id: String { rawValue }
+}
+
+struct TransferPopover: View {
     @ObservedObject var model: TransferSurfaceModel
     let service: any TransferSurfaceServicing
+    let initialSection: TransferSurfaceSection
     let onDismiss: () -> Void
-    @State private var section: Section = .active
+    @State private var section: TransferSurfaceSection
+
+    init(
+        model: TransferSurfaceModel,
+        service: any TransferSurfaceServicing,
+        initialSection: TransferSurfaceSection = .active,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.model = model
+        self.service = service
+        self.initialSection = initialSection
+        self.onDismiss = onDismiss
+        _section = State(initialValue: initialSection)
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -184,7 +199,7 @@ struct TransferPopover: View {
                     .keyboardShortcut(.cancelAction)
             }
             Picker("内容", selection: $section) {
-                ForEach(Section.allCases) { section in
+                ForEach(TransferSurfaceSection.allCases) { section in
                     Text(section.rawValue).tag(section)
                 }
             }

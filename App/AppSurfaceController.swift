@@ -132,6 +132,12 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
             else { return }
             showTransfers(relativeTo: anchor)
         }
+        controller.onShowReceiveHistory = { [weak self, weak controller] in
+            guard let self,
+                  let anchor = controller?.nativeButton ?? controller?.button
+            else { return }
+            showTransfers(relativeTo: anchor, initialSection: .history)
+        }
         controller.onShowPairing = { [weak self, weak controller] in
             guard let self,
                   let anchor = controller?.nativeButton ?? controller?.button
@@ -464,12 +470,16 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         restoreFocus()
     }
 
-    private func showTransfers(relativeTo anchor: NSView) {
+    private func showTransfers(
+        relativeTo anchor: NSView,
+        initialSection: TransferSurfaceSection = .active
+    ) {
         let popover = configuredPopover()
         popover.contentViewController = NSHostingController(
             rootView: TransferPopover(
                 model: transferModel,
                 service: transferService,
+                initialSection: initialSection,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
             )
         )

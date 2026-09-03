@@ -5,6 +5,18 @@ import XCTest
 @testable import MacChannelCore
 
 final class TransferSurfaceTests: XCTestCase {
+    @MainActor
+    func testTransferPopoverCanStartOnHistory() {
+        let view = TransferPopover(
+            model: TransferSurfaceModel(),
+            service: StubTransferSurfaceService(),
+            initialSection: .history,
+            onDismiss: {}
+        )
+
+        XCTAssertEqual(view.initialSection, .history)
+    }
+
     func testDefaultReceiveDirectoryPresentationNamesTheRealCompatibilityPath() {
         let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
 
@@ -1860,6 +1872,14 @@ private final class FailingTransferSurfaceService: TransferSurfaceServicing {
     func pause(_ id: TransferID) async throws { throw SurfaceActionFailure.expected }
     func resume(_ id: TransferID) async throws { throw SurfaceActionFailure.expected }
     func cancel(_ id: TransferID) async throws { throw SurfaceActionFailure.expected }
+    func showInFinder(_ url: URL) {}
+}
+
+@MainActor
+private final class StubTransferSurfaceService: TransferSurfaceServicing {
+    func pause(_ id: TransferID) async throws {}
+    func resume(_ id: TransferID) async throws {}
+    func cancel(_ id: TransferID) async throws {}
     func showInFinder(_ url: URL) {}
 }
 
