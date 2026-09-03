@@ -193,6 +193,7 @@ final class StatusItemController: NSObject {
     }
 
     func completeTransfer(token: StatusItemDragToken) {
+        discardPreparedContent(for: token)
         state.finishTransfer(token: token)
         renderPhase()
     }

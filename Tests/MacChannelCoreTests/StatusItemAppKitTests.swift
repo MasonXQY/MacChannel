@@ -648,6 +648,133 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testCompletedClipboardTransferDiscardsOwnedContentOnlyAfterMatchingTerminalCallback() async throws {
+        let target = DeviceID(rawValue: UUID())
+        let fileManager = RecordingRemovalFileManager()
+        let prepared = try ownedClipboardTransfer(fileManager: fileManager)
+        defer { prepared.discardTemporaryFiles() }
+        let transfer = RecordingTransferCoordinator()
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: transfer,
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+        var startedToken: StatusItemDragToken?
+        controller.onTransferStarted = { _, token in startedToken = token }
+
+        controller.performClipboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        for _ in 0..<100 where await transfer.sentCount() == 0 || startedToken == nil {
+            await Task.yield()
+        }
+        let token = try XCTUnwrap(startedToken)
+
+        XCTAssertEqual(fileManager.removeCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+
+        controller.completeTransfer(token: token)
+        controller.completeTransfer(token: token)
+
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+    }
+
+    @MainActor
+    func testLateTerminalCallbackForOldClipboardTokenDoesNotDiscardNewOwnership() async throws {
+        let target = DeviceID(rawValue: UUID())
+        let firstFileManager = RecordingRemovalFileManager()
+        let secondFileManager = RecordingRemovalFileManager()
+        let first = try ownedClipboardTransfer(fileManager: firstFileManager)
+        let second = try ownedClipboardTransfer(fileManager: secondFileManager)
+        defer {
+            first.discardTemporaryFiles()
+            second.discardTemporaryFiles()
+        }
+        let transfer = RecordingTransferCoordinator()
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: transfer,
+            clipboardPreparer: SequencedClipboardTransferPreparer(prepared: [first, second]),
+            deviceMenuPresenter: menu
+        )
+        var startedTokens: [StatusItemDragToken] = []
+        controller.onTransferStarted = { _, token in startedTokens.append(token) }
+
+        controller.performClipboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        for _ in 0..<100 where startedTokens.count < 1 {
+            await Task.yield()
+        }
+        let firstToken = try XCTUnwrap(startedTokens.first)
+        controller.completeTransfer(token: firstToken)
+
+        controller.performClipboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        for _ in 0..<100 where startedTokens.count < 2 {
+            await Task.yield()
+        }
+        let secondToken = try XCTUnwrap(startedTokens.last)
+
+        XCTAssertEqual(firstFileManager.removeCount, 1)
+        XCTAssertEqual(secondFileManager.removeCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.urls[0].path))
+
+        controller.completeTransfer(token: firstToken)
+
+        XCTAssertEqual(secondFileManager.removeCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.urls[0].path))
+
+        controller.completeTransfer(token: secondToken)
+        controller.completeTransfer(token: secondToken)
+
+        XCTAssertEqual(secondFileManager.removeCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: second.urls[0].path))
+    }
+
+    @MainActor
+    func testCompletedClipboardTransferNeverDeletesCopiedSourceURLs() async throws {
+        let target = DeviceID(rawValue: UUID())
+        let fileManager = RecordingRemovalFileManager()
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StatusItemAppKitTests-copied-\(UUID().uuidString).txt")
+        try Data("copied source".utf8).write(to: sourceURL)
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let prepared = PreparedClipboardTransfer(
+            urls: [sourceURL],
+            ownedTemporaryURLs: [],
+            fileManager: fileManager
+        )
+        let transfer = RecordingTransferCoordinator()
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: transfer,
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+        var startedToken: StatusItemDragToken?
+        controller.onTransferStarted = { _, token in startedToken = token }
+
+        controller.performClipboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        for _ in 0..<100 where startedToken == nil {
+            await Task.yield()
+        }
+
+        controller.completeTransfer(token: try XCTUnwrap(startedToken))
+
+        XCTAssertEqual(fileManager.removeCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
+    }
+
+    @MainActor
     func testClipboardTargetThatGoesOfflineCanBeCancelledAndDiscardsOwnedTemporaryContent() throws {
         let online = DeviceID(rawValue: UUID())
         let unavailable = DeviceID(rawValue: UUID())
