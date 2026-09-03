@@ -694,10 +694,14 @@ final class AppRuntimeTests: XCTestCase {
         let oldEvents = ApplicationShellReceiveEventSource()
         let currentEvents = ApplicationShellReceiveEventSource()
         let notificationCenter = ApplicationShellNotificationCenter()
+        let revealer = ApplicationShellReceiveTargetRevealer()
         let notifier = ReceiveNotificationController(
             center: notificationCenter,
-            revealer: ApplicationShellReceiveTargetRevealer()
+            revealer: revealer
         )
+        let sourceID = DeviceID(rawValue: UUID())
+        let transferID = TransferID(rawValue: UUID())
+        let receivedURL = URL(fileURLWithPath: "/tmp/received.pdf")
         let shell = MacChannelApplicationDelegate(
             initialContainer: AppContainer.localShell(),
             initialStatus: .ready,
@@ -708,7 +712,13 @@ final class AppRuntimeTests: XCTestCase {
                     button: StatusItemButton(
                         frame: NSRect(x: 0, y: 0, width: 30, height: 24)
                     ),
-                    devices: [],
+                    devices: [
+                        DeviceSummary(
+                            id: sourceID,
+                            displayName: "书房 Mac",
+                            availability: .lan
+                        )
+                    ],
                     transferCoordinator: container.transferCoordinator
                 )
             }
@@ -726,16 +736,119 @@ final class AppRuntimeTests: XCTestCase {
 
         await currentEvents.publish(
             TransferReceiveResult(
-                transferID: TransferID(rawValue: UUID()),
-                receivedURLs: [URL(fileURLWithPath: "/tmp/received.pdf")]
+                transferID: transferID,
+                receivedURLs: [receivedURL],
+                source: sourceID
             )
         )
+        for _ in 0..<100 where shell.recentReceiveSnapshot.visible.first?.id != transferID {
+            await Task.yield()
+        }
         for _ in 0..<100 where notificationCenter.deliveredCount == 0 {
             await Task.yield()
         }
 
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.first?.id, transferID)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.first?.sourceName, "书房 Mac")
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.first?.receivedURLs, [receivedURL])
         XCTAssertEqual(notificationCenter.deliveredCount, 1)
         XCTAssertTrue(shell.hasUnreadReceive)
+
+        shell.prepareStatusMenuForTesting()
+        XCTAssertTrue(shell.hasUnreadReceive)
+
+        shell.revealRecentReceiveForTesting(transferID)
+        XCTAssertEqual(revealer.revealedURLs, [[receivedURL]])
+        XCTAssertFalse(shell.hasUnreadReceive)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testOpeningDeliveredReceiveNotificationAcknowledgesOnlyItsResult() async throws {
+        let events = ApplicationShellReceiveEventSource()
+        let notificationCenter = ApplicationShellNotificationCenter()
+        let revealer = ApplicationShellReceiveTargetRevealer()
+        let notifier = ReceiveNotificationController(center: notificationCenter, revealer: revealer)
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let first = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/first.pdf")]
+        )
+        let second = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/second.pdf")]
+        )
+
+        await shell.replace(makeApplicationShellContainer(receiveEvents: events), status: .ready)
+        await events.waitUntilSubscribed()
+        await events.publish(first)
+        await events.publish(second)
+        for _ in 0..<1_000 where notificationCenter.deliveredRequests.count < 2 {
+            await Task.yield()
+        }
+
+        notifier.openNotification(
+            identifier: try XCTUnwrap(notificationCenter.deliveredRequests.first?.identifier)
+        )
+
+        XCTAssertEqual(revealer.revealedURLs, [first.receivedURLs])
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [second.transferID])
+        XCTAssertTrue(shell.hasUnreadReceive)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testInstalledHistoryActionAcknowledgesAllReceivedResults() async throws {
+        let events = ApplicationShellReceiveEventSource()
+        let notificationCenter = ApplicationShellNotificationCenter()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        var statusController: StatusItemController?
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: { container in
+                let controller = makeApplicationShellStatusController(container)
+                statusController = controller
+                return controller
+            }
+        )
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/history.pdf")]
+        )
+
+        await shell.replace(makeApplicationShellContainer(receiveEvents: events), status: .ready)
+        await events.waitUntilSubscribed()
+        await events.publish(result)
+        for _ in 0..<100 where shell.recentReceiveSnapshot.visible.first?.id != result.transferID {
+            await Task.yield()
+        }
+        let historyItem = try XCTUnwrap(
+            statusController?.statusMenu.items.first { $0.title == "查看全部历史…" }
+        )
+        statusController?.onShowReceiveHistory = nil
+
+        XCTAssertTrue(
+            NSApp.sendAction(
+                try XCTUnwrap(historyItem.action),
+                to: historyItem.target,
+                from: historyItem
+            )
+        )
+
+        XCTAssertTrue(shell.recentReceiveSnapshot.visible.isEmpty)
+        XCTAssertFalse(shell.hasUnreadReceive)
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
@@ -788,6 +901,7 @@ final class AppRuntimeTests: XCTestCase {
         for _ in 0..<100 { await Task.yield() }
 
         XCTAssertEqual(shell.observedReceiveEventCount, 1)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [expected[0].transferID])
         let completedBeforeRelease = await publisherFinished.isFinished()
         XCTAssertFalse(completedBeforeRelease)
         XCTAssertTrue(shell.hasUnreadReceive)
@@ -801,11 +915,16 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(notificationCenter.deliveredCount, expected.count)
         XCTAssertEqual(Set(notificationCenter.deliveredIdentifiers).count, expected.count)
         XCTAssertEqual(notificationCenter.maximumConcurrentDeliveries, 1)
+        XCTAssertEqual(
+            shell.recentReceiveSnapshot.visible.map(\.id),
+            expected.suffix(RecentReceiveStore.maximumVisibleCount).reversed().map(\.transferID)
+        )
+        XCTAssertEqual(shell.recentReceiveSnapshot.overflowCount, 1)
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
     @MainActor
-    func testAcknowledgingPublishedBurstWhileDeliveryIsBlockedDoesNotRelightUntilANewReceive()
+    func testOpeningStatusMenuWhileDeliveryIsBlockedPreservesUnreadReceives()
         async
     {
         let events = RuntimeReceiveEventSource(bufferCapacity: 2)
@@ -842,14 +961,14 @@ final class AppRuntimeTests: XCTestCase {
         )
 
         await shell.replace(container, status: .ready)
-        let acknowledgedResults = (0..<4).map { index in
+        let receivedResults = (0..<4).map { index in
             TransferReceiveResult(
                 transferID: TransferID(rawValue: UUID()),
-                receivedURLs: [URL(fileURLWithPath: "/tmp/acknowledged-\(index).pdf")]
+                receivedURLs: [URL(fileURLWithPath: "/tmp/received-\(index).pdf")]
             )
         }
         let publisher = Task {
-            for result in acknowledgedResults {
+            for result in receivedResults {
                 await events.publish(result)
             }
         }
@@ -858,17 +977,22 @@ final class AppRuntimeTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(events.completionState.latestSequence, 4)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [receivedResults[0].transferID])
         XCTAssertTrue(shell.hasUnreadReceive)
 
         statusController?.prepareToOpenStatusMenu()
         XCTAssertTrue(shell.hasUnreadReceive)
         notificationCenter.releaseFirstDelivery()
         await publisher.value
-        for _ in 0..<1_000 where notificationCenter.deliveredCount < acknowledgedResults.count {
+        for _ in 0..<1_000 where notificationCenter.deliveredCount < receivedResults.count {
             await Task.yield()
         }
 
-        XCTAssertEqual(notificationCenter.deliveredCount, acknowledgedResults.count)
+        XCTAssertEqual(notificationCenter.deliveredCount, receivedResults.count)
+        XCTAssertEqual(
+            shell.recentReceiveSnapshot.visible.map(\.id),
+            receivedResults.reversed().map(\.transferID)
+        )
         XCTAssertTrue(shell.hasUnreadReceive)
 
         await events.publish(
@@ -918,13 +1042,13 @@ final class AppRuntimeTests: XCTestCase {
 
         await shell.replace(firstContainer, status: .ready)
         await firstEvents.waitUntilSubscribed()
-        await firstEvents.publish(
-            TransferReceiveResult(
-                transferID: TransferID(rawValue: UUID()),
-                receivedURLs: [URL(fileURLWithPath: "/tmp/first.pdf")]
-            )
+        let firstResult = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/first.pdf")]
         )
+        await firstEvents.publish(firstResult)
         await notificationCenter.waitUntilDeliveryStarts()
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [firstResult.transferID])
 
         let replacementFinished = expectation(description: "runtime replacement finishes")
         let currentReplacement = Task { @MainActor in
@@ -937,6 +1061,7 @@ final class AppRuntimeTests: XCTestCase {
         let currentReplacementInstalled = await currentReplacement.value
 
         XCTAssertTrue(currentReplacementInstalled)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [firstResult.transferID])
         await firstEvents.waitUntilCancelled()
         await currentEvents.waitUntilSubscribed()
         let currentSubscribed = await currentEvents.isSubscribed()
@@ -979,6 +1104,15 @@ private struct TrustedRuntimeFixture {
     let peer: DeviceSummary
     let repository: TrustRepository
     let settings: RuntimeSettingsStore
+}
+
+@MainActor
+private func makeApplicationShellStatusController(_ container: AppContainer) -> StatusItemController {
+    StatusItemController(
+        button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24)),
+        devices: [],
+        transferCoordinator: container.transferCoordinator
+    )
 }
 
 @MainActor
@@ -1066,13 +1200,14 @@ private actor ApplicationShellReceiveEventSource {
 
 @MainActor
 private final class ApplicationShellNotificationCenter: ReceiveNotificationCenter {
-    private(set) var deliveredCount = 0
+    private(set) var deliveredRequests: [ReceiveNotificationRequest] = []
+    var deliveredCount: Int { deliveredRequests.count }
 
     func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
     func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .authorized }
 
     func deliver(_ request: ReceiveNotificationRequest) async throws {
-        deliveredCount += 1
+        deliveredRequests.append(request)
     }
 
     func openSystemSettings() {}
@@ -1125,7 +1260,12 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
 
 @MainActor
 private final class ApplicationShellReceiveTargetRevealer: ReceiveTargetRevealing {
-    func reveal(_ urls: [URL]) -> Bool { true }
+    private(set) var revealedURLs: [[URL]] = []
+
+    func reveal(_ urls: [URL]) -> Bool {
+        revealedURLs.append(urls)
+        return true
+    }
 }
 
 private actor FailingTrustSnapshotPersister: TrustSnapshotPersisting {
