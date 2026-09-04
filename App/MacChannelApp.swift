@@ -456,8 +456,10 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { break }
                 await beforeReceiveResultRecord?(result)
                 recordReceiveResult(result, generation: generation)
-                await events.markRecorded(result)
-                releaseReceiveEventDeduplication(result, generation: generation)
+                let sourceAcknowledgedRecording = await events.markRecorded(result)
+                if sourceAcknowledgedRecording {
+                    releaseReceiveEventDeduplication(result, generation: generation)
+                }
                 guard !Task.isCancelled else { break }
                 await receiveNotificationController.notify(receive: result)
             }

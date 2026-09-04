@@ -74,13 +74,13 @@ struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
         private var cancelled = false
         private let nextValue: @Sendable () async -> TransferReceiveResult?
         private let cancelSubscription: @Sendable () async -> Void
-        private let markRecordedValue: @Sendable (TransferReceiveResult) async -> Void
+        private let markRecordedValue: @Sendable (TransferReceiveResult) async -> Bool
         private let drainSubscription: @Sendable () async -> [TransferReceiveResult]
 
         init(
             next: @escaping @Sendable () async -> TransferReceiveResult?,
             cancel: @escaping @Sendable () async -> Void,
-            markRecorded: @escaping @Sendable (TransferReceiveResult) async -> Void = { _ in },
+            markRecorded: @escaping @Sendable (TransferReceiveResult) async -> Bool = { _ in true },
             drainAndCancel: @escaping @Sendable () async -> [TransferReceiveResult] = { [] }
         ) {
             nextValue = next
@@ -103,9 +103,9 @@ struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
             if shouldCancel { await cancelSubscription() }
         }
 
-        func markRecorded(_ result: TransferReceiveResult) async {
-            guard !lock.withLock({ cancelled }) else { return }
-            await markRecordedValue(result)
+        func markRecorded(_ result: TransferReceiveResult) async -> Bool {
+            guard !lock.withLock({ cancelled }) else { return false }
+            return await markRecordedValue(result)
         }
 
         func drainAndCancel() async -> [TransferReceiveResult] {
@@ -150,6 +150,20 @@ struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
         )
     }
 
+    init(
+        next: @escaping @Sendable () async -> TransferReceiveResult?,
+        cancel: @escaping @Sendable () async -> Void,
+        markRecorded: @escaping @Sendable (TransferReceiveResult) async -> Bool,
+        drainAndCancel: @escaping @Sendable () async -> [TransferReceiveResult]
+    ) {
+        subscription = Subscription(
+            next: next,
+            cancel: cancel,
+            markRecorded: markRecorded,
+            drainAndCancel: drainAndCancel
+        )
+    }
+
     func makeAsyncIterator() -> AsyncIterator {
         AsyncIterator(subscription: subscription)
     }
@@ -158,7 +172,7 @@ struct RuntimeReceiveEventStream: AsyncSequence, Sendable {
         await subscription.cancel()
     }
 
-    func markRecorded(_ result: TransferReceiveResult) async {
+    func markRecorded(_ result: TransferReceiveResult) async -> Bool {
         await subscription.markRecorded(result)
     }
 
@@ -224,16 +238,14 @@ actor RuntimeReceiveEventSource {
         drainPendingPublications()
 
         return RuntimeReceiveEventStream(
-            subscription: RuntimeReceiveEventStream.Subscription(
-                next: { [weak self] in await self?.next(subscription: id) },
-                cancel: { [weak self] in await self?.cancelSubscription(id) },
-                markRecorded: { [weak self] result in
-                    await self?.markRecorded(result, subscription: id)
-                },
-                drainAndCancel: { [weak self] in
-                    await self?.drainAndCancel(subscription: id) ?? []
-                }
-            )
+            next: { [weak self] in await self?.next(subscription: id) },
+            cancel: { [weak self] in await self?.cancelSubscription(id) },
+            markRecorded: { [weak self] result in
+                await self?.markRecorded(result, subscription: id) ?? false
+            },
+            drainAndCancel: { [weak self] in
+                await self?.drainAndCancel(subscription: id) ?? []
+            }
         )
     }
 
@@ -393,12 +405,13 @@ actor RuntimeReceiveEventSource {
         continuation?.resume()
     }
 
-    private func markRecorded(_ result: TransferReceiveResult, subscription id: UUID) {
+    private func markRecorded(_ result: TransferReceiveResult, subscription id: UUID) -> Bool {
         guard var state = subscriptions[id], state.inFlight?.transferID == result.transferID else {
-            return
+            return false
         }
         state.inFlight = nil
         subscriptions[id] = state
+        return true
     }
 
     private func drainAndCancel(subscription id: UUID) -> [TransferReceiveResult] {

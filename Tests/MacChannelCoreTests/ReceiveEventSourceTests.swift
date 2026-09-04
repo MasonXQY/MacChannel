@@ -287,10 +287,64 @@ final class ReceiveEventSourceTests: XCTestCase {
         await source.publish(result)
         let observed = await next.value
         XCTAssertEqual(observed, result)
-        await stream.markRecorded(result)
+        let recordingAcknowledged = await stream.markRecorded(result)
 
+        XCTAssertTrue(recordingAcknowledged)
         let drained = await stream.drainAndCancel()
         XCTAssertEqual(drained, [])
+        await source.finish()
+    }
+
+    func testMarkRecordedIsRejectedAfterDrainTakesOwnership() async {
+        let source = RuntimeReceiveEventSource()
+        let stream = await source.stream()
+        let result = makeResult(path: "/tmp/drain-before-recorded.bin")
+        var iterator = stream.makeAsyncIterator()
+        let next = Task { await iterator.next() }
+
+        await source.publish(result)
+        let observed = await next.value
+        XCTAssertEqual(observed, result)
+        let drained = await stream.drainAndCancel()
+        let recordingAcknowledged = await stream.markRecorded(result)
+
+        XCTAssertEqual(drained, [result])
+        XCTAssertFalse(recordingAcknowledged)
+        await source.finish()
+    }
+
+    func testFinishedSourceStillAcknowledgesItsInFlightResult() async {
+        let source = RuntimeReceiveEventSource()
+        let stream = await source.stream()
+        let result = makeResult(path: "/tmp/finished-before-recorded.bin")
+        var iterator = stream.makeAsyncIterator()
+        let next = Task { await iterator.next() }
+
+        await source.publish(result)
+        let observed = await next.value
+        XCTAssertEqual(observed, result)
+        await source.finish()
+        let recordingAcknowledged = await stream.markRecorded(result)
+        let drained = await stream.drainAndCancel()
+
+        XCTAssertTrue(recordingAcknowledged)
+        XCTAssertEqual(drained, [])
+    }
+
+    func testCancelledStreamRejectsLateRecordingAcknowledgement() async {
+        let source = RuntimeReceiveEventSource()
+        let stream = await source.stream()
+        let result = makeResult(path: "/tmp/cancelled-before-recorded.bin")
+        var iterator = stream.makeAsyncIterator()
+        let next = Task { await iterator.next() }
+
+        await source.publish(result)
+        let observed = await next.value
+        XCTAssertEqual(observed, result)
+        await stream.cancel()
+        let recordingAcknowledged = await stream.markRecorded(result)
+
+        XCTAssertFalse(recordingAcknowledged)
         await source.finish()
     }
 

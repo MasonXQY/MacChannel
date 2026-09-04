@@ -1688,6 +1688,166 @@ final class AppRuntimeTests: XCTestCase {
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
+    @MainActor
+    func testApplicationShellKeepsDeduplicationGuardUntilCancelledDrainRecords() async {
+        let result = TransferReceiveResult(
+            transferID: TransferID(
+                rawValue: UUID(uuidString: "abcdefab-cdef-abcd-efab-cdefabcdefab")!
+            ),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/cancel-before-acknowledgement.pdf")]
+        )
+        let source = CancelBeforeAcknowledgementReceiveEventSource(result: result)
+        let recordGate = ReceiveResultRecordGate()
+        let notifier = ReceiveNotificationController(
+            center: ApplicationShellNotificationCenter(),
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            beforeReceiveResultRecord: { result in
+                await recordGate.pause(result)
+            },
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let base = AppContainer.localShell()
+        let outgoingContainer = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await source.stream() }
+        )
+
+        await shell.replace(outgoingContainer, status: .ready)
+        await recordGate.waitUntilPaused()
+        let staleReplacement = Task { @MainActor in
+            await shell.replace(AppContainer.localShell(), status: .ready)
+        }
+        await source.waitUntilDrainEntered()
+        let currentReplacement = Task { @MainActor in
+            await shell.replace(AppContainer.localShell(), status: .ready)
+        }
+
+        await recordGate.release()
+        for _ in 0..<1_000 where shell.observedReceiveEventCount != 1 {
+            await Task.yield()
+        }
+        for _ in 0..<100 { await Task.yield() }
+        let guardCountWhileDrainIsBlocked = shell.receiveEventDeduplicationCount
+        await source.allowDrainToReturn()
+        let staleReplacementInstalled = await staleReplacement.value
+        let currentReplacementInstalled = await currentReplacement.value
+
+        XCTAssertEqual(guardCountWhileDrainIsBlocked, 1)
+        XCTAssertFalse(staleReplacementInstalled)
+        XCTAssertTrue(currentReplacementInstalled)
+        XCTAssertEqual(shell.observedReceiveEventCount, 1)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [result.transferID])
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 0)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testApplicationShellKeepsGuardWhenDrainWinsDuringSourceAcknowledgement() async {
+        let result = TransferReceiveResult(
+            transferID: TransferID(
+                rawValue: UUID(uuidString: "12345678-cdef-abcd-efab-cdefabcdefab")!
+            ),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/drain-wins-source-acknowledgement.pdf")]
+        )
+        let source = DelayedAcknowledgementReceiveEventSource(result: result)
+        let notifier = ReceiveNotificationController(
+            center: ApplicationShellNotificationCenter(),
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let base = AppContainer.localShell()
+        let outgoingContainer = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await source.stream() }
+        )
+
+        await shell.replace(outgoingContainer, status: .ready)
+        await source.waitUntilAcknowledgementEntered()
+        XCTAssertEqual(shell.observedReceiveEventCount, 1)
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 1)
+        let replacement = Task { @MainActor in
+            await shell.replace(AppContainer.localShell(), status: .ready)
+        }
+        await source.waitUntilDrainEntered()
+
+        await source.rejectAcknowledgement()
+        await source.waitUntilAcknowledgementReturned()
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 1)
+        await source.allowDrainToReturn()
+        let replacementInstalled = await replacement.value
+
+        XCTAssertTrue(replacementInstalled)
+        XCTAssertEqual(shell.observedReceiveEventCount, 1)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [result.transferID])
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 0)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testApplicationShutdownRetiresGuardAfterCancelledDrainCompletes() async {
+        let result = TransferReceiveResult(
+            transferID: TransferID(
+                rawValue: UUID(uuidString: "87654321-cdef-abcd-efab-cdefabcdefab")!
+            ),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/shutdown-cancel-before-acknowledgement.pdf")]
+        )
+        let source = CancelBeforeAcknowledgementReceiveEventSource(result: result)
+        let recordGate = ReceiveResultRecordGate()
+        let notifier = ReceiveNotificationController(
+            center: ApplicationShellNotificationCenter(),
+            revealer: ApplicationShellReceiveTargetRevealer()
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            beforeReceiveResultRecord: { result in
+                await recordGate.pause(result)
+            },
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let base = AppContainer.localShell()
+        let outgoingContainer = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await source.stream() }
+        )
+
+        await shell.replace(outgoingContainer, status: .ready)
+        await recordGate.waitUntilPaused()
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+        await source.waitUntilDrainEntered()
+        await recordGate.release()
+        for _ in 0..<1_000 where shell.observedReceiveEventCount != 1 {
+            await Task.yield()
+        }
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 1)
+
+        await source.allowDrainToReturn()
+        for _ in 0..<1_000 where shell.receiveEventDeduplicationCount != 0 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(shell.observedReceiveEventCount, 1)
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 0)
+    }
+
     private func makeTrustedRuntimeFixture() throws -> TrustedRuntimeFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1853,6 +2013,137 @@ private actor ReceiveResultRecordGate {
         isReleased = true
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+}
+
+private actor CancelBeforeAcknowledgementReceiveEventSource {
+    private let result: TransferReceiveResult
+    private var didYield = false
+    private var drainEntered = false
+    private var drainMayReturn = false
+    private var drainEnteredContinuation: CheckedContinuation<Void, Never>?
+    private var drainReturnContinuation: CheckedContinuation<Void, Never>?
+
+    init(result: TransferReceiveResult) {
+        self.result = result
+    }
+
+    func stream() -> RuntimeReceiveEventStream {
+        RuntimeReceiveEventStream(
+            next: { [weak self] in await self?.next() },
+            cancel: {},
+            markRecorded: { _ in true },
+            drainAndCancel: { [weak self] in await self?.drainAndCancel() ?? [] }
+        )
+    }
+
+    func waitUntilDrainEntered() async {
+        guard !drainEntered else { return }
+        await withCheckedContinuation { drainEnteredContinuation = $0 }
+    }
+
+    func allowDrainToReturn() {
+        drainMayReturn = true
+        drainReturnContinuation?.resume()
+        drainReturnContinuation = nil
+    }
+
+    private func next() -> TransferReceiveResult? {
+        guard !didYield else { return nil }
+        didYield = true
+        return result
+    }
+
+    private func drainAndCancel() async -> [TransferReceiveResult] {
+        drainEntered = true
+        drainEnteredContinuation?.resume()
+        drainEnteredContinuation = nil
+        guard !drainMayReturn else { return [result] }
+        await withCheckedContinuation { drainReturnContinuation = $0 }
+        return [result]
+    }
+}
+
+private actor DelayedAcknowledgementReceiveEventSource {
+    private let result: TransferReceiveResult
+    private var didYield = false
+    private var acknowledgementEntered = false
+    private var acknowledgementMayReturn = false
+    private var acknowledgementReturned = false
+    private var drainEntered = false
+    private var drainMayReturn = false
+    private var acknowledgementEnteredContinuation: CheckedContinuation<Void, Never>?
+    private var acknowledgementReturnContinuation: CheckedContinuation<Void, Never>?
+    private var acknowledgementReturnedContinuation: CheckedContinuation<Void, Never>?
+    private var drainEnteredContinuation: CheckedContinuation<Void, Never>?
+    private var drainReturnContinuation: CheckedContinuation<Void, Never>?
+
+    init(result: TransferReceiveResult) {
+        self.result = result
+    }
+
+    func stream() -> RuntimeReceiveEventStream {
+        RuntimeReceiveEventStream(
+            next: { [weak self] in await self?.next() },
+            cancel: {},
+            markRecorded: { [weak self] _ in await self?.markRecorded() ?? false },
+            drainAndCancel: { [weak self] in await self?.drainAndCancel() ?? [] }
+        )
+    }
+
+    func waitUntilAcknowledgementEntered() async {
+        guard !acknowledgementEntered else { return }
+        await withCheckedContinuation { acknowledgementEnteredContinuation = $0 }
+    }
+
+    func rejectAcknowledgement() {
+        acknowledgementMayReturn = true
+        acknowledgementReturnContinuation?.resume()
+        acknowledgementReturnContinuation = nil
+    }
+
+    func waitUntilAcknowledgementReturned() async {
+        guard !acknowledgementReturned else { return }
+        await withCheckedContinuation { acknowledgementReturnedContinuation = $0 }
+    }
+
+    func waitUntilDrainEntered() async {
+        guard !drainEntered else { return }
+        await withCheckedContinuation { drainEnteredContinuation = $0 }
+    }
+
+    func allowDrainToReturn() {
+        drainMayReturn = true
+        drainReturnContinuation?.resume()
+        drainReturnContinuation = nil
+    }
+
+    private func next() -> TransferReceiveResult? {
+        guard !didYield else { return nil }
+        didYield = true
+        return result
+    }
+
+    private func markRecorded() async -> Bool {
+        acknowledgementEntered = true
+        acknowledgementEnteredContinuation?.resume()
+        acknowledgementEnteredContinuation = nil
+        if !acknowledgementMayReturn {
+            await withCheckedContinuation { acknowledgementReturnContinuation = $0 }
+        }
+        acknowledgementReturned = true
+        acknowledgementReturnedContinuation?.resume()
+        acknowledgementReturnedContinuation = nil
+        return false
+    }
+
+    private func drainAndCancel() async -> [TransferReceiveResult] {
+        drainEntered = true
+        drainEnteredContinuation?.resume()
+        drainEnteredContinuation = nil
+        guard !drainMayReturn else { return [result] }
+        await withCheckedContinuation { drainReturnContinuation = $0 }
+        return [result]
     }
 }
 
