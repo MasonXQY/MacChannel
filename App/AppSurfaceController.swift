@@ -27,6 +27,7 @@ extension ReceiveNotificationController: ReceiveNotificationServicing {
 
 @MainActor
 final class AppSurfaceController: NSObject, NSPopoverDelegate {
+    var onSettingsSnapshot: ((SettingsSurfaceSnapshot) -> Void)?
     static let historyLimit = 200
     static let liveHistoryLimit = historyLimit
     static let standardPopoverBehavior: NSPopover.Behavior = .transient
@@ -274,6 +275,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         {
             pairingModel.resetToIdle()
         }
+        onSettingsSnapshot?(snapshot)
     }
 
     func currentReceiveDirectory(for source: DeviceID?) -> URL {

@@ -76,6 +76,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var visibleRecentReceives: [RecentReceiveSummary] = []
     private var latestRecentReceiveSnapshot = RecentReceiveSnapshot(visible: [], overflowCount: 0)
     private var isStatusMenuTracking = false
+    private var statusMenuTrackingGeneration = 0
     private var cleanupByToken: [StatusItemDragToken: @MainActor () -> Void] = [:]
 
     init(
@@ -305,7 +306,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func prepareToOpenStatusMenu() {
         guard !isStatusMenuTracking else { return }
-        applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
+        menuNeedsUpdate(statusMenu)
     }
 
     func bindRecentReceives(_ store: RecentReceiveStore) {
@@ -664,16 +665,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusItem?.length = button.preferredWidth
     }
 
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        guard !isStatusMenuTracking else { return }
+        applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === statusMenu else { return }
-        applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
+        statusMenuTrackingGeneration &+= 1
         isStatusMenuTracking = true
     }
 
     func menuDidClose(_ menu: NSMenu) {
         guard menu === statusMenu else { return }
-        isStatusMenuTracking = false
-        applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
+        let generation = statusMenuTrackingGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, statusMenuTrackingGeneration == generation else { return }
+            isStatusMenuTracking = false
+        }
     }
 
     private func receiveSnapshotDidChange(_ snapshot: RecentReceiveSnapshot) {

@@ -10,7 +10,9 @@ final class AppContainer {
     let directorySelector: any DirectorySelecting
     let transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)?
     let pairingStates: AsyncStream<PairingState>?
+    let initialSettingsSnapshot: SettingsSurfaceSnapshot?
     let settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)?
+    let receiveDirectoryConfigurationPending: Bool
     let transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)?
     let receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)?
     let receiveCompletionState: RuntimeReceiveCompletionState?
@@ -24,7 +26,9 @@ final class AppContainer {
         directorySelector: any DirectorySelecting = NativeDirectorySelector(),
         transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)? = nil,
         pairingStates: AsyncStream<PairingState>? = nil,
+        initialSettingsSnapshot: SettingsSurfaceSnapshot? = nil,
         settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)? = nil,
+        receiveDirectoryConfigurationPending: Bool = false,
         transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil,
         receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)? = nil,
         receiveCompletionState: RuntimeReceiveCompletionState? = nil,
@@ -37,7 +41,9 @@ final class AppContainer {
         self.directorySelector = directorySelector
         self.transferSnapshots = transferSnapshots
         self.pairingStates = pairingStates
+        self.initialSettingsSnapshot = initialSettingsSnapshot
         self.settingsSnapshots = settingsSnapshots
+        self.receiveDirectoryConfigurationPending = receiveDirectoryConfigurationPending
         self.transferHistory = transferHistory
         self.receiveEvents = receiveEvents
         self.receiveCompletionState = receiveCompletionState
@@ -54,7 +60,8 @@ final class AppContainer {
     static func loadingShell() -> AppContainer {
         AppContainer(
             deviceDirectory: DeviceDirectory(trust: DeviceTrust(trustedIDs: [])),
-            transferCoordinator: UnavailableTransferCoordinator()
+            transferCoordinator: UnavailableTransferCoordinator(),
+            receiveDirectoryConfigurationPending: true
         )
     }
 }

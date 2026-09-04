@@ -41,7 +41,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertTrue(center.requests[0].content.body.contains("plan.pdf"))
         XCTAssertFalse(center.requests[0].content.body.contains(file.path))
         XCTAssertTrue(center.requests[0].content.userInfo.isEmpty)
-        controller.openNotification(identifier: center.requests[0].identifier)
+        await controller.openNotification(identifier: center.requests[0].identifier)
         XCTAssertEqual(finder.revealedURLs, [[file]])
         XCTAssertEqual(opened, [result.transferID])
     }
@@ -94,7 +94,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
 
         XCTAssertEqual(center.requests.count, 1)
         XCTAssertTrue(center.requests[0].content.body.contains("已收到 2 个文件"))
-        controller.openNotification(identifier: center.requests[0].identifier)
+        await controller.openNotification(identifier: center.requests[0].identifier)
         XCTAssertEqual(finder.revealedURLs, [[first, second]])
     }
 
@@ -554,7 +554,9 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertTrue(workspace.openedURLs.isEmpty)
     }
 
-    func testUnknownNotificationIdentifierDoesNotRevealAnyTarget() {
+    func testWellFormedButUndeliveredNotificationIdentifierIsRejected() async {
+        let transferID = TransferID(rawValue: UUID())
+        let source = DeviceID(rawValue: UUID())
         let finder = RecordingReceiveTargetRevealer()
         let controller = ReceiveNotificationController(
             center: RecordingReceiveNotificationCenter(status: .authorized),
@@ -562,11 +564,46 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         )
         var opened: [TransferID] = []
         controller.onReceiveOpened = { opened.append($0) }
+        let identifier = "dropmesh.receive.v1.\(transferID.rawValue.uuidString).\(source.rawValue.uuidString)"
 
-        controller.openNotification(identifier: "dropmesh.receive.unknown")
+        await controller.openNotification(identifier: identifier)
 
         XCTAssertTrue(finder.revealedURLs.isEmpty)
         XCTAssertTrue(opened.isEmpty)
+    }
+
+    func testUUIDCaseVariantOfDeliveredNotificationAcknowledgesCanonicalTransferOnlyOnce()
+        async throws
+    {
+        let center = RecordingReceiveNotificationCenter(status: .authorized)
+        let finder = RecordingReceiveTargetRevealer()
+        let source = DeviceID(rawValue: UUID())
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/canonical.pdf")],
+            source: source
+        )
+        let controller = ReceiveNotificationController(center: center, revealer: finder)
+        var opened: [TransferID] = []
+        controller.onReceiveOpened = { opened.append($0) }
+
+        await controller.notify(receive: result)
+        let canonical = try XCTUnwrap(center.requests.first?.identifier)
+        let caseVariant = canonical
+            .replacingOccurrences(
+                of: result.transferID.rawValue.uuidString.lowercased(),
+                with: result.transferID.rawValue.uuidString.uppercased()
+            )
+            .replacingOccurrences(
+                of: source.rawValue.uuidString.lowercased(),
+                with: source.rawValue.uuidString.uppercased()
+            )
+
+        await controller.openNotification(identifier: caseVariant)
+        await controller.openNotification(identifier: canonical)
+
+        XCTAssertEqual(finder.revealedURLs, [result.receivedURLs])
+        XCTAssertEqual(opened, [result.transferID])
     }
 
     func testNotificationIdentifierCanRevealItsTargetOnlyOnce() async throws {
@@ -584,8 +621,8 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         await controller.notify(receive: result)
 
         let identifier = try XCTUnwrap(center.requests.first?.identifier)
-        controller.openNotification(identifier: identifier)
-        controller.openNotification(identifier: identifier)
+        await controller.openNotification(identifier: identifier)
+        await controller.openNotification(identifier: identifier)
 
         XCTAssertEqual(finder.revealedURLs, [[file]])
         XCTAssertEqual(opened, [result.transferID])
@@ -604,8 +641,8 @@ final class ReceiveNotificationControllerTests: XCTestCase {
 
         await controller.notify(receive: result)
         let identifier = try XCTUnwrap(center.requests.first?.identifier)
-        controller.openNotification(identifier: identifier)
-        controller.openNotification(identifier: identifier)
+        await controller.openNotification(identifier: identifier)
+        await controller.openNotification(identifier: identifier)
 
         XCTAssertEqual(finder.revealedURLs, [result.receivedURLs])
         XCTAssertEqual(opened, [result.transferID])
@@ -637,8 +674,8 @@ final class ReceiveNotificationControllerTests: XCTestCase {
             await controller.notify(receive: result)
         }
 
-        controller.openNotification(identifier: center.requests[0].identifier)
-        controller.openNotification(identifier: center.requests[0].identifier)
+        await controller.openNotification(identifier: center.requests[0].identifier)
+        await controller.openNotification(identifier: center.requests[0].identifier)
 
         XCTAssertEqual(finder.requests.map(\.urls), [[]])
         XCTAssertEqual(finder.requests.map(\.fallbackDirectory), [fallback])
@@ -671,8 +708,8 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         let identifier = try XCTUnwrap(center.requests.first?.identifier)
 
         now.addTimeInterval(61)
-        controller.openNotification(identifier: identifier)
-        controller.openNotification(identifier: identifier)
+        await controller.openNotification(identifier: identifier)
+        await controller.openNotification(identifier: identifier)
 
         XCTAssertEqual(finder.requests.map(\.urls), [[]])
         XCTAssertEqual(finder.requests.map(\.fallbackDirectory), [fallback])
@@ -706,13 +743,90 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         var opened: [TransferID] = []
         reconstructedController.onReceiveOpened = { opened.append($0) }
 
-        reconstructedController.openNotification(identifier: identifier)
-        reconstructedController.openNotification(identifier: identifier)
+        await reconstructedController.openNotification(identifier: identifier)
+        await reconstructedController.openNotification(identifier: identifier)
 
         XCTAssertEqual(finder.requests.map(\.urls), [[]])
         XCTAssertEqual(finder.requests.map(\.fallbackDirectory), [sourceDirectory])
         XCTAssertEqual(resolver.requestedSources, [source])
         XCTAssertEqual(opened, [transferID])
+    }
+
+    func testPrepareReconstructsIdentityBeforeSystemRemovesClickedNotification() async throws {
+        let center = RecordingReceiveNotificationCenter(status: .authorized)
+        let source = DeviceID(rawValue: UUID())
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/private/old/file.pdf")],
+            source: source
+        )
+        let deliveringController = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer()
+        )
+        await deliveringController.notify(receive: result)
+        let identifier = try XCTUnwrap(center.requests.first?.identifier)
+        let finder = RecordingReceiveTargetRevealer()
+        let reconstructedController = ReceiveNotificationController(
+            center: center,
+            revealer: finder,
+            receiveDirectoryResolver: RecordingReceiveDirectoryResolver(
+                defaultDirectory: URL(fileURLWithPath: "/Downloads/Current")
+            )
+        )
+        var opened: [TransferID] = []
+        reconstructedController.onReceiveOpened = { opened.append($0) }
+
+        await reconstructedController.prepare()
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+        await reconstructedController.openNotification(identifier: identifier)
+
+        XCTAssertEqual(finder.requests.map(\.urls), [[]])
+        XCTAssertEqual(opened, [result.transferID])
+    }
+
+    func testTrustedCenterResponseSurvivesReconstructionBeforeRegistryPreload() async throws {
+        let center = RecordingReceiveNotificationCenter(status: .authorized)
+        let source = DeviceID(rawValue: UUID())
+        let fallback = URL(fileURLWithPath: "/Downloads/Source Override")
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/private/old/file.pdf")],
+            source: source
+        )
+        let deliveringController = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer()
+        )
+        await deliveringController.notify(receive: result)
+        let identifier = try XCTUnwrap(center.requests.first?.identifier)
+        let finder = RecordingReceiveTargetRevealer()
+        let reconstructedController = ReceiveNotificationController(
+            center: center,
+            revealer: finder,
+            receiveDirectoryResolver: RecordingReceiveDirectoryResolver(
+                directories: [source: fallback]
+            )
+        )
+        var opened: [TransferID] = []
+        reconstructedController.onReceiveOpened = { opened.append($0) }
+        let caseVariant = identifier
+            .replacingOccurrences(
+                of: result.transferID.rawValue.uuidString.lowercased(),
+                with: result.transferID.rawValue.uuidString.uppercased()
+            )
+            .replacingOccurrences(
+                of: source.rawValue.uuidString.lowercased(),
+                with: source.rawValue.uuidString.uppercased()
+            )
+
+        center.removeDeliveredNotifications(withIdentifiers: [identifier])
+        await center.emitDeliveredResponse(identifier: caseVariant)
+        await center.emitDeliveredResponse(identifier: identifier)
+
+        XCTAssertEqual(finder.requests.map(\.urls), [[]])
+        XCTAssertEqual(finder.requests.map(\.fallbackDirectory), [fallback])
+        XCTAssertEqual(opened, [result.transferID])
     }
 
     func testSystemResponseCompletesAfterItsMainActorHandler() async {
@@ -813,6 +927,8 @@ private final class RecordingReceiveNotificationCenter: ReceiveNotificationCente
     private let requestedStatus: ReceiveNotificationAuthorizationState
     private(set) var authorizationRequestCount = 0
     private(set) var requests: [ReceiveNotificationRequest] = []
+    private var deliveredIdentifiers: Set<String> = []
+    private var deliveredResponseHandler: ((String) async -> Void)?
     var deliveryError: Error?
 
     init(
@@ -842,6 +958,23 @@ private final class RecordingReceiveNotificationCenter: ReceiveNotificationCente
         if let deliveryError {
             throw deliveryError
         }
+        deliveredIdentifiers.insert(request.identifier)
+    }
+
+    func deliveredNotificationIdentifiers() async -> [String] {
+        Array(deliveredIdentifiers)
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
+        deliveredIdentifiers.subtract(identifiers)
+    }
+
+    func setDeliveredResponseHandler(_ handler: @escaping (String) async -> Void) {
+        deliveredResponseHandler = handler
+    }
+
+    func emitDeliveredResponse(identifier: String) async {
+        await deliveredResponseHandler?(identifier)
     }
 
     func openSystemSettings() {}
@@ -879,7 +1012,7 @@ private final class RecordingReceiveDirectoryResolver: ReceiveDirectoryResolving
         self.directories = directories
     }
 
-    func currentReceiveDirectory(for source: DeviceID?) -> URL? {
+    func currentReceiveDirectory(for source: DeviceID?) async -> URL? {
         requestedSources.append(source)
         return source.flatMap { directories[$0] } ?? defaultDirectory
     }

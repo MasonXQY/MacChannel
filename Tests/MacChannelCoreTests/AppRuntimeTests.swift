@@ -894,7 +894,7 @@ final class AppRuntimeTests: XCTestCase {
         shell.prepareStatusMenuForTesting()
         XCTAssertTrue(shell.hasUnreadReceive)
 
-        shell.revealRecentReceiveForTesting(transferID)
+        await shell.revealRecentReceiveForTesting(transferID)
         XCTAssertEqual(revealer.revealedURLs, [[receivedURL]])
         XCTAssertFalse(shell.hasUnreadReceive)
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
@@ -930,13 +930,185 @@ final class AppRuntimeTests: XCTestCase {
             await Task.yield()
         }
 
-        notifier.openNotification(
+        await notifier.openNotification(
             identifier: try XCTUnwrap(notificationCenter.deliveredRequests.first?.identifier)
         )
 
         XCTAssertEqual(revealer.revealedURLs, [first.receivedURLs])
         XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [second.transferID])
         XCTAssertTrue(shell.hasUnreadReceive)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testColdStartNotificationWaitsForPersistedSourceDirectoryBeforeUIHydration()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = DeviceID(rawValue: UUID())
+        let globalDirectory = root.appendingPathComponent("Global Receives", isDirectory: true)
+        let sourceDirectory = root.appendingPathComponent("Source Receives", isDirectory: true)
+        let settingsURL = root.appendingPathComponent("settings.json")
+        let settings = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [source])
+        try await settings.updateDefaultDirectory(globalDirectory)
+        try await settings.updateDirectory(sourceDirectory, for: source)
+        let persistedSettings = try RuntimeSettingsStore(
+            url: settingsURL,
+            trustedDevices: [source]
+        )
+        let notificationCenter = ApplicationShellNotificationCenter()
+        let revealer = ApplicationShellReceiveTargetRevealer()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: revealer
+        )
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [root.appendingPathComponent("Old/missing.pdf")],
+            source: source
+        )
+        await notifier.notify(receive: result)
+        let identifier = try XCTUnwrap(notificationCenter.deliveredRequests.first?.identifier)
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: .loadingShell(),
+            initialStatus: .loading,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        await shell.replace(.loadingShell(), status: .loading)
+        let completion = AsyncCompletionProbe()
+        let click = Task { @MainActor in
+            await notifier.openNotification(identifier: identifier)
+            await completion.finish()
+        }
+
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertTrue(revealer.revealedURLs.isEmpty)
+        let completedBeforeSettings = await completion.isFinished()
+        XCTAssertFalse(completedBeforeSettings)
+
+        let base = AppContainer.localShell()
+        let configured = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            settingsSnapshots: { await persistedSettings.snapshots() }
+        )
+        await shell.replace(configured, status: .ready)
+        for _ in 0..<1_000 where !(await completion.isFinished()) {
+            await Task.yield()
+        }
+        await click.value
+
+        XCTAssertEqual(revealer.fallbackDirectories.compactMap { $0?.path }, [sourceDirectory.path])
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testColdStartNotificationUsesPersistedGlobalDirectoryForUnknownSource()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let globalDirectory = root.appendingPathComponent("Global Receives", isDirectory: true)
+        let settingsURL = root.appendingPathComponent("settings.json")
+        let settings = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [])
+        try await settings.updateDefaultDirectory(globalDirectory)
+        let persistedSettings = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [])
+        let notificationCenter = ApplicationShellNotificationCenter()
+        let revealer = ApplicationShellReceiveTargetRevealer()
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: revealer
+        )
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [root.appendingPathComponent("Old/missing.pdf")]
+        )
+        await notifier.notify(receive: result)
+        let identifier = try XCTUnwrap(notificationCenter.deliveredRequests.first?.identifier)
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: .loadingShell(),
+            initialStatus: .loading,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        await shell.replace(.loadingShell(), status: .loading)
+        let click = Task { @MainActor in
+            await notifier.openNotification(identifier: identifier)
+        }
+
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertTrue(revealer.revealedURLs.isEmpty)
+
+        let base = AppContainer.localShell()
+        await shell.replace(
+            AppContainer(
+                deviceDirectory: base.deviceDirectory,
+                transferCoordinator: base.transferCoordinator,
+                settingsSnapshots: { await persistedSettings.snapshots() }
+            ),
+            status: .ready
+        )
+        await click.value
+
+        XCTAssertEqual(revealer.fallbackDirectories.compactMap { $0?.path }, [globalDirectory.path])
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testColdStartNotificationResponseCompletesWhenSettingsBootstrapFails()
+        async throws
+    {
+        let notificationCenter = ApplicationShellNotificationCenter()
+        let revealer = ApplicationShellReceiveTargetRevealer(revealResult: false)
+        let notifier = ReceiveNotificationController(
+            center: notificationCenter,
+            revealer: revealer
+        )
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/old/missing.pdf")]
+        )
+        await notifier.notify(receive: result)
+        let identifier = try XCTUnwrap(notificationCenter.deliveredRequests.first?.identifier)
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: .loadingShell(),
+            initialStatus: .loading,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let completion = AsyncCompletionProbe()
+        let response = Task { @MainActor in
+            await notificationCenter.emitDeliveredResponse(identifier: identifier)
+            await completion.finish()
+        }
+
+        for _ in 0..<100 { await Task.yield() }
+        let finishedBeforeFailure = await completion.isFinished()
+        XCTAssertFalse(finishedBeforeFailure)
+
+        shell.updateReceiveDirectoryAvailability(
+            for: .startupError("settings unavailable", canRetry: true)
+        )
+        for _ in 0..<1_000 where !(await completion.isFinished()) {
+            await Task.yield()
+        }
+        let finishedAfterFailure = await completion.isFinished()
+        if !finishedAfterFailure { response.cancel() }
+        await response.value
+
+        XCTAssertTrue(finishedAfterFailure)
+        XCTAssertEqual(revealer.revealedURLs, [result.receivedURLs])
+        XCTAssertEqual(revealer.fallbackDirectories.count, 1)
+        XCTAssertNil(revealer.fallbackDirectories[0])
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
@@ -1007,7 +1179,7 @@ final class AppRuntimeTests: XCTestCase {
             await Task.yield()
         }
 
-        shell.revealRecentReceiveForTesting(result.transferID)
+        await shell.revealRecentReceiveForTesting(result.transferID)
 
         XCTAssertEqual(workspace.openedURLs, [sourceDirectory])
         XCTAssertFalse(shell.hasUnreadReceive)
@@ -1055,6 +1227,9 @@ final class AppRuntimeTests: XCTestCase {
 
         let item = try XCTUnwrap(controller.statusMenu.items.first { $0.title == "second.pdf" })
         XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
+        for _ in 0..<1_000 where revealer.revealedURLs.isEmpty {
+            await Task.yield()
+        }
 
         XCTAssertEqual(revealer.revealedURLs, [second.receivedURLs])
         XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [first.transferID])
@@ -1684,6 +1859,7 @@ private actor ReceiveResultRecordGate {
 @MainActor
 private final class ApplicationShellNotificationCenter: ReceiveNotificationCenter {
     private(set) var deliveredRequests: [ReceiveNotificationRequest] = []
+    private var deliveredResponseHandler: ((String) async -> Void)?
     var deliveredCount: Int { deliveredRequests.count }
 
     func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
@@ -1691,6 +1867,14 @@ private final class ApplicationShellNotificationCenter: ReceiveNotificationCente
 
     func deliver(_ request: ReceiveNotificationRequest) async throws {
         deliveredRequests.append(request)
+    }
+
+    func setDeliveredResponseHandler(_ handler: @escaping (String) async -> Void) {
+        deliveredResponseHandler = handler
+    }
+
+    func emitDeliveredResponse(identifier: String) async {
+        await deliveredResponseHandler?(identifier)
     }
 
     func openSystemSettings() {}
@@ -1744,6 +1928,7 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
 @MainActor
 private final class ApplicationShellReceiveTargetRevealer: ReceiveTargetRevealing {
     private(set) var revealedURLs: [[URL]] = []
+    private(set) var fallbackDirectories: [URL?] = []
     private let revealResult: Bool
 
     init(revealResult: Bool = true) {
@@ -1752,6 +1937,7 @@ private final class ApplicationShellReceiveTargetRevealer: ReceiveTargetRevealin
 
     func reveal(_ urls: [URL], fallbackDirectory: URL?) -> Bool {
         revealedURLs.append(urls)
+        fallbackDirectories.append(fallbackDirectory)
         return revealResult
     }
 }

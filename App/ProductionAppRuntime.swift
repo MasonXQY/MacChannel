@@ -476,6 +476,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             settingsSurfaceService: settingsService,
             transferSnapshots: { await transferCoordinator.snapshots() },
             pairingStates: pairingCoordinator.states,
+            initialSettingsSnapshot: settingsSnapshot,
             settingsSnapshots: { await settingsStore.snapshots() },
             transferHistory: { await history.stream() },
             receiveEvents: { await receiveEvents.stream() },

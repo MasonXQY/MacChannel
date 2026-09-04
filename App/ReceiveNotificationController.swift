@@ -60,11 +60,15 @@ protocol ReceiveNotificationCenter: AnyObject {
     func authorizationState() async -> ReceiveNotificationAuthorizationState
     func requestAuthorization() async -> ReceiveNotificationAuthorizationState
     func deliver(_ request: ReceiveNotificationRequest) async throws
+    func setDeliveredResponseHandler(_ handler: @escaping (String) async -> Void)
+    func deliveredNotificationIdentifiers() async -> [String]
     func removeDeliveredNotifications(withIdentifiers identifiers: [String])
     func openSystemSettings()
 }
 
 extension ReceiveNotificationCenter {
+    func setDeliveredResponseHandler(_ handler: @escaping (String) async -> Void) {}
+    func deliveredNotificationIdentifiers() async -> [String] { [] }
     func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
 }
 
@@ -75,12 +79,12 @@ protocol ReceiveTargetRevealing: AnyObject {
 
 @MainActor
 protocol ReceiveDirectoryResolving: AnyObject {
-    func currentReceiveDirectory(for source: DeviceID?) -> URL?
+    func currentReceiveDirectory(for source: DeviceID?) async -> URL?
 }
 
 @MainActor
 private final class CompatibilityReceiveDirectoryResolver: ReceiveDirectoryResolving {
-    func currentReceiveDirectory(for source: DeviceID?) -> URL? {
+    func currentReceiveDirectory(for source: DeviceID?) async -> URL? {
         DownloadDirectory().defaultDirectory
     }
 }
@@ -205,7 +209,7 @@ final class ReceiveNotificationController {
         let order: UInt64
     }
 
-    private struct NotificationIdentity {
+    private struct NotificationIdentity: Equatable, Hashable {
         static let prefix = "dropmesh.receive.v1"
 
         let transferID: TransferID
@@ -248,6 +252,10 @@ final class ReceiveNotificationController {
     private var receiveDirectoryResolver: any ReceiveDirectoryResolving
     private var continuations: [UUID: AsyncStream<ReceiveNotificationSnapshot>.Continuation] = [:]
     private var notificationTargets: [String: NotificationTarget] = [:]
+    private var deliveredNotificationIdentities: [TransferID: NotificationIdentity] = [:]
+    private var handledNotificationTransferIDs: Set<TransferID> = []
+    private var deliveredIdentityLoadTask: Task<[String], Never>?
+    private var didLoadDeliveredNotificationIdentities = false
     private let notificationTargetCapacity: Int
     private let notificationTargetTTL: TimeInterval
     private let now: () -> Date
@@ -255,8 +263,6 @@ final class ReceiveNotificationController {
     private let authorizationPromptTimeout: Duration
     private let deliveryTimeout: Duration
     private var notificationTargetOrder: UInt64 = 0
-    private var handledNotificationIdentifiers: Set<String> = []
-    private var handledNotificationIdentifierOrder: [String] = []
     private var didRequestAuthorization = false
     private var authorizationQueryOperation: AuthorizationOperation?
     private var authorizationRequestOperation: AuthorizationOperation?
@@ -294,14 +300,13 @@ final class ReceiveNotificationController {
         self.deliveryTimeout = deliveryTimeout
         self.now = now
 
-        if let systemCenter = center as? SystemReceiveNotificationCenter {
-            systemCenter.setResponseHandler { [weak self] identifier in
-                self?.openNotification(identifier: identifier)
-            }
+        center.setDeliveredResponseHandler { [weak self] identifier in
+            await self?.openDeliveredNotification(identifier: identifier)
         }
     }
 
     func prepare() async {
+        await loadDeliveredNotificationIdentitiesIfNeeded()
         if authorizationRequestOperation != nil {
             _ = await awaitAuthorizationRequest()
             return
@@ -393,10 +398,11 @@ final class ReceiveNotificationController {
     }
 
     @discardableResult
-    func reveal(_ urls: [URL], source: DeviceID? = nil) -> Bool {
-        revealer.reveal(
+    func reveal(_ urls: [URL], source: DeviceID? = nil) async -> Bool {
+        let fallbackDirectory = await receiveDirectoryResolver.currentReceiveDirectory(for: source)
+        return revealer.reveal(
             urls,
-            fallbackDirectory: receiveDirectoryResolver.currentReceiveDirectory(for: source)
+            fallbackDirectory: fallbackDirectory
         )
     }
 
@@ -404,16 +410,44 @@ final class ReceiveNotificationController {
         receiveDirectoryResolver = resolver
     }
 
-    func openNotification(identifier: String) {
+    func openNotification(identifier: String) async {
+        await handleNotification(identifier: identifier, trustsDeliveredResponse: false)
+    }
+
+    private func openDeliveredNotification(identifier: String) async {
+        await handleNotification(identifier: identifier, trustsDeliveredResponse: true)
+    }
+
+    private func handleNotification(
+        identifier: String,
+        trustsDeliveredResponse: Bool
+    ) async {
         pruneNotificationTargets()
-        let target = notificationTargets[identifier]
-        let identity = NotificationIdentity(identifier: identifier)
-        guard let transferID = target?.transferID ?? identity?.transferID else { return }
-        guard claimNotificationResponse(identifier) else { return }
-        notificationTargets.removeValue(forKey: identifier)
-        let source = target?.source ?? identity?.source
-        _ = reveal(target?.urls ?? [], source: source)
-        onReceiveOpened?(transferID)
+        guard let requestedIdentity = NotificationIdentity(identifier: identifier) else { return }
+        guard !handledNotificationTransferIDs.contains(requestedIdentity.transferID) else { return }
+
+        let deliveredIdentity: NotificationIdentity
+        if trustsDeliveredResponse {
+            deliveredIdentity = requestedIdentity
+        } else {
+            await loadDeliveredNotificationIdentitiesIfNeeded()
+            guard let registeredIdentity =
+                deliveredNotificationIdentities[requestedIdentity.transferID],
+                registeredIdentity == requestedIdentity
+            else { return }
+            deliveredIdentity = registeredIdentity
+        }
+        guard handledNotificationTransferIDs.insert(deliveredIdentity.transferID).inserted else {
+            return
+        }
+
+        deliveredNotificationIdentities.removeValue(forKey: deliveredIdentity.transferID)
+        let canonicalIdentifier = deliveredIdentity.identifier
+        let target = notificationTargets.removeValue(forKey: canonicalIdentifier)
+        center.removeDeliveredNotifications(withIdentifiers: [canonicalIdentifier])
+        let source = target?.source ?? deliveredIdentity.source
+        _ = await reveal(target?.urls ?? [], source: source)
+        onReceiveOpened?(deliveredIdentity.transferID)
     }
 
     private func publish(_ authorizationState: ReceiveNotificationAuthorizationState) {
@@ -545,7 +579,6 @@ final class ReceiveNotificationController {
             self?.completeDelivery(
                 id: id,
                 outcome: outcome,
-                identifier: request.identifier,
                 transferID: transferID,
                 source: source,
                 urls: urls
@@ -560,7 +593,6 @@ final class ReceiveNotificationController {
     private func completeDelivery(
         id: UUID,
         outcome: DeliveryOutcome,
-        identifier: String,
         transferID: TransferID,
         source: DeviceID?,
         urls: [URL]
@@ -569,11 +601,13 @@ final class ReceiveNotificationController {
         deliveryOperation = nil
         switch outcome {
         case .delivered:
+            let identity = NotificationIdentity(transferID: transferID, source: source)
+            deliveredNotificationIdentities[transferID] = identity
             storeNotificationTarget(
                 urls,
                 transferID: transferID,
                 source: source,
-                identifier: identifier
+                identifier: identity.identifier
             )
             publishDeliveryState(.available)
         case .failed:
@@ -616,16 +650,28 @@ final class ReceiveNotificationController {
         notificationTargets = notificationTargets.filter { $0.value.createdAt >= expiry }
     }
 
-    private func claimNotificationResponse(_ identifier: String) -> Bool {
-        guard handledNotificationIdentifiers.insert(identifier).inserted else { return false }
-        handledNotificationIdentifierOrder.append(identifier)
-        let responseCapacity = max(min(notificationTargetCapacity, 4_096) * 2, 128)
-        while handledNotificationIdentifierOrder.count > responseCapacity {
-            let expired = handledNotificationIdentifierOrder.removeFirst()
-            handledNotificationIdentifiers.remove(expired)
+    private func loadDeliveredNotificationIdentitiesIfNeeded() async {
+        guard !didLoadDeliveredNotificationIdentities else { return }
+        let task: Task<[String], Never>
+        if let deliveredIdentityLoadTask {
+            task = deliveredIdentityLoadTask
+        } else {
+            let center = center
+            let created = Task { @MainActor in
+                await center.deliveredNotificationIdentifiers()
+            }
+            deliveredIdentityLoadTask = created
+            task = created
         }
-        center.removeDeliveredNotifications(withIdentifiers: [identifier])
-        return true
+
+        let identifiers = await task.value
+        guard !didLoadDeliveredNotificationIdentities else { return }
+        for identifier in identifiers {
+            guard let identity = NotificationIdentity(identifier: identifier) else { continue }
+            deliveredNotificationIdentities[identity.transferID] = identity
+        }
+        didLoadDeliveredNotificationIdentities = true
+        deliveredIdentityLoadTask = nil
     }
 
 }
@@ -633,7 +679,7 @@ final class ReceiveNotificationController {
 @MainActor
 final class SystemReceiveNotificationCenter: NSObject, ReceiveNotificationCenter {
     private let center: UNUserNotificationCenter
-    private var responseHandler: ((String) -> Void)?
+    private var responseHandler: ((String) async -> Void)?
 
     override convenience init() {
         self.init(center: .current())
@@ -645,18 +691,18 @@ final class SystemReceiveNotificationCenter: NSObject, ReceiveNotificationCenter
         center.delegate = self
     }
 
-    func setResponseHandler(_ handler: @escaping (String) -> Void) {
+    func setDeliveredResponseHandler(_ handler: @escaping (String) async -> Void) {
         responseHandler = handler
     }
 
     nonisolated static func dispatchNotificationResponse(
         identifier: String,
-        responseHandler: @escaping @MainActor (String) -> Void,
+        responseHandler: @escaping @MainActor (String) async -> Void,
         completionHandler: @escaping () -> Void
     ) {
         let completion = NotificationResponseCompletion(completionHandler)
         Task { @MainActor in
-            responseHandler(identifier)
+            await responseHandler(identifier)
             completion.call()
         }
     }
@@ -690,6 +736,10 @@ final class SystemReceiveNotificationCenter: NSObject, ReceiveNotificationCenter
             trigger: nil
         )
         try await center.add(systemRequest)
+    }
+
+    func deliveredNotificationIdentifiers() async -> [String] {
+        await center.deliveredNotifications().map(\.request.identifier)
     }
 
     func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
@@ -753,7 +803,7 @@ extension SystemReceiveNotificationCenter: UNUserNotificationCenterDelegate {
         Self.dispatchNotificationResponse(
             identifier: identifier,
             responseHandler: { [weak self] identifier in
-                self?.responseHandler?(identifier)
+                await self?.responseHandler?(identifier)
             },
             completionHandler: completionHandler
         )

@@ -284,7 +284,9 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
-    func testRecentReceiveMenuFreezesRowsAndStableActionsForTrackingSession() throws {
+    func testRealMenuTrackingFreezesRowsAndDefersMutationUntilNextNeedsUpdate()
+        async throws
+    {
         let controller = makeController()
         let store = RecentReceiveStore()
         controller.bindRecentReceives(store)
@@ -300,38 +302,106 @@ final class StatusItemAppKitTests: XCTestCase {
         )
         store.record(first, sourceName: "First Mac")
         var selected: [TransferID] = []
-        controller.onRevealRecentReceive = { selected.append($0.id) }
-
-        controller.menuWillOpen(controller.statusMenu)
-        let visibleRow = try XCTUnwrap(
-            controller.statusMenu.items.first {
-                $0.representedObject as? String == first.transferID.rawValue.uuidString
-            }
+        let delegate = RecordingForwardingMenuDelegate(forwardingTo: controller)
+        controller.statusMenu.delegate = delegate
+        controller.onRevealRecentReceive = {
+            selected.append($0.id)
+            delegate.recordAction()
+        }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 40, height: 40))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 80, height: 80),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
         )
-        let frozenTitle = visibleRow.title
-        store.record(second, sourceName: "Second Mac")
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.close() }
+        let firstTracking = expectation(description: "first real menu tracking closes")
 
-        XCTAssertEqual(visibleRow.title, frozenTitle)
+        let firstTrackingTimer = MainActorTimerTarget(after: 0.05) {
+            guard let visibleRow = controller.statusMenu.items.first(where: {
+                $0.representedObject as? String == first.transferID.rawValue.uuidString
+            }) else {
+                XCTFail("expected the frozen first receive row")
+                controller.statusMenu.cancelTracking()
+                firstTracking.fulfill()
+                return
+            }
+            let frozenTitle = visibleRow.title
+            store.record(second, sourceName: "Second Mac")
+            XCTAssertEqual(visibleRow.title, frozenTitle)
+            XCTAssertNil(
+                controller.statusMenu.items.first {
+                    $0.representedObject as? String == second.transferID.rawValue.uuidString
+                }
+            )
+            guard let action = visibleRow.action else {
+                XCTFail("expected a stable receive-row action")
+                controller.statusMenu.cancelTracking()
+                firstTracking.fulfill()
+                return
+            }
+            XCTAssertTrue(
+                NSApp.sendAction(
+                    action,
+                    to: visibleRow.target,
+                    from: visibleRow
+                )
+            )
+            controller.statusMenu.cancelTracking()
+            firstTracking.fulfill()
+        }
+        firstTrackingTimer.schedule()
+        controller.statusMenu.popUp(
+            positioning: nil,
+            at: NSPoint(x: host.bounds.midX, y: host.bounds.midY),
+            in: host
+        )
+        await fulfillment(of: [firstTracking], timeout: 1)
+
+        XCTAssertEqual(selected, [first.transferID])
+        XCTAssertEqual(
+            Array(delegate.events.prefix(4)),
+            [.needsUpdate, .willOpen, .action, .didClose]
+        )
         XCTAssertNil(
             controller.statusMenu.items.first {
                 $0.representedObject as? String == second.transferID.rawValue.uuidString
             }
         )
-        XCTAssertTrue(
-            NSApp.sendAction(
-                try XCTUnwrap(visibleRow.action),
-                to: visibleRow.target,
-                from: visibleRow
-            )
-        )
-        XCTAssertEqual(selected, [first.transferID])
-
-        controller.menuDidClose(controller.statusMenu)
-
-        XCTAssertNotNil(
+        let closeTurn = expectation(description: "didClose next-turn state clear")
+        DispatchQueue.main.async { closeTurn.fulfill() }
+        await fulfillment(of: [closeTurn], timeout: 1)
+        XCTAssertNil(
             controller.statusMenu.items.first {
                 $0.representedObject as? String == second.transferID.rawValue.uuidString
             }
+        )
+
+        let secondVisibility = MainActorValue(false)
+        let secondTracking = expectation(description: "second real menu tracking closes")
+        let secondTrackingTimer = MainActorTimerTarget(after: 0.05) {
+            secondVisibility.value = controller.statusMenu.items.contains {
+                $0.representedObject as? String == second.transferID.rawValue.uuidString
+            }
+            controller.statusMenu.cancelTracking()
+            secondTracking.fulfill()
+        }
+        secondTrackingTimer.schedule()
+        controller.statusMenu.popUp(
+            positioning: nil,
+            at: NSPoint(x: host.bounds.midX, y: host.bounds.midY),
+            in: host
+        )
+        await fulfillment(of: [secondTracking], timeout: 1)
+
+        XCTAssertTrue(secondVisibility.value)
+        XCTAssertEqual(
+            Array(delegate.events.suffix(3)),
+            [.needsUpdate, .willOpen, .didClose]
         )
     }
 
@@ -1393,6 +1463,80 @@ final class StatusItemAppKitTests: XCTestCase {
             transferID: TransferID(rawValue: UUID()),
             receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/\(name)")]
         )
+    }
+}
+
+@MainActor
+private final class RecordingForwardingMenuDelegate: NSObject, NSMenuDelegate {
+    enum Event: Equatable {
+        case needsUpdate
+        case willOpen
+        case action
+        case didClose
+    }
+
+    private weak var forwardingDelegate: (any NSMenuDelegate)?
+    private(set) var events: [Event] = []
+
+    init(forwardingTo delegate: any NSMenuDelegate) {
+        forwardingDelegate = delegate
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        events.append(.needsUpdate)
+        forwardingDelegate?.menuNeedsUpdate?(menu)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        events.append(.willOpen)
+        forwardingDelegate?.menuWillOpen?(menu)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        events.append(.didClose)
+        forwardingDelegate?.menuDidClose?(menu)
+    }
+
+    func recordAction() {
+        events.append(.action)
+    }
+}
+
+@MainActor
+private final class MainActorTimerTarget: NSObject {
+    private let interval: TimeInterval
+    private let action: @MainActor () -> Void
+    private var timer: Timer?
+
+    init(after interval: TimeInterval, action: @escaping @MainActor () -> Void) {
+        self.interval = interval
+        self.action = action
+    }
+
+    func schedule() {
+        let timer = Timer(
+            timeInterval: interval,
+            target: self,
+            selector: #selector(fire(_:)),
+            userInfo: nil,
+            repeats: false
+        )
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func fire(_ timer: Timer) {
+        self.timer = nil
+        action()
+    }
+}
+
+@MainActor
+private final class MainActorValue<Value> {
+    var value: Value
+
+    init(_ value: Value) {
+        self.value = value
     }
 }
 

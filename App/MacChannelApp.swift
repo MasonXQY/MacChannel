@@ -107,15 +107,74 @@ private actor ReceiveEventObservation {
 }
 
 @MainActor
-private final class SurfaceReceiveDirectoryResolver: ReceiveDirectoryResolving {
-    private weak var surfaces: AppSurfaceController?
+private final class ApplicationReceiveDirectoryResolver: ReceiveDirectoryResolving {
+    private var snapshot: SettingsSurfaceSnapshot?
+    private var configurationUnavailable = false
+    private var waiters: [UUID: CheckedContinuation<SettingsSurfaceSnapshot?, Never>] = [:]
 
-    init(surfaces: AppSurfaceController) {
-        self.surfaces = surfaces
+    func configure(
+        initialSnapshot: SettingsSurfaceSnapshot?,
+        waitForSnapshot: Bool
+    ) {
+        if let initialSnapshot {
+            update(initialSnapshot)
+        } else if waitForSnapshot {
+            snapshot = nil
+            configurationUnavailable = false
+        } else {
+            update(SettingsSurfaceSnapshot(defaultDirectory: nil, devices: []))
+        }
     }
 
-    func currentReceiveDirectory(for source: DeviceID?) -> URL? {
-        surfaces?.currentReceiveDirectory(for: source)
+    func update(_ snapshot: SettingsSurfaceSnapshot) {
+        self.snapshot = snapshot
+        configurationUnavailable = false
+        let currentWaiters = waiters.values
+        waiters.removeAll(keepingCapacity: false)
+        currentWaiters.forEach { $0.resume(returning: snapshot) }
+    }
+
+    func markConfigurationUnavailable() {
+        guard snapshot == nil else { return }
+        configurationUnavailable = true
+        let currentWaiters = waiters.values
+        waiters.removeAll(keepingCapacity: false)
+        currentWaiters.forEach { $0.resume(returning: nil) }
+    }
+
+    func currentReceiveDirectory(for source: DeviceID?) async -> URL? {
+        guard let snapshot = await resolvedSnapshot() else { return nil }
+        if let source,
+           let override = snapshot.devices.first(where: { $0.id == source })?.directory
+        {
+            return override.standardizedFileURL
+        }
+        return SettingsReceiveDirectoryPresentation.directory(
+            defaultDirectory: snapshot.defaultDirectory
+        )
+    }
+
+    private func resolvedSnapshot() async -> SettingsSurfaceSnapshot? {
+        if let snapshot { return snapshot }
+        if configurationUnavailable { return nil }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if let snapshot {
+                    continuation.resume(returning: snapshot)
+                } else if configurationUnavailable {
+                    continuation.resume(returning: nil)
+                } else if Task.isCancelled {
+                    continuation.resume(returning: nil)
+                } else {
+                    waiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.waiters.removeValue(forKey: id)?.resume(returning: nil)
+            }
+        }
     }
 }
 
@@ -135,6 +194,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private let updateController = SparkleUpdateController()
     private lazy var updateLaunch = SoftwareUpdateLaunchCoordinator(controller: updateController)
     private let receiveNotificationController: ReceiveNotificationController
+    private let receiveDirectoryResolver = ApplicationReceiveDirectoryResolver()
     private let transferSurfacePresentation: ((TransferSurfaceSection) -> Void)?
     private let beforeReceiveResultRecord: (@MainActor (TransferReceiveResult) async -> Void)?
     private let statusItemControllerFactory: (AppContainer) -> StatusItemController
@@ -180,6 +240,12 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         self.transferSurfacePresentation = transferSurfacePresentation
         self.beforeReceiveResultRecord = beforeReceiveResultRecord
         self.statusItemControllerFactory = statusItemControllerFactory
+        receiveNotificationController.setReceiveDirectoryResolver(receiveDirectoryResolver)
+        receiveDirectoryResolver.configure(
+            initialSnapshot: initialContainer.initialSettingsSnapshot,
+            waitForSnapshot: initialContainer.receiveDirectoryConfigurationPending
+                || initialContainer.settingsSnapshots != nil
+        )
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -211,6 +277,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     self.statusItemController?.setRuntimeStatus(status)
                     self.surfaceController?.updateRuntimeStatus(status)
+                    self.updateReceiveDirectoryAvailability(for: status)
                     if case .startupError = status {
                         self.updateLaunch.prepare(transfers: nil)
                     }
@@ -261,9 +328,17 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                 Task { await runtimeHost?.bootstrap() }
             }
         )
-        receiveNotificationController.setReceiveDirectoryResolver(
-            SurfaceReceiveDirectoryResolver(surfaces: surfaces)
+        receiveDirectoryResolver.configure(
+            initialSnapshot: container.initialSettingsSnapshot,
+            waitForSnapshot: container.receiveDirectoryConfigurationPending
+                || container.settingsSnapshots != nil
         )
+        surfaces.onSettingsSnapshot = { [weak receiveDirectoryResolver] snapshot in
+            receiveDirectoryResolver?.update(snapshot)
+        }
+        if let initialSettingsSnapshot = container.initialSettingsSnapshot {
+            surfaces.updateSettings(initialSettingsSnapshot)
+        }
         statusController.onRetryRuntime = { [weak runtimeHost] in
             Task { await runtimeHost?.bootstrap() }
         }
@@ -271,14 +346,8 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         let showReceiveHistory = statusController.onShowReceiveHistory
         statusController.bindRecentReceives(recentReceiveStore)
         statusController.onRevealRecentReceive = { [weak self] summary in
-            guard let self else { return }
-            let revealed = receiveNotificationController.reveal(
-                summary.receivedURLs,
-                source: summary.source
-            )
-            recentReceiveStore.acknowledge(summary.id)
-            if !revealed {
-                statusItemController?.reportReceiveRevealFailure()
+            Task { @MainActor [weak self] in
+                await self?.revealRecentReceive(summary)
             }
         }
         statusController.onShowReceiveHistory = { [weak self] in
@@ -467,10 +536,31 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         statusItemController?.prepareToOpenStatusMenu()
     }
 
-    func revealRecentReceiveForTesting(_ transferID: TransferID) {
+    func updateReceiveDirectoryAvailability(for status: AppRuntimeStatus) {
+        if case .loading = status,
+           container.receiveDirectoryConfigurationPending
+        {
+            receiveDirectoryResolver.configure(initialSnapshot: nil, waitForSnapshot: true)
+        } else if case .startupError = status {
+            receiveDirectoryResolver.markConfigurationUnavailable()
+        }
+    }
+
+    func revealRecentReceiveForTesting(_ transferID: TransferID) async {
         guard let summary = recentReceiveStore.snapshot.visible.first(where: { $0.id == transferID })
         else { return }
-        statusItemController?.onRevealRecentReceive?(summary)
+        await revealRecentReceive(summary)
+    }
+
+    private func revealRecentReceive(_ summary: RecentReceiveSummary) async {
+        let revealed = await receiveNotificationController.reveal(
+            summary.receivedURLs,
+            source: summary.source
+        )
+        recentReceiveStore.acknowledge(summary.id)
+        if !revealed {
+            statusItemController?.reportReceiveRevealFailure()
+        }
     }
 
     private func completeLaunchSmokeTestIfRequested() {
