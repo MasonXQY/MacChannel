@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
+@testable import MacChannelAppKit
 @testable import MacChannelCore
 import XCTest
 
@@ -165,6 +166,110 @@ final class TransferIntegrationTests: XCTestCase {
         try assertMatchingHashes(source, destination)
         let routes = await harness.actualRoutes()
         XCTAssertEqual(routes, [.lan])
+    }
+
+    func testStatusMenuClipboardActionTransfersUniquePasteboardTextAndCleansGeneratedSource()
+        async throws
+    {
+        let harness = try await makeHarness(routePolicy: .lanOnly)
+        try await Task { @MainActor in
+            _ = NSApplication.shared
+            let expectedText = "DropMesh 真实剪贴板路径\n第二行 🌏\n"
+            let expectedData = Data(expectedText.utf8)
+            let pasteboard = NSPasteboard(
+                name: NSPasteboard.Name("TransferIntegrationTests-\(UUID().uuidString)")
+            )
+            pasteboard.clearContents()
+            XCTAssertTrue(pasteboard.setString(expectedText, forType: .string))
+            let clipboardRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "TransferIntegrationTests-clipboard-\(UUID().uuidString)",
+                    isDirectory: true
+                )
+            defer { try? FileManager.default.removeItem(at: clipboardRoot) }
+            let picker = IntegrationStatusItemDevicePicker()
+            let controller = StatusItemController(
+                button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+                devices: [
+                    DeviceSummary(
+                        id: harness.receiverID,
+                        displayName: "Receiver Mac",
+                        availability: .lan
+                    )
+                ],
+                transferCoordinator: harness.sender,
+                clipboardPreparer: NativeClipboardTransferPreparer(
+                    pasteboard: pasteboard,
+                    temporaryRoot: clipboardRoot
+                ),
+                deviceMenuPresenter: picker
+            )
+            let surfaces = AppSurfaceController(
+                transferService: NativeTransferSurfaceService(coordinator: harness.sender),
+                pairingService: UnavailablePairingSurfaceService(),
+                settingsService: UnavailableDeviceSettingsService(),
+                directorySelector: NativeDirectorySelector()
+            )
+            defer {
+                surfaces.invalidate()
+                controller.invalidate()
+            }
+            var startedTransfer: TransferID?
+            var announcements: [String] = []
+            controller.onTransferStarted = { transferID, _ in startedTransfer = transferID }
+            controller.onAnnouncement = { announcements.append($0) }
+            surfaces.bind(to: controller)
+            surfaces.observeTransferSnapshots { await harness.sender.snapshots() }
+
+            let clipboardItem = try XCTUnwrap(
+                controller.statusMenu.items.first { $0.title == "发送剪贴板…" }
+            )
+            XCTAssertTrue(
+                NSApp.sendAction(
+                    try XCTUnwrap(clipboardItem.action),
+                    to: clipboardItem.target,
+                    from: clipboardItem
+                )
+            )
+            XCTAssertEqual(
+                picker.presentedDevices.map(\.id),
+                [harness.receiverID],
+                "status announcements: \(announcements)"
+            )
+            let generatedSource = try XCTUnwrap(
+                FileManager.default.contentsOfDirectory(
+                    at: clipboardRoot,
+                    includingPropertiesForKeys: [.isRegularFileKey]
+                ).first
+            )
+            XCTAssertEqual(try Data(contentsOf: generatedSource), expectedData)
+            let sourceHash = try SHA256.hash(file: generatedSource)
+
+            XCTAssertTrue(try XCTUnwrap(picker.select)(harness.receiverID))
+            let admissionDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while startedTransfer == nil, ContinuousClock.now < admissionDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let transfer = try XCTUnwrap(startedTransfer)
+            try await harness.waitForCompletion(transfer, timeout: .seconds(30))
+
+            let destination = harness.receivedFile(named: generatedSource.lastPathComponent)
+            XCTAssertEqual(try Data(contentsOf: destination), expectedData)
+            XCTAssertEqual(try SHA256.hash(file: destination), sourceHash)
+            let cleanupDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while FileManager.default.fileExists(atPath: generatedSource.path),
+                  ContinuousClock.now < cleanupDeadline
+            {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: generatedSource.path))
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(atPath: clipboardRoot.path),
+                []
+            )
+            let routes = await harness.actualRoutes()
+            XCTAssertEqual(routes, [.lan])
+        }.value
     }
 
     func testClipboardPNGArrivesInReceiverDownloadRootAndRemainsDecodable() async throws {
@@ -597,6 +702,24 @@ private struct FixedReceiveCapacity: ReceiveCapacityProviding {
     func availableBytes(at directory: URL) throws -> UInt64 {
         _ = directory
         return bytes
+    }
+}
+
+@MainActor
+private final class IntegrationStatusItemDevicePicker: StatusItemDeviceMenuPresenting {
+    private(set) var presentedDevices: [DeviceSummary] = []
+    private(set) var select: ((DeviceID) -> Bool)?
+
+    func present(
+        devices: [DeviceSummary],
+        anchor: NSView,
+        select: @escaping (DeviceID) -> Bool,
+        cancel: @escaping () -> Void
+    ) {
+        _ = anchor
+        _ = cancel
+        presentedDevices = devices
+        self.select = select
     }
 }
 

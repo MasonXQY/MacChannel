@@ -30,6 +30,100 @@ struct RecentReceiveMenuText: Equatable {
 }
 
 @MainActor
+private final class PreparedContentOwnershipLease {
+    private enum State {
+        case awaitingSelection
+        case admissionInFlight(cleanupRequested: Bool)
+        case activeTransfer
+        case cleanupPending
+        case released
+    }
+
+    private var state: State = .awaitingSelection
+    private var cleanup: (@MainActor @Sendable () -> Bool)?
+
+    init(cleanup: @escaping @MainActor @Sendable () -> Bool) {
+        self.cleanup = cleanup
+    }
+
+    deinit {
+        if let cleanup {
+            Task { @MainActor in _ = cleanup() }
+        }
+    }
+
+    var isReleased: Bool {
+        if case .released = state { return true }
+        return false
+    }
+
+    func beginAdmission() -> Bool {
+        guard case .awaitingSelection = state else { return false }
+        state = .admissionInFlight(cleanupRequested: false)
+        return true
+    }
+
+    func cancelSelection() {
+        guard case .awaitingSelection = state else { return }
+        releasePreparedContent()
+    }
+
+    func requestInvalidationCleanup() -> Bool {
+        switch state {
+        case .awaitingSelection:
+            releasePreparedContent()
+            return false
+        case .admissionInFlight:
+            state = .admissionInFlight(cleanupRequested: true)
+            return true
+        case .activeTransfer:
+            return false
+        case .cleanupPending:
+            releasePreparedContent()
+            return false
+        case .released:
+            return false
+        }
+    }
+
+    func admissionSucceeded(controllerIsAlive: Bool) {
+        guard case .admissionInFlight(let cleanupRequested) = state else { return }
+        if cleanupRequested || !controllerIsAlive {
+            releasePreparedContent()
+        } else {
+            state = .activeTransfer
+        }
+    }
+
+    func admissionFailed() {
+        guard case .admissionInFlight = state else { return }
+        releasePreparedContent()
+    }
+
+    func completeTransfer() {
+        switch state {
+        case .activeTransfer, .cleanupPending:
+            releasePreparedContent()
+        case .awaitingSelection, .admissionInFlight, .released:
+            return
+        }
+    }
+
+    private func releasePreparedContent() {
+        guard let cleanup else {
+            state = .released
+            return
+        }
+        if cleanup() {
+            self.cleanup = nil
+            state = .released
+        } else {
+            state = .cleanupPending
+        }
+    }
+}
+
+@MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
     let button: StatusItemButton
     let statusMenu: NSMenu
@@ -77,7 +171,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var latestRecentReceiveSnapshot = RecentReceiveSnapshot(visible: [], overflowCount: 0)
     private var isStatusMenuTracking = false
     private var statusMenuTrackingGeneration = 0
-    private var cleanupByToken: [StatusItemDragToken: @MainActor () -> Void] = [:]
+    private var preparedContentLeases: [StatusItemDragToken: PreparedContentOwnershipLease] = [:]
+    private var sendAdmissionTasks: [StatusItemDragToken: Task<Void, Never>] = [:]
 
     init(
         button: StatusItemButton,
@@ -211,7 +306,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func completeTransfer(token: StatusItemDragToken) {
-        discardPreparedContent(for: token)
+        if let lease = preparedContentLeases[token] {
+            lease.completeTransfer()
+            removeReleasedLease(lease, for: token)
+        }
         state.finishTransfer(token: token)
         renderPhase()
     }
@@ -241,10 +339,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     private func presentKeyboardSend(
         urls: [URL],
-        cleanup: (@MainActor () -> Void)? = nil
+        cleanup: (@MainActor @Sendable () -> Bool)? = nil
     ) {
         guard let intent = try? DropIntent(items: urls.map(DropItem.fileURL)) else {
-            cleanup?()
+            _ = cleanup?()
             announce("所选内容无法发送。")
             return
         }
@@ -256,19 +354,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     == .orderedAscending
         }
         guard !onlineDevices.isEmpty else {
-            cleanup?()
+            _ = cleanup?()
             announce("没有在线设备。")
             return
         }
 
         replacePendingSelection()
         guard let token = state.begin(intent: intent) else {
-            cleanup?()
+            _ = cleanup?()
             announce("已有传输正在进行。")
             return
         }
         if let cleanup {
-            cleanupByToken[token] = cleanup
+            preparedContentLeases[token] = PreparedContentOwnershipLease(cleanup: cleanup)
         }
         currentFanToken = nil
         activeSelectionToken = token
@@ -292,7 +390,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if let token = activeSelectionToken ?? currentFanToken {
             terminatePendingSelection(token)
         }
-        discardAllPreparedContent()
+        requestAdmissionCleanupForInvalidation()
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
             self.statusItem = nil
@@ -377,6 +475,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             return false
         }
         guard let claim = state.claimDrop(token: token, target: device) else { return false }
+        let lease = preparedContentLeases[token]
+        guard lease?.beginAdmission() ?? true else { return false }
 
         dragRegionSession.invalidate(token: token)
         currentFanToken = nil
@@ -385,19 +485,34 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         onDismissDeviceFan?(token)
         renderPhase()
 
-        Task { [weak self, transferCoordinator, claim] in
+        let admissionTask = Task { [weak self, transferCoordinator, claim, lease] in
             do {
                 let transferID = try await transferCoordinator.send(
                     items: claim.urls,
                     to: claim.target
                 )
-                self?.onTransferStarted?(transferID, token)
+                guard let self else {
+                    lease?.admissionSucceeded(controllerIsAlive: false)
+                    return
+                }
+                sendAdmissionTasks.removeValue(forKey: token)
+                lease?.admissionSucceeded(controllerIsAlive: true)
+                if let lease { removeReleasedLease(lease, for: token) }
+                onTransferStarted?(transferID, token)
             } catch {
-                self?.announce("无法开始传输，请检查连接和设备状态。")
-                self?.discardPreparedContent(for: token)
-                self?.completeTransfer(token: token)
+                guard let self else {
+                    lease?.admissionFailed()
+                    return
+                }
+                sendAdmissionTasks.removeValue(forKey: token)
+                lease?.admissionFailed()
+                if let lease { removeReleasedLease(lease, for: token) }
+                announce("无法开始传输，请检查连接和设备状态。")
+                state.finishTransfer(token: token)
+                renderPhase()
             }
         }
+        sendAdmissionTasks[token] = admissionTask
         return true
     }
 
@@ -409,15 +524,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return dragRegionSession.enter(.fan, token: token, fingerprint: fingerprint)
     }
 
-    private func discardPreparedContent(for token: StatusItemDragToken) {
-        cleanupByToken.removeValue(forKey: token)?()
+    private func removeReleasedLease(
+        _ lease: PreparedContentOwnershipLease,
+        for token: StatusItemDragToken
+    ) {
+        guard lease.isReleased, preparedContentLeases[token] === lease else { return }
+        preparedContentLeases.removeValue(forKey: token)
     }
 
-    private func discardAllPreparedContent() {
-        let cleanup = cleanupByToken
-        cleanupByToken.removeAll()
-        for action in cleanup.values {
-            action()
+    private func requestAdmissionCleanupForInvalidation() {
+        for token in Array(sendAdmissionTasks.keys) {
+            if let lease = preparedContentLeases[token],
+               lease.requestInvalidationCleanup()
+            {
+                sendAdmissionTasks[token]?.cancel()
+                removeReleasedLease(lease, for: token)
+            } else {
+                sendAdmissionTasks[token]?.cancel()
+            }
+        }
+        for (token, lease) in Array(preparedContentLeases) {
+            guard sendAdmissionTasks[token] == nil else { continue }
+            _ = lease.requestInvalidationCleanup()
+            removeReleasedLease(lease, for: token)
         }
     }
 
@@ -438,7 +567,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             activeSelectionToken = nil
             announcedOfflineToken = nil
         }
-        discardPreparedContent(for: token)
+        if let lease = preparedContentLeases[token] {
+            lease.cancelSelection()
+            removeReleasedLease(lease, for: token)
+        }
         onDismissDeviceFan?(token)
         renderPhase()
     }

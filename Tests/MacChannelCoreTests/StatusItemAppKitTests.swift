@@ -702,7 +702,12 @@ final class StatusItemAppKitTests: XCTestCase {
         let ownedURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("StatusItemAppKitTests-\(UUID().uuidString).txt")
         try Data("clipboard".utf8).write(to: ownedURL)
-        let prepared = PreparedClipboardTransfer(urls: [], ownedTemporaryURLs: [ownedURL])
+        let cleanup = RecordingRemovalFileManager()
+        let prepared = PreparedClipboardTransfer(
+            urls: [],
+            ownedTemporaryURLs: [ownedURL],
+            cleanup: { cleanup.removeOwnedFile(at: ownedURL) }
+        )
         defer { prepared.discardTemporaryFiles() }
         let menu = RecordingStatusItemDeviceMenuPresenter()
         let controller = StatusItemController(
@@ -904,8 +909,7 @@ final class StatusItemAppKitTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: sourceURL) }
         let prepared = PreparedClipboardTransfer(
             urls: [sourceURL],
-            ownedTemporaryURLs: [],
-            fileManager: fileManager
+            ownedTemporaryURLs: []
         )
         let transfer = RecordingTransferCoordinator()
         let menu = RecordingStatusItemDeviceMenuPresenter()
@@ -1110,7 +1114,7 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
-    func testInvalidatingAcceptedClipboardTransferDrainsRetainedOwnershipExactlyOnce() async throws {
+    func testInvalidatingActiveClipboardTransferWaitsForMatchingTerminalCallback() async throws {
         let target = DeviceID(rawValue: UUID())
         let fileManager = RecordingRemovalFileManager()
         let prepared = try ownedClipboardTransfer(fileManager: fileManager)
@@ -1124,15 +1128,65 @@ final class StatusItemAppKitTests: XCTestCase {
             clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
             deviceMenuPresenter: menu
         )
+        var startedToken: StatusItemDragToken?
+        controller.onTransferStarted = { _, token in startedToken = token }
 
         controller.performClipboardSend()
         XCTAssertTrue(try XCTUnwrap(menu.select)(target))
-        for _ in 0..<100 where await transfer.sentCount() == 0 {
+        for _ in 0..<100 where await transfer.sentCount() == 0 || startedToken == nil {
             await Task.yield()
         }
 
         controller.invalidate()
         controller.invalidate()
+
+        XCTAssertEqual(fileManager.removeCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+
+        controller.completeTransfer(token: try XCTUnwrap(startedToken))
+        controller.completeTransfer(token: try XCTUnwrap(startedToken))
+
+        XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
+    }
+
+    @MainActor
+    func testInvalidationDuringClipboardAdmissionKeepsSourceUntilCoordinatorReadsItEvenAfterControllerRelease()
+        async throws
+    {
+        let target = DeviceID(rawValue: UUID())
+        let fileManager = RecordingRemovalFileManager()
+        let prepared = try ownedClipboardTransfer(fileManager: fileManager)
+        defer { prepared.discardTemporaryFiles() }
+        let transfer = BlockingBeforeReadTransferCoordinator()
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        var controller: StatusItemController? = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
+            transferCoordinator: transfer,
+            clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
+            deviceMenuPresenter: menu
+        )
+
+        controller?.performClipboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        await transfer.waitUntilBlockedBeforeRead()
+
+        controller?.invalidate()
+        controller = nil
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: prepared.urls[0].path),
+            "admission still needs to read the generated source"
+        )
+        XCTAssertEqual(fileManager.removeCount, 0)
+
+        await transfer.allowRead()
+        let received = try await transfer.waitForRead()
+        XCTAssertEqual(received, Data("clipboard".utf8))
+        for _ in 0..<100 where FileManager.default.fileExists(atPath: prepared.urls[0].path) {
+            await Task.yield()
+        }
 
         XCTAssertEqual(fileManager.removeCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
@@ -1446,7 +1500,7 @@ final class StatusItemAppKitTests: XCTestCase {
 
     @MainActor
     private func ownedClipboardTransfer(
-        fileManager: FileManager = .default
+        fileManager: RecordingRemovalFileManager = RecordingRemovalFileManager()
     ) throws -> PreparedClipboardTransfer {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("StatusItemAppKitTests-\(UUID().uuidString).txt")
@@ -1454,7 +1508,7 @@ final class StatusItemAppKitTests: XCTestCase {
         return PreparedClipboardTransfer(
             urls: [url],
             ownedTemporaryURLs: [url],
-            fileManager: fileManager
+            cleanup: { fileManager.removeOwnedFile(at: url) }
         )
     }
 
@@ -1566,6 +1620,82 @@ private actor FailingTransferCoordinator: TransferCoordinating {
     func cancel(_ id: TransferID) async -> TransferCancellationResult { .tooLate }
 }
 
+private actor BlockingBeforeReadTransferCoordinator: TransferCoordinating {
+    private let gate = BlockingClipboardAdmissionGate()
+
+    func send(items: [URL], to device: DeviceID) async throws -> TransferID {
+        _ = device
+        let source = try XCTUnwrap(items.first)
+        await gate.blockBeforeRead()
+        do {
+            let data = try Data(contentsOf: source)
+            await gate.finish(with: .success(data))
+            return TransferID(rawValue: UUID())
+        } catch {
+            await gate.finish(with: .failure(error))
+            throw error
+        }
+    }
+
+    func pause(_ id: TransferID) async {}
+    func resume(_ id: TransferID) async throws {}
+    func cancel(_ id: TransferID) async -> TransferCancellationResult { .requested }
+
+    func waitUntilBlockedBeforeRead() async {
+        await gate.waitUntilBlocked()
+    }
+
+    func allowRead() async {
+        await gate.allowRead()
+    }
+
+    func waitForRead() async throws -> Data {
+        try await gate.waitForResult().get()
+    }
+}
+
+private actor BlockingClipboardAdmissionGate {
+    private var isBlocked = false
+    private var mayRead = false
+    private var result: Result<Data, any Error>?
+    private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var readWaiters: [CheckedContinuation<Void, Never>] = []
+    private var resultWaiters: [CheckedContinuation<Result<Data, any Error>, Never>] = []
+
+    func blockBeforeRead() async {
+        isBlocked = true
+        let waiters = blockedWaiters
+        blockedWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        guard !mayRead else { return }
+        await withCheckedContinuation { readWaiters.append($0) }
+    }
+
+    func waitUntilBlocked() async {
+        guard !isBlocked else { return }
+        await withCheckedContinuation { blockedWaiters.append($0) }
+    }
+
+    func allowRead() {
+        mayRead = true
+        let waiters = readWaiters
+        readWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func finish(with result: Result<Data, any Error>) {
+        self.result = result
+        let waiters = resultWaiters
+        resultWaiters.removeAll()
+        for waiter in waiters { waiter.resume(returning: result) }
+    }
+
+    func waitForResult() async -> Result<Data, any Error> {
+        if let result { return result }
+        return await withCheckedContinuation { resultWaiters.append($0) }
+    }
+}
+
 @MainActor
 private final class StubStatusItemFilePicker: StatusItemFilePicking {
     let result: [URL]?
@@ -1622,12 +1752,20 @@ private final class SequencedClipboardTransferPreparer: ClipboardTransferPrepari
     }
 }
 
-private final class RecordingRemovalFileManager: FileManager {
+@MainActor
+private final class RecordingRemovalFileManager {
     private(set) var removeCount = 0
 
-    override func removeItem(at URL: URL) throws {
+    func removeOwnedFile(at url: URL) -> Bool {
         removeCount += 1
-        try super.removeItem(at: URL)
+        do {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+            return true
+        } catch {
+            return false
+        }
     }
 }
 

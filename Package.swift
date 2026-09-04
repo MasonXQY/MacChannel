@@ -44,6 +44,7 @@ let package = Package(
             name: "MacChannelIntegrationTests",
             dependencies: [
                 "MacChannelCore",
+                "MacChannelAppKit",
                 .product(name: "WebRTC", package: "WebRTC"),
             ],
             path: "Tests/Integration"

@@ -17,25 +17,358 @@ final class PreparedClipboardTransfer {
     let urls: [URL]
     let ownedTemporaryURLs: [URL]
 
-    private let fileManager: FileManager
-    private var discarded = false
+    private var cleanup: (@MainActor @Sendable () -> Bool)?
 
     init(
         urls: [URL],
         ownedTemporaryURLs: [URL],
-        fileManager: FileManager = .default
+        cleanup: (@MainActor @Sendable () -> Bool)? = nil
+    ) {
+        precondition(ownedTemporaryURLs.isEmpty || cleanup != nil)
+        self.urls = urls
+        self.ownedTemporaryURLs = ownedTemporaryURLs
+        self.cleanup = cleanup
+    }
+
+    fileprivate init(
+        urls: [URL],
+        ownedTemporaryURLs: [URL],
+        cleanupCapability: ClipboardTemporaryCleanupCapability
     ) {
         self.urls = urls
         self.ownedTemporaryURLs = ownedTemporaryURLs
-        self.fileManager = fileManager
+        cleanup = { cleanupCapability.discardOwnedFiles() }
     }
 
-    func discardTemporaryFiles() {
-        guard !discarded else { return }
-        discarded = true
-        for url in ownedTemporaryURLs {
-            try? fileManager.removeItem(at: url)
+    @discardableResult
+    func discardTemporaryFiles() -> Bool {
+        guard let cleanup else { return true }
+        guard cleanup() else { return false }
+        self.cleanup = nil
+        return true
+    }
+}
+
+private struct ClipboardOwnedTemporaryFile {
+    let publishedName: String
+    let name: String
+    let isQuarantined: Bool
+    let device: dev_t
+    let inode: ino_t
+    let fileType: mode_t
+
+    init(name: String, device: dev_t, inode: ino_t, fileType: mode_t) {
+        publishedName = name
+        self.name = name
+        isQuarantined = false
+        self.device = device
+        self.inode = inode
+        self.fileType = fileType
+    }
+
+    private init(
+        publishedName: String,
+        name: String,
+        isQuarantined: Bool,
+        device: dev_t,
+        inode: ino_t,
+        fileType: mode_t
+    ) {
+        self.publishedName = publishedName
+        self.name = name
+        self.isQuarantined = isQuarantined
+        self.device = device
+        self.inode = inode
+        self.fileType = fileType
+    }
+
+    func matches(_ metadata: stat) -> Bool {
+        fileType == S_IFREG
+            && (metadata.st_mode & S_IFMT) == fileType
+            && metadata.st_dev == device
+            && metadata.st_ino == inode
+    }
+
+    func quarantined(named name: String) -> ClipboardOwnedTemporaryFile {
+        ClipboardOwnedTemporaryFile(
+            publishedName: publishedName,
+            name: name,
+            isQuarantined: true,
+            device: device,
+            inode: inode,
+            fileType: fileType
+        )
+    }
+
+    func restoredToPublishedName() -> ClipboardOwnedTemporaryFile {
+        ClipboardOwnedTemporaryFile(
+            publishedName: publishedName,
+            name: publishedName,
+            isQuarantined: false,
+            device: device,
+            inode: inode,
+            fileType: fileType
+        )
+    }
+}
+
+@MainActor
+private final class ClipboardTemporaryCleanupCapability {
+    typealias RenameOperation = @MainActor (Int32, String, String) -> Int32
+    typealias UnlinkOperation = @MainActor (Int32, String) -> Int32
+
+    private enum Inspection {
+        case owned
+        case missing
+        case noLongerOwned
+        case retryLater
+    }
+
+    private enum CleanupAttempt {
+        case complete
+        case retry(ClipboardOwnedTemporaryFile)
+    }
+
+    private var rootDescriptor: Int32
+    private var ownedFiles: [ClipboardOwnedTemporaryFile]
+    private let ownsRootDescriptor: Bool
+    private let renameOperation: RenameOperation
+    private let unlinkOperation: UnlinkOperation
+
+    init(
+        duplicatingRootDescriptor rootDescriptor: Int32,
+        ownedFiles: [ClipboardOwnedTemporaryFile],
+        renameOperation: @escaping RenameOperation = systemRename,
+        unlinkOperation: @escaping UnlinkOperation = systemUnlink
+    ) throws {
+        self.rootDescriptor = try Self.duplicate(rootDescriptor)
+        self.ownedFiles = ownedFiles
+        ownsRootDescriptor = true
+        self.renameOperation = renameOperation
+        self.unlinkOperation = unlinkOperation
+    }
+
+    private init(
+        borrowingRootDescriptor rootDescriptor: Int32,
+        ownedFiles: [ClipboardOwnedTemporaryFile],
+        renameOperation: @escaping RenameOperation,
+        unlinkOperation: @escaping UnlinkOperation
+    ) {
+        self.rootDescriptor = rootDescriptor
+        self.ownedFiles = ownedFiles
+        ownsRootDescriptor = false
+        self.renameOperation = renameOperation
+        self.unlinkOperation = unlinkOperation
+    }
+
+    deinit {
+        if ownsRootDescriptor, rootDescriptor >= 0 {
+            _ = Darwin.close(rootDescriptor)
         }
+    }
+
+    static func discardPublishedFile(
+        _ ownedFile: ClipboardOwnedTemporaryFile,
+        rootDescriptor: Int32,
+        renameOperation: @escaping RenameOperation,
+        unlinkOperation: @escaping UnlinkOperation
+    ) -> Bool {
+        ClipboardTemporaryCleanupCapability(
+            borrowingRootDescriptor: rootDescriptor,
+            ownedFiles: [ownedFile],
+            renameOperation: renameOperation,
+            unlinkOperation: unlinkOperation
+        ).discardOwnedFiles()
+    }
+
+    func discardOwnedFiles() -> Bool {
+        guard rootDescriptor >= 0 else { return true }
+        var remaining: [ClipboardOwnedTemporaryFile] = []
+        for ownedFile in ownedFiles {
+            switch discard(ownedFile) {
+            case .complete:
+                break
+            case .retry(let retryable):
+                remaining.append(retryable)
+            }
+        }
+        ownedFiles = remaining
+        if ownedFiles.isEmpty { closeRootDescriptor() }
+        return ownedFiles.isEmpty
+    }
+
+    private func discard(_ ownedFile: ClipboardOwnedTemporaryFile) -> CleanupAttempt {
+        switch inspect(ownedFile) {
+        case .missing:
+            return .complete
+        case .retryLater:
+            return .retry(ownedFile)
+        case .noLongerOwned:
+            return ownedFile.isQuarantined
+                ? restoreRacedReplacement(ownedFile)
+                : .complete
+        case .owned:
+            return ownedFile.isQuarantined
+                ? unlinkVerifiedQuarantine(ownedFile)
+                : quarantineAndUnlink(ownedFile)
+        }
+    }
+
+    private func quarantineAndUnlink(
+        _ ownedFile: ClipboardOwnedTemporaryFile
+    ) -> CleanupAttempt {
+        let quarantineName = ".dropmesh-clipboard-cleanup-\(UUID().uuidString.lowercased())"
+        let error = renameToQuarantine(
+            from: ownedFile.name,
+            to: quarantineName
+        )
+        if error == ENOENT { return .complete }
+        guard error == 0 else { return .retry(ownedFile) }
+
+        let quarantined = ownedFile.quarantined(named: quarantineName)
+        switch inspect(quarantined) {
+        case .missing:
+            return .complete
+        case .retryLater:
+            return .retry(quarantined)
+        case .noLongerOwned:
+            return restoreRacedReplacement(quarantined)
+        case .owned:
+            return unlinkVerifiedQuarantine(quarantined)
+        }
+    }
+
+    private func unlinkVerifiedQuarantine(
+        _ quarantined: ClipboardOwnedTemporaryFile
+    ) -> CleanupAttempt {
+        let error = unlinkOwnedFile(named: quarantined.name)
+        if error == 0 || error == ENOENT { return .complete }
+
+        switch inspect(quarantined) {
+        case .missing:
+            return .complete
+        case .retryLater:
+            return .retry(quarantined)
+        case .noLongerOwned:
+            return restoreRacedReplacement(quarantined)
+        case .owned:
+            let restoreError = restoreFromQuarantine(quarantined)
+            if restoreError == 0 {
+                return .retry(quarantined.restoredToPublishedName())
+            }
+            if restoreError == ENOENT { return .complete }
+            return .retry(quarantined)
+        }
+    }
+
+    private func restoreRacedReplacement(
+        _ quarantined: ClipboardOwnedTemporaryFile
+    ) -> CleanupAttempt {
+        let error = restoreFromQuarantine(quarantined)
+        if error == 0 || error == ENOENT { return .complete }
+        return .retry(quarantined)
+    }
+
+    private func inspect(_ ownedFile: ClipboardOwnedTemporaryFile) -> Inspection {
+        var metadata = stat()
+        let error = Self.status(
+            rootDescriptor: rootDescriptor,
+            name: ownedFile.name,
+            metadata: &metadata
+        )
+        if error == ENOENT { return .missing }
+        guard error == 0 else { return .retryLater }
+        return ownedFile.matches(metadata) ? .owned : .noLongerOwned
+    }
+
+    private func renameToQuarantine(from sourceName: String, to quarantineName: String) -> Int32 {
+        while true {
+            let error = renameOperation(rootDescriptor, sourceName, quarantineName)
+            if error == 0 { return 0 }
+            if error == EINTR { continue }
+            return error
+        }
+    }
+
+    private func restoreFromQuarantine(_ quarantined: ClipboardOwnedTemporaryFile) -> Int32 {
+        while true {
+            let error = Self.systemRename(
+                rootDescriptor: rootDescriptor,
+                sourceName: quarantined.name,
+                destinationName: quarantined.publishedName
+            )
+            if error == 0 { return 0 }
+            if error == EINTR { continue }
+            return error
+        }
+    }
+
+    private func unlinkOwnedFile(named name: String) -> Int32 {
+        while true {
+            let error = unlinkOperation(rootDescriptor, name)
+            if error == 0 { return 0 }
+            if error == EINTR { continue }
+            return error
+        }
+    }
+
+    fileprivate static func systemUnlink(rootDescriptor: Int32, name: String) -> Int32 {
+        let result = name.withCString {
+            Darwin.unlinkat(rootDescriptor, $0, 0)
+        }
+        return result == 0 ? 0 : errno
+    }
+
+    fileprivate static func systemRename(
+        rootDescriptor: Int32,
+        sourceName: String,
+        destinationName: String
+    ) -> Int32 {
+        let result = sourceName.withCString { source in
+            destinationName.withCString { destination in
+                Darwin.renameatx_np(
+                    rootDescriptor,
+                    source,
+                    rootDescriptor,
+                    destination,
+                    UInt32(RENAME_EXCL)
+                )
+            }
+        }
+        return result == 0 ? 0 : errno
+    }
+
+    private static func status(
+        rootDescriptor: Int32,
+        name: String,
+        metadata: inout stat
+    ) -> Int32 {
+        while true {
+            let result = name.withCString {
+                Darwin.fstatat(rootDescriptor, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+            }
+            if result == 0 { return 0 }
+            let error = errno
+            if error == EINTR { continue }
+            return error
+        }
+    }
+
+    private static func duplicate(_ descriptor: Int32) throws -> Int32 {
+        while true {
+            let duplicate = Darwin.fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
+            if duplicate >= 0 { return duplicate }
+            if errno == EINTR { continue }
+            throw ClipboardTransferPreparationError.cannotCreateTemporaryFile
+        }
+    }
+
+    private func closeRootDescriptor() {
+        guard rootDescriptor >= 0 else { return }
+        if ownsRootDescriptor {
+            _ = Darwin.close(rootDescriptor)
+        }
+        rootDescriptor = -1
     }
 }
 
@@ -58,8 +391,11 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
     private let fileManager: FileManager
     private let cacheDirectory: URL
     private let reservationHook: (@MainActor (URL) throws -> Void)?
+    private let cleanupCapabilityCreationHook: (@MainActor () throws -> Void)?
     private let pruneBeforeQuarantineHook: (@MainActor (String) throws -> Void)?
     private let pruneRootOpenedHook: (@MainActor () throws -> Void)?
+    private let terminalCleanupRename: @MainActor (Int32, String, String) -> Int32
+    private let terminalCleanupUnlink: @MainActor (Int32, String) -> Int32
 
     static var defaultTemporaryRoot: URL {
         defaultTemporaryRoot(
@@ -74,8 +410,13 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         fileManager: FileManager = .default,
         cacheDirectory: URL? = nil,
         reservationHook: (@MainActor (URL) throws -> Void)? = nil,
+        cleanupCapabilityCreationHook: (@MainActor () throws -> Void)? = nil,
         pruneBeforeQuarantineHook: (@MainActor (String) throws -> Void)? = nil,
-        pruneRootOpenedHook: (@MainActor () throws -> Void)? = nil
+        pruneRootOpenedHook: (@MainActor () throws -> Void)? = nil,
+        terminalCleanupRename: @escaping @MainActor (Int32, String, String) -> Int32 =
+            ClipboardTemporaryCleanupCapability.systemRename,
+        terminalCleanupUnlink: @escaping @MainActor (Int32, String) -> Int32 =
+            ClipboardTemporaryCleanupCapability.systemUnlink
     ) {
         let cacheDirectory = cacheDirectory
             ?? fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -86,8 +427,11 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         self.fileManager = fileManager
         self.cacheDirectory = cacheDirectory
         self.reservationHook = reservationHook
+        self.cleanupCapabilityCreationHook = cleanupCapabilityCreationHook
         self.pruneBeforeQuarantineHook = pruneBeforeQuarantineHook
         self.pruneRootOpenedHook = pruneRootOpenedHook
+        self.terminalCleanupRename = terminalCleanupRename
+        self.terminalCleanupUnlink = terminalCleanupUnlink
 
         if usesProductionTemporaryRoot {
             try? pruneAbandonedFiles(olderThan: .seconds(24 * 60 * 60))
@@ -100,8 +444,7 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         if !fileURLs.isEmpty {
             return PreparedClipboardTransfer(
                 urls: fileURLs,
-                ownedTemporaryURLs: [],
-                fileManager: fileManager
+                ownedTemporaryURLs: []
             )
         }
 
@@ -166,19 +509,41 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
                 rootDescriptor: rootDescriptor
             )
             var published = false
+            var publishedOwnership: ClipboardOwnedTemporaryFile?
             defer {
                 if !published {
-                    removeReservationIfOwned(reservation, rootDescriptor: rootDescriptor)
+                    if let publishedOwnership {
+                        _ = ClipboardTemporaryCleanupCapability.discardPublishedFile(
+                            publishedOwnership,
+                            rootDescriptor: rootDescriptor,
+                            renameOperation: terminalCleanupRename,
+                            unlinkOperation: terminalCleanupUnlink
+                        )
+                    } else {
+                        removeReservationIfOwned(reservation, rootDescriptor: rootDescriptor)
+                    }
                 }
             }
 
             try reservationHook?(reservation.url)
-            try publish(data, over: reservation, rootDescriptor: rootDescriptor)
+            let ownership = try publish(
+                data,
+                over: reservation,
+                rootDescriptor: rootDescriptor
+            )
+            publishedOwnership = ownership
+            try cleanupCapabilityCreationHook?()
+            let cleanupCapability = try ClipboardTemporaryCleanupCapability(
+                duplicatingRootDescriptor: rootDescriptor,
+                ownedFiles: [ownership],
+                renameOperation: terminalCleanupRename,
+                unlinkOperation: terminalCleanupUnlink
+            )
             published = true
             return PreparedClipboardTransfer(
                 urls: [reservation.url],
                 ownedTemporaryURLs: [reservation.url],
-                fileManager: fileManager
+                cleanupCapability: cleanupCapability
             )
         } catch {
             throw ClipboardTransferPreparationError.cannotCreateTemporaryFile
@@ -192,7 +557,10 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         }
         let prefix = trustedBase.path + "/"
 
-        var descriptor = Darwin.open(trustedBase.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        var descriptor = Darwin.open(
+            trustedBase.path,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
         guard descriptor >= 0 else { throw MaterializationFailure.failed }
         let relativeComponents = requestedRoot.path.dropFirst(prefix.count)
             .split(separator: "/")
@@ -201,7 +569,7 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
             var nextDescriptor = Darwin.openat(
                 descriptor,
                 component,
-                O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
             )
             if nextDescriptor < 0 && errno == ENOENT {
                 guard Darwin.mkdirat(descriptor, component, S_IRUSR | S_IWUSR | S_IXUSR) == 0 else {
@@ -211,7 +579,7 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
                 nextDescriptor = Darwin.openat(
                     descriptor,
                     component,
-                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
                 )
             }
             guard nextDescriptor >= 0 else {
@@ -414,7 +782,7 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         _ data: Data,
         over reservation: FileReservation,
         rootDescriptor: Int32
-    ) throws {
+    ) throws -> ClipboardOwnedTemporaryFile {
         guard reservationIsStillOwned(reservation, rootDescriptor: rootDescriptor) else {
             throw MaterializationFailure.failed
         }
@@ -434,8 +802,11 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         }
 
         try write(data, to: descriptor)
+        var stagedMetadata = stat()
         guard Darwin.fsync(descriptor) == 0,
               Darwin.fchmod(descriptor, S_IRUSR | S_IWUSR) == 0,
+              Darwin.fstat(descriptor, &stagedMetadata) == 0,
+              (stagedMetadata.st_mode & S_IFMT) == S_IFREG,
               Darwin.close(descriptor) == 0
         else {
             throw MaterializationFailure.failed
@@ -448,6 +819,12 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
             throw MaterializationFailure.failed
         }
         published = true
+        return ClipboardOwnedTemporaryFile(
+            name: reservation.name,
+            device: stagedMetadata.st_dev,
+            inode: stagedMetadata.st_ino,
+            fileType: stagedMetadata.st_mode & S_IFMT
+        )
     }
 
     private func write(_ data: Data, to descriptor: Int32) throws {

@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import XCTest
 
@@ -313,19 +314,309 @@ final class ClipboardTransferSourceTests: XCTestCase {
     @MainActor
     func testDiscardTemporaryFilesDeletesOnlyOwnedURLsAndIsIdempotent() throws {
         let copiedSource = temporaryRoot.appendingPathComponent("copied-source.txt")
-        let ownedTemporary = temporaryRoot.appendingPathComponent("owned-temporary.txt")
         try Data("source".utf8).write(to: copiedSource)
-        try Data("temporary".utf8).write(to: ownedTemporary)
-        let prepared = PreparedClipboardTransfer(
-            urls: [copiedSource, ownedTemporary],
-            ownedTemporaryURLs: [ownedTemporary]
+        let copied = PreparedClipboardTransfer(
+            urls: [copiedSource],
+            ownedTemporaryURLs: []
         )
+        let pasteboard = makePasteboard()
+        pasteboard.setString("temporary", forType: .string)
+        let generated = try makePreparer(pasteboard).prepare()
+        let ownedTemporary = try XCTUnwrap(generated.urls.first)
 
-        prepared.discardTemporaryFiles()
-        prepared.discardTemporaryFiles()
+        copied.discardTemporaryFiles()
+        generated.discardTemporaryFiles()
+        generated.discardTemporaryFiles()
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: copiedSource.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: ownedTemporary.path))
+    }
+
+    @MainActor
+    func testDiscardDoesNotDeleteARegularFileThatReplacedTheGeneratedPayload() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        let prepared = try makePreparer(pasteboard).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+        let displaced = temporaryRoot.appendingPathComponent("displaced-owned.txt")
+        try FileManager.default.moveItem(at: generated, to: displaced)
+        try Data("replacement".utf8).write(to: generated)
+
+        prepared.discardTemporaryFiles()
+
+        XCTAssertEqual(try String(contentsOf: generated, encoding: .utf8), "replacement")
+        XCTAssertEqual(try String(contentsOf: displaced, encoding: .utf8), "owned secret")
+    }
+
+    @MainActor
+    func testDiscardDoesNotRecursivelyDeleteADirectoryThatReplacedTheGeneratedPayload() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        let prepared = try makePreparer(pasteboard).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+        let displaced = temporaryRoot.appendingPathComponent("displaced-owned.txt")
+        try FileManager.default.moveItem(at: generated, to: displaced)
+        try FileManager.default.createDirectory(at: generated, withIntermediateDirectories: false)
+        let replacementChild = generated.appendingPathComponent("replacement.txt")
+        try Data("replacement".utf8).write(to: replacementChild)
+
+        prepared.discardTemporaryFiles()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: generated.path))
+        XCTAssertEqual(try String(contentsOf: replacementChild, encoding: .utf8), "replacement")
+        XCTAssertEqual(try String(contentsOf: displaced, encoding: .utf8), "owned secret")
+    }
+
+    @MainActor
+    func testDiscardDoesNotRemoveAFinalSymlinkThatReplacedTheGeneratedPayload() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        let prepared = try makePreparer(pasteboard).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+        let displaced = temporaryRoot.appendingPathComponent("displaced-owned.txt")
+        let outside = temporaryRoot.appendingPathComponent("outside.txt")
+        try FileManager.default.moveItem(at: generated, to: displaced)
+        try Data("outside".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(at: generated, withDestinationURL: outside)
+
+        prepared.discardTemporaryFiles()
+
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: generated.path), outside.path)
+        XCTAssertEqual(try String(contentsOf: outside, encoding: .utf8), "outside")
+        XCTAssertEqual(try String(contentsOf: displaced, encoding: .utf8), "owned secret")
+    }
+
+    @MainActor
+    func testDiscardUsesTheOpenedRootWhenTheRootPathIsReplaced() throws {
+        let originalRoot = temporaryRoot!
+        let relocatedRoot = originalRoot.deletingLastPathComponent()
+            .appendingPathComponent("ClipboardTransferSourceTests-relocated-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: relocatedRoot) }
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        let prepared = try makePreparer(pasteboard).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+        let name = generated.lastPathComponent
+
+        try FileManager.default.moveItem(at: originalRoot, to: relocatedRoot)
+        try FileManager.default.createDirectory(at: originalRoot, withIntermediateDirectories: true)
+        let replacement = originalRoot.appendingPathComponent(name)
+        try Data("replacement".utf8).write(to: replacement)
+
+        prepared.discardTemporaryFiles()
+
+        XCTAssertEqual(try String(contentsOf: replacement, encoding: .utf8), "replacement")
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: relocatedRoot.appendingPathComponent(name).path
+            )
+        )
+    }
+
+    @MainActor
+    func testDiscardDoesNotFollowAReplacedAncestorToAnotherDirectory() throws {
+        let fileManager = FileManager.default
+        let requestedParent = temporaryRoot.appendingPathComponent("requested-parent")
+        let requestedRoot = requestedParent.appendingPathComponent("ClipboardTransfers")
+        let relocatedParent = temporaryRoot.appendingPathComponent("relocated-parent")
+        let outsideParent = temporaryRoot.appendingPathComponent("outside-parent")
+        let outsideRoot = outsideParent.appendingPathComponent("ClipboardTransfers")
+        try fileManager.createDirectory(at: requestedRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: outsideRoot, withIntermediateDirectories: true)
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        let prepared = try NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            temporaryRoot: requestedRoot,
+            now: { self.fixedDate }
+        ).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+        let name = generated.lastPathComponent
+
+        try fileManager.moveItem(at: requestedParent, to: relocatedParent)
+        try fileManager.createSymbolicLink(at: requestedParent, withDestinationURL: outsideParent)
+        let replacement = outsideRoot.appendingPathComponent(name)
+        try Data("replacement".utf8).write(to: replacement)
+
+        prepared.discardTemporaryFiles()
+
+        XCTAssertEqual(try String(contentsOf: replacement, encoding: .utf8), "replacement")
+        XCTAssertFalse(
+            fileManager.fileExists(
+                atPath: relocatedParent
+                    .appendingPathComponent("ClipboardTransfers")
+                    .appendingPathComponent(name)
+                    .path
+            )
+        )
+    }
+
+    @MainActor
+    func testDiscardRestoresAReplacementRacedAfterTheInitialIdentityCheck() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        let displacedName = "displaced-owned.txt"
+        var injectedRace = false
+        var unlinkAttempts = 0
+        let prepared = try NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            terminalCleanupRename: { descriptor, sourceName, quarantineName in
+                if !injectedRace {
+                    injectedRace = true
+                    let moved = sourceName.withCString { source in
+                        displacedName.withCString { displaced in
+                            Darwin.renameat(descriptor, source, descriptor, displaced)
+                        }
+                    }
+                    guard moved == 0 else { return errno }
+                    do {
+                        try Data("replacement".utf8).write(
+                            to: self.temporaryRoot.appendingPathComponent(sourceName)
+                        )
+                    } catch {
+                        XCTFail("failed to inject replacement race: \(error)")
+                        return EIO
+                    }
+                }
+                let result = sourceName.withCString { source in
+                    quarantineName.withCString { quarantine in
+                        Darwin.renameatx_np(
+                            descriptor,
+                            source,
+                            descriptor,
+                            quarantine,
+                            UInt32(RENAME_EXCL)
+                        )
+                    }
+                }
+                return result == 0 ? 0 : errno
+            },
+            terminalCleanupUnlink: { _, _ in
+                unlinkAttempts += 1
+                return EIO
+            }
+        ).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+
+        XCTAssertTrue(prepared.discardTemporaryFiles())
+
+        XCTAssertTrue(injectedRace)
+        XCTAssertEqual(unlinkAttempts, 0)
+        XCTAssertEqual(try String(contentsOf: generated, encoding: .utf8), "replacement")
+        XCTAssertEqual(
+            try String(
+                contentsOf: temporaryRoot.appendingPathComponent(displacedName),
+                encoding: .utf8
+            ),
+            "owned secret"
+        )
+    }
+
+    @MainActor
+    func testDiscardRetriesInterruptedUnlinkWithoutReleasingOwnership() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        var unlinkAttempts = 0
+        let prepared = try NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            terminalCleanupUnlink: { descriptor, name in
+                unlinkAttempts += 1
+                if unlinkAttempts == 1 { return EINTR }
+                return name.withCString {
+                    Darwin.unlinkat(descriptor, $0, 0) == 0 ? 0 : errno
+                }
+            }
+        ).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+
+        XCTAssertTrue(prepared.discardTemporaryFiles())
+
+        XCTAssertEqual(unlinkAttempts, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: generated.path))
+    }
+
+    @MainActor
+    func testDiscardRetainsOwnershipAfterTransientUnlinkFailureAndRetries() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        var unlinkAttempts = 0
+        var retainedRootDescriptor: Int32?
+        let prepared = try NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            terminalCleanupUnlink: { descriptor, name in
+                retainedRootDescriptor = descriptor
+                unlinkAttempts += 1
+                if unlinkAttempts == 1 { return EBUSY }
+                return name.withCString {
+                    Darwin.unlinkat(descriptor, $0, 0) == 0 ? 0 : errno
+                }
+            }
+        ).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+
+        XCTAssertFalse(prepared.discardTemporaryFiles())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: generated.path))
+        let descriptor = try XCTUnwrap(retainedRootDescriptor)
+        XCTAssertGreaterThanOrEqual(Darwin.fcntl(descriptor, F_GETFD), 0)
+        XCTAssertTrue(prepared.discardTemporaryFiles())
+        errno = 0
+        XCTAssertEqual(Darwin.fcntl(descriptor, F_GETFD), -1)
+        XCTAssertEqual(errno, EBADF)
+        XCTAssertTrue(prepared.discardTemporaryFiles())
+
+        XCTAssertEqual(unlinkAttempts, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: generated.path))
+    }
+
+    @MainActor
+    func testDiscardTreatsAnAlreadyMissingOwnedFileAsCompleteWithoutUnlinking() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        var unlinkAttempts = 0
+        let prepared = try NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            terminalCleanupUnlink: { _, _ in
+                unlinkAttempts += 1
+                return EIO
+            }
+        ).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+        try FileManager.default.removeItem(at: generated)
+
+        XCTAssertTrue(prepared.discardTemporaryFiles())
+        XCTAssertTrue(prepared.discardTemporaryFiles())
+
+        XCTAssertEqual(unlinkAttempts, 0)
+    }
+
+    @MainActor
+    func testTransientTerminalCleanupFailureLeavesARegularFileEligibleForStartupPruning() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        let prepared = try NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            terminalCleanupUnlink: { _, _ in EBUSY }
+        ).prepare()
+        let generated = try XCTUnwrap(prepared.urls.first)
+
+        XCTAssertFalse(prepared.discardTemporaryFiles())
+        try setDates(fixedDate.addingTimeInterval(-25 * 60 * 60), on: generated)
+        try makePreparer(makePasteboard()).pruneAbandonedFiles(
+            olderThan: .seconds(24 * 60 * 60)
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: generated.path))
+        XCTAssertTrue(prepared.discardTemporaryFiles())
     }
 
     @MainActor
@@ -343,6 +634,80 @@ final class ClipboardTransferSourceTests: XCTestCase {
             XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
         }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: temporaryRoot.path), [])
+    }
+
+    @MainActor
+    func testPostPublishCapabilityFailureRestoresAReplacementRacedDuringRollback() throws {
+        let pasteboard = makePasteboard()
+        pasteboard.setString("owned secret", forType: .string)
+        let publishedName = expectedName(kind: "文字", ext: "txt")
+        let displacedName = "displaced-after-publish.txt"
+        var injectedRace = false
+        var unlinkAttempts = 0
+        let preparer = NativeClipboardTransferPreparer(
+            pasteboard: pasteboard,
+            temporaryRoot: temporaryRoot,
+            now: { self.fixedDate },
+            cleanupCapabilityCreationHook: {
+                throw ClipboardTestFailure.expected
+            },
+            terminalCleanupRename: { descriptor, sourceName, quarantineName in
+                if !injectedRace {
+                    injectedRace = true
+                    let moved = sourceName.withCString { source in
+                        displacedName.withCString { displaced in
+                            Darwin.renameat(descriptor, source, descriptor, displaced)
+                        }
+                    }
+                    guard moved == 0 else { return errno }
+                    do {
+                        try Data("replacement".utf8).write(
+                            to: self.temporaryRoot.appendingPathComponent(sourceName)
+                        )
+                    } catch {
+                        XCTFail("failed to inject rollback replacement race: \(error)")
+                        return EIO
+                    }
+                }
+                let result = sourceName.withCString { source in
+                    quarantineName.withCString { quarantine in
+                        Darwin.renameatx_np(
+                            descriptor,
+                            source,
+                            descriptor,
+                            quarantine,
+                            UInt32(RENAME_EXCL)
+                        )
+                    }
+                }
+                return result == 0 ? 0 : errno
+            },
+            terminalCleanupUnlink: { _, _ in
+                unlinkAttempts += 1
+                return EIO
+            }
+        )
+
+        XCTAssertThrowsError(try preparer.prepare()) {
+            XCTAssertEqual($0 as? ClipboardTransferPreparationError, .cannotCreateTemporaryFile)
+        }
+
+        XCTAssertTrue(injectedRace)
+        XCTAssertEqual(unlinkAttempts, 0)
+        XCTAssertEqual(
+            try String(
+                contentsOf: temporaryRoot.appendingPathComponent(publishedName),
+                encoding: .utf8
+            ),
+            "replacement"
+        )
+        XCTAssertEqual(
+            try String(
+                contentsOf: temporaryRoot.appendingPathComponent(displacedName),
+                encoding: .utf8
+            ),
+            "owned secret"
+        )
     }
 
     @MainActor

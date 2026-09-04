@@ -1306,7 +1306,7 @@ private actor HarnessClientRuntime {
     }
 }
 
-actor HarnessSender {
+actor HarnessSender: TransferCoordinating {
     private var coordinator: TransferCoordinator
     private(set) var latestTransferID: TransferID?
 
@@ -1318,6 +1318,22 @@ actor HarnessSender {
         let transfer = try await coordinator.send(items: items, to: device)
         latestTransferID = transfer
         return transfer
+    }
+
+    func pause(_ id: TransferID) async throws {
+        try await coordinator.pause(id)
+    }
+
+    func resume(_ id: TransferID) async throws {
+        try await coordinator.resume(id)
+    }
+
+    func cancel(_ id: TransferID) async -> TransferCancellationResult {
+        await coordinator.cancel(id)
+    }
+
+    func snapshots() async -> AsyncStream<[TransferSnapshot]> {
+        await coordinator.snapshots()
     }
 
     func snapshot(for transfer: TransferID) async -> TransferSnapshot? {
