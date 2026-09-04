@@ -80,8 +80,13 @@ final class SoftwareUpdateLaunchCoordinator {
 }
 
 private actor ReceiveEventObservation {
+    nonisolated let generation: Int
     private var stream: RuntimeReceiveEventStream?
     private var streamWaiters: [CheckedContinuation<RuntimeReceiveEventStream, Never>] = []
+
+    init(generation: Int) {
+        self.generation = generation
+    }
 
     func install(_ stream: RuntimeReceiveEventStream) {
         self.stream = stream
@@ -98,6 +103,19 @@ private actor ReceiveEventObservation {
             stream = await withCheckedContinuation { streamWaiters.append($0) }
         }
         return await stream.drainAndCancel()
+    }
+}
+
+@MainActor
+private final class SurfaceReceiveDirectoryResolver: ReceiveDirectoryResolving {
+    private weak var surfaces: AppSurfaceController?
+
+    init(surfaces: AppSurfaceController) {
+        self.surfaces = surfaces
+    }
+
+    func currentReceiveDirectory(for source: DeviceID?) -> URL? {
+        surfaces?.currentReceiveDirectory(for: source)
     }
 }
 
@@ -125,8 +143,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private var receiveEventObservation: ReceiveEventObservation?
     private var pendingReceiveEventDrain: ReceiveEventDrain?
     private var receiveEventDrainGeneration = 0
+    private var receiveEventObservationGeneration = 0
     private var containerReplacementGeneration = 0
-    private var recordedReceiveEventIDs: Set<TransferID> = []
+    private var receiveEventDeduplicationIDs: [Int: Set<TransferID>] = [:]
     private(set) var observedReceiveEventCount = 0
 
     private struct ReceiveEventDrain {
@@ -136,6 +155,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
 
     var hasUnreadReceive: Bool { statusItemController?.hasUnreadReceive ?? false }
     var recentReceiveSnapshot: RecentReceiveSnapshot { recentReceiveStore.snapshot }
+    var receiveEventDeduplicationCount: Int {
+        receiveEventDeduplicationIDs.values.reduce(0) { $0 + $1.count }
+    }
 
     init(
         initialContainer: AppContainer,
@@ -239,6 +261,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                 Task { await runtimeHost?.bootstrap() }
             }
         )
+        receiveNotificationController.setReceiveDirectoryResolver(
+            SurfaceReceiveDirectoryResolver(surfaces: surfaces)
+        )
         statusController.onRetryRuntime = { [weak runtimeHost] in
             Task { await runtimeHost?.bootstrap() }
         }
@@ -247,7 +272,10 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         statusController.bindRecentReceives(recentReceiveStore)
         statusController.onRevealRecentReceive = { [weak self] summary in
             guard let self else { return }
-            let revealed = receiveNotificationController.reveal(summary.receivedURLs)
+            let revealed = receiveNotificationController.reveal(
+                summary.receivedURLs,
+                source: summary.source
+            )
             recentReceiveStore.acknowledge(summary.id)
             if !revealed {
                 statusItemController?.reportReceiveRevealFailure()
@@ -348,7 +376,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
 
     private func observeReceiveEvents(from container: AppContainer) {
         guard let makeEvents = container.receiveEvents else { return }
-        let observation = ReceiveEventObservation()
+        receiveEventObservationGeneration += 1
+        let generation = receiveEventObservationGeneration
+        let observation = ReceiveEventObservation(generation: generation)
         receiveEventObservation = observation
         receiveEventTask = Task { [weak self] in
             let events = await makeEvents()
@@ -356,8 +386,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             for await result in events {
                 guard let self else { break }
                 await beforeReceiveResultRecord?(result)
-                recordReceiveResult(result)
+                recordReceiveResult(result, generation: generation)
                 await events.markRecorded(result)
+                releaseReceiveEventDeduplication(result, generation: generation)
                 guard !Task.isCancelled else { break }
                 await receiveNotificationController.notify(receive: result)
             }
@@ -381,22 +412,44 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                 if let observation {
                     let drained = await observation.drainAndCancel()
                     for result in drained {
-                        recordReceiveResult(result)
+                        recordReceiveResult(result, generation: observation.generation)
                     }
                 }
                 observerTask?.cancel()
                 await observerTask?.value
+                if let observation {
+                    retireReceiveEventDeduplication(generation: observation.generation)
+                }
             }
         )
         pendingReceiveEventDrain = drain
         return drain
     }
 
-    private func recordReceiveResult(_ result: TransferReceiveResult) {
-        guard recordedReceiveEventIDs.insert(result.transferID).inserted else { return }
+    private func recordReceiveResult(_ result: TransferReceiveResult, generation: Int) {
+        var ids = receiveEventDeduplicationIDs[generation] ?? []
+        guard ids.insert(result.transferID).inserted else { return }
+        receiveEventDeduplicationIDs[generation] = ids
         observedReceiveEventCount += 1
         let sourceName = statusItemController?.sourceDisplayName(for: result.source) ?? "其他设备"
         recentReceiveStore.record(result, sourceName: sourceName)
+    }
+
+    private func releaseReceiveEventDeduplication(
+        _ result: TransferReceiveResult,
+        generation: Int
+    ) {
+        guard var ids = receiveEventDeduplicationIDs[generation] else { return }
+        ids.remove(result.transferID)
+        if ids.isEmpty {
+            receiveEventDeduplicationIDs.removeValue(forKey: generation)
+        } else {
+            receiveEventDeduplicationIDs[generation] = ids
+        }
+    }
+
+    private func retireReceiveEventDeduplication(generation: Int) {
+        receiveEventDeduplicationIDs.removeValue(forKey: generation)
     }
 
     private func drainReceiveEventObservation() async {

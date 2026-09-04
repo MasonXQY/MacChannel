@@ -44,13 +44,16 @@ final class RecentReceiveStoreTests: XCTestCase {
 
     func testStoreRetainsSourceNameAtReceiveTimeAndUsesFallbackForEmptyName() {
         let store = RecentReceiveStore()
+        let source = DeviceID(rawValue: UUID())
         let result = TransferReceiveResult(
             transferID: TransferID(rawValue: UUID()),
-            receivedURLs: [URL(fileURLWithPath: "/tmp/report.pdf")]
+            receivedURLs: [URL(fileURLWithPath: "/tmp/report.pdf")],
+            source: source
         )
 
         store.record(result, sourceName: "MacBook Pro")
         XCTAssertEqual(store.snapshot.visible.first?.sourceName, "MacBook Pro")
+        XCTAssertEqual(store.snapshot.visible.first?.source, source)
         XCTAssertEqual(store.snapshot.visible.first?.title, "report.pdf")
 
         store.record(result, sourceName: "")
@@ -87,5 +90,56 @@ final class RecentReceiveStoreTests: XCTestCase {
         XCTAssertEqual(snapshots[0].visible.count, 1)
         XCTAssertEqual(snapshots[1].visible.first?.sourceName, "Mac renamed")
         XCTAssertFalse(snapshots[2].hasUnread)
+    }
+
+    func testStoreOrdersByReceiveCompletionInsteadOfPublicationOrder() {
+        let store = RecentReceiveStore()
+        let older = TransferReceiveResult(
+            transferID: TransferID(
+                rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+            ),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/older.pdf")],
+            completedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let newer = TransferReceiveResult(
+            transferID: TransferID(
+                rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+            ),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/newer.pdf")],
+            completedAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        store.record(newer, sourceName: "New Mac")
+        store.record(older, sourceName: "Old Mac")
+
+        XCTAssertEqual(store.snapshot.visible.map(\.id), [newer.transferID, older.transferID])
+        XCTAssertEqual(
+            store.snapshot.visible.map(\.completedAt),
+            [newer.completedAt, older.completedAt]
+        )
+    }
+
+    func testStoreUsesTransferIDAsDeterministicCompletionTimeTieBreaker() {
+        let store = RecentReceiveStore()
+        let completedAt = Date(timeIntervalSince1970: 1_000)
+        let lower = TransferReceiveResult(
+            transferID: TransferID(
+                rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+            ),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/lower.pdf")],
+            completedAt: completedAt
+        )
+        let higher = TransferReceiveResult(
+            transferID: TransferID(
+                rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+            ),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/higher.pdf")],
+            completedAt: completedAt
+        )
+
+        store.record(higher, sourceName: "Mac")
+        store.record(lower, sourceName: "Mac")
+
+        XCTAssertEqual(store.snapshot.visible.map(\.id), [lower.transferID, higher.transferID])
     }
 }

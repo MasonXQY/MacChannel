@@ -284,6 +284,93 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testRecentReceiveMenuFreezesRowsAndStableActionsForTrackingSession() throws {
+        let controller = makeController()
+        let store = RecentReceiveStore()
+        controller.bindRecentReceives(store)
+        let first = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/first.pdf")],
+            completedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let second = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/second.pdf")],
+            completedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        store.record(first, sourceName: "First Mac")
+        var selected: [TransferID] = []
+        controller.onRevealRecentReceive = { selected.append($0.id) }
+
+        controller.menuWillOpen(controller.statusMenu)
+        let visibleRow = try XCTUnwrap(
+            controller.statusMenu.items.first {
+                $0.representedObject as? String == first.transferID.rawValue.uuidString
+            }
+        )
+        let frozenTitle = visibleRow.title
+        store.record(second, sourceName: "Second Mac")
+
+        XCTAssertEqual(visibleRow.title, frozenTitle)
+        XCTAssertNil(
+            controller.statusMenu.items.first {
+                $0.representedObject as? String == second.transferID.rawValue.uuidString
+            }
+        )
+        XCTAssertTrue(
+            NSApp.sendAction(
+                try XCTUnwrap(visibleRow.action),
+                to: visibleRow.target,
+                from: visibleRow
+            )
+        )
+        XCTAssertEqual(selected, [first.transferID])
+
+        controller.menuDidClose(controller.statusMenu)
+
+        XCTAssertNotNil(
+            controller.statusMenu.items.first {
+                $0.representedObject as? String == second.transferID.rawValue.uuidString
+            }
+        )
+    }
+
+    @MainActor
+    @available(macOS 14.4, *)
+    func testRecentReceiveRowsShowSourceSubtitleAndKeepAccessibleActionLabel() throws {
+        let controller = makeController()
+        let store = RecentReceiveStore()
+        controller.bindRecentReceives(store)
+        let named = receiveResult(named: "report.pdf")
+        let unknown = receiveResult(named: "report.pdf")
+
+        store.record(named, sourceName: "Studio Mac", completedAt: Date(timeIntervalSince1970: 2))
+        store.record(unknown, sourceName: "", completedAt: Date(timeIntervalSince1970: 1))
+
+        let rows = controller.statusMenu.items.filter { $0.title == "report.pdf" }
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows.map(\.subtitle), ["Studio Mac", "其他设备"])
+        XCTAssertEqual(
+            rows.map { $0.accessibilityLabel() },
+            [
+                "来自Studio Mac的report.pdf，在 Finder 中显示",
+                "来自其他设备的report.pdf，在 Finder 中显示",
+            ]
+        )
+    }
+
+    func testRecentReceiveRowUsesVisibleSourceFallbackWithoutSubtitleSupport() {
+        let text = RecentReceiveMenuText(
+            primaryTitle: "report.pdf",
+            sourceName: "Studio Mac",
+            supportsSubtitle: false
+        )
+
+        XCTAssertEqual(text.title, "report.pdf — Studio Mac")
+        XCTAssertNil(text.subtitle)
+    }
+
+    @MainActor
     func testRecentReceiveHistoryItemAcknowledgesAllEntriesBeforeEmittingCallback() throws {
         let controller = makeController()
         let store = RecentReceiveStore()

@@ -6,12 +6,15 @@ import XCTest
 
 final class TransferProtocolTests: XCTestCase {
     func testReceiveResultDefaultsUnknownSourceForLegacySessions() {
+        let beforeCreation = Date()
         let result = TransferReceiveResult(
             transferID: TransferID(rawValue: UUID()),
             receivedURLs: [URL(fileURLWithPath: "/tmp/report.pdf")]
         )
 
         XCTAssertNil(result.source)
+        XCTAssertGreaterThanOrEqual(result.completedAt, beforeCreation)
+        XCTAssertLessThanOrEqual(result.completedAt, Date())
     }
 
     func testDurableReceiveResultIncludesAuthenticatedSource() async throws {
@@ -37,11 +40,14 @@ final class TransferProtocolTests: XCTestCase {
             incomingDirectory: incoming
         )
 
+        let beforeReceive = Date()
         async let result = receiver.run(on: channels.receiver)
         _ = try await SendSession(manifest).run(on: channels.sender)
 
         let received = try await result
         XCTAssertEqual(received.source, source)
+        XCTAssertGreaterThanOrEqual(received.completedAt, beforeReceive)
+        XCTAssertLessThanOrEqual(received.completedAt, Date())
     }
 
     func testManifestBuildsForAFileWithoutLoadingItIntoTheProtocol() throws {

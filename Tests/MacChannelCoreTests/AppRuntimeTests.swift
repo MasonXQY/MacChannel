@@ -941,6 +941,80 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testApplicationRecentRevealUsesLatestSourceSpecificDirectoryForMissingFiles()
+        async throws
+    {
+        let source = DeviceID(rawValue: UUID())
+        let sourceDirectory = URL(fileURLWithPath: "/Volumes/Source Receives")
+        let defaultDirectory = URL(fileURLWithPath: "/Volumes/Default Receives")
+        let oldDirectory = URL(fileURLWithPath: "/Volumes/Old Receives")
+        let missingFile = oldDirectory.appendingPathComponent("missing.pdf")
+        let workspace = ApplicationShellReceiveWorkspace()
+        let revealer = WorkspaceReceiveTargetRevealer(
+            workspace: workspace,
+            fileExists: {
+                $0 == oldDirectory || $0 == sourceDirectory || $0 == defaultDirectory
+            }
+        )
+        let notifier = ReceiveNotificationController(
+            center: ApplicationShellNotificationCenter(),
+            revealer: revealer
+        )
+        let events = ApplicationShellReceiveEventSource()
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let base = AppContainer.localShell()
+        let snapshot = SettingsSurfaceSnapshot(
+            defaultDirectory: defaultDirectory,
+            devices: [
+                DeviceSetting(
+                    device: DeviceSummary(
+                        id: source,
+                        displayName: "Studio Mac",
+                        availability: .offline
+                    ),
+                    directory: sourceDirectory
+                )
+            ]
+        )
+        let container = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            settingsSnapshots: {
+                AsyncStream { continuation in
+                    continuation.yield(snapshot)
+                    continuation.finish()
+                }
+            },
+            receiveEvents: { await events.stream() }
+        )
+        let result = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [missingFile],
+            source: source
+        )
+
+        await shell.replace(container, status: .ready)
+        await events.waitUntilSubscribed()
+        for _ in 0..<100 { await Task.yield() }
+        await events.publish(result)
+        for _ in 0..<100 where shell.recentReceiveSnapshot.visible.isEmpty {
+            await Task.yield()
+        }
+
+        shell.revealRecentReceiveForTesting(result.transferID)
+
+        XCTAssertEqual(workspace.openedURLs, [sourceDirectory])
+        XCTAssertFalse(shell.hasUnreadReceive)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
     func testOpeningRecentReceiveAcknowledgesOnlyThatBatchWhenFinderRevealFails() async throws {
         let events = ApplicationShellReceiveEventSource()
         let notificationCenter = ApplicationShellNotificationCenter()
@@ -1107,6 +1181,54 @@ final class AppRuntimeTests: XCTestCase {
             expected.suffix(RecentReceiveStore.maximumVisibleCount).reversed().map(\.transferID)
         )
         XCTAssertEqual(shell.recentReceiveSnapshot.overflowCount, 1)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
+    @MainActor
+    func testReceiveEventDeduplicationStateRemainsBoundedAcrossLongRunningStream() async {
+        let events = RuntimeReceiveEventSource(bufferCapacity: 8)
+        let notifier = ReceiveNotificationController(
+            center: ApplicationShellNotificationCenter(),
+            revealer: ApplicationShellReceiveTargetRevealer(),
+            notificationTargetCapacity: 4
+        )
+        let shell = MacChannelApplicationDelegate(
+            initialContainer: AppContainer.localShell(),
+            initialStatus: .ready,
+            runtimeHost: nil,
+            receiveNotificationController: notifier,
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+        let base = AppContainer.localShell()
+        let container = AppContainer(
+            deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator,
+            receiveEvents: { await events.stream() }
+        )
+        let resultCount = 512
+
+        await shell.replace(container, status: .ready)
+        let publisher = Task {
+            for index in 0..<resultCount {
+                await events.publish(
+                    TransferReceiveResult(
+                        transferID: TransferID(rawValue: UUID()),
+                        receivedURLs: [URL(fileURLWithPath: "/tmp/long-run-\(index).bin")]
+                    )
+                )
+            }
+        }
+        await publisher.value
+        for _ in 0..<10_000
+        where shell.observedReceiveEventCount != resultCount
+            || shell.receiveEventDeduplicationCount != 0
+        {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(shell.observedReceiveEventCount, resultCount)
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 0)
+        XCTAssertEqual(shell.recentReceiveSnapshot.visible.count, RecentReceiveStore.maximumVisibleCount)
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
@@ -1375,6 +1497,7 @@ final class AppRuntimeTests: XCTestCase {
         }
 
         XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [result.transferID])
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 1)
         await recordGate.release()
         await fulfillment(
             of: [staleReplacementFinished, currentReplacementFinished],
@@ -1386,6 +1509,7 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertTrue(currentReplacementInstalled)
         XCTAssertEqual(shell.observedReceiveEventCount, 1)
         XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [result.transferID])
+        XCTAssertEqual(shell.receiveEventDeduplicationCount, 0)
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
@@ -1626,9 +1750,23 @@ private final class ApplicationShellReceiveTargetRevealer: ReceiveTargetRevealin
         self.revealResult = revealResult
     }
 
-    func reveal(_ urls: [URL]) -> Bool {
+    func reveal(_ urls: [URL], fallbackDirectory: URL?) -> Bool {
         revealedURLs.append(urls)
         return revealResult
+    }
+}
+
+@MainActor
+private final class ApplicationShellReceiveWorkspace: ReceiveWorkspaceOpening {
+    private(set) var selectedURLs: [[URL]] = []
+    private(set) var openedURLs: [URL] = []
+
+    func select(_ urls: [URL]) {
+        selectedURLs.append(urls)
+    }
+
+    func open(_ url: URL) {
+        openedURLs.append(url)
     }
 }
 

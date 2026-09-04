@@ -276,6 +276,17 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         }
     }
 
+    func currentReceiveDirectory(for source: DeviceID?) -> URL {
+        if let source,
+           let override = settingsModel.devices.first(where: { $0.id == source })?.directory
+        {
+            return override.standardizedFileURL
+        }
+        return SettingsReceiveDirectoryPresentation.directory(
+            defaultDirectory: settingsModel.defaultDirectory
+        )
+    }
+
     func updateRuntimeStatus(_ status: AppRuntimeStatus) {
         settingsModel.runtimeStatus = status
     }

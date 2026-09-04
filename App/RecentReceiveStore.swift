@@ -3,6 +3,7 @@ import MacChannelCore
 
 struct RecentReceiveSummary: Identifiable, Equatable, Sendable {
     let id: TransferID
+    let source: DeviceID?
     let sourceName: String
     let receivedURLs: [URL]
     let completedAt: Date
@@ -38,19 +39,20 @@ final class RecentReceiveStore {
     func record(
         _ result: TransferReceiveResult,
         sourceName: String,
-        completedAt: Date = Date()
+        completedAt: Date? = nil
     ) {
         guard !result.receivedURLs.isEmpty else { return }
         unread.removeAll { $0.id == result.transferID }
-        unread.insert(
+        unread.append(
             RecentReceiveSummary(
                 id: result.transferID,
+                source: result.source,
                 sourceName: sourceName.isEmpty ? "其他设备" : sourceName,
                 receivedURLs: result.receivedURLs,
-                completedAt: completedAt
-            ),
-            at: 0
+                completedAt: completedAt ?? result.completedAt
+            )
         )
+        unread.sort(by: Self.isOrderedBefore)
         onChange?(snapshot)
     }
 
@@ -64,5 +66,15 @@ final class RecentReceiveStore {
         guard !unread.isEmpty else { return }
         unread.removeAll(keepingCapacity: false)
         onChange?(snapshot)
+    }
+
+    private static func isOrderedBefore(
+        _ lhs: RecentReceiveSummary,
+        _ rhs: RecentReceiveSummary
+    ) -> Bool {
+        if lhs.completedAt != rhs.completedAt {
+            return lhs.completedAt > rhs.completedAt
+        }
+        return lhs.id.rawValue.uuidString < rhs.id.rawValue.uuidString
     }
 }

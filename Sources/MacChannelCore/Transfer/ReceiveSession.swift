@@ -6,15 +6,18 @@ public struct TransferReceiveResult: Equatable, Sendable {
     public let transferID: TransferID
     public let receivedURLs: [URL]
     public let source: DeviceID?
+    public let completedAt: Date
 
     public init(
         transferID: TransferID,
         receivedURLs: [URL],
-        source: DeviceID? = nil
+        source: DeviceID? = nil,
+        completedAt: Date = Date()
     ) {
         self.transferID = transferID
         self.receivedURLs = receivedURLs
         self.source = source
+        self.completedAt = completedAt
     }
 }
 
@@ -389,6 +392,7 @@ public struct ReceiveSession: Sendable {
                         manifest,
                         onMetadataValidated: onMetadataValidated
                     )
+                    let completedAt = Date()
                     receiveStorage = storage
                     // Publication is the session commit point. Completion is a
                     // bounded notification: failure or cancellation here must
@@ -410,7 +414,8 @@ public struct ReceiveSession: Sendable {
                     return TransferReceiveResult(
                         transferID: transferID,
                         receivedURLs: receivedURLs,
-                        source: durableStorage?.source
+                        source: durableStorage?.source,
+                        completedAt: completedAt
                     )
                 case .cancel:
                     throw TransferProtocolError.cancelled

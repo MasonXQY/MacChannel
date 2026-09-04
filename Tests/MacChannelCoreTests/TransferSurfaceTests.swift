@@ -47,6 +47,41 @@ final class TransferSurfaceTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testSurfaceResolvesCurrentSourceOverrideBeforeConfiguredDefaultDirectory() {
+        let source = DeviceID(rawValue: UUID())
+        let sourceDirectory = URL(fileURLWithPath: "/Volumes/Source Receives")
+        let defaultDirectory = URL(fileURLWithPath: "/Volumes/Default Receives")
+        let surfaces = AppSurfaceController(
+            transferService: StubTransferSurfaceService(),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector()
+        )
+        surfaces.updateSettings(
+            SettingsSurfaceSnapshot(
+                defaultDirectory: defaultDirectory,
+                devices: [
+                    DeviceSetting(
+                        device: DeviceSummary(
+                            id: source,
+                            displayName: "Studio Mac",
+                            availability: .offline
+                        ),
+                        directory: sourceDirectory
+                    )
+                ]
+            )
+        )
+
+        XCTAssertEqual(surfaces.currentReceiveDirectory(for: source), sourceDirectory)
+        XCTAssertEqual(
+            surfaces.currentReceiveDirectory(for: DeviceID(rawValue: UUID())),
+            defaultDirectory
+        )
+        XCTAssertEqual(surfaces.currentReceiveDirectory(for: nil), defaultDirectory)
+    }
+
     func testSettingsSourceOffersFinderRevealForTheEffectiveReceiveDirectory() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

@@ -14,8 +14,23 @@ struct DeviceFanRequest {
     let announce: @MainActor (String) -> Void
 }
 
+struct RecentReceiveMenuText: Equatable {
+    let title: String
+    let subtitle: String?
+
+    init(primaryTitle: String, sourceName: String, supportsSubtitle: Bool) {
+        if supportsSubtitle {
+            title = primaryTitle
+            subtitle = sourceName
+        } else {
+            title = "\(primaryTitle) — \(sourceName)"
+            subtitle = nil
+        }
+    }
+}
+
 @MainActor
-final class StatusItemController: NSObject {
+final class StatusItemController: NSObject, NSMenuDelegate {
     let button: StatusItemButton
     let statusMenu: NSMenu
     var onPresentDeviceFan: ((DeviceFanRequest) -> Void)?
@@ -59,6 +74,8 @@ final class StatusItemController: NSObject {
     private var recentReceiveHistoryItem: NSMenuItem?
     private var recentReceiveSeparatorItem: NSMenuItem?
     private var visibleRecentReceives: [RecentReceiveSummary] = []
+    private var latestRecentReceiveSnapshot = RecentReceiveSnapshot(visible: [], overflowCount: 0)
+    private var isStatusMenuTracking = false
     private var cleanupByToken: [StatusItemDragToken: @MainActor () -> Void] = [:]
 
     init(
@@ -287,14 +304,16 @@ final class StatusItemController: NSObject {
     }
 
     func prepareToOpenStatusMenu() {
+        guard !isStatusMenuTracking else { return }
+        applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
     }
 
     func bindRecentReceives(_ store: RecentReceiveStore) {
         recentReceiveStore = store
         store.onChange = { [weak self] snapshot in
-            self?.renderRecentReceives(snapshot)
+            self?.receiveSnapshotDidChange(snapshot)
         }
-        renderRecentReceives(store.snapshot)
+        receiveSnapshotDidChange(store.snapshot)
     }
 
     func sourceDisplayName(for source: DeviceID?) -> String {
@@ -443,6 +462,7 @@ final class StatusItemController: NSObject {
     }
 
     private func configureMenu() {
+        statusMenu.delegate = self
         let initialRuntimeStatus = runtimeStatus ?? .loading
         let runtime = NSMenuItem(title: initialRuntimeStatus.localizedText, action: nil, keyEquivalent: "")
         runtime.isEnabled = false
@@ -471,14 +491,13 @@ final class StatusItemController: NSObject {
         recentReceiveHeadingItem = recentHeading
         statusMenu.addItem(recentHeading)
 
-        recentReceiveItems = (0..<RecentReceiveStore.maximumVisibleCount).map { index in
+        recentReceiveItems = (0..<RecentReceiveStore.maximumVisibleCount).map { _ in
             let item = NSMenuItem(
                 title: "",
                 action: #selector(revealRecentReceive(_:)),
                 keyEquivalent: ""
             )
             item.target = self
-            item.tag = index
             item.isHidden = true
             item.image = NSImage(
                 systemSymbolName: "tray.and.arrow.down",
@@ -645,7 +664,26 @@ final class StatusItemController: NSObject {
         statusItem?.length = button.preferredWidth
     }
 
-    private func renderRecentReceives(_ snapshot: RecentReceiveSnapshot) {
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
+        isStatusMenuTracking = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        isStatusMenuTracking = false
+        applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
+    }
+
+    private func receiveSnapshotDidChange(_ snapshot: RecentReceiveSnapshot) {
+        latestRecentReceiveSnapshot = snapshot
+        setUnreadReceive(snapshot.hasUnread)
+        guard !isStatusMenuTracking else { return }
+        applyRecentReceiveSnapshot(snapshot)
+    }
+
+    private func applyRecentReceiveSnapshot(_ snapshot: RecentReceiveSnapshot) {
         visibleRecentReceives = snapshot.visible
         let hasUnread = snapshot.hasUnread
         recentReceiveHeadingItem?.isHidden = !hasUnread
@@ -655,10 +693,26 @@ final class StatusItemController: NSObject {
         for (index, item) in recentReceiveItems.enumerated() {
             guard snapshot.visible.indices.contains(index) else {
                 item.isHidden = true
+                item.representedObject = nil
                 continue
             }
             let summary = snapshot.visible[index]
-            item.title = summary.title
+            let supportsSubtitle: Bool
+            if #available(macOS 14.4, *) {
+                supportsSubtitle = true
+            } else {
+                supportsSubtitle = false
+            }
+            let text = RecentReceiveMenuText(
+                primaryTitle: summary.title,
+                sourceName: summary.sourceName,
+                supportsSubtitle: supportsSubtitle
+            )
+            item.title = text.title
+            if #available(macOS 14.4, *) {
+                item.subtitle = text.subtitle ?? ""
+            }
+            item.representedObject = summary.id.rawValue.uuidString
             item.setAccessibilityLabel(
                 "来自\(summary.sourceName)的\(summary.title)，在 Finder 中显示"
             )
@@ -671,8 +725,6 @@ final class StatusItemController: NSObject {
         } else {
             recentReceiveOverflowItem?.isHidden = true
         }
-
-        setUnreadReceive(hasUnread)
     }
 
     private func announce(_ message: String) {
@@ -697,8 +749,13 @@ final class StatusItemController: NSObject {
     }
 
     @objc private func revealRecentReceive(_ sender: NSMenuItem) {
-        guard visibleRecentReceives.indices.contains(sender.tag) else { return }
-        onRevealRecentReceive?(visibleRecentReceives[sender.tag])
+        guard let rawID = sender.representedObject as? String,
+              let uuid = UUID(uuidString: rawID),
+              let summary = visibleRecentReceives.first(where: {
+                  $0.id == TransferID(rawValue: uuid)
+              })
+        else { return }
+        onRevealRecentReceive?(summary)
     }
 
     @objc private func showReceiveHistory(_ sender: NSMenuItem) {
