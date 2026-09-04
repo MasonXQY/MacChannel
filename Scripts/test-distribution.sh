@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
+source "$repo_root/Scripts/legacy-brand-audit.sh"
 
 if [[ ! -x Scripts/build-distribution.sh ]]; then
     echo "Scripts/build-distribution.sh is missing or not executable" >&2
@@ -14,14 +15,19 @@ grep -F 'spctl --assess --type open --context context:primary-signature' \
 grep -F 'MACCHANNEL_RELEASE_NOTES' Scripts/build-distribution.sh >/dev/null
 grep -F 'bash Scripts/build-update-feed.sh' Scripts/build-distribution.sh >/dev/null
 
+clipboard_source="$(<App/ClipboardTransferSource.swift)"
+if ! macchannel_clipboard_cache_compatibility_source_is_valid "$clipboard_source"; then
+    echo "clipboard cache compatibility source is not structurally exact" >&2
+    exit 1
+fi
+
 # Public branding must not leak the legacy product name. Swift string literals
 # are allowed only for these byte-for-byte storage/protocol compatibility IDs.
 while IFS=: read -r source_file source_line source_text; do
     allowed=0
     case "$source_file" in
         App/ClipboardTransferSource.swift)
-            [[ "$source_text" == *'appendingPathComponent("MacChannel", isDirectory: true)'* ]] \
-                && allowed=1
+            macchannel_clipboard_legacy_line_is_allowed "$source_text" && allowed=1
             ;;
         App/ProductionAppRuntime.swift)
             [[ "$source_text" == *'appendingPathComponent("MacChannel", isDirectory: true)'* ]] \
