@@ -209,6 +209,11 @@ final class ReceiveNotificationController {
         let order: UInt64
     }
 
+    private struct HandledNotificationTransfer {
+        var lastSeenAt: Date
+        var order: UInt64
+    }
+
     private struct NotificationIdentity: Equatable, Hashable {
         static let prefix = "dropmesh.receive.v1"
 
@@ -253,16 +258,19 @@ final class ReceiveNotificationController {
     private var continuations: [UUID: AsyncStream<ReceiveNotificationSnapshot>.Continuation] = [:]
     private var notificationTargets: [String: NotificationTarget] = [:]
     private var deliveredNotificationIdentities: [TransferID: NotificationIdentity] = [:]
-    private var handledNotificationTransferIDs: Set<TransferID> = []
-    private var deliveredIdentityLoadTask: Task<[String], Never>?
-    private var didLoadDeliveredNotificationIdentities = false
+    private var handledNotificationTransfers: [TransferID: HandledNotificationTransfer] = [:]
+    private var processingNotificationTransferIDs: Set<TransferID> = []
+    private var deliveredNotificationIdentityRevision: UInt64 = 0
     private let notificationTargetCapacity: Int
     private let notificationTargetTTL: TimeInterval
+    private let handledNotificationCapacity: Int
+    private let handledNotificationTTL: TimeInterval
     private let now: () -> Date
     private let authorizationStatusTimeout: Duration
     private let authorizationPromptTimeout: Duration
     private let deliveryTimeout: Duration
     private var notificationTargetOrder: UInt64 = 0
+    private var handledNotificationOrder: UInt64 = 0
     private var didRequestAuthorization = false
     private var authorizationQueryOperation: AuthorizationOperation?
     private var authorizationRequestOperation: AuthorizationOperation?
@@ -285,6 +293,8 @@ final class ReceiveNotificationController {
         receiveDirectoryResolver: any ReceiveDirectoryResolving = CompatibilityReceiveDirectoryResolver(),
         notificationTargetCapacity: Int = 64,
         notificationTargetTTL: TimeInterval = 10 * 60,
+        handledNotificationCapacity: Int = 128,
+        handledNotificationTTL: TimeInterval = 5 * 60,
         authorizationStatusTimeout: Duration = .seconds(3),
         authorizationPromptTimeout: Duration = .seconds(60),
         deliveryTimeout: Duration = .seconds(3),
@@ -295,6 +305,8 @@ final class ReceiveNotificationController {
         self.receiveDirectoryResolver = receiveDirectoryResolver
         self.notificationTargetCapacity = max(1, notificationTargetCapacity)
         self.notificationTargetTTL = max(0, notificationTargetTTL)
+        self.handledNotificationCapacity = max(1, handledNotificationCapacity)
+        self.handledNotificationTTL = max(0, handledNotificationTTL)
         self.authorizationStatusTimeout = authorizationStatusTimeout
         self.authorizationPromptTimeout = authorizationPromptTimeout
         self.deliveryTimeout = deliveryTimeout
@@ -306,7 +318,7 @@ final class ReceiveNotificationController {
     }
 
     func prepare() async {
-        await loadDeliveredNotificationIdentitiesIfNeeded()
+        await reconcileDeliveredNotificationIdentities()
         if authorizationRequestOperation != nil {
             _ = await awaitAuthorizationRequest()
             return
@@ -424,24 +436,32 @@ final class ReceiveNotificationController {
     ) async {
         pruneNotificationTargets()
         guard let requestedIdentity = NotificationIdentity(identifier: identifier) else { return }
-        guard !handledNotificationTransferIDs.contains(requestedIdentity.transferID) else { return }
+        guard !processingNotificationTransferIDs.contains(requestedIdentity.transferID),
+              !isHandledNotification(requestedIdentity.transferID)
+        else { return }
 
         let deliveredIdentity: NotificationIdentity
         if trustsDeliveredResponse {
             deliveredIdentity = requestedIdentity
         } else {
-            await loadDeliveredNotificationIdentitiesIfNeeded()
+            await reconcileDeliveredNotificationIdentities()
             guard let registeredIdentity =
                 deliveredNotificationIdentities[requestedIdentity.transferID],
                 registeredIdentity == requestedIdentity
             else { return }
             deliveredIdentity = registeredIdentity
         }
-        guard handledNotificationTransferIDs.insert(deliveredIdentity.transferID).inserted else {
-            return
+        guard !processingNotificationTransferIDs.contains(deliveredIdentity.transferID),
+              !isHandledNotification(deliveredIdentity.transferID)
+        else { return }
+        processingNotificationTransferIDs.insert(deliveredIdentity.transferID)
+        defer {
+            processingNotificationTransferIDs.remove(deliveredIdentity.transferID)
+            rememberHandledNotification(deliveredIdentity.transferID)
         }
 
         deliveredNotificationIdentities.removeValue(forKey: deliveredIdentity.transferID)
+        deliveredNotificationIdentityRevision &+= 1
         let canonicalIdentifier = deliveredIdentity.identifier
         let target = notificationTargets.removeValue(forKey: canonicalIdentifier)
         center.removeDeliveredNotifications(withIdentifiers: [canonicalIdentifier])
@@ -603,6 +623,7 @@ final class ReceiveNotificationController {
         case .delivered:
             let identity = NotificationIdentity(transferID: transferID, source: source)
             deliveredNotificationIdentities[transferID] = identity
+            deliveredNotificationIdentityRevision &+= 1
             storeNotificationTarget(
                 urls,
                 transferID: transferID,
@@ -650,28 +671,64 @@ final class ReceiveNotificationController {
         notificationTargets = notificationTargets.filter { $0.value.createdAt >= expiry }
     }
 
-    private func loadDeliveredNotificationIdentitiesIfNeeded() async {
-        guard !didLoadDeliveredNotificationIdentities else { return }
-        let task: Task<[String], Never>
-        if let deliveredIdentityLoadTask {
-            task = deliveredIdentityLoadTask
-        } else {
-            let center = center
-            let created = Task { @MainActor in
-                await center.deliveredNotificationIdentifiers()
-            }
-            deliveredIdentityLoadTask = created
-            task = created
-        }
+    private func isHandledNotification(_ transferID: TransferID) -> Bool {
+        let currentDate = now()
+        pruneHandledNotifications(at: currentDate)
+        guard handledNotificationTransfers[transferID] != nil else { return false }
+        handledNotificationOrder &+= 1
+        handledNotificationTransfers[transferID]?.lastSeenAt = currentDate
+        handledNotificationTransfers[transferID]?.order = handledNotificationOrder
+        return true
+    }
 
-        let identifiers = await task.value
-        guard !didLoadDeliveredNotificationIdentities else { return }
-        for identifier in identifiers {
-            guard let identity = NotificationIdentity(identifier: identifier) else { continue }
-            deliveredNotificationIdentities[identity.transferID] = identity
+    @discardableResult
+    private func rememberHandledNotification(_ transferID: TransferID) -> Bool {
+        let currentDate = now()
+        pruneHandledNotifications(at: currentDate)
+        if handledNotificationTransfers[transferID] != nil {
+            handledNotificationOrder &+= 1
+            handledNotificationTransfers[transferID]?.lastSeenAt = currentDate
+            handledNotificationTransfers[transferID]?.order = handledNotificationOrder
+            return false
         }
-        didLoadDeliveredNotificationIdentities = true
-        deliveredIdentityLoadTask = nil
+        while handledNotificationTransfers.count >= handledNotificationCapacity,
+              let leastRecentlyUsed = handledNotificationTransfers.min(by: {
+                  $0.value.order < $1.value.order
+              })?.key
+        {
+            handledNotificationTransfers.removeValue(forKey: leastRecentlyUsed)
+        }
+        handledNotificationOrder &+= 1
+        handledNotificationTransfers[transferID] = HandledNotificationTransfer(
+            lastSeenAt: currentDate,
+            order: handledNotificationOrder
+        )
+        return true
+    }
+
+    private func pruneHandledNotifications(at currentDate: Date? = nil) {
+        let currentDate = currentDate ?? now()
+        let expiry = currentDate.addingTimeInterval(-handledNotificationTTL)
+        handledNotificationTransfers = handledNotificationTransfers.filter {
+            $0.value.lastSeenAt >= expiry
+        }
+    }
+
+    private func reconcileDeliveredNotificationIdentities() async {
+        let startingRevision = deliveredNotificationIdentityRevision
+        let identifiers = await center.deliveredNotificationIdentifiers()
+        guard startingRevision == deliveredNotificationIdentityRevision else { return }
+
+        pruneHandledNotifications()
+        var deliveredIdentities: [TransferID: NotificationIdentity] = [:]
+        for identifier in identifiers {
+            guard let identity = NotificationIdentity(identifier: identifier),
+                  handledNotificationTransfers[identity.transferID] == nil,
+                  !processingNotificationTransferIDs.contains(identity.transferID)
+            else { continue }
+            deliveredIdentities[identity.transferID] = identity
+        }
+        deliveredNotificationIdentities = deliveredIdentities
     }
 
 }

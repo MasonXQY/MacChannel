@@ -1859,6 +1859,7 @@ private actor ReceiveResultRecordGate {
 @MainActor
 private final class ApplicationShellNotificationCenter: ReceiveNotificationCenter {
     private(set) var deliveredRequests: [ReceiveNotificationRequest] = []
+    private var activeDeliveredIdentifiers: Set<String> = []
     private var deliveredResponseHandler: ((String) async -> Void)?
     var deliveredCount: Int { deliveredRequests.count }
 
@@ -1867,6 +1868,15 @@ private final class ApplicationShellNotificationCenter: ReceiveNotificationCente
 
     func deliver(_ request: ReceiveNotificationRequest) async throws {
         deliveredRequests.append(request)
+        activeDeliveredIdentifiers.insert(request.identifier)
+    }
+
+    func deliveredNotificationIdentifiers() async -> [String] {
+        Array(activeDeliveredIdentifiers)
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
+        activeDeliveredIdentifiers.subtract(identifiers)
     }
 
     func setDeliveredResponseHandler(_ handler: @escaping (String) async -> Void) {
