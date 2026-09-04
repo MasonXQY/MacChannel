@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
-source "$repo_root/Scripts/legacy-brand-audit.sh"
+source "$repo_root/Scripts/test-legacy-brand-audit-support.sh"
 
 valid_source='    private static func defaultTemporaryRoot(in cacheDirectory: URL) -> URL {
         cacheDirectory

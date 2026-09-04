@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
-source "$repo_root/Scripts/legacy-brand-audit.sh"
+source "$repo_root/Scripts/test-legacy-brand-audit-support.sh"
 
 if [[ ! -x Scripts/build-distribution.sh ]]; then
     echo "Scripts/build-distribution.sh is missing or not executable" >&2
