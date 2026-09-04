@@ -298,7 +298,7 @@ printf '%s\n' Applications MacChannel.app README.txt | LC_ALL=C sort >"$test_roo
 cmp "$test_root/expected-entries.txt" "$mapfile_path"
 test -L "$mounted_path/Applications"
 test "$(readlink "$mounted_path/Applications")" = /Applications
-grep -F "版本 1.2.6 (19)" "$mounted_path/README.txt" >/dev/null
+grep -F "版本 1.2.6 (20)" "$mounted_path/README.txt" >/dev/null
 clean_codesign --verify --deep --strict --verbose=2 "$mounted_path/MacChannel.app"
 
 plist="$mounted_path/MacChannel.app/Contents/Info.plist"
@@ -307,7 +307,7 @@ test -d "$sparkle"
 test -x "$sparkle/Versions/Current/Sparkle"
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$plist")" = 1.2.6
 test -n "$(plutil -extract NSDownloadsFolderUsageDescription raw -o - "$plist")"
-test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 19
+test "$(plutil -extract CFBundleVersion raw -o - "$plist")" = 20
 test "$(plutil -extract CFBundlePackageType raw -o - "$plist")" = APPL
 test "$(plutil -extract CFBundleIdentifier raw -o - "$plist")" = com.mason.macchannel
 test "$(plutil -extract CFBundleExecutable raw -o - "$plist")" = MacChannelApp
@@ -341,7 +341,7 @@ actual_sha="$(shasum -a 256 $test_dist/DropMesh.dmg | awk '{print $1}')"
 test "$manifest_sha" = "$actual_sha"
 test "$(plutil -extract gitCommit raw -o - $test_dist/DropMesh.manifest.json)" = "$(git rev-parse HEAD)"
 test "$(plutil -extract version raw -o - $test_dist/DropMesh.manifest.json)" = 1.2.6
-test "$(plutil -extract build raw -o - $test_dist/DropMesh.manifest.json)" = 19
+test "$(plutil -extract build raw -o - $test_dist/DropMesh.manifest.json)" = 20
 test "$(plutil -extract releaseState raw -o - $test_dist/DropMesh.manifest.json)" = internalSignedNotNotarized
 test "$(plutil -extract product raw -o - $test_dist/DropMesh.manifest.json)" = DropMesh
 test "$(plutil -extract bundleIdentifier raw -o - \
