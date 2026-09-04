@@ -23,5 +23,5 @@ for consumer in "${release_consumers[@]}"; do
 done
 
 test "$macchannel_default_version" = 1.2.6
-test "$macchannel_default_build_number" = 20
+test "$macchannel_default_build_number" = 21
 echo "release defaults contract PASS"

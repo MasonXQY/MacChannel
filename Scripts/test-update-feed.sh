@@ -15,7 +15,7 @@ grep -F '/usr/bin/xcrun stapler validate "$dmg_path"' \
 grep -F '/usr/sbin/spctl --assess --type open' Scripts/build-update-feed.sh >/dev/null
 
 version=1.2.6
-build_number=20
+build_number=21
 account=com.mason.macchannel.updates
 generate_appcast="$repo_root/.build/tools/Sparkle-2.9.6/bin/generate_appcast"
 signing_home="${HOME:?}"
@@ -370,7 +370,7 @@ expect_failure manifest run_feed_builder
 prepare_fixture
 MACCHANNEL_TEST_VERSION=1.2.5 expect_failure manifest run_feed_builder
 prepare_fixture
-MACCHANNEL_TEST_BUILD_NUMBER=19 expect_failure manifest run_feed_builder
+MACCHANNEL_TEST_BUILD_NUMBER=20 expect_failure manifest run_feed_builder
 
 prepare_fixture
 plutil -replace dmgSHA256 -string \
