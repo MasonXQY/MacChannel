@@ -194,7 +194,7 @@ public struct SendSession: Sendable {
             }
 
             // Complete also acts as an immediate ACK flush for transfers whose
-            // final batch contains fewer than 16 chunks.
+            // final batch does not reach the acknowledgement checkpoint boundary.
             try await send(
                 .complete,
                 transferID: manifest.id,
