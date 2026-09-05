@@ -337,19 +337,50 @@ public struct SendSession: Sendable {
         announcedPause: inout Bool
     ) async throws {
         while true {
-            let frame = try await nextFrame(
-                from: reader,
-                controlSnapshot: &controlSnapshot,
-                on: channel,
-                outboundCipher: outboundCipher,
-                outboundSequence: &outboundSequence,
-                announcedPause: &announcedPause
+            let event = try await waitForTransferSessionEvent(
+                reader: reader,
+                control: control,
+                after: controlSnapshot
             )
-            switch frame {
-            case .resume: return
-            case .cancel: throw TransferProtocolError.cancelled
-            case .error(let remote): throw mapRemoteError(remote)
-            default: throw TransferProtocolError.unexpectedFrame
+            switch event {
+            case .frame(let frame):
+                try Task.checkCancellation()
+                if let control {
+                    let latest = await control.snapshot()
+                    if latest.revision != controlSnapshot?.revision {
+                        controlSnapshot = latest
+                    }
+                    if case .cancelled = controlSnapshot?.state {
+                        throw TransferProtocolError.cancelled
+                    }
+                }
+                switch frame {
+                case .resume:
+                    try await applyLocalControl(
+                        on: channel,
+                        cipher: outboundCipher,
+                        sequence: &outboundSequence,
+                        announcedPause: &announcedPause,
+                        snapshot: &controlSnapshot
+                    )
+                    return
+                case .cancel:
+                    throw TransferProtocolError.cancelled
+                case .error(let remote):
+                    throw mapRemoteError(remote)
+                default:
+                    throw TransferProtocolError.unexpectedFrame
+                }
+            case .timeout:
+                continue
+            case .control(let changed):
+                // A legacy paused peer may already hold the full 127-data-frame
+                // window. Coalesce local pause/active churn until its resume;
+                // cancellation still exits through the single terminal frame.
+                controlSnapshot = changed
+                if case .cancelled = changed.state {
+                    throw TransferProtocolError.cancelled
+                }
             }
         }
     }

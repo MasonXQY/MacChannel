@@ -2008,6 +2008,132 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertEqual(receiveResult.transferID, manifest.id)
     }
 
+    func testSenderPauseResumeChangesAreCoalescedWhileLegacyReceiverRemainsPaused() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("coalesced-controls.bin")
+        let bytes = Data(
+            repeating: 0x4e,
+            count: TransferProtocolLimits.maximumChunkBytes
+                * (TransferProtocolLimits.maximumUnacknowledgedChunks + 1)
+        )
+        try bytes.write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let receiverControl = TransferSessionControl()
+        let senderControl = TransferSessionControl()
+        let recorder = TestChunkRecorder()
+        await receiverControl.pause()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination,
+                control: receiverControl
+            ).run(on: channels.receiver)
+        }
+        let sender = Task {
+            try await SendSession(
+                manifest,
+                recorder: recorder,
+                control: senderControl
+            ).run(on: channels.sender)
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        let pausedCoordinates = await recorder.coordinates
+        let sentAtBoundary = await channels.sender.sentCount()
+        XCTAssertEqual(pausedCoordinates.count, 127)
+        XCTAssertEqual(sentAtBoundary, 128)
+        for _ in 0..<2 {
+            await senderControl.pause()
+            try await Task.sleep(for: .milliseconds(50))
+            await senderControl.resume()
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let sentWhileReceiverPaused = await channels.sender.sentCount()
+        XCTAssertEqual(
+            sentWhileReceiverPaused,
+            128,
+            "Local pause/active changes must not consume a legacy receiver frame while it is paused"
+        )
+
+        await receiverControl.resume()
+        let sendResult = try await sender.value
+        let receiveResult = try await receiver.value
+        let received = try XCTUnwrap(receiveResult.receivedURLs.first)
+
+        XCTAssertEqual(sendResult.sentChunkCount, 128)
+        XCTAssertEqual(try Data(contentsOf: received), bytes)
+    }
+
+    func testSenderPauseIsAnnouncedOnceAfterLegacyReceiverResumes() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("deferred-pause.bin")
+        let bytes = Data(
+            repeating: 0x5e,
+            count: TransferProtocolLimits.maximumChunkBytes
+                * (TransferProtocolLimits.maximumUnacknowledgedChunks + 1)
+        )
+        try bytes.write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let receiverControl = TransferSessionControl()
+        let senderControl = TransferSessionControl()
+        let recorder = TestChunkRecorder()
+        await receiverControl.pause()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination,
+                control: receiverControl
+            ).run(on: channels.receiver)
+        }
+        let sender = Task {
+            try await SendSession(
+                manifest,
+                recorder: recorder,
+                control: senderControl
+            ).run(on: channels.sender)
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        let pausedCoordinates = await recorder.coordinates
+        let sentAtBoundary = await channels.sender.sentCount()
+        XCTAssertEqual(pausedCoordinates.count, 127)
+        XCTAssertEqual(sentAtBoundary, 128)
+        await senderControl.pause()
+        try await Task.sleep(for: .milliseconds(50))
+        let sentBeforeReceiverResume = await channels.sender.sentCount()
+        XCTAssertEqual(
+            sentBeforeReceiverResume,
+            128,
+            "Local pause must be deferred while the legacy receiver is paused"
+        )
+
+        await receiverControl.resume()
+        await channels.sender.waitUntilSentCount(129)
+        let deferredPauseCoordinates = await recorder.coordinates
+        XCTAssertEqual(
+            deferredPauseCoordinates.count,
+            127,
+            "The first deferred frame must be pause, not the next data chunk"
+        )
+        await senderControl.resume()
+        let sendResult = try await sender.value
+        let receiveResult = try await receiver.value
+        let received = try XCTUnwrap(receiveResult.receivedURLs.first)
+
+        XCTAssertEqual(sendResult.sentChunkCount, 128)
+        XCTAssertEqual(try Data(contentsOf: received), bytes)
+    }
+
     func testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks() async throws {
         XCTAssertEqual(TransferProtocolLimits.acknowledgementChunkInterval, 127)
         let directory = FileManager.default.temporaryDirectory

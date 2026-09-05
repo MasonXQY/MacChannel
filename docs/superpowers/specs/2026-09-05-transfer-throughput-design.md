@@ -36,6 +36,8 @@ Compression can help text and source trees but often harms already-compressed ar
 
 The installed 1.2.6 transfer decoder accepts at most 128 queued frames. The transfer protocol therefore permits at most 127 unacknowledged data chunks, about 8 MiB, and reserves the final frame of that legacy budget for `.complete`, `.pause`, `.resume`, `.cancel`, or `.error`. The current decoded-frame inbox remains bounded at the same 128-frame limit. Receiver acknowledgements still communicate actual durable progress rather than merely received bytes.
 
+Once a sender has received a remote `.pause`, local paused/active changes are coalesced in its control snapshot without emitting frames into the paused peer's full legacy inbox. A local cancellation still terminates immediately and emits at most the single terminal `.cancel` that fits the reserved slot. After remote `.resume`, the sender applies the latest local state once: an active sender emits no stale pause/resume pair, while a paused sender announces one `.pause` and waits for local resume while the peer is active and consuming frames.
+
 ### Adaptive durable checkpoints
 
 The receiver checkpoints after either 127 chunks (approximately 8 MiB) or 250 ms since the previous checkpoint. Aligning the chunk threshold with the 127-data-frame sender window avoids falling back to the timer at every full window. The time condition preserves frequent recovery points on slow links and for small transfers; the byte condition reduces `fsync` and SQLite commit frequency on fast links.
@@ -66,7 +68,8 @@ Add deterministic tests that prove:
 3. WebRTC flow control uses the larger 256-frame inbound stream and bounded queue thresholds while still rejecting waiter/byte floods.
 4. A sender can place 127 chunks in flight, reserves the 128th legacy receive-frame slot for control or completion, and blocks the next data chunk until a durable acknowledgement arrives.
 5. Exactly 127 chunks plus `.complete` fit the installed 1.2.6 receiver's 128-frame decoded-input budget while paused.
-6. Existing resume, interruption, relay, memory-bound, authentication, and protocol tests continue to pass.
+6. Local pause/active churn emits no frames while the remote peer remains paused; after remote resume only the latest local state is announced.
+7. Existing resume, interruption, relay, memory-bound, authentication, and protocol tests continue to pass.
 
 Record warm-build wall time for an actual 64 MiB LAN loopback transfer before and after the change. Run the complete test suite after implementation. The release is not considered ready for public distribution until a signed build is tested between two physical Macs on both local-network and relay routes, with file hashes matching at the destination.
 

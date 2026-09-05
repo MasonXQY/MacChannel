@@ -248,10 +248,11 @@ git commit -m "perf: avoid redundant receive chunk rereads"
 
 **Files:**
 - Modify: `Sources/MacChannelCore/Connectivity/WebRTCSecureChannel.swift:23-27,55-58`
+- Modify: `Sources/MacChannelCore/Transfer/SendSession.swift:331-355`
 - Modify: `Sources/MacChannelCore/Transfer/TransferManifest.swift:28-43`
 - Modify: `Sources/MacChannelCore/Transfer/ReceiveSession.swift:727-803`
 - Modify: `Tests/MacChannelCoreTests/WebRTCLoopbackTests.swift:6-74,170-194`
-- Modify: `Tests/MacChannelCoreTests/TransferProtocolTests.swift:1056-1168,1488-1555,1924-2091`
+- Modify: `Tests/MacChannelCoreTests/TransferProtocolTests.swift:1056-1168,1488-1555,1924-2225`
 
 **Interfaces:**
 - Produces: a 1 MiB WebRTC low-water threshold, 4 MiB high-water mark, 256-frame WebRTC receive stream, and a legacy-compatible 127-data-chunk protocol send window.
@@ -274,6 +275,10 @@ Rename `testSenderStopsAtSixtyFourChunksUntilAcknowledged` to `testSenderReserve
 In `testReceiverControlPauseBackpressuresSenderUntilResume`, build `maximumUnacknowledgedChunks + 1` chunks, expect 127 recorded chunks while paused, and expect all 128 after resume. Update `testControlCancelWakesSenderWaitingForAcknowledgement` to use the same boundary-relative fixture.
 
 Add `testExactlyOneHundredTwentySevenChunksPlusCompleteFitLegacyReceiveFrameBudgetWhilePaused`. While receiver control is paused, require the sender to emit an offer, 127 chunks, and `.complete`; the post-offer 127 data frames plus one completion frame exactly fill the installed 1.2.6 receiver's 128-frame decoded-input budget. Resume and require both sessions to complete.
+
+Add `testSenderPauseResumeChangesAreCoalescedWhileLegacyReceiverRemainsPaused`. Fill the 127-data boundary, toggle sender pause/resume at least twice while the receiver remains paused, require the sender frame count not to increase, then resume and verify both sessions and destination bytes.
+
+Add `testSenderPauseIsAnnouncedOnceAfterLegacyReceiverResumes`. Fill the same boundary, leave the sender locally paused, require no early pause frame, resume the receiver, require exactly one deferred pause before any next data chunk, then resume the sender and verify completion and destination bytes.
 
 Rename the checkpoint-boundary regression to `testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks`, send `0..<127`, and require acknowledgement range `0..<127`. Keep `testReceiverFlushesAcknowledgementAfterTwoHundredFiftyMilliseconds` unchanged.
 
@@ -332,6 +337,8 @@ Run:
 swift test --filter WebRTCLoopbackTests/testThroughputFlowControlRemainsExplicitlyBounded
 swift test --filter TransferProtocolTests/testSenderReservesControlHeadroomAtLegacyOneHundredTwentyEightFrameBoundary
 swift test --filter TransferProtocolTests/testExactlyOneHundredTwentySevenChunksPlusCompleteFitLegacyReceiveFrameBudgetWhilePaused
+swift test --filter TransferProtocolTests/testSenderPauseResumeChangesAreCoalescedWhileLegacyReceiverRemainsPaused
+swift test --filter TransferProtocolTests/testSenderPauseIsAnnouncedOnceAfterLegacyReceiverResumes
 swift test --filter TransferProtocolTests/testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks
 ```
 
@@ -364,6 +371,8 @@ public static let acknowledgementChunkInterval = 127
 
 Use `maximumUnacknowledgedChunks = 127`, not 128: the installed 1.2.6 decoder's 128-frame total budget must reserve one control/terminal slot. Keep `TransferFrameInbox` at 128 total frames. Keep `State.maximumSuspendedFrameBytes` at 4 MiB and `maximumBackpressureWaiters` at 128.
 
+In `SendSession.waitForRemoteResume`, consume local control revisions without calling `applyLocalControl` while the peer is paused. Update `controlSnapshot` only for `.paused` and `.active`; `.cancelled` still throws so the outer termination path sends at most one terminal `.cancel`. When remote `.resume` arrives, call `applyLocalControl` once with the latest snapshot. An active snapshot sends nothing; a paused snapshot announces `.pause` and waits normally for local resume while the peer is active.
+
 - [ ] **Step 4: Run flow-control, overload, and protocol suites**
 
 Run:
@@ -378,7 +387,7 @@ Expected: all tests PASS; the existing byte-flood and waiter-flood overload test
 - [ ] **Step 5: Commit flow-control tuning**
 
 ```bash
-git add Sources/MacChannelCore/Connectivity/WebRTCSecureChannel.swift Sources/MacChannelCore/Transfer/ReceiveSession.swift Sources/MacChannelCore/Transfer/TransferManifest.swift Tests/MacChannelCoreTests/WebRTCLoopbackTests.swift Tests/MacChannelCoreTests/TransferProtocolTests.swift docs/superpowers/specs/2026-09-05-transfer-throughput-design.md docs/superpowers/plans/2026-09-05-transfer-throughput.md
+git add Sources/MacChannelCore/Connectivity/WebRTCSecureChannel.swift Sources/MacChannelCore/Transfer/SendSession.swift Sources/MacChannelCore/Transfer/ReceiveSession.swift Sources/MacChannelCore/Transfer/TransferManifest.swift Tests/MacChannelCoreTests/WebRTCLoopbackTests.swift Tests/MacChannelCoreTests/TransferProtocolTests.swift docs/superpowers/specs/2026-09-05-transfer-throughput-design.md docs/superpowers/plans/2026-09-05-transfer-throughput.md
 git commit -m "perf: widen bounded transfer flow control"
 ```
 
