@@ -110,6 +110,7 @@ final class GoRendezvousInteropTests: XCTestCase {
             allowInsecureForTesting: true
         )
         try await session.connect()
+        try await socket.ping()
         await session.stop()
         await transport.stop()
 
@@ -251,6 +252,18 @@ private final class IntegrationPresenceWebSocket: PresenceWebSocket, @unchecked 
     }
 
     func send(_ data: Data) async throws { try await task.send(.data(data)) }
+    func ping() async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, any Error>) in
+            task.sendPing { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+    }
     func receive() async throws -> Data {
         switch try await task.receive() {
         case let .data(data): data

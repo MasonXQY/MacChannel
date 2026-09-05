@@ -32,6 +32,7 @@ public struct RendezvousProtocolError: Equatable, Sendable {
 /// Narrow transport seam for URLSessionWebSocketTask and deterministic tests.
 public protocol PresenceWebSocket: Sendable {
     func send(_ data: Data) async throws
+    func ping() async throws
     func receive() async throws -> Data
     func close() async
 }
@@ -61,6 +62,19 @@ public final class URLSessionPresenceWebSocket: PresenceWebSocket, @unchecked Se
 
     public func send(_ data: Data) async throws {
         try await task.send(.data(data))
+    }
+
+    public func ping() async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, any Error>) in
+            task.sendPing { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
     }
 
     public func receive() async throws -> Data {
@@ -144,14 +158,19 @@ public actor AuthenticatedPresenceSession {
     public static let authenticationPayload = Data("{\"type\":\"websocket-auth-v1\"}".utf8)
     public static let maximumSignalPayloadBytes = 64 * 1024
     public static let maximumFrameBytes = 128 * 1024
+    static let livenessInterval: Duration = .seconds(20)
+    static let livenessTimeout: Duration = .seconds(10)
 
     private let identity: DeviceIdentity
     private let origin: URL
     private let socket: any PresenceWebSocket
     private let client: PresenceClient
     private let trustRepository: TrustRepository?
+    private let livenessInterval: Duration
+    private let livenessTimeout: Duration
     private var running = false
     private var readerActive = false
+    private var livenessTask: Task<Void, Never>?
     private let presenceStream: AsyncStream<RendezvousPresenceEvent>
     private let signalStream: AsyncStream<RendezvousSignalFrame>
     private let trustResultStream: AsyncStream<RendezvousTrustResult>
@@ -183,7 +202,10 @@ public actor AuthenticatedPresenceSession {
     init(
         identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket,
         client: PresenceClient,
-        trustRepository: TrustRepository? = nil, allowInsecureForTesting: Bool
+        trustRepository: TrustRepository? = nil,
+        livenessInterval: Duration = AuthenticatedPresenceSession.livenessInterval,
+        livenessTimeout: Duration = AuthenticatedPresenceSession.livenessTimeout,
+        allowInsecureForTesting: Bool
     ) throws {
         let scheme = origin.scheme?.lowercased()
         guard origin.host != nil,
@@ -194,6 +216,8 @@ public actor AuthenticatedPresenceSession {
         self.socket = socket
         self.client = client
         self.trustRepository = trustRepository
+        self.livenessInterval = livenessInterval
+        self.livenessTimeout = livenessTimeout
         var presenceContinuation: AsyncStream<RendezvousPresenceEvent>.Continuation!
         presenceStream = AsyncStream(bufferingPolicy: .bufferingNewest(32)) {
             presenceContinuation = $0
@@ -307,7 +331,9 @@ public actor AuthenticatedPresenceSession {
             throw AuthenticatedPresenceError.transport("reader_already_active")
         }
         readerActive = true
+        startLivenessMonitoring()
         defer {
+            stopLivenessMonitoring()
             readerActive = false
             if !running { finishStreams() }
         }
@@ -380,10 +406,64 @@ public actor AuthenticatedPresenceSession {
 
     public func stop() async {
         running = false
+        stopLivenessMonitoring()
         pendingTrustRecords.removeAll()
         finishStreams()
         await client.disconnect()
         await socket.close()
+    }
+
+    private func startLivenessMonitoring() {
+        livenessTask?.cancel()
+        let interval = livenessInterval
+        let timeout = livenessTimeout
+        let socket = socket
+        livenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                    try Task.checkCancellation()
+                    try await Self.verifyLiveness(of: socket, timeout: timeout)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    await self?.failStaleConnection()
+                    return
+                }
+            }
+        }
+    }
+
+    private static func verifyLiveness(
+        of socket: any PresenceWebSocket,
+        timeout: Duration
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await socket.ping() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                await socket.close()
+                throw AuthenticatedPresenceError.transport("liveness_timeout")
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw AuthenticatedPresenceError.transport("liveness_cancelled")
+            }
+            return first
+        }
+    }
+
+    private func stopLivenessMonitoring() {
+        livenessTask?.cancel()
+        livenessTask = nil
+    }
+
+    private func failStaleConnection() async {
+        guard running else { return }
+        running = false
+        await socket.close()
+        await client.disconnect()
     }
 
     private func ingestMembershipCatchUp(

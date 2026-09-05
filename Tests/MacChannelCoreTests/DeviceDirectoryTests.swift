@@ -642,6 +642,54 @@ final class DeviceDirectoryTests: XCTestCase {
         XCTAssertTrue(snapshot.isEmpty)
     }
 
+    func testAuthenticatedPresenceSessionClosesAStaleSocketWhenRoundTripPingDoesNotRespond()
+        async throws
+    {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer))
+        let socket = MemoryPresenceSocket(
+            incoming: [
+                try frame([
+                    "type": "challenge",
+                    "nonce": Data(repeating: 19, count: 32).base64EncodedString(),
+                    "expiresAt": 9_999_999_999_999,
+                ]),
+                try frame([
+                    "type": "auth-ok",
+                    "deviceID": identity.id.rawValue.uuidString.lowercased(),
+                ]),
+                try frame([
+                    "type": "presence",
+                    "deviceID": peer.rawValue.uuidString.lowercased(),
+                    "availability": "internet",
+                ]),
+            ],
+            blocksWhenEmpty: true,
+            blocksPings: true
+        )
+        let session = try AuthenticatedPresenceSession(
+            identity: identity,
+            origin: URL(string: "wss://rendezvous.example/v1/ws")!,
+            socket: socket,
+            client: PresenceClient(directory: directory),
+            livenessInterval: .milliseconds(1),
+            livenessTimeout: .milliseconds(5),
+            allowInsecureForTesting: false
+        )
+
+        try await session.connect()
+        await XCTAssertThrowsErrorAsync(try await session.run()) { error in
+            XCTAssertEqual(error as? AuthenticatedPresenceError, .transport("closed"))
+        }
+
+        let pingCount = await socket.pingCount()
+        let finalSnapshot = await directory.snapshot()
+        XCTAssertEqual(pingCount, 1)
+        XCTAssertTrue(finalSnapshot.isEmpty)
+        await session.stop()
+    }
+
     func testDevicesStreamPublishesDeduplicatedSnapshots() async {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))
@@ -865,14 +913,31 @@ private actor MemoryPresenceSocket: PresenceWebSocket {
     private var incoming: [Data]
     private var sent: [Data] = []
     private let blocksWhenEmpty: Bool
+    private let blocksPings: Bool
     private var blockedReceiver: CheckedContinuation<Data, Error>?
+    private var blockedPing: CheckedContinuation<Void, Error>?
+    private var pings = 0
+    private var isClosed = false
 
-    init(incoming: [Data], blocksWhenEmpty: Bool = false) {
+    init(
+        incoming: [Data],
+        blocksWhenEmpty: Bool = false,
+        blocksPings: Bool = false
+    ) {
         self.incoming = incoming
         self.blocksWhenEmpty = blocksWhenEmpty
+        self.blocksPings = blocksPings
     }
     func send(_ data: Data) async throws { sent.append(data) }
+    func ping() async throws {
+        pings += 1
+        if isClosed { throw AuthenticatedPresenceError.transport("closed") }
+        if blocksPings {
+            return try await withCheckedThrowingContinuation { blockedPing = $0 }
+        }
+    }
     func receive() async throws -> Data {
+        if isClosed { throw AuthenticatedPresenceError.transport("closed") }
         guard !incoming.isEmpty else {
             if blocksWhenEmpty {
                 return try await withCheckedThrowingContinuation { blockedReceiver = $0 }
@@ -882,11 +947,15 @@ private actor MemoryPresenceSocket: PresenceWebSocket {
         return incoming.removeFirst()
     }
     func close() async {
+        isClosed = true
         blockedReceiver?.resume(throwing: AuthenticatedPresenceError.transport("closed"))
         blockedReceiver = nil
+        blockedPing?.resume(throwing: AuthenticatedPresenceError.transport("closed"))
+        blockedPing = nil
     }
     func sentFrame() throws -> Data { try XCTUnwrap(sent.first) }
     func sentFrames() -> [Data] { sent }
+    func pingCount() -> Int { pings }
 }
 
 private actor BonjourApplyGate {
