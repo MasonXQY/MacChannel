@@ -1954,7 +1954,7 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertEqual(completedCoordinates.count, 65)
     }
 
-    func testReceiverAcknowledgesAContinuousRangeAtSixteenChunks() async throws {
+    func testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentyEightChunks() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let destination = directory.appendingPathComponent("received", isDirectory: true)
@@ -1963,7 +1963,7 @@ final class TransferProtocolTests: XCTestCase {
         let source = directory.appendingPathComponent("ack.bin")
         let bytes = Data(
             repeating: 6,
-            count: TransferProtocolLimits.maximumChunkBytes * 17
+            count: TransferProtocolLimits.maximumChunkBytes * 129
         )
         try bytes.write(to: source)
         let manifest = try TransferManifest.build(from: source)
@@ -2000,7 +2000,7 @@ final class TransferProtocolTests: XCTestCase {
                 sequence: &inboundSequence
             )
         else { return XCTFail("Expected accept") }
-        for index in 0..<UInt32(16) {
+        for index in 0..<UInt32(128) {
             let offset = Int(index) * TransferProtocolLimits.maximumChunkBytes
             try await send(
                 .chunk(
@@ -2029,7 +2029,7 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertEqual(
             map.ranges,
             [
-                try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 16)
+                try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 128)
             ])
         try await send(
             .cancel,
