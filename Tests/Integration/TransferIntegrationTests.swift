@@ -146,6 +146,37 @@ final class TransferIntegrationTests: XCTestCase {
         )
     }
 
+    func testLAN64MiBThroughputEvidence() async throws {
+        let harness = try await makeHarness(routePolicy: .lanOnly)
+        let byteCount = 64 * 1024 * 1024
+        let source = try harness.makeDeterministicFile(
+            size: byteCount,
+            named: "throughput-64m.bin"
+        )
+        let clock = ContinuousClock()
+        let started = clock.now
+        let transfer = try await harness.sender.send(items: [source], to: harness.receiverID)
+        try await harness.waitForCompletion(transfer, timeout: .seconds(120))
+        let elapsed = started.duration(to: clock.now)
+        let components = elapsed.components
+        let seconds = Double(components.seconds)
+            + Double(components.attoseconds) / 1_000_000_000_000_000_000
+        let mebibytesPerSecond = Double(byteCount) / 1_048_576 / seconds
+        let destination = harness.receivedFile(named: source.lastPathComponent)
+        let sourceHash = try SHA256.hash(file: source)
+        let destinationHash = try SHA256.hash(file: destination)
+
+        XCTAssertGreaterThan(seconds, 0)
+        XCTAssertEqual(sourceHash, destinationHash)
+        let routes = await harness.actualRoutes()
+        XCTAssertEqual(routes, [.lan])
+        print(
+            "throughput-lan bytes=\(byteCount) seconds=\(seconds) "
+                + "mib_per_second=\(mebibytesPerSecond) route=lan "
+                + "source_sha256=\(sourceHash) destination_sha256=\(destinationHash)"
+        )
+    }
+
     func testClipboardUTF8TextArrivesInReceiverDownloadRootByteForByte() async throws {
         let harness = try await makeHarness(routePolicy: .lanOnly)
         let expectedText = "DropMesh 剪贴板\n第二行 🌏\n"
