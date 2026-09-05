@@ -30,7 +30,7 @@ Compression can help text and source trees but often harms already-compressed ar
 
 ## Selected architecture
 
-### Route-aware flow control
+### Bounded flow control
 
 `WebRTCSecureChannel` keeps the existing 64 KiB message cap. Its high-water mark becomes 4 MiB and its low-water threshold becomes 1 MiB. The existing suspended-send bound remains 4 MiB, so callers cannot accumulate an unbounded amount of memory while WebRTC is congested.
 
