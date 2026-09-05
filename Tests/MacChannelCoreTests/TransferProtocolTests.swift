@@ -1169,6 +1169,337 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertEqual(result.sentChunkCount, 128)
     }
 
+    func testLateAcknowledgementDoesNotClearNewLocalControlDebt() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("late-control-debt.bin")
+        try Data(
+            repeating: 0x2f,
+            count: TransferProtocolLimits.maximumChunkBytes
+                * (TransferProtocolLimits.maximumUnacknowledgedChunks + 16)
+        ).write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let control = TransferSessionControl()
+        let challenge = TransferReceiverChallenge.fresh(for: manifest.id)
+        try await channels.receiver.send(challenge.encode())
+        let crypto = try await TransferCryptographicContext.make(
+            on: channels.receiver,
+            transfer: manifest.id,
+            receiverChallenge: challenge.bytes
+        )
+        var inboundSequence: UInt64 = 0
+        var outboundSequence: UInt64 = 0
+        var iterator = channels.receiver.frames().makeAsyncIterator()
+        let sender = Task {
+            try await SendSession(manifest, control: control).run(on: channels.sender)
+        }
+
+        guard
+            case .offer = try await receive(
+                from: &iterator,
+                transferID: manifest.id,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver,
+                sequence: &inboundSequence
+            )
+        else { return XCTFail("Expected offer") }
+        try await send(
+            .accept(try ResumeMap()),
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        guard await channels.sender.waitUntilSentCount(128) else {
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Sender did not fill the initial 127-chunk window")
+        }
+        for expectedIndex in 0..<UInt32(16) {
+            guard
+                case .chunk(let chunk) = try await receive(
+                    from: &iterator,
+                    transferID: manifest.id,
+                    direction: .senderToReceiver,
+                    cipher: crypto.senderToReceiver,
+                    sequence: &inboundSequence
+                )
+            else { return XCTFail("Expected initial chunk") }
+            XCTAssertEqual(chunk.coordinate.chunkIndex, expectedIndex)
+        }
+
+        await control.pause()
+        try await send(
+            .ackRanges(
+                try ResumeMap(ranges: [
+                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 16)
+                ])),
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        try await send(
+            .pause,
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        guard await channels.sender.waitUntilSentCount(129) else {
+            await control.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Sender did not announce its local pause after the ACK")
+        }
+        await control.resume()
+
+        guard await channels.sender.waitUntilSentCount(144) else {
+            await control.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Sender did not reach the debt-adjusted window")
+        }
+        if await channels.sender.waitUntilSentCount(145, timeout: .milliseconds(250)) {
+            await control.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Queued ACK incorrectly cleared newer local control debt")
+        }
+
+        try await send(
+            .resume,
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        for expectedIndex in 16..<UInt32(127) {
+            guard
+                case .chunk(let chunk) = try await receive(
+                    from: &iterator,
+                    transferID: manifest.id,
+                    direction: .senderToReceiver,
+                    cipher: crypto.senderToReceiver,
+                    sequence: &inboundSequence
+                )
+            else { return XCTFail("Expected retained initial chunk") }
+            XCTAssertEqual(chunk.coordinate.chunkIndex, expectedIndex)
+        }
+        guard
+            case .pause = try await receive(
+                from: &iterator,
+                transferID: manifest.id,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver,
+                sequence: &inboundSequence
+            ),
+            case .resume = try await receive(
+                from: &iterator,
+                transferID: manifest.id,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver,
+                sequence: &inboundSequence
+            )
+        else { return XCTFail("Expected ordered local pause/resume") }
+        for expectedIndex in 127..<UInt32(141) {
+            guard
+                case .chunk(let chunk) = try await receive(
+                    from: &iterator,
+                    transferID: manifest.id,
+                    direction: .senderToReceiver,
+                    cipher: crypto.senderToReceiver,
+                    sequence: &inboundSequence
+                )
+            else { return XCTFail("Expected debt-adjusted chunk") }
+            XCTAssertEqual(chunk.coordinate.chunkIndex, expectedIndex)
+        }
+        try await send(
+            .ackRanges(
+                try ResumeMap(ranges: [
+                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 141)
+                ])),
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        for expectedIndex in 141..<UInt32(143) {
+            guard
+                case .chunk(let chunk) = try await receive(
+                    from: &iterator,
+                    transferID: manifest.id,
+                    direction: .senderToReceiver,
+                    cipher: crypto.senderToReceiver,
+                    sequence: &inboundSequence
+                )
+            else { return XCTFail("Expected final chunk") }
+            XCTAssertEqual(chunk.coordinate.chunkIndex, expectedIndex)
+        }
+        guard
+            case .complete = try await receive(
+                from: &iterator,
+                transferID: manifest.id,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver,
+                sequence: &inboundSequence
+            )
+        else { return XCTFail("Expected completion request") }
+        try await send(
+            .ackRanges(
+                try ResumeMap(ranges: [
+                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 143)
+                ])),
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        try await send(
+            .complete,
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+
+        let result = try await sender.value
+        XCTAssertEqual(result.sentChunkCount, 143)
+    }
+
+    func testLateAcknowledgementPauseThenCancelUsesReservedTerminalHeadroom() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("late-control-cancel.bin")
+        try Data(
+            repeating: 0x3f,
+            count: TransferProtocolLimits.maximumChunkBytes
+                * (TransferProtocolLimits.maximumUnacknowledgedChunks + 1)
+        ).write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let control = TransferSessionControl()
+        let challenge = TransferReceiverChallenge.fresh(for: manifest.id)
+        try await channels.receiver.send(challenge.encode())
+        let crypto = try await TransferCryptographicContext.make(
+            on: channels.receiver,
+            transfer: manifest.id,
+            receiverChallenge: challenge.bytes
+        )
+        var inboundSequence: UInt64 = 0
+        var outboundSequence: UInt64 = 0
+        var iterator = channels.receiver.frames().makeAsyncIterator()
+        let sender = Task {
+            try await SendSession(manifest, control: control).run(on: channels.sender)
+        }
+
+        guard
+            case .offer = try await receive(
+                from: &iterator,
+                transferID: manifest.id,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver,
+                sequence: &inboundSequence
+            )
+        else { return XCTFail("Expected offer") }
+        try await send(
+            .accept(try ResumeMap()),
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        guard await channels.sender.waitUntilSentCount(128) else {
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Sender did not fill the initial window")
+        }
+        for _ in 0..<1 {
+            guard
+                case .chunk = try await receive(
+                    from: &iterator,
+                    transferID: manifest.id,
+                    direction: .senderToReceiver,
+                    cipher: crypto.senderToReceiver,
+                    sequence: &inboundSequence
+                )
+            else { return XCTFail("Expected initial chunk") }
+        }
+
+        await control.pause()
+        try await send(
+            .ackRanges(
+                try ResumeMap(ranges: [
+                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 1)
+                ])),
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        try await send(
+            .pause,
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        if await channels.sender.waitUntilSentCount(129, timeout: .milliseconds(250)) {
+            await control.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Sender announced pause without bounded resume headroom")
+        }
+        await control.cancel()
+        guard await channels.sender.waitUntilSentCount(129) else {
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Sender did not emit the reserved terminal cancel")
+        }
+
+        for _ in 1..<127 {
+            guard
+                case .chunk = try await receive(
+                    from: &iterator,
+                    transferID: manifest.id,
+                    direction: .senderToReceiver,
+                    cipher: crypto.senderToReceiver,
+                    sequence: &inboundSequence
+                )
+            else { return XCTFail("Expected retained initial chunk") }
+        }
+        guard
+            case .cancel = try await receive(
+                from: &iterator,
+                transferID: manifest.id,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver,
+                sequence: &inboundSequence
+            )
+        else { return XCTFail("Expected terminal cancel in the reserved headroom") }
+        do {
+            _ = try await sender.value
+            XCTFail("Expected sender cancellation")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .cancelled)
+        }
+    }
+
     func testSenderControlPauseResumeStopsAndRestartsChunkProduction() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

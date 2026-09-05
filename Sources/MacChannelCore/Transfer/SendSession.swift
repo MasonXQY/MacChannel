@@ -112,7 +112,7 @@ public struct SendSession: Sendable {
                 announcedPause: &announcedLocalPause,
                 snapshot: &controlSnapshot
             )
-            let acceptedFrame = try await nextFrameBeforeAcceptance(
+            let acceptedFrame = try await nextFrameCoalescingLocalControl(
                 from: frameReader,
                 controlSnapshot: &controlSnapshot
             )
@@ -131,43 +131,29 @@ public struct SendSession: Sendable {
             var sentCount = 0
             var sentCoverage = ChunkCoverage()
             var outstanding: Set<ChunkCoordinate> = []
-            // Before the peer's first acknowledgement, it may still be paused
-            // behind an ordered accept/pause pair. Charge early local controls
-            // to the same 127-frame data budget until consumption is proven.
-            var firstWindowControlFrames = Int(outboundSequence - sequenceAfterOffer)
-            var preservingFirstWindowControlHeadroom = true
+            var controlDebt = ControlFrameDebt()
+            controlDebt.record(
+                count: Int(outboundSequence - sequenceAfterOffer)
+            )
             for (entryOffset, entry) in manifest.entries.enumerated() where entry.kind == .file {
                 guard let source = entry.pinnedSource else {
                     throw TransferProtocolError.sourceChanged
                 }
                 for chunkIndex in 0..<entry.chunkCount {
-                    let sequenceBeforeLocalControl = outboundSequence
-                    try await applyLocalControl(
-                        on: channel,
-                        cipher: crypto.senderToReceiver,
-                        sequence: &outboundSequence,
-                        announcedPause: &announcedLocalPause,
-                        snapshot: &controlSnapshot
-                    )
-                    if preservingFirstWindowControlHeadroom {
-                        firstWindowControlFrames += Int(
-                            outboundSequence - sequenceBeforeLocalControl
-                        )
-                    }
                     let coordinate = ChunkCoordinate(
                         entryIndex: UInt32(entryOffset),
                         chunkIndex: chunkIndex
                     )
                     guard !resumeMap.contains(coordinate) else { continue }
-                    let currentDataWindow = preservingFirstWindowControlHeadroom
-                        ? max(
-                            0,
-                            TransferProtocolLimits.maximumUnacknowledgedChunks
-                                - firstWindowControlFrames
+                    while outstanding.count + controlDebt.count
+                        + maximumLocalControlFramesBeforeReturning(
+                            snapshot: controlSnapshot,
+                            announcedPause: announcedLocalPause
                         )
-                        : TransferProtocolLimits.maximumUnacknowledgedChunks
-                    while outstanding.count >= currentDataWindow {
-                        try await receiveAcknowledgement(
+                        >= TransferProtocolLimits.maximumUnacknowledgedChunks
+                    {
+                        let sequenceBeforeAcknowledgement = outboundSequence
+                        let acknowledgement = try await receiveAcknowledgement(
                             from: frameReader,
                             controlSnapshot: &controlSnapshot,
                             on: channel,
@@ -178,8 +164,22 @@ public struct SendSession: Sendable {
                             sent: sentCoverage,
                             outstanding: &outstanding
                         )
-                        preservingFirstWindowControlHeadroom = false
+                        controlDebt.record(
+                            count: Int(outboundSequence - sequenceBeforeAcknowledgement)
+                        )
+                        controlDebt.applyAcknowledgement(acknowledgement)
                     }
+                    let sequenceBeforeDeferredControl = outboundSequence
+                    try await applyLocalControl(
+                        on: channel,
+                        cipher: crypto.senderToReceiver,
+                        sequence: &outboundSequence,
+                        announcedPause: &announcedLocalPause,
+                        snapshot: &controlSnapshot
+                    )
+                    controlDebt.record(
+                        count: Int(outboundSequence - sequenceBeforeDeferredControl)
+                    )
                     let offset =
                         UInt64(chunkIndex) * UInt64(TransferProtocolLimits.maximumChunkBytes)
                     let expectedLength = Int(
@@ -203,6 +203,7 @@ public struct SendSession: Sendable {
                         control: control
                     )
                     sentCount += 1
+                    controlDebt.recordSentChunk(coordinate)
                     await recorder?.recordSentChunk(coordinate)
                     sentCoverage.insert(coordinate)
                     outstanding.insert(coordinate)
@@ -401,7 +402,23 @@ public struct SendSession: Sendable {
         }
     }
 
-    private func nextFrameBeforeAcceptance(
+    private func maximumLocalControlFramesBeforeReturning(
+        snapshot: TransferSessionControl.Snapshot?,
+        announcedPause: Bool
+    ) -> Int {
+        guard control != nil, let snapshot else { return 0 }
+        switch snapshot.state {
+        case .active:
+            return announcedPause ? 1 : 0
+        case .paused:
+            // A paused call can announce pause, wait, then announce resume.
+            return announcedPause ? 1 : 2
+        case .cancelled:
+            return 0
+        }
+    }
+
+    private func nextFrameCoalescingLocalControl(
         from reader: TransferFrameReader,
         controlSnapshot: inout TransferSessionControl.Snapshot?
     ) async throws -> TransferFrame {
@@ -427,9 +444,9 @@ public struct SendSession: Sendable {
             case .timeout:
                 continue
             case .control(let changed):
-                // Acceptance establishes whether the peer is already paused.
-                // Coalesce additional local churn until that ordered peer state
-                // can be observed instead of spending more legacy inbox slots.
+                // When outbound capacity is not yet known to be available,
+                // retain only the latest local state. Cancellation still exits
+                // immediately through the reserved terminal-frame headroom.
                 controlSnapshot = changed
                 if case .cancelled = changed.state {
                     throw TransferProtocolError.cancelled
@@ -469,15 +486,11 @@ public struct SendSession: Sendable {
         resumeMap: ResumeMap,
         sent: ChunkCoverage,
         outstanding: inout Set<ChunkCoordinate>
-    ) async throws {
+    ) async throws -> ResumeMap {
         while true {
-            let frame = try await nextFrame(
+            let frame = try await nextFrameCoalescingLocalControl(
                 from: reader,
-                controlSnapshot: &controlSnapshot,
-                on: channel,
-                outboundCipher: outboundCipher,
-                outboundSequence: &outboundSequence,
-                announcedPause: &announcedPause
+                controlSnapshot: &controlSnapshot
             )
             switch frame {
             case .ackRanges(let map):
@@ -487,7 +500,7 @@ public struct SendSession: Sendable {
                     sent: sent,
                     outstanding: &outstanding
                 )
-                return
+                return map
             case .cancel:
                 throw TransferProtocolError.cancelled
             case .pause:
@@ -605,6 +618,36 @@ private struct ChunkCoverage {
             if cursor >= requested.upperBound { return true }
         }
         return false
+    }
+}
+
+private struct ControlFrameDebt {
+    // A control is consumed before the first data frame sent after it because
+    // the sender-to-receiver channel is ordered. Only an ACK covering that
+    // specific later chunk can retire the control; an already queued ACK cannot.
+    private var requiredAcknowledgements: [ChunkCoordinate?] = []
+
+    var count: Int { requiredAcknowledgements.count }
+
+    mutating func record(count: Int) {
+        guard count > 0 else { return }
+        requiredAcknowledgements.append(
+            contentsOf: repeatElement(nil, count: count)
+        )
+    }
+
+    mutating func recordSentChunk(_ coordinate: ChunkCoordinate) {
+        for index in requiredAcknowledgements.indices
+        where requiredAcknowledgements[index] == nil {
+            requiredAcknowledgements[index] = coordinate
+        }
+    }
+
+    mutating func applyAcknowledgement(_ map: ResumeMap) {
+        requiredAcknowledgements.removeAll { coordinate in
+            guard let coordinate else { return false }
+            return map.contains(coordinate)
+        }
     }
 }
 
