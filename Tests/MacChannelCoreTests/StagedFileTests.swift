@@ -16,8 +16,17 @@ final class StagedFileTests: XCTestCase {
             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
             S_IRUSR | S_IWUSR
         )
-        XCTAssertGreaterThanOrEqual(descriptor, 0)
-        let file = try StagedFile(descriptor: descriptor)
+        guard descriptor >= 0 else {
+            XCTFail("Could not create write-only staged file")
+            return
+        }
+        let file: StagedFile
+        do {
+            file = try StagedFile(descriptor: descriptor)
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
         let bytes = Data((0..<4096).map { UInt8($0 % 251) })
 
         let digest = try file.writeAndVerify(bytes, offset: 0)
