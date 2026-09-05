@@ -23,6 +23,8 @@ struct WebRTCHandshakePublicMaterial: Sendable {
 public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelDelegate, @unchecked Sendable {
     public static let maximumMessageBytes = 64 * 1024
     public static let bufferedAmountLowThreshold: UInt64 = 1024 * 1024
+    static let inboundApplicationFrameCapacity = 256
+    static let orderedCallbackCapacity = 256
     fileprivate static let bufferedAmountHighWaterMark: UInt64 = 4 * 1024 * 1024
 
     public let route: ConnectionRoute
@@ -31,7 +33,7 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
     private let channel: RTCDataChannel
     private let state: State
     private let frameStream: AsyncThrowingStream<Data, Error>
-    private let callbacks = OrderedDataChannelCallbacks()
+    private let callbacks: OrderedDataChannelCallbacks
     private let testOnlyGenerateLocalCandidate: @Sendable () async -> Void
 
     init(
@@ -53,9 +55,14 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
             && channel.maxRetransmits == UInt16.max
 
         var continuation: AsyncThrowingStream<Data, Error>.Continuation!
-        frameStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(256)) {
+        frameStream = AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(Self.inboundApplicationFrameCapacity)
+        ) {
             continuation = $0
         }
+        callbacks = OrderedDataChannelCallbacks(
+            maximumPendingOperations: Self.orderedCallbackCapacity
+        )
         state = State(
             channel: RTCDataChannelBox(channel),
             connectionID: connectionID,
@@ -146,17 +153,23 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
 private final class OrderedDataChannelCallbacks: @unchecked Sendable {
     typealias Operation = @Sendable () async -> Void
 
+    private let maximumPendingOperations: Int
     private let lock = NSLock()
     private var queue: [Operation] = []
     private var draining = false
     private var overflowed = false
+
+    init(maximumPendingOperations: Int) {
+        precondition(maximumPendingOperations > 0)
+        self.maximumPendingOperations = maximumPendingOperations
+    }
 
     func enqueue(_ operation: @escaping Operation, onOverflow: @escaping Operation) {
         var shouldStartDraining = false
         var shouldReportOverflow = false
         lock.withLock {
             guard !overflowed else { return }
-            if queue.count >= 128 {
+            if queue.count >= maximumPendingOperations {
                 overflowed = true
                 queue.removeAll(keepingCapacity: false)
                 shouldReportOverflow = true

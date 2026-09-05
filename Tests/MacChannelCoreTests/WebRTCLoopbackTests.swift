@@ -8,6 +8,14 @@ final class WebRTCLoopbackTests: XCTestCase {
         XCTAssertEqual(WebRTCSecureChannel.bufferedAmountLowThreshold, 1024 * 1024)
     }
 
+    func testCallbackQueueCanStageEntireInboundFrameBuffer() {
+        XCTAssertEqual(WebRTCSecureChannel.inboundApplicationFrameCapacity, 256)
+        XCTAssertEqual(
+            WebRTCSecureChannel.orderedCallbackCapacity,
+            WebRTCSecureChannel.inboundApplicationFrameCapacity
+        )
+    }
+
     func testOrderedReliableLoopbackTransfersOneMiBIn64KiBFrames() async throws {
         let leftIdentity = try DeviceIdentity.ephemeral()
         let rightIdentity = try DeviceIdentity.ephemeral()

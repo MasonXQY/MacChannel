@@ -255,7 +255,7 @@ git commit -m "perf: avoid redundant receive chunk rereads"
 - Modify: `Tests/MacChannelCoreTests/TransferProtocolTests.swift:1056-1168,1488-1555,1924-2225`
 
 **Interfaces:**
-- Produces: a 1 MiB WebRTC low-water threshold, 4 MiB high-water mark, 256-frame WebRTC receive stream, and a legacy-compatible 127-data-chunk protocol send window.
+- Produces: a 1 MiB WebRTC low-water threshold, 4 MiB high-water mark, aligned 256-frame WebRTC callback and receive queues, and a legacy-compatible 127-data-chunk protocol send window.
 - Preserves: the installed 1.2.6 decoded-input budget of 128 total frames, one reserved control/terminal frame, 64 KiB application-message cap, 4 MiB suspended-send bound, 128 waiter bound, ordered reliable delivery, and overload failure behavior.
 
 - [ ] **Step 1: Write failing flow-control assertions**
@@ -269,6 +269,8 @@ func testThroughputFlowControlRemainsExplicitlyBounded() {
 ```
 
 Rename `testActorBackedFrameStreamDoesNotDropAReceiverBurst` to `testActorBackedFrameStreamDoesNotDropATwoHundredFrameReceiverBurst` and change its expected frame count from 80 to 200.
+
+Add `testCallbackQueueCanStageEntireInboundFrameBuffer` to enforce that the ordered WebRTC callback queue can stage the complete 256-frame application-stream budget. This prevents scheduler pressure from overflowing the earlier callback stage during a valid 200-frame burst.
 
 Rename `testSenderStopsAtSixtyFourChunksUntilAcknowledged` to `testSenderReservesControlHeadroomAtLegacyOneHundredTwentyEightFrameBoundary`. Build 128 chunks. Immediately after sending `.accept`, sleep 50 ms and inspect `channels.sender.sentCount()` before reading any chunk frames. Require 128 sent frames including the offer (offer plus exactly 127 chunks); when another count is observed, close the receiver, await the sender, fail with the observed count, and return. On the optimized path, drain indices `0..<127`, send a legacy-sized acknowledgement for `0..<16`, and then expect chunk index 127 followed by completion. This proves that a newer sender accepts the smaller durable acknowledgements emitted by a 1.2.6 receiver.
 
@@ -371,6 +373,8 @@ frameStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(256)) {
     continuation = $0
 }
 ```
+
+Keep `OrderedDataChannelCallbacks` bounded at 256 pending operations so its capacity matches the inbound stream rather than failing closed at the old 128-operation limit before the stream can accept a valid burst.
 
 In `TransferProtocolLimits`, set:
 

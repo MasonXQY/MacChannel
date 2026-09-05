@@ -32,7 +32,7 @@ Compression can help text and source trees but often harms already-compressed ar
 
 ### Bounded flow control
 
-`WebRTCSecureChannel` keeps the existing 64 KiB message cap. Its high-water mark becomes 4 MiB, its low-water threshold becomes 1 MiB, and its inbound application stream buffers at most 256 frames. The existing suspended-send bound remains 4 MiB, so callers cannot accumulate an unbounded amount of memory while WebRTC is congested.
+`WebRTCSecureChannel` keeps the existing 64 KiB message cap. Its high-water mark becomes 4 MiB, its low-water threshold becomes 1 MiB, and both the ordered callback queue and inbound application stream buffer at most 256 frames. Keeping those two bounded stages aligned prevents a valid 200-frame burst from overflowing the earlier callback queue before the application stream can accept it. The existing suspended-send bound remains 4 MiB, so callers cannot accumulate an unbounded amount of memory while WebRTC is congested.
 
 The installed 1.2.6 transfer decoder accepts at most 128 queued frames. During data streaming, the transfer protocol therefore permits at most 127 unacknowledged data/control frames, about 8 MiB, and reserves the final frame of that legacy budget for control or termination. Before sending `.complete`, the sender reduces outstanding data plus unresolved control debt to at most 126. Completion can then occupy frame 127 while frame 128 remains available for one fail-closed `.cancel` or `.error`. The current decoded-frame inbox remains bounded at the same 128-frame limit. Receiver acknowledgements still communicate actual durable progress rather than merely received bytes.
 
