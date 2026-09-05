@@ -18,7 +18,7 @@ The receiver also writes every chunk, reads the same bytes back immediately, com
 
 Keep the 64 KiB wire-frame format and protocol version. Increase the durability batch, raise the WebRTC queue thresholds within existing bounded-memory limits, and eliminate the redundant read-after-write while retaining authenticated transport, per-chunk resume evidence, periodic durable checkpoints, and final whole-file verification.
 
-This provides the best near-term improvement and remains interoperable with 1.2.6. A newer sender may put more data in flight, but an older receiver's acknowledgement cadence still governs progress safely.
+This provides the best near-term improvement and remains interoperable with 1.2.6. A newer sender stays within the older receiver's 128-frame decoded-input budget: 127 data chunks may be outstanding, reserving one frame for `.complete` or another control/terminal frame. Older receivers' smaller durable acknowledgements still advance the newer sender safely.
 
 ### B. Protocol v2 with larger transfer frames
 
@@ -32,13 +32,13 @@ Compression can help text and source trees but often harms already-compressed ar
 
 ### Bounded flow control
 
-`WebRTCSecureChannel` keeps the existing 64 KiB message cap. Its high-water mark becomes 4 MiB and its low-water threshold becomes 1 MiB. The existing suspended-send bound remains 4 MiB, so callers cannot accumulate an unbounded amount of memory while WebRTC is congested.
+`WebRTCSecureChannel` keeps the existing 64 KiB message cap. Its high-water mark becomes 4 MiB, its low-water threshold becomes 1 MiB, and its inbound application stream buffers at most 256 frames. The existing suspended-send bound remains 4 MiB, so callers cannot accumulate an unbounded amount of memory while WebRTC is congested.
 
-The transfer protocol's maximum unacknowledged window becomes 256 chunks, about 16 MiB. This is large enough to fill a fast LAN path without changing the encrypted frame format. Receiver acknowledgements still communicate actual durable progress rather than merely received bytes.
+The installed 1.2.6 transfer decoder accepts at most 128 queued frames. The transfer protocol therefore permits at most 127 unacknowledged data chunks, about 8 MiB, and reserves the final frame of that legacy budget for `.complete`, `.pause`, `.resume`, `.cancel`, or `.error`. The current decoded-frame inbox remains bounded at the same 128-frame limit. Receiver acknowledgements still communicate actual durable progress rather than merely received bytes.
 
 ### Adaptive durable checkpoints
 
-The receiver checkpoints after either 128 chunks (about 8 MiB) or 250 ms since the previous checkpoint. The time condition preserves frequent recovery points on slow links and for small transfers; the byte condition reduces `fsync` and SQLite commit frequency on fast links.
+The receiver checkpoints after either 127 chunks (approximately 8 MiB) or 250 ms since the previous checkpoint. Aligning the chunk threshold with the 127-data-frame sender window avoids falling back to the timer at every full window. The time condition preserves frequent recovery points on slow links and for small transfers; the byte condition reduces `fsync` and SQLite commit frequency on fast links.
 
 The final partial batch is always checkpointed before the receiver acknowledges completion. Pause, cancellation, disconnect, and error semantics remain fail-closed: only checkpointed chunks are advertised as resumable after restart.
 
@@ -61,11 +61,12 @@ Short writes and filesystem errors remain detected by the existing complete-writ
 
 Add deterministic tests that prove:
 
-1. The receiver checkpoint policy selects 128 chunks as the fast-path batch while retaining the 250 ms time flush.
+1. The receiver checkpoint policy selects 127 chunks as the fast-path batch while retaining the 250 ms time flush.
 2. Chunk verification no longer performs a mandatory read-after-write, while final whole-file verification remains required.
-3. WebRTC flow control uses the larger bounded queue thresholds and still rejects waiter/byte floods.
-4. A sender can place 256 chunks in flight but blocks on the 257th until a durable acknowledgement arrives.
-5. Existing resume, interruption, relay, memory-bound, authentication, and protocol tests continue to pass.
+3. WebRTC flow control uses the larger 256-frame inbound stream and bounded queue thresholds while still rejecting waiter/byte floods.
+4. A sender can place 127 chunks in flight, reserves the 128th legacy receive-frame slot for control or completion, and blocks the next data chunk until a durable acknowledgement arrives.
+5. Exactly 127 chunks plus `.complete` fit the installed 1.2.6 receiver's 128-frame decoded-input budget while paused.
+6. Existing resume, interruption, relay, memory-bound, authentication, and protocol tests continue to pass.
 
 Record warm-build wall time for an actual 64 MiB LAN loopback transfer before and after the change. Run the complete test suite after implementation. The release is not considered ready for public distribution until a signed build is tested between two physical Macs on both local-network and relay routes, with file hashes matching at the destination.
 

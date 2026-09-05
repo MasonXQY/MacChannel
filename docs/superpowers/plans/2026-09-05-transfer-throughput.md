@@ -93,22 +93,22 @@ git commit -m "test: add LAN transfer throughput evidence"
 - Modify: `Tests/MacChannelCoreTests/TransferProtocolTests.swift:1957-2124`
 
 **Interfaces:**
-- Produces: `TransferProtocolLimits.acknowledgementChunkInterval == 128`, equivalent to about 8 MiB at the existing chunk size.
+- Produces: `TransferProtocolLimits.acknowledgementChunkInterval == 127`, equivalent to approximately 8 MiB at the existing chunk size and aligned with the legacy-compatible sender window.
 - Preserves: the receiver's existing 250 ms timer flush and final partial-batch flush before sending a durable acknowledgement.
 
 - [ ] **Step 1: Change the existing fast-path acknowledgement test to the new boundary**
 
-Rename `testReceiverAcknowledgesAContinuousRangeAtSixteenChunks` to `testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentyEightChunks`. Change its fixture from 17 chunks to 129 chunks, send indices `0..<128`, and require the first acknowledgement range to be `0..<128`:
+Rename `testReceiverAcknowledgesAContinuousRangeAtSixteenChunks` to `testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks`. Change its fixture from 17 chunks to 128 chunks, send indices `0..<127`, and require the first acknowledgement range to be `0..<127`:
 
 ```diff
 - func testReceiverAcknowledgesAContinuousRangeAtSixteenChunks() async throws {
-+ func testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentyEightChunks() async throws {
++ func testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks() async throws {
 -   count: TransferProtocolLimits.maximumChunkBytes * 17
-+   count: TransferProtocolLimits.maximumChunkBytes * 129
++   count: TransferProtocolLimits.maximumChunkBytes * 128
 -   for index in 0..<UInt32(16) {
-+   for index in 0..<UInt32(128) {
++   for index in 0..<UInt32(127) {
 -       [try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 16)]
-+       [try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 128)]
++       [try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 127)]
 ```
 
 Keep `testReceiverFlushesAcknowledgementAfterTwoHundredFiftyMilliseconds` unchanged; it is the slow-link compatibility check.
@@ -118,17 +118,17 @@ Keep `testReceiverFlushesAcknowledgementAfterTwoHundredFiftyMilliseconds` unchan
 Run:
 
 ```bash
-swift test --filter TransferProtocolTests/testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentyEightChunks
+swift test --filter TransferProtocolTests/testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks
 ```
 
-Expected: FAIL because the current receiver emits its first range acknowledgement after 16 chunks rather than 128.
+Expected: FAIL because the current receiver emits its first range acknowledgement after 16 chunks rather than 127.
 
 - [ ] **Step 3: Increase only the fast-path chunk boundary**
 
 In `TransferProtocolLimits`, change:
 
 ```swift
-public static let acknowledgementChunkInterval = 128
+public static let acknowledgementChunkInterval = 127
 ```
 
 Do not change the existing 250 ms timeout path or the final `.complete` flush.
@@ -138,7 +138,7 @@ Do not change the existing 250 ms timeout path or the final `.complete` flush.
 Run:
 
 ```bash
-swift test --filter TransferProtocolTests/testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentyEightChunks
+swift test --filter TransferProtocolTests/testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks
 swift test --filter TransferProtocolTests/testReceiverFlushesAcknowledgementAfterTwoHundredFiftyMilliseconds
 swift test --filter TransferProtocolTests
 swift test --filter ReceiveStoreTests
@@ -249,12 +249,13 @@ git commit -m "perf: avoid redundant receive chunk rereads"
 **Files:**
 - Modify: `Sources/MacChannelCore/Connectivity/WebRTCSecureChannel.swift:23-27,55-58`
 - Modify: `Sources/MacChannelCore/Transfer/TransferManifest.swift:28-43`
+- Modify: `Sources/MacChannelCore/Transfer/ReceiveSession.swift:727-803`
 - Modify: `Tests/MacChannelCoreTests/WebRTCLoopbackTests.swift:6-74,170-194`
-- Modify: `Tests/MacChannelCoreTests/TransferProtocolTests.swift:1056-1160`
+- Modify: `Tests/MacChannelCoreTests/TransferProtocolTests.swift:1056-1168,1488-1555,1924-2091`
 
 **Interfaces:**
-- Produces: a 1 MiB WebRTC low-water threshold, 4 MiB high-water mark, 256-frame receive stream, and 256-chunk protocol send window.
-- Preserves: 64 KiB application-message cap, 4 MiB suspended-send bound, 128 waiter bound, ordered reliable delivery, and overload failure behavior.
+- Produces: a 1 MiB WebRTC low-water threshold, 4 MiB high-water mark, 256-frame WebRTC receive stream, and a legacy-compatible 127-data-chunk protocol send window.
+- Preserves: the installed 1.2.6 decoded-input budget of 128 total frames, one reserved control/terminal frame, 64 KiB application-message cap, 4 MiB suspended-send bound, 128 waiter bound, ordered reliable delivery, and overload failure behavior.
 
 - [ ] **Step 1: Write failing flow-control assertions**
 
@@ -268,11 +269,15 @@ func testThroughputFlowControlRemainsExplicitlyBounded() {
 
 Rename `testActorBackedFrameStreamDoesNotDropAReceiverBurst` to `testActorBackedFrameStreamDoesNotDropATwoHundredFrameReceiverBurst` and change its expected frame count from 80 to 200.
 
-Rename `testSenderStopsAtSixtyFourChunksUntilAcknowledged` to `testSenderStopsAtTwoHundredFiftySixChunksUntilAcknowledged`. Build 257 chunks. Immediately after sending `.accept`, sleep 50 ms and inspect `channels.sender.sentCount()` before reading any chunk frames. Require 257 sent frames including the offer; when fewer are observed, close the receiver, await the sender, fail with the observed count, and return. On the optimized path, drain indices `0..<256`, send a legacy-sized acknowledgement for `0..<16`, and then expect chunk index 256 followed by completion. This also proves that a newer sender accepts the smaller durable acknowledgements emitted by a 1.2.6 receiver.
+Rename `testSenderStopsAtSixtyFourChunksUntilAcknowledged` to `testSenderReservesControlHeadroomAtLegacyOneHundredTwentyEightFrameBoundary`. Build 128 chunks. Immediately after sending `.accept`, sleep 50 ms and inspect `channels.sender.sentCount()` before reading any chunk frames. Require 128 sent frames including the offer (offer plus exactly 127 chunks); when another count is observed, close the receiver, await the sender, fail with the observed count, and return. On the optimized path, drain indices `0..<127`, send a legacy-sized acknowledgement for `0..<16`, and then expect chunk index 127 followed by completion. This proves that a newer sender accepts the smaller durable acknowledgements emitted by a 1.2.6 receiver.
 
-In `testReceiverControlPauseBackpressuresSenderUntilResume`, build 257 chunks, expect 256 recorded chunks while paused, and expect all 257 after resume. This preserves the test's original window-boundary meaning.
+In `testReceiverControlPauseBackpressuresSenderUntilResume`, build `maximumUnacknowledgedChunks + 1` chunks, expect 127 recorded chunks while paused, and expect all 128 after resume. Update `testControlCancelWakesSenderWaitingForAcknowledgement` to use the same boundary-relative fixture.
 
-Apply these exact test edits:
+Add `testExactlyOneHundredTwentySevenChunksPlusCompleteFitLegacyReceiveFrameBudgetWhilePaused`. While receiver control is paused, require the sender to emit an offer, 127 chunks, and `.complete`; the post-offer 127 data frames plus one completion frame exactly fill the installed 1.2.6 receiver's 128-frame decoded-input budget. Resume and require both sessions to complete.
+
+Rename the checkpoint-boundary regression to `testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks`, send `0..<127`, and require acknowledgement range `0..<127`. Keep `testReceiverFlushesAcknowledgementAfterTwoHundredFiftyMilliseconds` unchanged.
+
+Apply these key boundary edits:
 
 ```diff
 - func testActorBackedFrameStreamDoesNotDropAReceiverBurst() async throws {
@@ -281,17 +286,17 @@ Apply these exact test edits:
 +   let expected = (0..<200).map { Data([UInt8($0)]) }
 
 - func testSenderStopsAtSixtyFourChunksUntilAcknowledged() async throws {
-+ func testSenderStopsAtTwoHundredFiftySixChunksUntilAcknowledged() async throws {
++ func testSenderReservesControlHeadroomAtLegacyOneHundredTwentyEightFrameBoundary() async throws {
 -       count: TransferProtocolLimits.maximumChunkBytes * 65
-+       count: TransferProtocolLimits.maximumChunkBytes * 257
++       count: TransferProtocolLimits.maximumChunkBytes * 128
 +   try await Task.sleep(for: .milliseconds(50))
 +   let sentBeforeAcknowledgement = await channels.sender.sentCount()
-+   guard sentBeforeAcknowledgement == 257 else {
++   guard sentBeforeAcknowledgement == 128 else {
 +       await channels.receiver.close()
 +       _ = try? await sender.value
-+       return XCTFail("Expected offer plus exactly 256 chunks, got \(sentBeforeAcknowledgement)")
++       return XCTFail("Expected offer plus exactly 127 chunks, got \(sentBeforeAcknowledgement)")
 +   }
-+   for expectedIndex in 0..<UInt32(256) {
++   for expectedIndex in 0..<UInt32(127) {
 +       guard
 +           case .chunk(let chunk) = try await receive(
 +               from: &iterator,
@@ -306,16 +311,17 @@ Apply these exact test edits:
 -               try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 64)
 +               try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 16)
 -   XCTAssertEqual(lastChunk.coordinate.chunkIndex, 64)
-+   XCTAssertEqual(lastChunk.coordinate.chunkIndex, 256)
++   XCTAssertEqual(lastChunk.coordinate.chunkIndex, 127)
 -   try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 65)
-+   try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 257)
++   try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 128)
 
 -       count: TransferProtocolLimits.maximumChunkBytes * 65
-+       count: TransferProtocolLimits.maximumChunkBytes * 257
++       count: TransferProtocolLimits.maximumChunkBytes
++           * (TransferProtocolLimits.maximumUnacknowledgedChunks + 1)
 -   XCTAssertEqual(pausedCoordinates.count, 64)
-+   XCTAssertEqual(pausedCoordinates.count, 256)
++   XCTAssertEqual(pausedCoordinates.count, 127)
 -   XCTAssertEqual(completedCoordinates.count, 65)
-+   XCTAssertEqual(completedCoordinates.count, 257)
++   XCTAssertEqual(completedCoordinates.count, 128)
 ```
 
 - [ ] **Step 2: Run both focused tests and verify RED**
@@ -324,10 +330,12 @@ Run:
 
 ```bash
 swift test --filter WebRTCLoopbackTests/testThroughputFlowControlRemainsExplicitlyBounded
-swift test --filter TransferProtocolTests/testSenderStopsAtTwoHundredFiftySixChunksUntilAcknowledged
+swift test --filter TransferProtocolTests/testSenderReservesControlHeadroomAtLegacyOneHundredTwentyEightFrameBoundary
+swift test --filter TransferProtocolTests/testExactlyOneHundredTwentySevenChunksPlusCompleteFitLegacyReceiveFrameBudgetWhilePaused
+swift test --filter TransferProtocolTests/testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks
 ```
 
-Expected: the constant test fails against the current 256 KiB low-water threshold, and the sender-window test reports 65 sent frames (offer plus 64 chunks) before closing cleanly.
+Expected: the constant test fails against the current 256 KiB low-water threshold; the sender-window test reports 65 sent frames (offer plus 64 chunks) before closing cleanly; and the new boundary tests fail until the data window and checkpoint interval are both 127.
 
 - [ ] **Step 3: Implement bounded window increases**
 
@@ -350,10 +358,11 @@ frameStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(256)) {
 In `TransferProtocolLimits`, set:
 
 ```swift
-public static let maximumUnacknowledgedChunks = 256
+public static let maximumUnacknowledgedChunks = 127
+public static let acknowledgementChunkInterval = 127
 ```
 
-Keep `State.maximumSuspendedFrameBytes` at 4 MiB and `maximumBackpressureWaiters` at 128.
+Use `maximumUnacknowledgedChunks = 127`, not 128: the installed 1.2.6 decoder's 128-frame total budget must reserve one control/terminal slot. Keep `TransferFrameInbox` at 128 total frames. Keep `State.maximumSuspendedFrameBytes` at 4 MiB and `maximumBackpressureWaiters` at 128.
 
 - [ ] **Step 4: Run flow-control, overload, and protocol suites**
 
@@ -369,7 +378,7 @@ Expected: all tests PASS; the existing byte-flood and waiter-flood overload test
 - [ ] **Step 5: Commit flow-control tuning**
 
 ```bash
-git add Sources/MacChannelCore/Connectivity/WebRTCSecureChannel.swift Sources/MacChannelCore/Transfer/TransferManifest.swift Tests/MacChannelCoreTests/WebRTCLoopbackTests.swift Tests/MacChannelCoreTests/TransferProtocolTests.swift
+git add Sources/MacChannelCore/Connectivity/WebRTCSecureChannel.swift Sources/MacChannelCore/Transfer/ReceiveSession.swift Sources/MacChannelCore/Transfer/TransferManifest.swift Tests/MacChannelCoreTests/WebRTCLoopbackTests.swift Tests/MacChannelCoreTests/TransferProtocolTests.swift docs/superpowers/specs/2026-09-05-transfer-throughput-design.md docs/superpowers/plans/2026-09-05-transfer-throughput.md
 git commit -m "perf: widen bounded transfer flow control"
 ```
 

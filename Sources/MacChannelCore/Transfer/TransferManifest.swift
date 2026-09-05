@@ -27,8 +27,8 @@ public enum TransferProtocolError: Error, Equatable, Sendable {
 
 public enum TransferProtocolLimits {
     public static let maximumWireFrameBytes = 64 * 1024
-    public static let maximumUnacknowledgedChunks = 256
-    public static let acknowledgementChunkInterval = 128
+    public static let maximumUnacknowledgedChunks = 127
+    public static let acknowledgementChunkInterval = 127
     public static let maximumFramePlaintextBytes = maximumWireFrameBytes - 62
     public static let maximumManifestEntries = 4_096
     public static let maximumResumeRanges = maximumManifestEntries

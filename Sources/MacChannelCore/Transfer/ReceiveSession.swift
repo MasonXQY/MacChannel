@@ -736,7 +736,7 @@ private actor TransferFrameInbox {
             waiter.timer?.cancel()
             waiter.continuation.resume(returning: .frame(frame))
         } else {
-            guard frames.count < 256 else {
+            guard frames.count < 128 else {
                 frames.removeAll(keepingCapacity: false)
                 terminalError = TransferProtocolError.invalidFrame
                 return false
