@@ -274,7 +274,9 @@ Rename `testSenderStopsAtSixtyFourChunksUntilAcknowledged` to `testSenderReserve
 
 In `testReceiverControlPauseBackpressuresSenderUntilResume`, build `maximumUnacknowledgedChunks + 1` chunks, expect 127 recorded chunks while paused, and expect all 128 after resume. Update `testControlCancelWakesSenderWaitingForAcknowledgement` to use the same boundary-relative fixture.
 
-Add `testExactlyOneHundredTwentySevenChunksPlusCompleteFitLegacyReceiveFrameBudgetWhilePaused`. While receiver control is paused, require the sender to emit an offer, 127 chunks, and `.complete`; the post-offer 127 data frames plus one completion frame exactly fill the installed 1.2.6 receiver's 128-frame decoded-input budget. Resume and require both sessions to complete.
+Add `testExactlyOneHundredTwentySevenChunksWaitForProgressBeforeComplete`. While receiver control is paused, require the sender to emit 127 chunks but withhold `.complete`, preserving separate completion and fail-closed terminal headroom. Resume and require both sessions to complete.
+
+Add `testPostCompletePauseResumeDoesNotUseReservedTerminalSlot` and `testTerminalCancelUsesReservedLegacyReceiveFrameHeadroom`. With 126 chunks plus `.complete` occupying 127 queued frames, prove post-data local pause/active changes are coalesced without consuming the final slot. At the exact 127-data boundary, require `.complete` to wait until acknowledged progress makes room, and prove local cancellation instead uses the one remaining legacy inbox slot and is observed as `.cancelled`, never `.invalidFrame`.
 
 Add `testSenderPauseResumeChangesAreCoalescedWhileLegacyReceiverRemainsPaused`. Fill the 127-data boundary, toggle sender pause/resume at least twice while the receiver remains paused, require the sender frame count not to increase, then resume and verify both sessions and destination bytes.
 
@@ -282,7 +284,7 @@ Add `testSenderPauseIsAnnouncedOnceAfterLegacyReceiverResumes`. Fill the same bo
 
 Add `testPreAcceptLocalPauseResumePreservesLegacyReceiverControlHeadroom`. Start both controls paused, synchronize on the receiver's decoded inbox and its emitted accept/pause sequence, then resume only the sender. Require the paused receiver to remain at no more than 127 buffered frames before it resumes, and verify both sessions complete with identical bytes. Use bounded test-channel send-count waits that are released by timeout or close so a regression fails cleanly.
 
-In `SendSession`, coalesce additional local state changes while waiting for `.accept` or while a full data/control window is waiting for peer progress. Before applying deferred local state, reserve room for the maximum pause/resume pair plus the next chunk; if unavailable, keep coalescing while allowing cancellation to use the terminal slot. Track each emitted pause/resume frame as control debt associated with the next data ordinal. Keep that debt inside the 127-frame data/control budget until an acknowledgement covers data sent after the control; an ACK that was already queued before the control must not clear it. Continue coalescing local pause/active changes after an observed remote pause as described above.
+In `SendSession`, coalesce additional local state changes while waiting for `.accept` or while a full data/control window is waiting for peer progress. Before applying deferred local state, reserve room for the maximum pause/resume pair plus the next chunk; if unavailable, keep coalescing while allowing cancellation to use the terminal slot. Track each emitted pause/resume frame as control debt associated with the next data ordinal. Keep that debt inside the 127-frame data/control budget until an acknowledgement covers data sent after the control; an ACK that was already queued before the control must not clear it. Continue coalescing local pause/active changes after an observed remote pause as described above. Before `.complete`, require outstanding data plus unresolved control debt to be at most 126. Once no data remains, suppress nonterminal local pause/active announcements while awaiting progress or final completion; cancellation may emit the single reserved terminal frame exactly once.
 
 Add `testLateAcknowledgementDoesNotClearNewLocalControlDebt`. Leave 111 frames retained from an initial 127-frame window, queue a legacy `0..<16` ACK immediately followed by receiver pause, and trigger a local pause/resume around that ACK. Require only 14 new chunks before the sender consumes remote pause, then acknowledge the later data and prove the full window returns without deadlock. Add a pause-then-cancel variant that proves the single terminal cancel still fits the reserved slot.
 
@@ -342,7 +344,9 @@ Run:
 ```bash
 swift test --filter WebRTCLoopbackTests/testThroughputFlowControlRemainsExplicitlyBounded
 swift test --filter TransferProtocolTests/testSenderReservesControlHeadroomAtLegacyOneHundredTwentyEightFrameBoundary
-swift test --filter TransferProtocolTests/testExactlyOneHundredTwentySevenChunksPlusCompleteFitLegacyReceiveFrameBudgetWhilePaused
+swift test --filter TransferProtocolTests/testExactlyOneHundredTwentySevenChunksWaitForProgressBeforeComplete
+swift test --filter TransferProtocolTests/testPostCompletePauseResumeDoesNotUseReservedTerminalSlot
+swift test --filter TransferProtocolTests/testTerminalCancelUsesReservedLegacyReceiveFrameHeadroom
 swift test --filter TransferProtocolTests/testSenderPauseResumeChangesAreCoalescedWhileLegacyReceiverRemainsPaused
 swift test --filter TransferProtocolTests/testSenderPauseIsAnnouncedOnceAfterLegacyReceiverResumes
 swift test --filter TransferProtocolTests/testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks

@@ -18,7 +18,7 @@ The receiver also writes every chunk, reads the same bytes back immediately, com
 
 Keep the 64 KiB wire-frame format and protocol version. Increase the durability batch, raise the WebRTC queue thresholds within existing bounded-memory limits, and eliminate the redundant read-after-write while retaining authenticated transport, per-chunk resume evidence, periodic durable checkpoints, and final whole-file verification.
 
-This provides the best near-term improvement and remains interoperable with 1.2.6. A newer sender stays within the older receiver's 128-frame decoded-input budget: 127 data chunks may be outstanding, reserving one frame for `.complete` or another control/terminal frame. Older receivers' smaller durable acknowledgements still advance the newer sender safely.
+This provides the best near-term improvement and remains interoperable with 1.2.6. A newer sender stays within the older receiver's 128-frame decoded-input budget: as many as 127 data chunks may be outstanding during streaming, while terminal completion first waits for enough acknowledged progress to preserve separate completion and fail-closed terminal headroom. Older receivers' smaller durable acknowledgements still advance the newer sender safely.
 
 ### B. Protocol v2 with larger transfer frames
 
@@ -34,11 +34,13 @@ Compression can help text and source trees but often harms already-compressed ar
 
 `WebRTCSecureChannel` keeps the existing 64 KiB message cap. Its high-water mark becomes 4 MiB, its low-water threshold becomes 1 MiB, and its inbound application stream buffers at most 256 frames. The existing suspended-send bound remains 4 MiB, so callers cannot accumulate an unbounded amount of memory while WebRTC is congested.
 
-The installed 1.2.6 transfer decoder accepts at most 128 queued frames. The transfer protocol therefore permits at most 127 unacknowledged data chunks, about 8 MiB, and reserves the final frame of that legacy budget for `.complete`, `.pause`, `.resume`, `.cancel`, or `.error`. The current decoded-frame inbox remains bounded at the same 128-frame limit. Receiver acknowledgements still communicate actual durable progress rather than merely received bytes.
+The installed 1.2.6 transfer decoder accepts at most 128 queued frames. During data streaming, the transfer protocol therefore permits at most 127 unacknowledged data/control frames, about 8 MiB, and reserves the final frame of that legacy budget for control or termination. Before sending `.complete`, the sender reduces outstanding data plus unresolved control debt to at most 126. Completion can then occupy frame 127 while frame 128 remains available for one fail-closed `.cancel` or `.error`. The current decoded-frame inbox remains bounded at the same 128-frame limit. Receiver acknowledgements still communicate actual durable progress rather than merely received bytes.
 
 Once a sender has received a remote `.pause`, local paused/active changes are coalesced in its control snapshot without emitting frames into the paused peer's full legacy inbox. A local cancellation still terminates immediately and emits at most the single terminal `.cancel` that fits the reserved slot. After remote `.resume`, the sender applies the latest local state once: an active sender emits no stale pause/resume pair, while a paused sender announces one `.pause` and waits for local resume while the peer is active and consuming frames.
 
 The same legacy budget covers controls emitted before the sender can observe an ordered peer `.pause`, both before acceptance and after any later acknowledgement. The sender may announce a local pause/resume pair when capacity is known, but coalesces local pause/active changes while acceptance or a full window is awaiting peer progress. Before applying a deferred local state, it reserves enough room for the possible pause/resume pair and the next data frame; when that room is unavailable, only cancellation uses the terminal slot. Every emitted non-terminal control remains charged against the 127-frame data/control budget until an acknowledgement covers a data chunk sent after that control. An ACK already queued before a newer local control therefore cannot falsely clear its debt. A causally later ACK restores that capacity, so repeated pause cycles neither permanently shrink nor deadlock the window. The remaining 128th legacy inbox slot stays available for control or termination.
+
+Once all data has been emitted, local pause/active changes are coalesced without sending nonterminal frames, including while awaiting the final acknowledgement and receiver completion. If 127 data/control frames are still outstanding, `.complete` waits for an acknowledgement or safe remote-resume progress instead of filling the inbox. Local cancellation remains immediate and emits at most one terminal `.cancel`; after `.complete`, the separately reserved 128th slot keeps that cancellation observable without overflowing a paused legacy decoder.
 
 ### Adaptive durable checkpoints
 
@@ -69,7 +71,7 @@ Add deterministic tests that prove:
 2. Chunk verification no longer performs a mandatory read-after-write, while final whole-file verification remains required.
 3. WebRTC flow control uses the larger 256-frame inbound stream and bounded queue thresholds while still rejecting waiter/byte floods.
 4. A sender can place 127 chunks in flight, reserves the 128th legacy receive-frame slot for control or completion, and blocks the next data chunk until a durable acknowledgement arrives.
-5. Exactly 127 chunks plus `.complete` fit the installed 1.2.6 receiver's 128-frame decoded-input budget while paused.
+5. At the exact 127-frame terminal boundary, `.complete` waits for peer progress, post-data pause/active changes emit no frames, and one terminal cancellation still fits the installed 1.2.6 receiver's 128-frame decoded-input budget.
 6. Local pause/active churn emits no frames while the remote peer remains paused; after remote resume only the latest local state is announced.
 7. Existing resume, interruption, relay, memory-bound, authentication, and protocol tests continue to pass.
 

@@ -2304,7 +2304,7 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertEqual(completedCoordinates.count, 128)
     }
 
-    func testExactlyOneHundredTwentySevenChunksPlusCompleteFitLegacyReceiveFrameBudgetWhilePaused() async throws {
+    func testExactlyOneHundredTwentySevenChunksWaitForProgressBeforeComplete() async throws {
         XCTAssertEqual(TransferProtocolLimits.maximumUnacknowledgedChunks, 127)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -2337,12 +2337,19 @@ final class TransferProtocolTests: XCTestCase {
             try await SendSession(manifest, recorder: recorder).run(on: channels.sender)
         }
 
-        guard await inboxProbe.waitUntilAtLeast(128) else {
+        guard await inboxProbe.waitUntilAtLeast(127) else {
             await control.cancel()
             await channels.receiver.close()
             _ = try? await sender.value
             _ = try? await receiver.value
-            return XCTFail("Receiver did not buffer 127 chunks plus complete")
+            return XCTFail("Receiver did not buffer the 127-chunk terminal boundary")
+        }
+        if await inboxProbe.waitUntilAtLeast(128, timeout: .milliseconds(250)) {
+            await control.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail("Complete consumed the reserved terminal-cancel slot")
         }
         let pausedCoordinates = await recorder.coordinates
         XCTAssertEqual(pausedCoordinates.count, 127)
@@ -2352,6 +2359,187 @@ final class TransferProtocolTests: XCTestCase {
 
         XCTAssertEqual(sendResult.sentChunkCount, 127)
         XCTAssertEqual(receiveResult.transferID, manifest.id)
+    }
+
+    func testPostCompletePauseResumeDoesNotUseReservedTerminalSlot() async throws {
+        XCTAssertEqual(TransferProtocolLimits.maximumUnacknowledgedChunks, 127)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("terminal-controls.bin")
+        let bytes = Data(
+            repeating: 0x2d,
+            count: TransferProtocolLimits.maximumChunkBytes
+                * (TransferProtocolLimits.maximumUnacknowledgedChunks - 1)
+        )
+        try bytes.write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let senderControl = TransferSessionControl()
+        let challenge = TransferReceiverChallenge.fresh(for: manifest.id)
+        try await channels.receiver.send(challenge.encode())
+        let crypto = try await TransferCryptographicContext.make(
+            on: channels.receiver,
+            transfer: manifest.id,
+            receiverChallenge: challenge.bytes
+        )
+        var inboundSequence: UInt64 = 0
+        var outboundSequence: UInt64 = 0
+        var iterator = channels.receiver.frames().makeAsyncIterator()
+        let sender = Task {
+            try await SendSession(manifest, control: senderControl).run(on: channels.sender)
+        }
+
+        guard
+            case .offer = try await receive(
+                from: &iterator,
+                transferID: manifest.id,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver,
+                sequence: &inboundSequence
+            )
+        else { return XCTFail("Expected offer") }
+        try await send(
+            .accept(try ResumeMap()),
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        guard await channels.sender.waitUntilSentCount(128) else {
+            await senderControl.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Sender did not queue 126 chunks plus complete")
+        }
+        await senderControl.pause()
+        let overflowed = await channels.sender.waitUntilSentCount(
+            129,
+            timeout: .milliseconds(250)
+        )
+        await senderControl.resume()
+
+        var receivedBytes = Data()
+        for _ in 0..<126 {
+            guard
+                case .chunk(let chunk) = try await receive(
+                    from: &iterator,
+                    transferID: manifest.id,
+                    direction: .senderToReceiver,
+                    cipher: crypto.senderToReceiver,
+                    sequence: &inboundSequence
+                )
+            else { return XCTFail("Expected terminal-boundary chunk") }
+            receivedBytes.append(chunk.data)
+        }
+        try await send(
+            .ackRanges(
+                try ResumeMap(ranges: [
+                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 126)
+                ])),
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+        guard
+            case .complete = try await receive(
+                from: &iterator,
+                transferID: manifest.id,
+                direction: .senderToReceiver,
+                cipher: crypto.senderToReceiver,
+                sequence: &inboundSequence
+            )
+        else { return XCTFail("Expected completion at the terminal boundary") }
+        try await send(
+            .complete,
+            transferID: manifest.id,
+            direction: .receiverToSender,
+            on: channels.receiver,
+            cipher: crypto.receiverToSender,
+            sequence: &outboundSequence
+        )
+
+        let sendResult = try await sender.value
+        XCTAssertFalse(
+            overflowed,
+            "Post-complete pause must not consume the reserved terminal slot"
+        )
+        XCTAssertEqual(sendResult.sentChunkCount, 126)
+        XCTAssertEqual(receivedBytes, bytes)
+    }
+
+    func testTerminalCancelUsesReservedLegacyReceiveFrameHeadroom() async throws {
+        XCTAssertEqual(TransferProtocolLimits.maximumUnacknowledgedChunks, 127)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("terminal-cancel.bin")
+        try Data(
+            repeating: 0x1d,
+            count: TransferProtocolLimits.maximumChunkBytes
+                * TransferProtocolLimits.maximumUnacknowledgedChunks
+        ).write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let receiverControl = TransferSessionControl()
+        let senderControl = TransferSessionControl()
+        let inboxProbe = TestFrameInboxProbe()
+        await receiverControl.pause()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination,
+                control: receiverControl,
+                onStagingPrepared: { _ in },
+                onDecodedFrameBuffered: { count in
+                    await inboxProbe.record(count)
+                }
+            ).run(on: channels.receiver)
+        }
+        let sender = Task {
+            try await SendSession(manifest, control: senderControl).run(on: channels.sender)
+        }
+
+        guard await inboxProbe.waitUntilAtLeast(127) else {
+            await receiverControl.cancel()
+            await senderControl.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail("Receiver did not reach the terminal cancellation boundary")
+        }
+        _ = await channels.sender.waitUntilSentCount(129, timeout: .milliseconds(250))
+        await senderControl.cancel()
+
+        do {
+            _ = try await sender.value
+            XCTFail("Expected sender cancellation")
+        } catch {
+            XCTAssertEqual(error as? TransferProtocolError, .cancelled)
+        }
+        let terminalSendCount = await channels.sender.sentCount()
+        await receiverControl.resume()
+        do {
+            _ = try await receiver.value
+            XCTFail("Expected receiver cancellation")
+        } catch {
+            XCTAssertEqual(
+                error as? TransferProtocolError,
+                .cancelled,
+                "The reserved terminal slot must deliver cancel without inbox overflow"
+            )
+        }
+        XCTAssertLessThanOrEqual(
+            terminalSendCount,
+            129,
+            "127 retained data frames may be followed by only one terminal cancel"
+        )
     }
 
     func testSenderPauseResumeChangesAreCoalescedWhileLegacyReceiverRemainsPaused() async throws {

@@ -210,6 +210,28 @@ public struct SendSession: Sendable {
                 }
             }
 
+            // Reserve one additional terminal slot beyond complete. A paused
+            // legacy receiver may retain every outstanding data/control frame,
+            // so complete is sent only when it can occupy frame 127 and leave
+            // frame 128 available for a fail-closed cancel/error.
+            while outstanding.count + controlDebt.count
+                >= TransferProtocolLimits.maximumUnacknowledgedChunks
+            {
+                let acknowledgement = try await receiveAcknowledgement(
+                    from: frameReader,
+                    controlSnapshot: &controlSnapshot,
+                    on: channel,
+                    outboundCipher: crypto.senderToReceiver,
+                    outboundSequence: &outboundSequence,
+                    announcedPause: &announcedLocalPause,
+                    resumeMap: resumeMap,
+                    sent: sentCoverage,
+                    outstanding: &outstanding,
+                    announceLocalControlOnRemoteResume: false
+                )
+                controlDebt.applyAcknowledgement(acknowledgement)
+            }
+
             // Complete also acts as an immediate ACK flush for transfers whose
             // final batch does not reach the acknowledgement checkpoint boundary.
             try await send(
@@ -223,13 +245,12 @@ public struct SendSession: Sendable {
             )
             var receiverCompleted = false
             while !receiverCompleted || !outstanding.isEmpty {
-                let frame = try await nextFrame(
+                // No data remains, so pause/active changes are local state only.
+                // Suppressing those nonterminal frames preserves the final
+                // legacy inbox slot for cancellation or error.
+                let frame = try await nextFrameCoalescingLocalControl(
                     from: frameReader,
-                    controlSnapshot: &controlSnapshot,
-                    on: channel,
-                    outboundCipher: crypto.senderToReceiver,
-                    outboundSequence: &outboundSequence,
-                    announcedPause: &announcedLocalPause
+                    controlSnapshot: &controlSnapshot
                 )
                 switch frame {
                 case .ackRanges(let map):
@@ -248,7 +269,8 @@ public struct SendSession: Sendable {
                         on: channel,
                         outboundCipher: crypto.senderToReceiver,
                         outboundSequence: &outboundSequence,
-                        announcedPause: &announcedLocalPause
+                        announcedPause: &announcedLocalPause,
+                        announceLocalControlOnResume: false
                     )
                 case .cancel:
                     throw TransferProtocolError.cancelled
@@ -351,7 +373,8 @@ public struct SendSession: Sendable {
         on channel: any SecureChannel,
         outboundCipher: ChunkCipher,
         outboundSequence: inout UInt64,
-        announcedPause: inout Bool
+        announcedPause: inout Bool,
+        announceLocalControlOnResume: Bool = true
     ) async throws {
         while true {
             let event = try await waitForTransferSessionEvent(
@@ -373,13 +396,15 @@ public struct SendSession: Sendable {
                 }
                 switch frame {
                 case .resume:
-                    try await applyLocalControl(
-                        on: channel,
-                        cipher: outboundCipher,
-                        sequence: &outboundSequence,
-                        announcedPause: &announcedPause,
-                        snapshot: &controlSnapshot
-                    )
+                    if announceLocalControlOnResume {
+                        try await applyLocalControl(
+                            on: channel,
+                            cipher: outboundCipher,
+                            sequence: &outboundSequence,
+                            announcedPause: &announcedPause,
+                            snapshot: &controlSnapshot
+                        )
+                    }
                     return
                 case .cancel:
                     throw TransferProtocolError.cancelled
@@ -485,7 +510,8 @@ public struct SendSession: Sendable {
         announcedPause: inout Bool,
         resumeMap: ResumeMap,
         sent: ChunkCoverage,
-        outstanding: inout Set<ChunkCoordinate>
+        outstanding: inout Set<ChunkCoordinate>,
+        announceLocalControlOnRemoteResume: Bool = true
     ) async throws -> ResumeMap {
         while true {
             let frame = try await nextFrameCoalescingLocalControl(
@@ -510,58 +536,13 @@ public struct SendSession: Sendable {
                     on: channel,
                     outboundCipher: outboundCipher,
                     outboundSequence: &outboundSequence,
-                    announcedPause: &announcedPause
+                    announcedPause: &announcedPause,
+                    announceLocalControlOnResume: announceLocalControlOnRemoteResume
                 )
             case .error(let remote):
                 throw mapRemoteError(remote)
             default:
                 throw TransferProtocolError.unexpectedFrame
-            }
-        }
-    }
-
-    private func nextFrame(
-        from reader: TransferFrameReader,
-        controlSnapshot: inout TransferSessionControl.Snapshot?,
-        on channel: any SecureChannel,
-        outboundCipher: ChunkCipher,
-        outboundSequence: inout UInt64,
-        announcedPause: inout Bool
-    ) async throws -> TransferFrame {
-        while true {
-            let event = try await waitForTransferSessionEvent(
-                reader: reader,
-                control: control,
-                after: controlSnapshot
-            )
-            switch event {
-            case .frame(let frame):
-                try Task.checkCancellation()
-                if let control {
-                    let latest = await control.snapshot()
-                    if latest.revision != controlSnapshot?.revision {
-                        controlSnapshot = latest
-                        try await applyLocalControl(
-                            on: channel,
-                            cipher: outboundCipher,
-                            sequence: &outboundSequence,
-                            announcedPause: &announcedPause,
-                            snapshot: &controlSnapshot
-                        )
-                    }
-                }
-                return frame
-            case .timeout:
-                continue
-            case .control(let changed):
-                controlSnapshot = changed
-                try await applyLocalControl(
-                    on: channel,
-                    cipher: outboundCipher,
-                    sequence: &outboundSequence,
-                    announcedPause: &announcedPause,
-                    snapshot: &controlSnapshot
-                )
             }
         }
     }
