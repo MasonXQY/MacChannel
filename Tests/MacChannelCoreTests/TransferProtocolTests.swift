@@ -1940,19 +1940,30 @@ final class TransferProtocolTests: XCTestCase {
         let channels = TestSecureChannelPair.make()
         let control = TransferSessionControl()
         let recorder = TestChunkRecorder()
+        let inboxProbe = TestFrameInboxProbe()
         await control.pause()
         let receiver = Task {
             try await ReceiveSession(
                 transferID: manifest.id,
                 destinationDirectory: destination,
-                control: control
+                control: control,
+                onStagingPrepared: { _ in },
+                onDecodedFrameBuffered: { count in
+                    await inboxProbe.record(count)
+                }
             ).run(on: channels.receiver)
         }
         let sender = Task {
             try await SendSession(manifest, recorder: recorder).run(on: channels.sender)
         }
 
-        try await Task.sleep(for: .milliseconds(100))
+        guard await inboxProbe.waitUntilAtLeast(127) else {
+            await control.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail("Receiver did not buffer the 127-chunk paused boundary")
+        }
         let pausedCoordinates = await recorder.coordinates
         XCTAssertEqual(pausedCoordinates.count, 127)
         await control.resume()
@@ -1978,25 +1989,29 @@ final class TransferProtocolTests: XCTestCase {
         let channels = TestSecureChannelPair.make()
         let control = TransferSessionControl()
         let recorder = TestChunkRecorder()
+        let inboxProbe = TestFrameInboxProbe()
         await control.pause()
         let receiver = Task {
             try await ReceiveSession(
                 transferID: manifest.id,
                 destinationDirectory: destination,
-                control: control
+                control: control,
+                onStagingPrepared: { _ in },
+                onDecodedFrameBuffered: { count in
+                    await inboxProbe.record(count)
+                }
             ).run(on: channels.receiver)
         }
         let sender = Task {
             try await SendSession(manifest, recorder: recorder).run(on: channels.sender)
         }
 
-        try await Task.sleep(for: .milliseconds(50))
-        let sentWhilePaused = await channels.sender.sentCount()
-        guard sentWhilePaused == 129 else {
+        guard await inboxProbe.waitUntilAtLeast(128) else {
+            await control.cancel()
             await channels.receiver.close()
             _ = try? await sender.value
             _ = try? await receiver.value
-            return XCTFail("Expected offer, 127 chunks, and complete; got \(sentWhilePaused) frames")
+            return XCTFail("Receiver did not buffer 127 chunks plus complete")
         }
         let pausedCoordinates = await recorder.coordinates
         XCTAssertEqual(pausedCoordinates.count, 127)
@@ -2026,12 +2041,17 @@ final class TransferProtocolTests: XCTestCase {
         let receiverControl = TransferSessionControl()
         let senderControl = TransferSessionControl()
         let recorder = TestChunkRecorder()
+        let inboxProbe = TestFrameInboxProbe()
         await receiverControl.pause()
         let receiver = Task {
             try await ReceiveSession(
                 transferID: manifest.id,
                 destinationDirectory: destination,
-                control: receiverControl
+                control: receiverControl,
+                onStagingPrepared: { _ in },
+                onDecodedFrameBuffered: { count in
+                    await inboxProbe.record(count)
+                }
             ).run(on: channels.receiver)
         }
         let sender = Task {
@@ -2042,7 +2062,14 @@ final class TransferProtocolTests: XCTestCase {
             ).run(on: channels.sender)
         }
 
-        try await Task.sleep(for: .milliseconds(100))
+        guard await inboxProbe.waitUntilAtLeast(127) else {
+            await receiverControl.cancel()
+            await senderControl.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail("Receiver did not buffer the 127-frame paused boundary")
+        }
         let pausedCoordinates = await recorder.coordinates
         let sentAtBoundary = await channels.sender.sentCount()
         XCTAssertEqual(pausedCoordinates.count, 127)
@@ -2087,12 +2114,17 @@ final class TransferProtocolTests: XCTestCase {
         let receiverControl = TransferSessionControl()
         let senderControl = TransferSessionControl()
         let recorder = TestChunkRecorder()
+        let inboxProbe = TestFrameInboxProbe()
         await receiverControl.pause()
         let receiver = Task {
             try await ReceiveSession(
                 transferID: manifest.id,
                 destinationDirectory: destination,
-                control: receiverControl
+                control: receiverControl,
+                onStagingPrepared: { _ in },
+                onDecodedFrameBuffered: { count in
+                    await inboxProbe.record(count)
+                }
             ).run(on: channels.receiver)
         }
         let sender = Task {
@@ -2103,7 +2135,14 @@ final class TransferProtocolTests: XCTestCase {
             ).run(on: channels.sender)
         }
 
-        try await Task.sleep(for: .milliseconds(100))
+        guard await inboxProbe.waitUntilAtLeast(127) else {
+            await receiverControl.cancel()
+            await senderControl.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail("Receiver did not buffer the 127-frame paused boundary")
+        }
         let pausedCoordinates = await recorder.coordinates
         let sentAtBoundary = await channels.sender.sentCount()
         XCTAssertEqual(pausedCoordinates.count, 127)
@@ -2118,7 +2157,14 @@ final class TransferProtocolTests: XCTestCase {
         )
 
         await receiverControl.resume()
-        await channels.sender.waitUntilSentCount(129)
+        guard await channels.sender.waitUntilSentCount(129) else {
+            await receiverControl.cancel()
+            await senderControl.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail("Sender did not announce the deferred pause")
+        }
         let deferredPauseCoordinates = await recorder.coordinates
         XCTAssertEqual(
             deferredPauseCoordinates.count,
@@ -2126,6 +2172,80 @@ final class TransferProtocolTests: XCTestCase {
             "The first deferred frame must be pause, not the next data chunk"
         )
         await senderControl.resume()
+        let sendResult = try await sender.value
+        let receiveResult = try await receiver.value
+        let received = try XCTUnwrap(receiveResult.receivedURLs.first)
+
+        XCTAssertEqual(sendResult.sentChunkCount, 128)
+        XCTAssertEqual(try Data(contentsOf: received), bytes)
+    }
+
+    func testPreAcceptLocalPauseResumePreservesLegacyReceiverControlHeadroom() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent("received", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("pre-accept-controls.bin")
+        let bytes = Data(
+            repeating: 0x6e,
+            count: TransferProtocolLimits.maximumChunkBytes
+                * (TransferProtocolLimits.maximumUnacknowledgedChunks + 1)
+        )
+        try bytes.write(to: source)
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        let receiverControl = TransferSessionControl()
+        let senderControl = TransferSessionControl()
+        let inboxProbe = TestFrameInboxProbe()
+        await receiverControl.pause()
+        await senderControl.pause()
+        let receiver = Task {
+            try await ReceiveSession(
+                transferID: manifest.id,
+                destinationDirectory: destination,
+                control: receiverControl,
+                onStagingPrepared: { _ in },
+                onDecodedFrameBuffered: { count in
+                    await inboxProbe.record(count)
+                }
+            ).run(on: channels.receiver)
+        }
+        let sender = Task {
+            try await SendSession(manifest, control: senderControl).run(on: channels.sender)
+        }
+
+        guard await inboxProbe.waitUntilAtLeast(1),
+            await channels.receiver.waitUntilSentCount(3)
+        else {
+            await receiverControl.cancel()
+            await senderControl.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail("Both pre-accept pauses were not established")
+        }
+        await senderControl.resume()
+        guard await inboxProbe.waitUntilAtLeast(127) else {
+            await receiverControl.cancel()
+            await senderControl.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail("Receiver did not reach the safe paused-frame boundary")
+        }
+        if await inboxProbe.waitUntilAtLeast(128, timeout: .milliseconds(250)) {
+            await receiverControl.cancel()
+            await senderControl.cancel()
+            await channels.receiver.close()
+            _ = try? await sender.value
+            _ = try? await receiver.value
+            return XCTFail(
+                "Pre-accept pause/resume consumed reserved legacy control headroom"
+            )
+        }
+
+        await receiverControl.resume()
         let sendResult = try await sender.value
         let receiveResult = try await receiver.value
         let received = try XCTUnwrap(receiveResult.receivedURLs.first)
@@ -2458,8 +2578,10 @@ private final class TestSecureChannel: SecureChannel, @unchecked Sendable {
     func close() async {
         await blocker.close()
         await returnBlocker.close()
+        await sendGate.close()
         await peer?.blocker.close()
         await peer?.returnBlocker.close()
+        await peer?.sendGate.close()
         continuation.finish()
         peer?.continuation.finish()
     }
@@ -2467,8 +2589,12 @@ private final class TestSecureChannel: SecureChannel, @unchecked Sendable {
     func sentCount() async -> Int { await sendGate.count }
     func flushCount() async -> Int { await flushCounter.value }
 
-    func waitUntilSentCount(_ count: Int) async {
-        await sendGate.waitUntilCount(count)
+    @discardableResult
+    func waitUntilSentCount(
+        _ count: Int,
+        timeout: Duration = .seconds(2)
+    ) async -> Bool {
+        await sendGate.waitUntilCount(count, timeout: timeout)
     }
 }
 
@@ -2580,28 +2706,148 @@ private func receiveCryptographicContext(
 }
 
 private actor TestSendGate {
+    private struct Waiter {
+        let count: Int
+        let continuation: CheckedContinuation<Bool, Never>
+        let timer: Task<Void, Never>
+    }
+
     private let failAfter: Int?
     private var sent = 0
-    private var waiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var closed = false
+    private var waiters: [UUID: Waiter] = [:]
 
     init(failAfter: Int?) { self.failAfter = failAfter }
 
     func permit() -> Bool {
-        guard failAfter == nil || sent < failAfter! else { return false }
+        guard failAfter == nil || sent < failAfter! else {
+            close()
+            return false
+        }
         sent += 1
-        let ready = waiters.filter { sent >= $0.count }
-        waiters.removeAll { sent >= $0.count }
-        for waiter in ready { waiter.continuation.resume() }
+        let ready = waiters.filter { sent >= $0.value.count }
+        for (id, waiter) in ready {
+            waiters.removeValue(forKey: id)
+            waiter.timer.cancel()
+            waiter.continuation.resume(returning: true)
+        }
         return true
     }
 
     var count: Int { sent }
 
-    func waitUntilCount(_ count: Int) async {
-        guard sent < count else { return }
-        await withCheckedContinuation { continuation in
-            waiters.append((count, continuation))
+    func waitUntilCount(_ count: Int, timeout: Duration) async -> Bool {
+        if sent >= count { return true }
+        if closed { return false }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if sent >= count {
+                    continuation.resume(returning: true)
+                    return
+                }
+                if closed {
+                    continuation.resume(returning: false)
+                    return
+                }
+                let timer = Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: timeout)
+                        await self?.timeout(id)
+                    } catch {}
+                }
+                waiters[id] = Waiter(
+                    count: count,
+                    continuation: continuation,
+                    timer: timer
+                )
+            }
+        } onCancel: {
+            Task { await self.cancel(id) }
         }
+    }
+
+    func close() {
+        guard !closed else { return }
+        closed = true
+        let pending = waiters.values
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.timer.cancel()
+            waiter.continuation.resume(returning: false)
+        }
+    }
+
+    private func timeout(_ id: UUID) {
+        guard let waiter = waiters.removeValue(forKey: id) else { return }
+        waiter.continuation.resume(returning: false)
+    }
+
+    private func cancel(_ id: UUID) {
+        guard let waiter = waiters.removeValue(forKey: id) else { return }
+        waiter.timer.cancel()
+        waiter.continuation.resume(returning: false)
+    }
+}
+
+private actor TestFrameInboxProbe {
+    private struct Waiter {
+        let count: Int
+        let continuation: CheckedContinuation<Bool, Never>
+        let timer: Task<Void, Never>
+    }
+
+    private var maximumCount = 0
+    private var waiters: [UUID: Waiter] = [:]
+
+    func record(_ count: Int) {
+        maximumCount = max(maximumCount, count)
+        let ready = waiters.filter { maximumCount >= $0.value.count }
+        for (id, waiter) in ready {
+            waiters.removeValue(forKey: id)
+            waiter.timer.cancel()
+            waiter.continuation.resume(returning: true)
+        }
+    }
+
+    func waitUntilAtLeast(
+        _ count: Int,
+        timeout: Duration = .seconds(2)
+    ) async -> Bool {
+        if maximumCount >= count { return true }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if maximumCount >= count {
+                    continuation.resume(returning: true)
+                    return
+                }
+                let timer = Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: timeout)
+                        await self?.timeout(id)
+                    } catch {}
+                }
+                waiters[id] = Waiter(
+                    count: count,
+                    continuation: continuation,
+                    timer: timer
+                )
+            }
+        } onCancel: {
+            Task { await self.cancel(id) }
+        }
+    }
+
+    private func timeout(_ id: UUID) {
+        guard let waiter = waiters.removeValue(forKey: id) else { return }
+        waiter.continuation.resume(returning: false)
+    }
+
+    private func cancel(_ id: UUID) {
+        guard let waiter = waiters.removeValue(forKey: id) else { return }
+        waiter.timer.cancel()
+        waiter.continuation.resume(returning: false)
     }
 }
 

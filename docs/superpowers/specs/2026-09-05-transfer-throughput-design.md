@@ -38,6 +38,8 @@ The installed 1.2.6 transfer decoder accepts at most 128 queued frames. The tran
 
 Once a sender has received a remote `.pause`, local paused/active changes are coalesced in its control snapshot without emitting frames into the paused peer's full legacy inbox. A local cancellation still terminates immediately and emits at most the single terminal `.cancel` that fits the reserved slot. After remote `.resume`, the sender applies the latest local state once: an active sender emits no stale pause/resume pair, while a paused sender announces one `.pause` and waits for local resume while the peer is active and consuming frames.
 
+The same legacy budget also covers controls emitted before the sender can observe the peer's ordered `.accept` and `.pause`. The sender may announce its initial local pause/resume pair, but coalesces further local state changes while acceptance is pending. Any local control frames emitted before the first data chunk reduce the first data window by the same count. After the first acknowledgement proves forward receiver consumption, the normal 127-data-chunk window is restored. This prevents pre-observation controls plus data from exceeding 127 queued frames and keeps the one remaining legacy inbox slot available for control or termination.
+
 ### Adaptive durable checkpoints
 
 The receiver checkpoints after either 127 chunks (approximately 8 MiB) or 250 ms since the previous checkpoint. Aligning the chunk threshold with the 127-data-frame sender window avoids falling back to the timer at every full window. The time condition preserves frequent recovery points on slow links and for small transfers; the byte condition reduces `fsync` and SQLite commit frequency on fast links.

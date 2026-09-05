@@ -280,6 +280,10 @@ Add `testSenderPauseResumeChangesAreCoalescedWhileLegacyReceiverRemainsPaused`. 
 
 Add `testSenderPauseIsAnnouncedOnceAfterLegacyReceiverResumes`. Fill the same boundary, leave the sender locally paused, require no early pause frame, resume the receiver, require exactly one deferred pause before any next data chunk, then resume the sender and verify completion and destination bytes.
 
+Add `testPreAcceptLocalPauseResumePreservesLegacyReceiverControlHeadroom`. Start both controls paused, synchronize on the receiver's decoded inbox and its emitted accept/pause sequence, then resume only the sender. Require the paused receiver to remain at no more than 127 buffered frames before it resumes, and verify both sessions complete with identical bytes. Use bounded test-channel send-count waits that are released by timeout or close so a regression fails cleanly.
+
+In `SendSession`, coalesce additional local state changes while waiting for `.accept`. Count any pause/resume frames emitted after the offer and before the first data chunk against the first 127-frame send window. Restore the full 127-data window only after an acknowledgement demonstrates receiver progress. Continue coalescing local pause/active changes after an observed remote pause as described above.
+
 Rename the checkpoint-boundary regression to `testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentySevenChunks`, send `0..<127`, and require acknowledgement range `0..<127`. Keep `testReceiverFlushesAcknowledgementAfterTwoHundredFiftyMilliseconds` unchanged.
 
 Apply these key boundary edits:

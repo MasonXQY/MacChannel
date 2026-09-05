@@ -42,6 +42,7 @@ public struct ReceiveSession: Sendable {
     private let onStagingPrepared: (@Sendable (URL) -> Void)?
     private let onCheckpointValidated: (@Sendable (String) -> Void)?
     private let onMetadataValidated: (@Sendable (String) -> Void)?
+    private let onDecodedFrameBuffered: (@Sendable (Int) async -> Void)?
 
     public init(
         transferID: TransferID,
@@ -62,6 +63,7 @@ public struct ReceiveSession: Sendable {
         onStagingPrepared = nil
         onCheckpointValidated = nil
         onMetadataValidated = nil
+        onDecodedFrameBuffered = nil
     }
 
     init(
@@ -70,7 +72,8 @@ public struct ReceiveSession: Sendable {
         control: TransferSessionControl? = nil,
         onStagingPrepared: @escaping @Sendable (URL) -> Void,
         onCheckpointValidated: (@Sendable (String) -> Void)? = nil,
-        onMetadataValidated: (@Sendable (String) -> Void)? = nil
+        onMetadataValidated: (@Sendable (String) -> Void)? = nil,
+        onDecodedFrameBuffered: (@Sendable (Int) async -> Void)? = nil
     ) {
         self.transferID = transferID
         self.destinationDirectory = destinationDirectory
@@ -83,6 +86,7 @@ public struct ReceiveSession: Sendable {
         self.onStagingPrepared = onStagingPrepared
         self.onCheckpointValidated = onCheckpointValidated
         self.onMetadataValidated = onMetadataValidated
+        self.onDecodedFrameBuffered = onDecodedFrameBuffered
     }
 
     /// Uses the hardened receive store for policy authorization, durable resume
@@ -118,6 +122,7 @@ public struct ReceiveSession: Sendable {
         onStagingPrepared = nil
         onCheckpointValidated = nil
         onMetadataValidated = nil
+        onDecodedFrameBuffered = nil
     }
 
     init(
@@ -152,6 +157,7 @@ public struct ReceiveSession: Sendable {
         onStagingPrepared = nil
         onCheckpointValidated = nil
         onMetadataValidated = nil
+        onDecodedFrameBuffered = nil
     }
 
     public func run(on channel: any SecureChannel) async throws -> TransferReceiveResult {
@@ -180,7 +186,8 @@ public struct ReceiveSession: Sendable {
                 stream: channel.frames(),
                 transferID: transferID,
                 direction: .senderToReceiver,
-                cipher: crypto.senderToReceiver
+                cipher: crypto.senderToReceiver,
+                onFrameBuffered: onDecodedFrameBuffered
             )
             var controlSnapshot = await control?.snapshot()
             if case .cancelled = controlSnapshot?.state {
@@ -625,9 +632,10 @@ final class TransferFrameReader: @unchecked Sendable {
         stream: AsyncThrowingStream<Data, Error>,
         transferID: TransferID,
         direction: TransferDirection,
-        cipher: ChunkCipher
+        cipher: ChunkCipher,
+        onFrameBuffered: (@Sendable (Int) async -> Void)? = nil
     ) async {
-        let inbox = TransferFrameInbox()
+        let inbox = TransferFrameInbox(onFrameBuffered: onFrameBuffered)
         let retainedOwnership = await Self.retainResourceOwnership()
         self.inbox = inbox
         readerTask = Self.startReader(
@@ -724,12 +732,17 @@ private actor TransferFrameInbox {
     private var frames: [TransferFrame] = []
     private var terminalError: Error?
     private var waiter: Waiter?
+    private let onFrameBuffered: (@Sendable (Int) async -> Void)?
 
-    init(frames: [TransferFrame] = []) {
+    init(
+        frames: [TransferFrame] = [],
+        onFrameBuffered: (@Sendable (Int) async -> Void)? = nil
+    ) {
         self.frames = frames
+        self.onFrameBuffered = onFrameBuffered
     }
 
-    func push(_ frame: TransferFrame) -> Bool {
+    func push(_ frame: TransferFrame) async -> Bool {
         guard terminalError == nil else { return false }
         if let waiter {
             self.waiter = nil
@@ -742,6 +755,7 @@ private actor TransferFrameInbox {
                 return false
             }
             frames.append(frame)
+            await onFrameBuffered?(frames.count)
         }
         return true
     }
