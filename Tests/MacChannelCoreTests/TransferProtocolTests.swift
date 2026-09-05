@@ -1053,7 +1053,7 @@ final class TransferProtocolTests: XCTestCase {
         }
     }
 
-    func testSenderStopsAtSixtyFourChunksUntilAcknowledged() async throws {
+    func testSenderStopsAtTwoHundredFiftySixChunksUntilAcknowledged() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1061,7 +1061,7 @@ final class TransferProtocolTests: XCTestCase {
         let source = directory.appendingPathComponent("window.bin")
         try Data(
             repeating: 5,
-            count: TransferProtocolLimits.maximumChunkBytes * 65
+            count: TransferProtocolLimits.maximumChunkBytes * 257
         ).write(to: source)
         let manifest = try TransferManifest.build(from: source)
         let channels = TestSecureChannelPair.make()
@@ -1094,7 +1094,14 @@ final class TransferProtocolTests: XCTestCase {
             cipher: crypto.receiverToSender,
             sequence: &outboundSequence
         )
-        for expectedIndex in 0..<UInt32(64) {
+        try await Task.sleep(for: .milliseconds(50))
+        let sentBeforeAcknowledgement = await channels.sender.sentCount()
+        guard sentBeforeAcknowledgement == 257 else {
+            await channels.receiver.close()
+            _ = try? await sender.value
+            return XCTFail("Expected offer plus exactly 256 chunks, got \(sentBeforeAcknowledgement)")
+        }
+        for expectedIndex in 0..<UInt32(256) {
             guard
                 case .chunk(let chunk) = try await receive(
                     from: &iterator,
@@ -1106,14 +1113,11 @@ final class TransferProtocolTests: XCTestCase {
             else { return XCTFail("Expected chunk") }
             XCTAssertEqual(chunk.coordinate.chunkIndex, expectedIndex)
         }
-        try await Task.sleep(for: .milliseconds(50))
-        let sentBeforeAcknowledgement = await channels.sender.sentCount()
-        XCTAssertEqual(sentBeforeAcknowledgement, 65, "offer plus exactly 64 chunks")
 
         try await send(
             .ackRanges(
                 try ResumeMap(ranges: [
-                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 64)
+                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 16)
                 ])),
             transferID: manifest.id,
             direction: .receiverToSender,
@@ -1130,7 +1134,7 @@ final class TransferProtocolTests: XCTestCase {
                 sequence: &inboundSequence
             )
         else { return XCTFail("Expected final chunk") }
-        XCTAssertEqual(lastChunk.coordinate.chunkIndex, 64)
+        XCTAssertEqual(lastChunk.coordinate.chunkIndex, 256)
         guard
             case .complete = try await receive(
                 from: &iterator,
@@ -1143,7 +1147,7 @@ final class TransferProtocolTests: XCTestCase {
         try await send(
             .ackRanges(
                 try ResumeMap(ranges: [
-                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 65)
+                    try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 257)
                 ])),
             transferID: manifest.id,
             direction: .receiverToSender,
@@ -1160,7 +1164,7 @@ final class TransferProtocolTests: XCTestCase {
             sequence: &outboundSequence
         )
         let result = try await sender.value
-        XCTAssertEqual(result.sentChunkCount, 65)
+        XCTAssertEqual(result.sentChunkCount, 257)
     }
 
     func testSenderControlPauseResumeStopsAndRestartsChunkProduction() async throws {
@@ -1492,7 +1496,7 @@ final class TransferProtocolTests: XCTestCase {
         let source = directory.appendingPathComponent("ack-wait.bin")
         try Data(
             repeating: 0x6b,
-            count: TransferProtocolLimits.maximumChunkBytes * 65
+            count: TransferProtocolLimits.maximumChunkBytes * 257
         ).write(to: source)
         let fixture = ManualSenderWaitFixture(
             directory: directory,
@@ -1926,7 +1930,7 @@ final class TransferProtocolTests: XCTestCase {
         let source = directory.appendingPathComponent("receiver-controlled.bin")
         try Data(
             repeating: 0x7a,
-            count: TransferProtocolLimits.maximumChunkBytes * 65
+            count: TransferProtocolLimits.maximumChunkBytes * 257
         ).write(to: source)
         let manifest = try TransferManifest.build(from: source)
         let channels = TestSecureChannelPair.make()
@@ -1946,12 +1950,12 @@ final class TransferProtocolTests: XCTestCase {
 
         try await Task.sleep(for: .milliseconds(100))
         let pausedCoordinates = await recorder.coordinates
-        XCTAssertEqual(pausedCoordinates.count, 64)
+        XCTAssertEqual(pausedCoordinates.count, 256)
         await control.resume()
         _ = try await sender.value
         _ = try await receiver.value
         let completedCoordinates = await recorder.coordinates
-        XCTAssertEqual(completedCoordinates.count, 65)
+        XCTAssertEqual(completedCoordinates.count, 257)
     }
 
     func testReceiverAcknowledgesAContinuousRangeAtOneHundredTwentyEightChunks() async throws {

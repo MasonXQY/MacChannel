@@ -4,6 +4,10 @@ import XCTest
 @testable import MacChannelCore
 
 final class WebRTCLoopbackTests: XCTestCase {
+    func testThroughputFlowControlRemainsExplicitlyBounded() {
+        XCTAssertEqual(WebRTCSecureChannel.bufferedAmountLowThreshold, 1024 * 1024)
+    }
+
     func testOrderedReliableLoopbackTransfersOneMiBIn64KiBFrames() async throws {
         let leftIdentity = try DeviceIdentity.ephemeral()
         let rightIdentity = try DeviceIdentity.ephemeral()
@@ -167,9 +171,9 @@ final class WebRTCLoopbackTests: XCTestCase {
         await channels.right.close()
     }
 
-    func testActorBackedFrameStreamDoesNotDropAReceiverBurst() async throws {
+    func testActorBackedFrameStreamDoesNotDropATwoHundredFrameReceiverBurst() async throws {
         let channels = try await makeLoopbackPair()
-        let expected = (0..<80).map { Data([UInt8($0)]) }
+        let expected = (0..<200).map { Data([UInt8($0)]) }
         for frame in expected { try await channels.left.send(frame) }
         try await Task.sleep(for: .milliseconds(100))
         let allReceived = expectation(description: "all buffered frames received")

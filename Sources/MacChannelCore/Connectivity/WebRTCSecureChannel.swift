@@ -22,8 +22,8 @@ struct WebRTCHandshakePublicMaterial: Sendable {
 /// channel. Handshake frames never escape through `frames()`.
 public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelDelegate, @unchecked Sendable {
     public static let maximumMessageBytes = 64 * 1024
-    public static let bufferedAmountLowThreshold: UInt64 = 256 * 1024
-    fileprivate static let bufferedAmountHighWaterMark: UInt64 = 1024 * 1024
+    public static let bufferedAmountLowThreshold: UInt64 = 1024 * 1024
+    fileprivate static let bufferedAmountHighWaterMark: UInt64 = 4 * 1024 * 1024
 
     public let route: ConnectionRoute
     public let isOrderedReliable: Bool
@@ -53,7 +53,7 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
             && channel.maxRetransmits == UInt16.max
 
         var continuation: AsyncThrowingStream<Data, Error>.Continuation!
-        frameStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(128)) {
+        frameStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(256)) {
             continuation = $0
         }
         state = State(
