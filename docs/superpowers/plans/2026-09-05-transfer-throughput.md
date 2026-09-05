@@ -54,7 +54,8 @@ func testLAN64MiBThroughputEvidence() async throws {
 
     XCTAssertGreaterThan(seconds, 0)
     XCTAssertEqual(sourceHash, destinationHash)
-    XCTAssertEqual(await harness.actualRoutes(), [.lan])
+    let routes = await harness.actualRoutes()
+    XCTAssertEqual(routes, [.lan])
     print(
         "throughput-lan bytes=\(byteCount) seconds=\(seconds) "
             + "mib_per_second=\(mebibytesPerSecond) route=lan "
@@ -267,7 +268,7 @@ func testThroughputFlowControlRemainsExplicitlyBounded() {
 
 Rename `testActorBackedFrameStreamDoesNotDropAReceiverBurst` to `testActorBackedFrameStreamDoesNotDropATwoHundredFrameReceiverBurst` and change its expected frame count from 80 to 200.
 
-Rename `testSenderStopsAtSixtyFourChunksUntilAcknowledged` to `testSenderStopsAtTwoHundredFiftySixChunksUntilAcknowledged`. Build 257 chunks, assert the sent count is 257 including the offer before draining frames, and fail cleanly by closing the receiver if the current 64-chunk window is observed. On the optimized path, drain indices `0..<256`, send a legacy-sized acknowledgement for `0..<16`, and then expect chunk index 256 followed by completion. This also proves that a newer sender accepts the smaller durable acknowledgements emitted by a 1.2.6 receiver.
+Rename `testSenderStopsAtSixtyFourChunksUntilAcknowledged` to `testSenderStopsAtTwoHundredFiftySixChunksUntilAcknowledged`. Build 257 chunks. Immediately after sending `.accept`, sleep 50 ms and inspect `channels.sender.sentCount()` before reading any chunk frames. Require 257 sent frames including the offer; when fewer are observed, close the receiver, await the sender, fail with the observed count, and return. On the optimized path, drain indices `0..<256`, send a legacy-sized acknowledgement for `0..<16`, and then expect chunk index 256 followed by completion. This also proves that a newer sender accepts the smaller durable acknowledgements emitted by a 1.2.6 receiver.
 
 In `testReceiverControlPauseBackpressuresSenderUntilResume`, build 257 chunks, expect 256 recorded chunks while paused, and expect all 257 after resume. This preserves the test's original window-boundary meaning.
 
@@ -283,13 +284,24 @@ Apply these exact test edits:
 + func testSenderStopsAtTwoHundredFiftySixChunksUntilAcknowledged() async throws {
 -       count: TransferProtocolLimits.maximumChunkBytes * 65
 +       count: TransferProtocolLimits.maximumChunkBytes * 257
--   for expectedIndex in 0..<UInt32(64) {
-+   for expectedIndex in 0..<UInt32(256) {
--   XCTAssertEqual(sentBeforeAcknowledgement, 65, "offer plus exactly 64 chunks")
++   try await Task.sleep(for: .milliseconds(50))
++   let sentBeforeAcknowledgement = await channels.sender.sentCount()
 +   guard sentBeforeAcknowledgement == 257 else {
 +       await channels.receiver.close()
 +       _ = try? await sender.value
 +       return XCTFail("Expected offer plus exactly 256 chunks, got \(sentBeforeAcknowledgement)")
++   }
++   for expectedIndex in 0..<UInt32(256) {
++       guard
++           case .chunk(let chunk) = try await receive(
++               from: &iterator,
++               transferID: manifest.id,
++               direction: .senderToReceiver,
++               cipher: crypto.senderToReceiver,
++               sequence: &inboundSequence
++           )
++       else { return XCTFail("Expected chunk") }
++       XCTAssertEqual(chunk.coordinate.chunkIndex, expectedIndex)
 +   }
 -               try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 64)
 +               try ChunkRange(entryIndex: 0, lowerBound: 0, upperBound: 16)
