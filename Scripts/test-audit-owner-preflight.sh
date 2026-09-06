@@ -16,6 +16,8 @@ adapter_digest="$(shasum -a 256 "$tool_root/NativeMain.swift" | awk '{print $1}'
 }
 xcrun swiftc -warnings-as-errors "$tool_root/Preflight.swift" "$tool_root/Tests.swift" -o "$build_root/tests"
 "$build_root/tests"
+xcrun swiftc -warnings-as-errors "$tool_root/SigningSession.swift" "$tool_root/SigningSessionTests.swift" -o "$build_root/signing-session-tests"
+"$build_root/signing-session-tests"
 xcrun swiftc -warnings-as-errors "$tool_root/Preflight.swift" "$tool_root/NativeMain.swift" -o "$build_root/audit-owner-preflight"
 
 assert_usage() {

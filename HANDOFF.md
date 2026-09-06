@@ -69,6 +69,39 @@ Do not reimplement the completed four-task phase. Next phase is production colle
 
 Detailed historical progress: .superpowers/sdd/progress.md. Do not repeat completed tasks or treat old portal/account notes as freshly verified.
 
+## Signing workflow core slice (September7 continuation)
+
+- User asked to continue after9209cfb. Implemented the local internal review
+  session, not the full signer/collector. Design and plan:
+  docs/superpowers/specs/2026-09-07-audit-signing-session-design.md and
+  docs/superpowers/plans/2026-09-07-audit-signing-session.md.
+- Tools/AuditOwnerPreflight/SigningSession.swift freezes manifest and pinned
+  P-256 public point, binds both into review digest, allows one attempt, expires
+  at300seconds monotonic, suppresses cancelled results, sanitizes backend errors,
+  verifies strict DER signature against exact message and pinned key.
+- RED scaffold compiled and valid roundtrip failed; GREEN38 cases passed.
+  Additional RED reproduced backend-owned signature storage changing after
+  verification. Fix deep-copies bounded returned bytes before verify and return;
+  input/output borrowed-memory regression cases now pass.
+- Fresh full `bash Scripts/test-audit-owner-preflight.sh`: exit0,14 preflight
+  cases+38session cases, native capability-only result, logging and runtime-block
+  checks. Separate `xcrun swiftc -sanitize=thread -warnings-as-errors` build/run
+  of SigningSession.swift+SigningSessionTests.swift: exit0,38cases, no TSan report.
+- Sequential default scanner mutation, static privacy, audit source-scope
+  contracts all exited0. Scoped diff against9209cfb: no app, package, production,
+  native preflight, or release gate changes. Independent read-only review approved
+  with no actionable findings. No installs, uploads, key access or live collection.
+- Session sources are compiled only into the separate test executable. Fixed
+  synthetic software keys exist only in test memory. Matching digest is NOT proof
+  of owner presence; canonical schema/semantic completeness/external policy must
+  be validated before any future production session. No signing CLI exists.
+- Next work remains the trusted review surface/native dedicated-key provider and
+  restricted local capture/semantic adapters. The collector was not implemented
+  in this slice. Actual provisioning, repeated hardware-auth prompts, isolated
+  real-service evidence, production collection and release acceptance remain open.
+  Do not restart the completed preflight or session work, or call this a complete
+  production signing tool.
+
 ## Implementation findings
 
 - Native macOS filesystem probe: Go os.Root.OpenFile retries symlinks even when O_NOFOLLOW is supplied. Direct libc openat accepted the regular synthetic fixture and rejected the symlink. Plan/spec now use a minimal cgo system-call bridge, not an external Go module; no-follow acceptance is unchanged. Commits `0268403`, `7ae1582` document this correction. Local probe files are temporary synthetic data only.
