@@ -55,6 +55,37 @@ final class DeviceDirectoryTests: XCTestCase {
         await advertiser.stopAndWait()
         observed = await iterator.next(); XCTAssertEqual(observed, .stopped)
     }
+
+    func testBonjourLifecycleStreamsBufferOnlyNewestSnapshotForStalledObservers() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let browser = BonjourPeerBrowser(
+            directory: DeviceDirectory(trust: .allowing(peer)),
+            trust: .allowing(peer)
+        )
+        var browserIterator = browser.states().makeAsyncIterator()
+        var observed = await browserIterator.next()
+        XCTAssertEqual(observed, .stopped)
+        browser.setStateForTesting(.starting)
+        browser.setStateForTesting(.failed("policy_denied"))
+        browser.setStateForTesting(.ready)
+        XCTAssertEqual(browser.state(), .ready)
+        observed = await browserIterator.next()
+        XCTAssertEqual(observed, .ready)
+
+        let advertiser = try BonjourPeerAdvertiser(device: peer, port: 7443) { $0.cancel() }
+        var advertiserIterator = advertiser.states().makeAsyncIterator()
+        observed = await advertiserIterator.next()
+        XCTAssertEqual(observed, .stopped)
+        advertiser.setStateForTesting(.starting)
+        advertiser.setStateForTesting(.failed("policy_denied"))
+        advertiser.setStateForTesting(.ready)
+        XCTAssertEqual(advertiser.state(), .ready)
+        observed = await advertiserIterator.next()
+        XCTAssertEqual(observed, .ready)
+
+        await browser.stop()
+        await advertiser.stopAndWait()
+    }
     func testLANDiscoveryAloneDoesNotClaimPeerIsReadyToTransfer() async {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))

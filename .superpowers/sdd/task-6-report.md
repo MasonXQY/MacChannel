@@ -43,3 +43,16 @@ Review RED/GREEN evidence:
 - `.superpowers/sdd/task-6-review-final-full-swift-test.log`: 856 tests executed, 3 existing environment-gated skips, 0 failures in 41.154 seconds. SHA-256 `39230d7a9867a44523dd91ab0548888afb836a9807aaf79bf2aecac5beeeebf4`.
 - `.superpowers/sdd/task-6-review-direct-build.log`: Direct build passed.
 - `.superpowers/sdd/task-6-review-direct-baseline.log`: `direct-regression PASS version=1.2.6 build=21`.
+
+## Second review follow-up
+
+- Container replacement is now a notification-generation boundary. It cancels and clears the prior bounded worker plus authorization/delivery operations before installing the new container. Worker IDs prevent a late old worker from clearing the new worker. A cancellation-insensitive delivery that returns after replacement is treated as stale, its notification is removed, and its response identifier is rejected before target lookup, directory resolution, reveal, or acknowledgement callback. A cancelled unresolved authorization prompt may be requested by the next relevant receive; a completed denial remains unchanged.
+- Bonjour advertiser and browser lifecycle snapshot streams now use `bufferingNewest(1)`, preventing stalled Settings observers from accumulating obsolete transitions.
+
+Second-review RED/GREEN evidence:
+
+- The replacement regression test first failed with the cancellation-insensitive old operation completing after replacement: `deliveredCount` was `1` instead of `0`, and no stale notification identifier was removed.
+- `swift test --no-parallel --filter AppRuntimeTests`: 48 tests, 0 failures.
+- `swift test --no-parallel --filter DeviceDirectoryTests`: 39 tests, 0 failures.
+- `swift test --no-parallel --filter ReceiveNotificationControllerTests`: 34 tests, 0 failures.
+- Final focused replacement and latest-snapshot tests each passed independently; `git diff --check` passed. Per review direction, the already-green full suite and Direct baseline were not rerun for this limited follow-up.

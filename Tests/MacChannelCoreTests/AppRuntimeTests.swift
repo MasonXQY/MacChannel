@@ -1604,17 +1604,20 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testApplicationShellReplacementDoesNotWaitForBlockedNotificationOperation()
+    func testApplicationShellReplacementInvalidatesBlockedNotificationAndAcceptsNewReceives()
         async throws
     {
         let firstEvents = ApplicationShellReceiveEventSource()
         let currentEvents = ApplicationShellReceiveEventSource()
         let notificationCenter = BlockingApplicationShellNotificationCenter()
+        let revealer = ApplicationShellReceiveTargetRevealer()
         let notifier = ReceiveNotificationController(
             center: notificationCenter,
-            revealer: ApplicationShellReceiveTargetRevealer(),
+            revealer: revealer,
             deliveryTimeout: .seconds(30)
         )
+        var openedTransferIDs: [TransferID] = []
+        notifier.onReceiveOpened = { openedTransferIDs.append($0) }
         let shell = MacChannelApplicationDelegate(
             initialContainer: AppContainer.localShell(),
             initialStatus: .ready,
@@ -1659,6 +1662,30 @@ final class AppRuntimeTests: XCTestCase {
         await currentEvents.waitUntilSubscribed()
         let currentSubscribed = await currentEvents.isSubscribed()
         XCTAssertTrue(currentSubscribed)
+
+        for _ in 0..<1_000 where notificationCenter.removedIdentifiers.isEmpty {
+            await Task.yield()
+        }
+        XCTAssertEqual(notificationCenter.deliveredCount, 0)
+        let staleIdentifier = try XCTUnwrap(notificationCenter.firstAttemptedIdentifier)
+        XCTAssertEqual(notificationCenter.removedIdentifiers, [staleIdentifier])
+        await notificationCenter.emitDeliveredResponse(identifier: staleIdentifier)
+        XCTAssertTrue(revealer.revealedURLs.isEmpty)
+        XCTAssertTrue(openedTransferIDs.isEmpty)
+
+        let currentResult = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/current.pdf")]
+        )
+        await currentEvents.publish(currentResult)
+        for _ in 0..<1_000 where notificationCenter.deliveredCount < 1 {
+            await Task.yield()
+        }
+        XCTAssertEqual(notificationCenter.deliveredCount, 1)
+        XCTAssertEqual(
+            notificationCenter.deliveredIdentifiers.first,
+            "dropmesh.receive.v1.\(currentResult.transferID.rawValue.uuidString.lowercased()).unknown"
+        )
 
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
         await currentEvents.waitUntilCancelled()
@@ -2288,14 +2315,19 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
     private var deliveryStartContinuation: CheckedContinuation<Void, Never>?
     private var deliveryReleaseContinuation: CheckedContinuation<Void, Never>?
     private(set) var deliveredIdentifiers: [String] = []
+    private(set) var attemptedIdentifiers: [String] = []
+    private(set) var removedIdentifiers: [String] = []
+    private var deliveredResponseHandler: ((String) async -> Void)?
     private var activeDeliveries = 0
     private(set) var maximumConcurrentDeliveries = 0
     var deliveredCount: Int { deliveredIdentifiers.count }
+    var firstAttemptedIdentifier: String? { attemptedIdentifiers.first }
 
     func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
     func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .authorized }
 
     func deliver(_ request: ReceiveNotificationRequest) async throws {
+        attemptedIdentifiers.append(request.identifier)
         activeDeliveries += 1
         maximumConcurrentDeliveries = max(maximumConcurrentDeliveries, activeDeliveries)
         defer { activeDeliveries -= 1 }
@@ -2309,6 +2341,19 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
             }
         }
         deliveredIdentifiers.append(request.identifier)
+    }
+
+    func setDeliveredResponseHandler(_ handler: @escaping (String) async -> Void) {
+        deliveredResponseHandler = handler
+    }
+
+    func emitDeliveredResponse(identifier: String) async {
+        await deliveredResponseHandler?(identifier)
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
+        removedIdentifiers.append(contentsOf: identifiers)
+        deliveredIdentifiers.removeAll { identifiers.contains($0) }
     }
 
     func waitUntilDeliveryStarts() async {

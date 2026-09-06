@@ -180,6 +180,15 @@ private final class ReceiveAuthorizationOperationWaiters: @unchecked Sendable {
             task = nil
         }
     }
+
+    func cancel() {
+        let taskToCancel: Task<Void, Never>? = lock.withLock {
+            completed = true
+            defer { task = nil }
+            return task
+        }
+        taskToCancel?.cancel()
+    }
 }
 
 @MainActor
@@ -197,6 +206,7 @@ final class ReceiveNotificationController {
 
     private struct DeliveryOperation {
         let id: UUID
+        let identifier: String
         let signal: ReceiveNotificationOperationSignal<DeliveryOutcome>
         let task: Task<Void, Never>
     }
@@ -270,6 +280,8 @@ final class ReceiveNotificationController {
     private var snapshot = ReceiveNotificationSnapshot(authorizationState: .notDetermined)
     private var pendingReceiveNotifications: [TransferReceiveResult] = []
     private var notificationWorker: Task<Void, Never>?
+    private var notificationWorkerID: UUID?
+    private var invalidatedNotificationIdentifiers: Set<String> = []
     private let pendingReceiveNotificationLimit = 64
 
     var onReceiveOpened: ((TransferID) -> Void)?
@@ -380,20 +392,37 @@ final class ReceiveNotificationController {
         guard pendingReceiveNotifications.count < pendingReceiveNotificationLimit else { return }
         pendingReceiveNotifications.append(result)
         guard notificationWorker == nil else { return }
+        let workerID = UUID()
+        notificationWorkerID = workerID
         notificationWorker = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled, !self.pendingReceiveNotifications.isEmpty {
                 let next = self.pendingReceiveNotifications.removeFirst()
                 await self.notify(receive: next)
             }
+            guard self.notificationWorkerID == workerID else { return }
             self.notificationWorker = nil
+            self.notificationWorkerID = nil
         }
     }
 
     func stopPendingNotifications() {
         notificationWorker?.cancel()
         notificationWorker = nil
+        notificationWorkerID = nil
         pendingReceiveNotifications.removeAll()
+        authorizationQueryOperation?.waiters.cancel()
+        authorizationQueryOperation = nil
+        if authorizationRequestOperation != nil {
+            didRequestAuthorization = false
+        }
+        authorizationRequestOperation?.waiters.cancel()
+        authorizationRequestOperation = nil
+        if let deliveryOperation {
+            invalidatedNotificationIdentifiers.insert(deliveryOperation.identifier)
+            deliveryOperation.task.cancel()
+            self.deliveryOperation = nil
+        }
     }
 
     func snapshots() -> AsyncStream<ReceiveNotificationSnapshot> {
@@ -438,6 +467,7 @@ final class ReceiveNotificationController {
         identifier: String,
         trustsDeliveredResponse: Bool
     ) async {
+        guard !invalidatedNotificationIdentifiers.contains(identifier) else { return }
         pruneNotificationTargets()
         guard let requestedIdentity = NotificationIdentity(identifier: identifier) else { return }
         guard !handledNotificationTransferIDs.contains(requestedIdentity.transferID) else { return }
@@ -601,7 +631,12 @@ final class ReceiveNotificationController {
             )
             await signal.resolve(outcome)
         }
-        let operation = DeliveryOperation(id: id, signal: signal, task: task)
+        let operation = DeliveryOperation(
+            id: id,
+            identifier: request.identifier,
+            signal: signal,
+            task: task
+        )
         deliveryOperation = operation
         return operation
     }
@@ -613,7 +648,13 @@ final class ReceiveNotificationController {
         source: DeviceID?,
         urls: [URL]
     ) {
-        guard deliveryOperation?.id == id else { return }
+        guard deliveryOperation?.id == id else {
+            let identity = NotificationIdentity(transferID: transferID, source: source)
+            if invalidatedNotificationIdentifiers.contains(identity.identifier) {
+                center.removeDeliveredNotifications(withIdentifiers: [identity.identifier])
+            }
+            return
+        }
         deliveryOperation = nil
         switch outcome {
         case .delivered:

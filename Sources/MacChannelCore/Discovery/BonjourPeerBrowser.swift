@@ -49,7 +49,7 @@ public final class BonjourPeerAdvertiser: @unchecked Sendable {
     public func state() -> BonjourLifecycleState { queue.sync { lifecycleState } }
     public func states() -> AsyncStream<BonjourLifecycleState> {
         let id = UUID()
-        return AsyncStream { continuation in
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             queue.async { [weak self] in
                 guard let self else { continuation.finish(); return }
                 stateContinuations[id] = continuation
@@ -179,7 +179,7 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     public func state() -> BonjourLifecycleState { queue.sync { lifecycleState } }
     public func states() -> AsyncStream<BonjourLifecycleState> {
         let id = UUID()
-        return AsyncStream { continuation in
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             queue.async { [weak self] in
                 guard let self else { continuation.finish(); return }
                 stateContinuations[id] = continuation

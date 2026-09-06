@@ -435,6 +435,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     ) async -> Bool {
         await drainReceiveEventObservation()
         guard generation == containerReplacementGeneration else { return false }
+        receiveNotificationController.stopPendingNotifications()
         install(container, status: status)
         return true
     }
