@@ -1,7 +1,7 @@
 # Offline privacy evidence verifier — phase 1
 
-Status: written design for owner review. The owner approved verifier-first sequencing;
-this document fixes the implementation details. No production audit is approved.
+Status: owner approved this written design after commit `0a400b2`.
+Implementation is scoped to the offline fixture verifier. No production audit is approved.
 
 ## Outcome and boundaries
 
