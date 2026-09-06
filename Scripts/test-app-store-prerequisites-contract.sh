@@ -33,8 +33,11 @@ fi
 grep -F 'verify-apple-provisioning-profile.swift' "$audit" >/dev/null
 grep -F 'find-identity -v -p codesigning' "$audit" >/dev/null
 grep -F 'altool --list-apps' "$audit" >/dev/null
-grep -F 'com.apple.security.app-sandbox' "$audit" >/dev/null
-grep -F 'get-task-allow' "$audit" >/dev/null
+grep -F 'macchannel_validate_macos_profile' "$audit" >/dev/null
+if grep -F 'get-task-allow' "$audit" >/dev/null; then
+    echo "macOS profile type must not depend on get-task-allow" >&2
+    exit 1
+fi
 grep -F 'XKAZ67HN45.com.zensystech.dropmesh' "$audit" >/dev/null
 grep -F 'development identity with a private key is required' "$audit" >/dev/null
 
@@ -78,6 +81,8 @@ selfsigned_root="$(mktemp -d "${TMPDIR:-/tmp}/dropmesh-selfsigned-profile.XXXXXX
 trap 'rm -f "$fake_key" "$verified_payload"; rm -rf "$selfsigned_root"' EXIT
 xcrun swift "$cms_verifier" "$apple_profile" "$verified_payload"
 plutil -lint "$verified_payload" >/dev/null
+printf '%s\n' '<?xml version="1.0"?><plist version="1.0"><dict><key>Name</key><string>unsigned</string></dict></plist>' >"$selfsigned_root/unsigned.plist"
+! xcrun swift "$cms_verifier" "$selfsigned_root/unsigned.plist" "$selfsigned_root/unsigned-decoded.plist" >/dev/null 2>&1
 cp "$apple_profile" "$selfsigned_root/tampered.provisionprofile"
 printf '\000' | dd of="$selfsigned_root/tampered.provisionprofile" bs=1 seek=32 conv=notrunc 2>/dev/null
 ! xcrun swift "$cms_verifier" "$selfsigned_root/tampered.provisionprofile" "$selfsigned_root/tampered.plist" >/dev/null 2>&1

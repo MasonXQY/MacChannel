@@ -50,7 +50,7 @@ identity_fingerprint() {
 }
 
 check_profile() {
-    local kind="$1" profile="$2" expected_task_allow="$3" expected_identity="$4" expected_fingerprint="$5"
+    local kind="$1" profile="$2" expected_identity="$3" expected_fingerprint="$4"
     if [[ -z "$profile" || ! -f "$profile" || -L "$profile" ]]; then
         block "$kind profile is missing or is not a regular file"
         return
@@ -60,26 +60,9 @@ check_profile() {
         block "$kind profile CMS signature, Apple signer trust, or payload could not be verified"
         return
     fi
-    local name uuid expiry expiry_epoch app_id team sandbox task_allow
+    local name uuid expiry
     name="$(plist_value "$decoded" Name)"; uuid="$(plist_value "$decoded" UUID)"; expiry="$(plist_value "$decoded" ExpirationDate)"
-    app_id="$(plist_value "$decoded" Entitlements.application-identifier)"
-    team="$(plist_value "$decoded" TeamIdentifier.0)"
-    sandbox="$(plist_value "$decoded" Entitlements.com.apple.security.app-sandbox)"
-    task_allow="$(plist_value "$decoded" Entitlements.get-task-allow)"
-    [[ -n "$uuid" ]] || block "$kind profile has no UUID"
-    [[ "$app_id" == "$expected_application_id" && "$app_id" != *'*'* ]] || block "$kind profile lacks the explicit application identifier"
-    [[ "$team" == "$expected_team" ]] || block "$kind profile Team ID does not match"
-    [[ "$sandbox" == true ]] || block "$kind profile does not enable App Sandbox"
-    [[ "$task_allow" == "$expected_task_allow" ]] || block "$kind profile has the wrong profile type"
-    if [[ "$kind" == development ]]; then
-        plutil -extract ProvisionedDevices xml1 -o - "$decoded" >/dev/null 2>&1 || block "development profile has no registered devices"
-    else
-        if plutil -extract ProvisionedDevices xml1 -o - "$decoded" >/dev/null 2>&1 || [[ "$(plist_value "$decoded" ProvisionsAllDevices)" == true ]]; then
-            block "distribution profile is not a Mac App Store distribution profile"
-        fi
-    fi
-    expiry_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$expiry" '+%s' 2>/dev/null || true)"
-    [[ "$expiry_epoch" =~ ^[0-9]+$ && "$expiry_epoch" -gt "$(date -u +%s)" ]] || block "$kind profile is expired or has an invalid expiration"
+    macchannel_validate_macos_profile "$decoded" "$kind" "$expected_application_id" "$expected_team" "$expected_application_id" || block "$kind profile is not a valid unexpired DropMesh macOS $kind profile"
     if [[ -z "$expected_fingerprint" ]] || ! macchannel_require_profile_certificate "$decoded" "$expected_fingerprint" "$expected_identity"; then
         block "$kind profile does not contain its selected application certificate"
     fi
@@ -111,8 +94,8 @@ else
     printf 'installer certificate subject: %s\n' "$installer_identity"
 fi
 
-check_profile development "$development_profile" true "$development_identity" "$development_fingerprint"
-check_profile distribution "$distribution_profile" false "$application_identity" "$application_fingerprint"
+check_profile development "$development_profile" "$development_identity" "$development_fingerprint"
+check_profile distribution "$distribution_profile" "$application_identity" "$application_fingerprint"
 
 anchor_id="$(plist_value "$anchor" appStoreID)"
 if [[ ! "$app_store_id" =~ ^[1-9][0-9]*$ || "$anchor_id" != "$app_store_id" ]]; then

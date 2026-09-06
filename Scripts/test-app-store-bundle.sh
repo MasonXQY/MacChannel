@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+source "$repo_root/Scripts/app-store-validation.sh"
+
 app="${1:-}"
 [[ -d "$app" && ! -L "$app" ]] || { echo "usage: $0 /path/to/DropMesh.app" >&2; exit 2; }
 plist="$app/Contents/Info.plist"
@@ -45,24 +48,13 @@ test -s "$app/Contents/embedded.provisionprofile"
 signed_entitlements="$(mktemp "${TMPDIR:-/tmp}/dropmesh-entitlements.XXXXXX")"
 trap 'rm -f "$signed_entitlements"' EXIT
 /usr/bin/codesign -d --entitlements :- "$app" >"$signed_entitlements" 2>/dev/null
-for key in com.apple.security.app-sandbox com.apple.security.network.client com.apple.security.network.server com.apple.security.files.downloads.read-write com.apple.security.files.user-selected.read-write; do
-    test "$(/usr/libexec/PlistBuddy -c "Print :$key" "$signed_entitlements")" = true
-done
-test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.application-identifier' "$signed_entitlements")" = XKAZ67HN45.com.zensystech.dropmesh
-test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$signed_entitlements")" = XKAZ67HN45
-test "$(/usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$signed_entitlements")" = XKAZ67HN45.com.zensystech.dropmesh
-if grep -q '<key>com\.apple\.security\.temporary-exception' "$signed_entitlements"; then
-    echo "signed app contains a temporary exception entitlement" >&2; exit 1
-fi
+macchannel_validate_signed_app_entitlements "$signed_entitlements" XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh || { echo "signed app entitlement allowlist mismatch" >&2; exit 1; }
 
 archs="$(lipo -archs "$executable")"
 [[ " $archs " == *' arm64 '* && " $archs " == *' x86_64 '* ]] || { echo "universal architectures are required" >&2; exit 1; }
 profile_plist="$(mktemp "${TMPDIR:-/tmp}/dropmesh-profile.XXXXXX")"
 trap 'rm -f "$signed_entitlements" "$profile_plist"' EXIT
-security cms -D -i "$app/Contents/embedded.provisionprofile" >"$profile_plist" 2>/dev/null
-test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$profile_plist")" = XKAZ67HN45.com.zensystech.dropmesh
-expiry="$(plutil -extract ExpirationDate raw -o - "$profile_plist")"
-expiry_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$expiry" '+%s')"
-test "$expiry_epoch" -gt "$(date -u +%s)"
+xcrun swift "$repo_root/Scripts/verify-apple-provisioning-profile.swift" "$app/Contents/embedded.provisionprofile" "$profile_plist" >/dev/null 2>&1
+macchannel_validate_macos_profile "$profile_plist" distribution XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh
 
 echo "app store bundle PASS"

@@ -13,6 +13,7 @@ required=(
     Scripts/test-app-store-bundle.sh
     Scripts/test-app-store-validation.sh
     Tests/Fixtures/app-store-profile-summary.plist
+    Tests/Fixtures/app-store-development-profile-summary.plist
 )
 for path in "${required[@]}"; do
     test -f "$path" || { echo "missing App Store contract file: $path" >&2; exit 1; }
@@ -64,7 +65,13 @@ test "$(plutil -extract bundleIdentifier raw -o - "$anchor")" = com.zensystech.d
 test "$(plutil -extract bundleExecutable raw -o - "$anchor")" = DropMeshAppStore
 test "$(plutil -extract teamID raw -o - "$anchor")" = XKAZ67HN45
 
-test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' Tests/Fixtures/app-store-profile-summary.plist)" = XKAZ67HN45.com.zensystech.dropmesh
+test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' Tests/Fixtures/app-store-profile-summary.plist)" = XKAZ67HN45.com.zensystech.dropmesh
+test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:keychain-access-groups:0' Tests/Fixtures/app-store-profile-summary.plist)" = 'XKAZ67HN45.*'
+if /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.security.app-sandbox' Tests/Fixtures/app-store-profile-summary.plist >/dev/null 2>&1; then
+    echo "sanitized macOS profile fixture incorrectly requires signed-app sandbox entitlements" >&2
+    exit 1
+fi
+grep -F 'verify-apple-provisioning-profile.swift' Scripts/build-app-store-app.sh >/dev/null
 
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/dropmesh-store-negative.XXXXXX")"
 fixture_root="$(cd "$fixture_root" && pwd -P)"

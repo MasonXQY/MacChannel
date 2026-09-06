@@ -8,6 +8,43 @@ source Scripts/app-store-validation.sh
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/dropmesh-store-validation.XXXXXX")"
 test_root="$(cd "$test_root" && pwd -P)"
 trap 'rm -rf "$test_root"' EXIT
+store_profile=Tests/Fixtures/app-store-profile-summary.plist
+development_profile=Tests/Fixtures/app-store-development-profile-summary.plist
+macchannel_validate_macos_profile "$store_profile" distribution XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh
+macchannel_validate_macos_profile "$development_profile" development XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh
+
+mutate_profile() {
+    local name="$1" source="$2" target
+    target="$test_root/$name.plist"
+    cp "$source" "$target"
+    printf '%s\n' "$target"
+}
+wildcard_profile="$(mutate_profile wildcard "$store_profile")"
+/usr/libexec/PlistBuddy -c 'Set :Entitlements:com.apple.application-identifier XKAZ67HN45.*' "$wildcard_profile"
+wrong_team_profile="$(mutate_profile wrong-team "$store_profile")"
+plutil -replace TeamIdentifier.0 -string AAAAAAAAAA "$wrong_team_profile"
+wrong_type_profile="$(mutate_profile wrong-type "$store_profile")"
+plutil -insert ProvisionedDevices -array "$wrong_type_profile"
+plutil -insert ProvisionedDevices.0 -string SANITIZED-MAC "$wrong_type_profile"
+all_devices_profile="$(mutate_profile all-devices "$development_profile")"
+plutil -insert ProvisionsAllDevices -bool true "$all_devices_profile"
+wrong_platform_profile="$(mutate_profile wrong-platform "$store_profile")"
+plutil -replace Platform.0 -string iOS "$wrong_platform_profile"
+wrong_group_profile="$(mutate_profile wrong-group "$store_profile")"
+plutil -replace Entitlements.keychain-access-groups.0 -string 'AAAAAAAAAA.*' "$wrong_group_profile"
+for rejected in "$wildcard_profile" "$wrong_team_profile" "$wrong_type_profile" "$all_devices_profile" "$wrong_platform_profile" "$wrong_group_profile"; do
+    if macchannel_validate_macos_profile "$rejected" distribution XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh >/dev/null 2>&1; then
+        echo "invalid macOS profile unexpectedly accepted: $(basename "$rejected")" >&2; exit 1
+    fi
+done
+
+signed_entitlements="$test_root/signed-entitlements.plist"
+cp Distribution/AppStore.entitlements "$signed_entitlements"
+macchannel_validate_signed_app_entitlements "$signed_entitlements" XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh
+/usr/libexec/PlistBuddy -c 'Add :com.apple.security.cs.allow-jit bool true' "$signed_entitlements"
+if macchannel_validate_signed_app_entitlements "$signed_entitlements" XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh >/dev/null 2>&1; then
+    echo "extra signed app entitlement unexpectedly accepted" >&2; exit 1
+fi
 security_output="$test_root/identities.txt"
 cat >"$security_output" <<'EOF'
   1) AAAABBBBCCCCDDDDEEEEFFFF0000111122223333 "Apple Distribution: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)"

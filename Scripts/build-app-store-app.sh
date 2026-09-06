@@ -38,27 +38,12 @@ chmod 700 "$work_root"
 cleanup() { rm -rf "$work_root"; }
 trap cleanup EXIT
 profile_plist="$work_root/profile.plist"
-security cms -D -i "$profile" >"$profile_plist" 2>/dev/null || fail "provisioning profile is not a valid signed CMS profile"
+xcrun swift "$repo_root/Scripts/verify-apple-provisioning-profile.swift" "$profile" "$profile_plist" >/dev/null 2>&1 || fail "provisioning profile CMS signature or Apple signer trust is invalid"
 plutil -lint "$profile_plist" >/dev/null || fail "provisioning profile payload is invalid"
 
 profile_name="$(plutil -extract Name raw -o - "$profile_plist" 2>/dev/null || true)"
 [[ "$profile_name" != *Mi2* ]] || fail "Mi2 provisioning profiles are forbidden"
-profile_app_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$profile_plist" 2>/dev/null || true)"
-[[ "$profile_app_id" == "$macchannel_app_store_application_identifier" ]] || fail "profile application identifier mismatch or wildcard profile"
-[[ "$profile_app_id" != *'*'* ]] || fail "wildcard provisioning profiles are forbidden"
-[[ "$(plutil -extract TeamIdentifier.0 raw -o - "$profile_plist" 2>/dev/null || true)" == "$macchannel_app_store_team_identifier" ]] || fail "profile Team ID mismatch"
-profile_expiry="$(plutil -extract ExpirationDate raw -o - "$profile_plist" 2>/dev/null || true)"
-expiry_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$profile_expiry" '+%s' 2>/dev/null || true)"
-[[ "$expiry_epoch" =~ ^[0-9]+$ && "$expiry_epoch" -gt "$(date -u +%s)" ]] || fail "provisioning profile is expired or has an invalid expiration"
-
-for key in com.apple.security.app-sandbox com.apple.security.network.client com.apple.security.network.server com.apple.security.files.downloads.read-write com.apple.security.files.user-selected.read-write; do
-    [[ "$(/usr/libexec/PlistBuddy -c "Print :Entitlements:$key" "$profile_plist" 2>/dev/null || true)" == "$(/usr/libexec/PlistBuddy -c "Print :$key" "$entitlements")" ]] || fail "profile entitlement mismatch: $key"
-done
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.team-identifier' "$profile_plist" 2>/dev/null || true)" == "$macchannel_app_store_team_identifier" ]] || fail "profile team entitlement mismatch"
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:keychain-access-groups:0' "$profile_plist" 2>/dev/null || true)" == "$macchannel_app_store_keychain_group" ]] || fail "profile keychain group mismatch"
-if plutil -convert xml1 -o - "$profile_plist" | grep -q '<key>com\.apple\.security\.temporary-exception'; then
-    fail "profile contains a temporary exception entitlement"
-fi
+macchannel_validate_macos_profile "$profile_plist" distribution "$macchannel_app_store_application_identifier" "$macchannel_app_store_team_identifier" "$macchannel_app_store_keychain_group" || fail "profile is not an exact, unexpired macOS App Store distribution profile for DropMesh"
 
 identity_listing="$work_root/identities.txt"
 security find-identity -v -p codesigning >"$identity_listing" 2>/dev/null || fail "unable to query signing identities"
