@@ -402,7 +402,6 @@ package struct RuntimeNamespace: Equatable, Sendable {
     let defaultReceiveFolderName: String
 
     static let direct: RuntimeNamespace
-    static let appStore: RuntimeNamespace
 }
 
 public struct KeychainPolicy: Equatable, Sendable {
@@ -419,7 +418,7 @@ package protocol RuntimeEligibilityMonitoring: AnyObject {
 }
 ```
 
-Direct namespace remains `MacChannel` plus `com.mason.macchannel.identity` and no access group. Store namespace is `DropMesh` inside its sandbox container plus `com.zensystech.dropmesh.identity` and access group `XKAZ67HN45.com.zensystech.dropmesh`.
+Direct namespace remains `MacChannel` plus `com.mason.macchannel.identity` and no access group. Store namespace is constructed only inside `DropMeshAppStoreDistribution` as `DropMesh` inside its sandbox container plus `com.zensystech.dropmesh.identity` and access group `XKAZ67HN45.com.zensystech.dropmesh`. Shared AppKit must not embed the Store bundle ID, keychain service, or access-group literals, so the Direct executable cannot inherit Store identity strings through the shared target.
 
 - [ ] **Step 1: Write namespace and keychain RED tests**
 
@@ -904,16 +903,15 @@ Use semantic HTML, visible language switch controls, keyboard focus, responsive 
 
 The workflow checks out a commit-pinned action, uploads only `docs/site`, deploys only from `main`, uses minimum `pages: write` and `id-token: write` permissions, and runs `Scripts/test-pages.sh` first.
 
-- [ ] **Step 4: Publish and verify the real URLs**
+- [ ] **Step 4: Commit the reviewed site without deploying from the feature branch**
 
 ```bash
 bash Scripts/test-pages.sh
 git add docs/site .github/workflows/pages.yml Scripts/test-pages.sh README.md
 git commit -m "docs: publish DropMesh App Store support pages"
-git push origin main
 ```
 
-After the Pages deployment completes, fetch all three public HTTPS URLs, require HTTP 200, verify canonical links and both languages, and save deployment commit/time in `docs/security/app-store-privacy-audit.md`.
+Do not push `main` from the isolated feature worktree. After the complete implementation branch passes final review and is merged, push that reviewed `main` commit, wait for the Pages deployment, fetch all three public HTTPS URLs, require HTTP 200, verify canonical links and both languages, and save deployment commit/time in `docs/security/app-store-privacy-audit.md`. Task 12 submission remains blocked until this post-merge deployment evidence exists.
 
 ---
 
