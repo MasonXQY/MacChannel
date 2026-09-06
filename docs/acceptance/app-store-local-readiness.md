@@ -43,6 +43,10 @@ Actual application signing and strict verification passed on an isolated harmles
 
 ## Unchanged safety boundary
 
+### Upload credential verification update
+
+On September 6, 2026, after explicit user approval, the Developer-role `DropMesh Upload` team API key was created and its downloaded private key moved outside the repository into an owner-only directory and file. No key material is stored in this report. Native key validation passed. An initial audit could not authenticate; configuring the `API_PRIVATE_KEYS_DIR` setting documented by the installed `altool --help` enabled a real read-only `altool --list-apps` request (exit 0). The full prerequisite audit then returned `app-store-prerequisites PASS` for `com.zensystech.dropmesh`, team `XKAZ67HN45`, App Store ID `6809209993`. This supersedes earlier missing-upload-authentication entries, but does not prove package upload permission, final binary validation, privacy/export compliance, or installed acceptance. No package was uploaded or submitted.
+
 Independent task review of `7b0f997..bb91ab0` approved both spec compliance and code quality with no findings. The separate real installed-profile audit above resolves the review's runtime-evidence limitation. Full prerequisite and release approval remain blocked as stated.
 
 No replacement of `/Applications`, installed Direct app, user data, remote Mac B, production services, or public website was performed. Portal setup subsequently created only the isolated DropMesh App ID and App Store Connect draft described above. No merge, release, build upload, or submission has occurred. Local build evidence is not proof of signed sandbox or installed coexistence behavior.
