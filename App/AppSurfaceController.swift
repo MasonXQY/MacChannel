@@ -446,6 +446,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     func invalidate() {
+        localNetworkModel.invalidateObservation()
         deviceTask?.cancel()
         deviceTask = nil
         transferTask?.cancel()

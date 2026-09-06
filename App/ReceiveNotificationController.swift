@@ -268,6 +268,9 @@ final class ReceiveNotificationController {
     private var authorizationRequestOperation: AuthorizationOperation?
     private var deliveryOperation: DeliveryOperation?
     private var snapshot = ReceiveNotificationSnapshot(authorizationState: .notDetermined)
+    private var pendingReceiveNotifications: [TransferReceiveResult] = []
+    private var notificationWorker: Task<Void, Never>?
+    private let pendingReceiveNotificationLimit = 64
 
     var onReceiveOpened: ((TransferID) -> Void)?
 
@@ -371,6 +374,26 @@ final class ReceiveNotificationController {
             publishDeliveryState(.temporarilyUnavailable)
             return
         }
+    }
+
+    func enqueue(receive result: TransferReceiveResult) {
+        guard pendingReceiveNotifications.count < pendingReceiveNotificationLimit else { return }
+        pendingReceiveNotifications.append(result)
+        guard notificationWorker == nil else { return }
+        notificationWorker = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, !self.pendingReceiveNotifications.isEmpty {
+                let next = self.pendingReceiveNotifications.removeFirst()
+                await self.notify(receive: next)
+            }
+            self.notificationWorker = nil
+        }
+    }
+
+    func stopPendingNotifications() {
+        notificationWorker?.cancel()
+        notificationWorker = nil
+        pendingReceiveNotifications.removeAll()
     }
 
     func snapshots() -> AsyncStream<ReceiveNotificationSnapshot> {

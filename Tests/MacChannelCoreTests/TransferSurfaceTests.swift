@@ -294,6 +294,19 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testLoginItemUnregisterFailureRollsBackEnabledSnapshot() async {
+        let loginItems = StubLoginItemRegistration(error: SurfaceActionFailure.expected)
+        let service = RecordingEssentialSettingsService()
+        let model = SettingsSurfaceModel(launchAtLogin: true)
+
+        await model.updateLaunchAtLogin(false, loginItems: loginItems, using: service)
+
+        XCTAssertTrue(model.launchAtLogin)
+        XCTAssertNil(service.launchAtLogin)
+        XCTAssertNotNil(model.actionError)
+    }
+
+    @MainActor
     func testSettingsExposeInstalledVersionAndManualUpdateAction() {
         let updates = RecordingSoftwareUpdateService()
         let snapshot = SoftwareUpdateSnapshot.fixtureUpToDate

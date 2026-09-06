@@ -3,6 +3,16 @@ import Foundation
 import MacChannelCore
 
 @MainActor
+final class LocalNetworkActivationStore {
+    static let key = "appStoreLocalNetworkActivated"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    var isActivated: Bool { defaults.bool(forKey: Self.key) }
+    func activate() { defaults.set(true, forKey: Self.key) }
+}
+
+@MainActor
 final class LocalNetworkPermissionModel: ObservableObject {
     enum Capability: Equatable {
         case available
@@ -13,6 +23,10 @@ final class LocalNetworkPermissionModel: ObservableObject {
     private let retryHandler: () -> Void
     private let stateProvider: (() -> (BonjourLifecycleState, BonjourLifecycleState))?
     private let openURL: (URL) -> Bool
+    private var browserState: BonjourLifecycleState = .stopped
+    private var advertiserState: BonjourLifecycleState = .stopped
+    private var observationTasks: [Task<Void, Never>] = []
+    private var observationGeneration: UInt = 0
 
     init(
         retry: @escaping () -> Void = {},
@@ -31,6 +45,8 @@ final class LocalNetworkPermissionModel: ObservableObject {
     }
 
     func update(browser: BonjourLifecycleState, advertiser: BonjourLifecycleState) {
+        browserState = browser
+        advertiserState = advertiser
         capability = [browser, advertiser].contains { state in
             if case .failed("policy_denied") = state { return true }
             return false
@@ -53,5 +69,34 @@ final class LocalNetworkPermissionModel: ObservableObject {
     func refresh() {
         guard let state = stateProvider?() else { return }
         update(browser: state.0, advertiser: state.1)
+    }
+
+    func observe(
+        browser: AsyncStream<BonjourLifecycleState>,
+        advertiser: AsyncStream<BonjourLifecycleState>
+    ) {
+        invalidateObservation()
+        observationGeneration &+= 1
+        let generation = observationGeneration
+        observationTasks = [
+            Task { [weak self] in
+                for await state in browser {
+                    guard let self, self.observationGeneration == generation else { return }
+                    self.update(browser: state, advertiser: self.advertiserState)
+                }
+            },
+            Task { [weak self] in
+                for await state in advertiser {
+                    guard let self, self.observationGeneration == generation else { return }
+                    self.update(browser: self.browserState, advertiser: state)
+                }
+            },
+        ]
+    }
+
+    func invalidateObservation() {
+        observationGeneration &+= 1
+        observationTasks.forEach { $0.cancel() }
+        observationTasks.removeAll()
     }
 }

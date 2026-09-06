@@ -191,6 +191,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private var networkWasAvailable = false
     private let updateController: any SoftwareUpdateControlling
     private let distributionChannel: DistributionChannel
+    private let localNetworkActivationStore: LocalNetworkActivationStore
     private lazy var updateLaunch = SoftwareUpdateLaunchCoordinator(controller: updateController)
     private let receiveNotificationController: ReceiveNotificationController
     private let receiveDirectoryResolver = ApplicationReceiveDirectoryResolver()
@@ -224,6 +225,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         runtimeHost: AppRuntimeHost?,
         updateController: (any SoftwareUpdateControlling)? = nil,
         distributionChannel: DistributionChannel = .direct,
+        localNetworkActivationStore: LocalNetworkActivationStore = LocalNetworkActivationStore(),
         receiveNotificationController: ReceiveNotificationController = ReceiveNotificationController(),
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
         beforeReceiveResultRecord: (@MainActor (TransferReceiveResult) async -> Void)? = nil,
@@ -239,6 +241,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         self.runtimeHost = runtimeHost
         self.updateController = updateController ?? InactiveSoftwareUpdateController()
         self.distributionChannel = distributionChannel
+        self.localNetworkActivationStore = localNetworkActivationStore
         self.receiveNotificationController = receiveNotificationController
         self.transferSurfacePresentation = transferSurfacePresentation
         self.beforeReceiveResultRecord = beforeReceiveResultRecord
@@ -266,7 +269,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             runtimeHost.onChange = { [weak self] status, container in
                 guard let self else { return }
                 if let container {
-                    if self.distributionChannel == .direct {
+                    if self.distributionChannel == .direct || self.localNetworkActivationStore.isActivated {
                         Task { await runtimeHost.startLocalNetwork() }
                     }
                     containerReplacementGeneration += 1
@@ -354,11 +357,17 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             onRetryRuntime: { [weak runtimeHost] in
                 Task { await runtimeHost?.bootstrap() }
             },
-            onUseLocalNetwork: { [weak runtimeHost] in
+            onUseLocalNetwork: { [weak self, weak runtimeHost] in
+                if self?.distributionChannel == .appStore {
+                    self?.localNetworkActivationStore.activate()
+                }
                 Task { await runtimeHost?.startLocalNetwork() }
             }
         )
         surfaces.localNetworkModel.refresh()
+        if let states = container.localNetworkStates?() {
+            surfaces.localNetworkModel.observe(browser: states.0, advertiser: states.1)
+        }
         receiveDirectoryResolver.configure(
             initialSnapshot: container.initialSettingsSnapshot,
             waitForSnapshot: container.receiveDirectoryConfigurationPending
@@ -438,6 +447,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         bootstrapTask?.cancel()
         beginReceiveEventDrain()
         updateController.stop()
+        receiveNotificationController.stopPendingNotifications()
         surfaceController?.invalidate()
         statusItemController?.invalidate()
     }
@@ -492,7 +502,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                     releaseReceiveEventDeduplication(result, generation: generation)
                 }
                 guard !Task.isCancelled else { break }
-                await receiveNotificationController.notify(receive: result)
+                receiveNotificationController.enqueue(receive: result)
             }
             await events.cancel()
         }

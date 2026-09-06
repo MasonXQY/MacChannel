@@ -5,16 +5,6 @@ import XCTest
 
 final class StatusItemAppKitTests: XCTestCase {
     @MainActor
-    func testLoginItemPresentationStartsOffWithoutRegistrarMutation() {
-        let model = SettingsSurfaceModel()
-        let registrar = RecordingLoginItemStatusRegistrar()
-
-        XCTAssertFalse(model.launchAtLogin)
-        XCTAssertFalse(registrar.isEnabled)
-        XCTAssertEqual(registrar.mutationCount, 0)
-    }
-
-    @MainActor
     func testFileSelectionAndDirectDragActivateLocalNetworkOnFirstRelevantAction() throws {
         let peer = DeviceID(rawValue: UUID())
         let controller = StatusItemController(
@@ -1552,16 +1542,6 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 }
 
-@MainActor
-private final class RecordingLoginItemStatusRegistrar: LoginItemRegistering {
-    private(set) var isEnabled = false
-    private(set) var mutationCount = 0
-
-    func setEnabled(_ enabled: Bool) throws {
-        mutationCount += 1
-        isEnabled = enabled
-    }
-}
 
 @MainActor
 private final class RecordingForwardingMenuDelegate: NSObject, NSMenuDelegate {

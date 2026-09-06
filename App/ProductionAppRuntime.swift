@@ -493,6 +493,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             receiveCompletionState: receiveEvents.completionState,
             runtimeIdentityID: identity.id,
             localNetworkState: { (browser.state(), advertiser.state()) },
+            localNetworkStates: { (browser.states(), advertiser.states()) },
             sourceAccess: configuration.namespace.directoryAuthorizationMode == .securityScopedBookmarks ? UserSelectedSourceAccess() : nil
         )
         return ProductionAppRuntime(

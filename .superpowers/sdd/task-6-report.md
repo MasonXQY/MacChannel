@@ -26,3 +26,20 @@ Base: `8255b8b96bcb1aa07996c8fcdd9c8e1d4345d478`.
 ## Acceptance limits
 
 No installed application or remote Mac was launched or controlled. The tests exercise native AppKit/SwiftUI construction and behavior, but this task does not claim a physically installed, signed App Store permission prompt or two-Mac UX. The three full-suite skips remain the existing environment-gated live Go router and Docker Internet ICE/forced-relay tests. Store signing, TestFlight, and physical two-Mac acceptance remain later external gates.
+
+## Review follow-up
+
+- Store-local `appStoreLocalNetworkActivated` persistence now distinguishes a virgin install from a previously used LAN capability. The first relevant pairing, file-picker, clipboard, or drag action commits activation before starting the existing runtime objects. A later Store launch restores LAN automatically, so paired local-only peers can advertise and receive without reopening pairing. Direct continues to start LAN after runtime installation.
+- Browser and advertiser lifecycle changes now publish continuous streams. The Settings model observes both streams, combines their current state, and cancels the old observation with a monotonically increasing generation when a container is replaced. Delayed denial, ready recovery, retry, wake eligibility, stop, and stale-stream rejection are covered without fixed-delay sampling.
+- The vacuous login-status test was removed. The replacement drives `SettingsSurfaceModel.updateLaunchAtLogin` from an enabled snapshot through a failing unregister operation and verifies the enabled UI state and persisted service state roll back.
+- Notification authorization/delivery moved out of the serial receive-recording loop into one bounded controller worker (maximum 64 pending banners). A blocked prompt or delivery cannot hold later history, unread-dot, or source acknowledgement; notification delivery remains serial and bounded.
+- The earlier `ReceiveEventSourceTests.swift:129` failure was a test synchronization defect: cancellation awaited the actor cutoff, but the test asserted a separate publisher task's completion after an arbitrary 100 scheduler yields and before joining that task. The test now awaits the publisher task—the causal boundary—before asserting its completion. No receive-source production behavior changed.
+
+Review RED/GREEN evidence:
+
+- `.superpowers/sdd/task-6-review-activation-red.log`: activation persistence API absent.
+- The pre-fix blocked-delivery contract had only one recorded receive and a blocked publisher while the first notification delivery waited. The revised `testBlockedNotificationDeliveryDoesNotStallReceiveHistoryOrUnreadDot` verifies all six receives are recorded and the publisher finishes before notification release.
+- `.superpowers/sdd/task-6-review-focused-green.log` and `task-6-review-focused-green-2.log`: persistence/relaunch, continuous browser/advertiser state, stale observation cancellation, notification non-blocking, unregister rollback, and causal receive-source cancellation focused suites passed.
+- `.superpowers/sdd/task-6-review-final-full-swift-test.log`: 856 tests executed, 3 existing environment-gated skips, 0 failures in 41.154 seconds. SHA-256 `39230d7a9867a44523dd91ab0548888afb836a9807aaf79bf2aecac5beeeebf4`.
+- `.superpowers/sdd/task-6-review-direct-build.log`: Direct build passed.
+- `.superpowers/sdd/task-6-review-direct-baseline.log`: `direct-regression PASS version=1.2.6 build=21`.

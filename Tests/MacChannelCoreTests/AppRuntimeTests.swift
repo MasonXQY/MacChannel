@@ -254,6 +254,53 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testStoreRelaunchRestoresOnlyPersistedLocalNetworkActivation() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let activation = LocalNetworkActivationStore(defaults: defaults)
+        let virginRuntime = RuntimeLifecycleSpy()
+        let virginHost = AppRuntimeHost(builder: RuntimeBuilderStub(result: .success(
+            AppRuntimeLaunch(runtime: virginRuntime, status: .ready)
+        )))
+        let virginDelegate = MacChannelApplicationDelegate(
+            initialContainer: .loadingShell(), initialStatus: .loading,
+            runtimeHost: virginHost, distributionChannel: .appStore,
+            localNetworkActivationStore: activation,
+            receiveNotificationController: ReceiveNotificationController(
+                center: ApplicationShellNotificationCenter(),
+                revealer: ApplicationShellReceiveTargetRevealer()
+            ),
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+
+        virginDelegate.applicationDidFinishLaunching(Notification(name: .init("test")))
+        for _ in 0..<1_000 where virginHost.status != .ready { await Task.yield() }
+        XCTAssertEqual(virginRuntime.localNetworkStartCount, 0)
+        virginDelegate.applicationWillTerminate(Notification(name: .init("test")))
+
+        activation.activate()
+        let restoredRuntime = RuntimeLifecycleSpy()
+        let restoredHost = AppRuntimeHost(builder: RuntimeBuilderStub(result: .success(
+            AppRuntimeLaunch(runtime: restoredRuntime, status: .ready)
+        )))
+        let restoredDelegate = MacChannelApplicationDelegate(
+            initialContainer: .loadingShell(), initialStatus: .loading,
+            runtimeHost: restoredHost, distributionChannel: .appStore,
+            localNetworkActivationStore: activation,
+            receiveNotificationController: ReceiveNotificationController(
+                center: ApplicationShellNotificationCenter(),
+                revealer: ApplicationShellReceiveTargetRevealer()
+            ),
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+
+        restoredDelegate.applicationDidFinishLaunching(Notification(name: .init("test")))
+        for _ in 0..<1_000 where restoredRuntime.localNetworkStartCount == 0 { await Task.yield() }
+        XCTAssertEqual(restoredRuntime.localNetworkStartCount, 1)
+        restoredDelegate.applicationWillTerminate(Notification(name: .init("test")))
+    }
+
+    @MainActor
     func testRuntimeHostPublishesChineseErrorWithoutFakeReadyContainer() async {
         let host = AppRuntimeHost(
             builder: RuntimeBuilderStub(result: .failure(RuntimeTestError.failed))
@@ -1339,7 +1386,7 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testReceiveWorkerBackpressuresBurstWhileSystemDeliveryIsBlocked() async {
+    func testBlockedNotificationDeliveryDoesNotStallReceiveHistoryOrUnreadDot() async {
         let events = RuntimeReceiveEventSource(bufferCapacity: 2)
         let notificationCenter = BlockingApplicationShellNotificationCenter()
         let notifier = ReceiveNotificationController(
@@ -1386,10 +1433,16 @@ final class AppRuntimeTests: XCTestCase {
         await notificationCenter.waitUntilDeliveryStarts()
         for _ in 0..<100 { await Task.yield() }
 
-        XCTAssertEqual(shell.observedReceiveEventCount, 1)
-        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [expected[0].transferID])
+        for _ in 0..<1_000 where shell.observedReceiveEventCount < expected.count {
+            await Task.yield()
+        }
+        XCTAssertEqual(shell.observedReceiveEventCount, expected.count)
+        XCTAssertEqual(
+            shell.recentReceiveSnapshot.visible.map(\.id),
+            expected.suffix(RecentReceiveStore.maximumVisibleCount).reversed().map(\.transferID)
+        )
         let completedBeforeRelease = await publisherFinished.isFinished()
-        XCTAssertFalse(completedBeforeRelease)
+        XCTAssertTrue(completedBeforeRelease)
         XCTAssertTrue(shell.hasUnreadReceive)
 
         notificationCenter.releaseFirstDelivery()
@@ -1511,7 +1564,13 @@ final class AppRuntimeTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(events.completionState.latestSequence, 4)
-        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [receivedResults[0].transferID])
+        for _ in 0..<1_000 where shell.observedReceiveEventCount < receivedResults.count {
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            shell.recentReceiveSnapshot.visible.map(\.id),
+            receivedResults.reversed().map(\.transferID)
+        )
         XCTAssertTrue(shell.hasUnreadReceive)
 
         statusController?.prepareToOpenStatusMenu()

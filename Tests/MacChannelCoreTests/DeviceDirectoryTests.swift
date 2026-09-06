@@ -16,6 +16,45 @@ final class DeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(denied, .policyDenied)
         XCTAssertEqual(ordinary, .transport)
     }
+
+    func testBonjourLifecycleStreamsDelayedDenialRetryReadyAndCancellation() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let browser = BonjourPeerBrowser(
+            directory: DeviceDirectory(trust: .allowing(peer)),
+            trust: .allowing(peer)
+        )
+        var iterator = browser.states().makeAsyncIterator()
+        var observed = await iterator.next()
+        XCTAssertEqual(observed, .stopped)
+
+        browser.startWithoutSystemBrowserForTesting()
+        observed = await iterator.next(); XCTAssertEqual(observed, .starting)
+        observed = await iterator.next(); XCTAssertEqual(observed, .ready)
+
+        browser.setStateForTesting(.failed("policy_denied"))
+        observed = await iterator.next(); XCTAssertEqual(observed, .failed("policy_denied"))
+        await browser.stop()
+        observed = await iterator.next(); XCTAssertEqual(observed, .stopped)
+
+        browser.startWithoutSystemBrowserForTesting()
+        observed = await iterator.next(); XCTAssertEqual(observed, .starting)
+        observed = await iterator.next(); XCTAssertEqual(observed, .ready)
+        await browser.stop()
+    }
+
+    func testBonjourAdvertiserPublishesDelayedPolicyDenialAndReadyRecovery() async throws {
+        let advertiser = try BonjourPeerAdvertiser(device: DeviceID(rawValue: UUID()), port: 7443) {
+            $0.cancel()
+        }
+        var iterator = advertiser.states().makeAsyncIterator()
+        var observed = await iterator.next(); XCTAssertEqual(observed, .stopped)
+        advertiser.setStateForTesting(.failed("policy_denied"))
+        observed = await iterator.next(); XCTAssertEqual(observed, .failed("policy_denied"))
+        advertiser.setStateForTesting(.ready)
+        observed = await iterator.next(); XCTAssertEqual(observed, .ready)
+        await advertiser.stopAndWait()
+        observed = await iterator.next(); XCTAssertEqual(observed, .stopped)
+    }
     func testLANDiscoveryAloneDoesNotClaimPeerIsReadyToTransfer() async {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))

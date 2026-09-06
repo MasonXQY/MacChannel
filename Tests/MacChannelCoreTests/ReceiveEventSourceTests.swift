@@ -123,11 +123,9 @@ final class ReceiveEventSourceTests: XCTestCase {
         XCTAssertFalse(finishedBeforeCancellation)
 
         await stream.cancel()
-
-        for _ in 0..<100 where !(await publisherFinished.isFinished()) { await Task.yield() }
+        await blockedPublisher.value
         let finishedAfterCancellation = await publisherFinished.isFinished()
         XCTAssertTrue(finishedAfterCancellation)
-        await blockedPublisher.value
     }
 
     func testEverySubscriptionReceivesEventsPublishedAfterItStarts() async throws {

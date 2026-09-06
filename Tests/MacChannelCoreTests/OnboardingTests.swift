@@ -1,5 +1,6 @@
 import XCTest
 @testable import MacChannelAppKit
+@testable import MacChannelCore
 
 @MainActor
 final class OnboardingTests: XCTestCase {
@@ -29,5 +30,45 @@ final class OnboardingTests: XCTestCase {
 
         XCTAssertTrue(store.isCompleted)
         XCTAssertTrue(defaults.bool(forKey: OnboardingCompletionStore.key))
+    }
+
+    func testLocalNetworkActivationIsVirginThenPersistsAcrossStoreRelaunch() {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+
+        let firstLaunch = LocalNetworkActivationStore(defaults: defaults)
+        XCTAssertFalse(firstLaunch.isActivated)
+
+        firstLaunch.activate()
+        XCTAssertTrue(LocalNetworkActivationStore(defaults: defaults).isActivated)
+    }
+
+    func testLocalNetworkModelContinuouslyObservesDelayedDenialReadyAndInvalidatesStaleStream() async {
+        var oldBrowser: AsyncStream<BonjourLifecycleState>.Continuation!
+        var advertiser: AsyncStream<BonjourLifecycleState>.Continuation!
+        let model = LocalNetworkPermissionModel()
+        model.observe(
+            browser: AsyncStream { oldBrowser = $0 },
+            advertiser: AsyncStream { advertiser = $0 }
+        )
+
+        oldBrowser.yield(.failed("policy_denied"))
+        for _ in 0..<20 where model.capability != .unavailable { await Task.yield() }
+        XCTAssertEqual(model.capability, .unavailable)
+
+        oldBrowser.yield(.ready)
+        advertiser.yield(.ready)
+        for _ in 0..<20 where model.capability != .available { await Task.yield() }
+        XCTAssertEqual(model.capability, .available)
+
+        var replacement: AsyncStream<BonjourLifecycleState>.Continuation!
+        model.observe(
+            browser: AsyncStream { replacement = $0 },
+            advertiser: AsyncStream { _ = $0 }
+        )
+        oldBrowser.yield(.failed("policy_denied"))
+        replacement.yield(.ready)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(model.capability, .available)
     }
 }
