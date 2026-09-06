@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
 source Scripts/app-store-build-defaults.sh
+source Scripts/app-store-validation.sh
 
 identity="${MACCHANNEL_APP_STORE_SIGNING_IDENTITY:-}"
 profile="${MACCHANNEL_APP_STORE_PROFILE:-}"
@@ -16,24 +17,16 @@ entitlements="$repo_root/Distribution/AppStore.entitlements"
 
 fail() { echo "$*" >&2; exit 2; }
 [[ -n "$identity" ]] || fail "MACCHANNEL_APP_STORE_SIGNING_IDENTITY is required"
-[[ "$identity" != *"Developer ID Application"* ]] || fail "Developer ID identities cannot sign the App Store bundle"
 [[ -f "$profile" && ! -L "$profile" ]] || fail "MACCHANNEL_APP_STORE_PROFILE must be a regular provisioning profile"
 [[ "$store_id" =~ ^[1-9][0-9]*$ ]] || fail "MACCHANNEL_APP_STORE_APP_ID must be the numeric App Store Connect ID"
-[[ -n "$app_output" && "$app_output" == */DropMesh.app ]] || fail "MACCHANNEL_APP_STORE_APP_OUTPUT must end in DropMesh.app"
+[[ -n "$app_output" ]] || fail "MACCHANNEL_APP_STORE_APP_OUTPUT is required"
 [[ "$app_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail "MACCHANNEL_APP_STORE_VERSION must be release SemVer"
 [[ "$build_number" =~ ^[1-9][0-9]*$ ]] || fail "MACCHANNEL_APP_STORE_BUILD_NUMBER must be a positive integer"
 
-case "$app_output" in
-    /*) output_abs="$app_output" ;;
-    *) output_abs="$repo_root/$app_output" ;;
-esac
-case "$output_abs" in
-    "$repo_root/dist/"*) fail "App Store output must not be written under dist/" ;;
-esac
-[[ ! -e "$output_abs" && ! -L "$output_abs" ]] || fail "refusing to replace an existing App Store output"
+output_abs="$(macchannel_validate_store_output_path "$repo_root" "$app_output")" || fail "App Store output path is unsafe, existing, symlinked, or under dist/"
 output_parent="$(dirname "$output_abs")"
 mkdir -p "$output_parent"
-[[ ! -L "$output_parent" ]] || fail "App Store output parent must not be a symlink"
+[[ "$(macchannel_validate_store_output_path "$repo_root" "$output_abs")" == "$output_abs" ]] || fail "App Store output ancestry changed during preparation"
 
 [[ -f "$export_record" && ! -L "$export_record" ]] || fail "approved export-compliance record is required: docs/security/app-store-export-compliance.md"
 grep -Eiq '^Status:[[:space:]]*approved[[:space:]]*$' "$export_record" || fail "export-compliance record is not approved"
@@ -67,8 +60,10 @@ if plutil -convert xml1 -o - "$profile_plist" | grep -q '<key>com\.apple\.securi
     fail "profile contains a temporary exception entitlement"
 fi
 
-identity_line="$(security find-identity -v -p codesigning | grep -F \"$identity\" | head -1 || true)"
-[[ -n "$identity_line" ]] || fail "Store signing identity with private key is unavailable"
+identity_listing="$work_root/identities.txt"
+security find-identity -v -p codesigning >"$identity_listing" 2>/dev/null || fail "unable to query signing identities"
+identity_fingerprint="$(macchannel_resolve_store_identity "$identity" "$identity_listing")" || fail "exactly one approved Store application identity for Team XKAZ67HN45 is required"
+macchannel_require_profile_certificate "$profile_plist" "$identity_fingerprint" "$identity" || fail "selected Store signing certificate is not included in the provisioning profile or has inconsistent certificate identity"
 
 HOME_VALUE="${HOME:?}"
 TMP_VALUE="${TMPDIR:-/tmp}"
@@ -130,6 +125,7 @@ sign=(--force --sign "$identity" --timestamp)
 /usr/bin/codesign "${sign[@]}" --entitlements "$entitlements" "$contents/MacOS/$macchannel_app_store_executable"
 /usr/bin/codesign "${sign[@]}" --entitlements "$entitlements" "$app"
 bash "$repo_root/Scripts/test-app-store-bundle.sh" "$app"
+[[ "$(macchannel_validate_store_output_path "$repo_root" "$output_abs")" == "$output_abs" ]] || fail "App Store output ancestry changed before publication"
 mv "$app" "$output_abs"
 trap - EXIT
 rm -rf "$work_root"

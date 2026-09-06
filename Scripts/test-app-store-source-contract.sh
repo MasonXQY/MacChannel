@@ -9,7 +9,9 @@ required=(
     Distribution/AppStore.entitlements
     Distribution/AppStoreSigningAnchor.plist
     Scripts/build-app-store-app.sh
+    Scripts/app-store-validation.sh
     Scripts/test-app-store-bundle.sh
+    Scripts/test-app-store-validation.sh
     Tests/Fixtures/app-store-profile-summary.plist
 )
 for path in "${required[@]}"; do
@@ -52,6 +54,9 @@ grep -F 'MACCHANNEL_APP_STORE_PROFILE' Scripts/build-app-store-app.sh >/dev/null
 grep -F 'MACCHANNEL_APP_STORE_SIGNING_IDENTITY' Scripts/build-app-store-app.sh >/dev/null
 grep -F 'MACCHANNEL_APP_STORE_APP_ID' Scripts/build-app-store-app.sh >/dev/null
 grep -F 'MACCHANNEL_APP_STORE_APP_OUTPUT' Scripts/build-app-store-app.sh >/dev/null
+grep -F 'macchannel_resolve_store_identity "$identity" "$identity_listing"' Scripts/build-app-store-app.sh >/dev/null
+grep -F 'macchannel_require_profile_certificate "$profile_plist" "$identity_fingerprint" "$identity"' Scripts/build-app-store-app.sh >/dev/null
+grep -F 'macchannel_validate_store_output_path "$repo_root" "$app_output"' Scripts/build-app-store-app.sh >/dev/null
 
 anchor=Distribution/AppStoreSigningAnchor.plist
 plutil -lint "$anchor" >/dev/null
@@ -62,6 +67,7 @@ test "$(plutil -extract teamID raw -o - "$anchor")" = XKAZ67HN45
 test "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' Tests/Fixtures/app-store-profile-summary.plist)" = XKAZ67HN45.com.zensystech.dropmesh
 
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/dropmesh-store-negative.XXXXXX")"
+fixture_root="$(cd "$fixture_root" && pwd -P)"
 trap 'rm -rf "$fixture_root"' EXIT
 fixture_app="$fixture_root/DropMesh.app"
 mkdir -p "$fixture_app/Contents/MacOS"
@@ -76,12 +82,6 @@ test "$fixture_status" -ne 0
 grep -F 'forbidden Direct update material: Sparkle.framework' "$fixture_root/result.log" >/dev/null
 
 set +e
-MACCHANNEL_APP_STORE_SIGNING_IDENTITY='Developer ID Application: forbidden fixture' \
-MACCHANNEL_APP_STORE_PROFILE=Tests/Fixtures/app-store-profile-summary.plist \
-MACCHANNEL_APP_STORE_APP_ID=123456789 \
-MACCHANNEL_APP_STORE_APP_OUTPUT="$fixture_root/direct/DropMesh.app" \
-bash Scripts/build-app-store-app.sh >"$fixture_root/direct.log" 2>&1
-direct_status=$?
 MACCHANNEL_APP_STORE_SIGNING_IDENTITY='Apple Distribution: fixture (XKAZ67HN45)' \
 MACCHANNEL_APP_STORE_PROFILE=Tests/Fixtures/app-store-profile-summary.plist \
 MACCHANNEL_APP_STORE_APP_ID=123456789 \
@@ -89,11 +89,8 @@ MACCHANNEL_APP_STORE_APP_OUTPUT=dist/DropMesh.app \
 bash Scripts/build-app-store-app.sh >"$fixture_root/dist.log" 2>&1
 dist_status=$?
 set -e
-test "$direct_status" -eq 2
-grep -F 'Developer ID identities cannot sign the App Store bundle' "$fixture_root/direct.log" >/dev/null
 test "$dist_status" -eq 2
-grep -F 'App Store output must not be written under dist/' "$fixture_root/dist.log" >/dev/null
-test ! -e "$fixture_root/direct/DropMesh.app"
+grep -F 'App Store output path is unsafe, existing, symlinked, or under dist/' "$fixture_root/dist.log" >/dev/null
 test ! -e dist/DropMesh.app
 
 echo "app store source contract PASS"

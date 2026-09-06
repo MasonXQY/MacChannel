@@ -7,6 +7,17 @@ plist="$app/Contents/Info.plist"
 executable="$app/Contents/MacOS/DropMeshAppStore"
 [[ -f "$plist" && -f "$executable" && ! -L "$executable" ]] || { echo "incomplete App Store bundle" >&2; exit 1; }
 
+while IFS= read -r -d '' candidate; do
+    [[ -f "$candidate" && ! -L "$candidate" ]] || continue
+    xml="$(plutil -convert xml1 -o - "$candidate" 2>/dev/null || true)"
+    [[ -n "$xml" ]] || continue
+    su_key="$(printf '%s\n' "$xml" | sed -nE 's@.*<key>(SU[^<]*)</key>.*@\1@p' | head -1)"
+    if [[ -n "$su_key" ]]; then
+        echo "forbidden SU metadata key: $su_key" >&2
+        exit 1
+    fi
+done < <(find "$app" -type f -print0)
+
 for forbidden in Sparkle.framework Downloader.xpc Installer.xpc Updater.app Autoupdate SUFeedURL SUPublicEDKey SUEnableAutomaticChecks appcast.xml SparklePublicKey github.com/MasonXQY/MacChannel/releases/latest/download; do
     if find "$app" -name "*$forbidden*" -print -quit | grep -q . || /usr/bin/grep -R -a -F -q "$forbidden" "$app" 2>/dev/null; then
         echo "forbidden Direct update material: $forbidden" >&2
