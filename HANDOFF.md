@@ -19,6 +19,13 @@ Owner confirmed the offline fixture verifier design and asked to develop under t
 
 ## Next steps and verification
 
+September7 continuation: reviewed repository production input/backup docs and the
+production privacy schema; no live access or new collection performed. Concrete
+custody/access proposal: docs/acceptance/production-privacy-audit-boundary.md.
+Owner decision needed: owner-held local audit identity with per-signature approval
+versus external auditor. Do not create keys or collect production data until the
+custody/access boundary and exact execution scope are settled.
+
 Do not reimplement the completed four-task phase. Next phase is production collector/trust and semantic privacy auditing, requiring concrete custody/access/retention and producer/receiver attestation decisions before production collection or provisioning. No production authority is inferred from the completed fixture tool. Keep current isolated branch; no merge/push/release requested. Use `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off` for local reproduction; preserve existing gate exit2.
 
 Detailed historical progress: .superpowers/sdd/progress.md. Do not repeat completed tasks or treat old portal/account notes as freshly verified.
