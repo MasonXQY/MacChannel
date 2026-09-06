@@ -1,8 +1,32 @@
 import AppKit
 import MacChannelCore
 
+enum StatusItemBaseIconStyle: Equatable, Sendable {
+    case direct
+    case appStore
+
+    init(distributionChannel: DistributionChannel) {
+        self = distributionChannel == .appStore ? .appStore : .direct
+    }
+}
+
 @MainActor
 final class StatusItemButton: NSStatusBarButton {
+    static let appStoreOutlineSVGPoints: [NSPoint] = [
+        NSPoint(x: 20, y: 4),
+        NSPoint(x: 4, y: 10.5),
+        NSPoint(x: 10.5, y: 13.5),
+        NSPoint(x: 13.5, y: 20),
+    ]
+    static let appStoreFoldSVGPoints: [NSPoint] = [
+        NSPoint(x: 20, y: 4),
+        NSPoint(x: 10.5, y: 13.5),
+    ]
+
+    var baseIconStyle: StatusItemBaseIconStyle = .direct {
+        didSet { render() }
+    }
+
     var phase: StatusItemPhase = .idle {
         didSet { render() }
     }
@@ -194,11 +218,13 @@ final class StatusItemButton: NSStatusBarButton {
         title = phase == .ready ? L10n.text(.sendReady) : ""
         alignment = .center
         let symbolName = presentation.symbolName ?? "paperplane"
-        image = {
+        if phase == .idle, baseIconStyle == .appStore {
+            image = Self.appStoreBaseImage
+        } else {
             let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
             symbol?.isTemplate = true
-            return symbol
-        }()
+            image = symbol
+        }
         // Keep status-bar symbols as untinted templates so AppKit can choose
         // the correct contrasting color for the current menu-bar material and
         // highlighted state. Semantic label colors can resolve to black even
@@ -217,6 +243,32 @@ final class StatusItemButton: NSStatusBarButton {
         toolTip = accessibilityValue
         needsDisplay = true
     }
+
+    private static let appStoreBaseImage: NSImage = {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            // NSImage's drawing handler presents the SVG-compatible flipped canvas
+            // used here, so the approved 24-point coordinates map without a y flip.
+            func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+                NSPoint(x: x * 0.75, y: y * 0.75)
+            }
+            let outline = NSBezierPath()
+            outline.move(to: point(appStoreOutlineSVGPoints[0].x, appStoreOutlineSVGPoints[0].y))
+            for sourcePoint in appStoreOutlineSVGPoints.dropFirst() {
+                outline.line(to: point(sourcePoint.x, sourcePoint.y))
+            }
+            outline.close()
+            outline.move(to: point(appStoreFoldSVGPoints[0].x, appStoreFoldSVGPoints[0].y))
+            outline.line(to: point(appStoreFoldSVGPoints[1].x, appStoreFoldSVGPoints[1].y))
+            outline.lineWidth = 1.125
+            outline.lineJoinStyle = .round
+            outline.lineCapStyle = .round
+            NSColor.black.setStroke()
+            outline.stroke()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 
     private func indicatorRect(
         diameter: CGFloat,

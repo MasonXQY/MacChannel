@@ -338,6 +338,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         surfaceController?.invalidate()
         statusItemController?.invalidate()
         let statusController = statusItemControllerFactory(container)
+        statusController.button.baseIconStyle = StatusItemBaseIconStyle(
+            distributionChannel: distributionChannel
+        )
         let surfaces = AppSurfaceController(
             transferService: NativeTransferSurfaceService(
                 coordinator: container.transferCoordinator

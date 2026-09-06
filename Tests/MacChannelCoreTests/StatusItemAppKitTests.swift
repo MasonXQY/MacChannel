@@ -16,6 +16,106 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testStoreIdleUsesApprovedUpperRightTemplateMarkWhileDirectRemainsSystemPaperplane() throws {
+        XCTAssertEqual(StatusItemButton.appStoreOutlineSVGPoints[0], NSPoint(x: 20, y: 4))
+        XCTAssertEqual(StatusItemButton.appStoreOutlineSVGPoints[1], NSPoint(x: 4, y: 10.5))
+        XCTAssertEqual(StatusItemButton.appStoreOutlineSVGPoints[2], NSPoint(x: 10.5, y: 13.5))
+        XCTAssertEqual(StatusItemButton.appStoreOutlineSVGPoints[3], NSPoint(x: 13.5, y: 20))
+        XCTAssertEqual(StatusItemButton.appStoreFoldSVGPoints, [NSPoint(x: 20, y: 4), NSPoint(x: 10.5, y: 13.5)])
+        let direct = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+        let originalDirect = try XCTUnwrap(direct.image)
+        XCTAssertEqual(originalDirect.name(), NSImage(systemSymbolName: "paperplane", accessibilityDescription: nil)?.name())
+
+        let store = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+        store.baseIconStyle = .appStore
+        let image = try XCTUnwrap(store.image)
+        XCTAssertTrue(image.isTemplate)
+        XCTAssertFalse(image.representations.isEmpty)
+        XCTAssertEqual(image.size, NSSize(width: 18, height: 18))
+
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 36,
+            pixelsHigh: 36,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        image.draw(in: NSRect(x: 0, y: 0, width: 36, height: 36))
+        NSGraphicsContext.restoreGraphicsState()
+        func alphaNear(x: Int, y: Int) -> CGFloat {
+            var total: CGFloat = 0
+            for pixelY in (y - 2)...(y + 2) {
+                for pixelX in (x - 2)...(x + 2) {
+                    total += bitmap.colorAt(x: pixelX, y: pixelY)?.alphaComponent ?? 0
+                }
+            }
+            return total
+        }
+        XCTAssertGreaterThan(alphaNear(x: 30, y: 30), 0, "approved Store mark must have an upper-right tip")
+        XCTAssertEqual(alphaNear(x: 30, y: 6), 0, "approved Store mark must not be vertically flipped")
+    }
+
+    @MainActor
+    func testStoreCustomBaseDoesNotReplaceReadyOrTransferStateSymbols() throws {
+        let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+        button.baseIconStyle = .appStore
+        button.hasUnreadReceive = true
+
+        button.phase = .ready
+        XCTAssertEqual(button.image?.name(), NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)?.name())
+        XCTAssertTrue(button.showsReceiveIndicator)
+
+        button.phase = .transferring(progress: 0.42)
+        XCTAssertEqual(button.image?.name(), NSImage(systemSymbolName: "paperplane", accessibilityDescription: nil)?.name())
+        XCTAssertEqual(button.transferProgressFillRect.width, 5.88, accuracy: 0.001)
+        XCTAssertTrue(button.showsReceiveIndicator)
+    }
+
+    @MainActor
+    func testDistributionChannelRoutesOnlyStoreToCustomBaseIcon() {
+        XCTAssertEqual(StatusItemBaseIconStyle(distributionChannel: .direct), .direct)
+        XCTAssertEqual(StatusItemBaseIconStyle(distributionChannel: .appStore), .appStore)
+    }
+
+    @MainActor
+    func testStoreStatusIconRendersInNativeLightAndDarkAppearancesWhenRequested() throws {
+        guard let outputPath = ProcessInfo.processInfo.environment["DROPMESH_STATUS_ICON_RENDER_DIR"] else {
+            throw XCTSkip("Set DROPMESH_STATUS_ICON_RENDER_DIR to capture native status icons")
+        }
+        let output = URL(fileURLWithPath: outputPath, isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+
+        for (appearanceName, filename) in [(NSAppearance.Name.aqua, "status-light.png"), (.darkAqua, "status-dark.png")] {
+            let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+            button.baseIconStyle = .appStore
+            button.hasUnreadReceive = true
+            button.appearance = try XCTUnwrap(NSAppearance(named: appearanceName))
+            let window = NSWindow(
+                contentRect: NSRect(x: -10_000, y: -10_000, width: 30, height: 24),
+                styleMask: .borderless,
+                backing: .buffered,
+                defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.backgroundColor = appearanceName == .darkAqua ? .black : .white
+            window.contentView = button
+            button.displayIfNeeded()
+            let bitmap = try XCTUnwrap(button.bitmapImageRepForCachingDisplay(in: button.bounds))
+            button.cacheDisplay(in: button.bounds, to: bitmap)
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                .write(to: output.appendingPathComponent(filename), options: .atomic)
+            window.close()
+        }
+    }
+
+    @MainActor
     func testFileSelectionAndDirectDragActivateLocalNetworkOnFirstRelevantAction() throws {
         let peer = DeviceID(rawValue: UUID())
         let controller = StatusItemController(
