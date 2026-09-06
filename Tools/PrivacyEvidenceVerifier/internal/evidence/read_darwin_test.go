@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -32,6 +33,30 @@ func TestReadInputsAcceptsExactReadOnlyFixture(t *testing.T) {
 		}
 	}
 	assertSnapshotEqual(t, before, snapshotInputs(t, filepath.Dir(bundlePath)))
+}
+
+func TestReadInputsNormalizesRootBeforeNoFollowCheck(t *testing.T) {
+	for _, suffix := range []string{"", "/", "/.", "//./."} {
+		t.Run("symlink"+strings.ReplaceAll(suffix, "/", "-slash"), func(t *testing.T) {
+			bundlePath, policyPath := materializeReaderFixture(t)
+			realPath := bundlePath + "-real"
+			mustRename(t, bundlePath, realPath)
+			mustSymlink(t, realPath, bundlePath)
+			_, _, failure := ReadInputs(bundlePath+suffix, policyPath)
+			if failure == nil || failure.Category != UnsafeInput {
+				t.Fatalf("symlink root alias accepted: %#v", failure)
+			}
+		})
+	}
+
+	for _, suffix := range []string{"", "/", "/.", "//./."} {
+		t.Run("directory"+strings.ReplaceAll(suffix, "/", "-slash"), func(t *testing.T) {
+			bundlePath, policyPath := materializeReaderFixture(t)
+			if _, _, failure := ReadInputs(bundlePath+suffix, policyPath); failure != nil {
+				t.Fatalf("real directory alias rejected: %v", failure)
+			}
+		})
+	}
 }
 
 func TestReadInputsRejectsUnsafeFilesystemShapesWithoutMutation(t *testing.T) {

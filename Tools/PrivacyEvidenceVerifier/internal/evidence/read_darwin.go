@@ -49,6 +49,11 @@ func readInputsWithReader(bundlePath, policyPath string, reader boundedReader) (
 	if reader == nil {
 		return empty, nil, unsafeFailure()
 	}
+	if bundlePath == "" || policyPath == "" {
+		return empty, nil, unavailableFailure()
+	}
+	bundlePath = filepath.Clean(bundlePath)
+	policyPath = filepath.Clean(policyPath)
 	initialRoot, err := os.Lstat(bundlePath)
 	if err != nil {
 		return empty, nil, unavailableFailure()
