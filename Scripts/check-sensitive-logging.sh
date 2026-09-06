@@ -32,6 +32,49 @@ remove_fixture_data_write() {
   done <<< "$matches"
 }
 
+shell_function_at_line() {
+  local source_file="$1"
+  local target_line="$2"
+  awk -v target_line="$target_line" '
+    /^[[:space:]]*[[:alnum:]_]+[[:space:]]*\(\)[[:space:]]*\{/ {
+      function_name = $0
+      sub(/^[[:space:]]*/, "", function_name)
+      sub(/[[:space:]]*\(\)[[:space:]]*\{.*/, "", function_name)
+    }
+    NR == target_line { print function_name; exit }
+    /^[[:space:]]*\}[[:space:]]*$/ { function_name = "" }
+  ' "$source_file"
+}
+
+remove_exact_function_return() {
+  local matches="$1"
+  local source_file="$2"
+  local allowed_function="$3"
+  local line line_number text trimmed
+  while IFS= read -r line; do
+    line_number="${line%%:*}"
+    text="${line#*:}"
+    trimmed="${text#"${text%%[![:space:]]*}"}"
+    if [[ "$trimmed" == 'printf '\''%s\n'\'' "$fingerprint"' ]] &&
+        [[ "$(shell_function_at_line "$source_file" "$line_number")" == "$allowed_function" ]]; then
+      continue
+    fi
+    printf '%s\n' "$line"
+  done <<< "$matches"
+}
+
+remove_exact_forged_profile_fixture_write() {
+  local matches="$1"
+  local line text
+  while IFS= read -r line; do
+    text="${line#*:}"
+    if [[ "$text" == 'printf '\''%s\n'\'' '\''<?xml version="1.0"?><plist version="1.0"><dict><key>Name</key><string>forged</string></dict></plist>'\'' >"$selfsigned_root/payload.plist"' ]]; then
+      continue
+    fi
+    printf '%s\n' "$line"
+  done <<< "$matches"
+}
+
 for source_file in "$@"; do
   [[ -f "${source_file}" ]] || continue
   matches=
@@ -66,7 +109,16 @@ for source_file in "$@"; do
         */Scripts/app-store-validation.sh)
           # This helper returns a public certificate fingerprint to its caller;
           # it is not a production log sink and never prints private key data.
-          matches="$(printf '%s\n' "$matches" | rg -v '^26:[[:space:]]+printf .+fingerprint' || true)"
+          matches="$(remove_exact_function_return "$matches" "$source_file" macchannel_resolve_store_identity)"
+          ;;
+        */Scripts/audit-app-store-prerequisites.sh)
+          # This helper likewise returns a public certificate fingerprint only
+          # through command substitution; other output remains prohibited.
+          matches="$(remove_exact_function_return "$matches" "$source_file" identity_fingerprint)"
+          ;;
+        */Scripts/test-app-store-prerequisites-contract.sh)
+          # Synthetic unsigned plist input is written to a fixture file, not a log.
+          matches="$(remove_exact_forged_profile_fixture_write "$matches")"
           ;;
         */Scripts/test-sensitive-logging-contract.sh|*/Scripts/test-privacy-audit-contract.sh)
           matches="$(remove_fixture_data_write "$matches" '"$mutation_path"')"
