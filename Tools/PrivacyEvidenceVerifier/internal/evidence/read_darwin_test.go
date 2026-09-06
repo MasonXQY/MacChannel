@@ -124,8 +124,23 @@ func TestReadInputsRejectsUnsafeFilesystemShapesWithoutMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"oversize signature", func(t *testing.T, bundlePath, _ string) {
+			if err := os.Truncate(filepath.Join(bundlePath, "manifest.sig"), 65); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{"oversize policy", func(t *testing.T, _ string, policyPath string) {
 			if err := os.Truncate(policyPath, 16*1024+1); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"oversize receipt", func(t *testing.T, bundlePath, _ string) {
+			if err := os.Truncate(filepath.Join(bundlePath, "receipt.json"), 64*1024+1); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"oversize canaries", func(t *testing.T, bundlePath, _ string) {
+			if err := os.Truncate(filepath.Join(bundlePath, "canaries.json"), 64*1024+1); err != nil {
 				t.Fatal(err)
 			}
 		}},
