@@ -32,6 +32,14 @@ require_plist_value() {
     fi
 }
 
+require_executable_path() {
+    local path="$1"
+    if [[ ! -x "$path" ]]; then
+        echo "required Direct Sparkle component is missing or not executable: $path" >&2
+        exit 1
+    fi
+}
+
 require_plist_value CFBundleName "$(baseline_value product)"
 require_plist_value CFBundleIdentifier "$(baseline_value bundleIdentifier)"
 require_plist_value CFBundleExecutable "$(baseline_value bundleExecutable)"
@@ -40,7 +48,8 @@ require_plist_value CFBundleVersion "$(baseline_value build)"
 require_plist_value LSUIElement true
 
 expected_su_keys=$'SUAllowsAutomaticUpdates\nSUAutomaticallyUpdate\nSUEnableAutomaticChecks\nSUFeedURL\nSUPublicEDKey\nSURequireSignedFeed\nSUScheduledCheckInterval\nSUVerifyUpdateBeforeExtraction'
-actual_su_keys="$(plutil -convert json -o - "$plist" | jq -er 'keys[] | select(startswith("SU"))' | sort)"
+actual_su_keys="$(plutil -convert xml1 -o - "$plist" | \
+    sed -n 's|^[[:space:]]*<key>\(SU[^<]*\)</key>[[:space:]]*$|\1|p' | LC_ALL=C sort -u)"
 if [[ "$actual_su_keys" != "$expected_su_keys" ]]; then
     echo "Sparkle Info.plist keys changed" >&2
     exit 1
@@ -62,8 +71,18 @@ if [[ "$actual_key_hash" != "$(baseline_value sparklePublicKeySHA256)" ]]; then
 fi
 
 [[ -d "$sparkle" ]]
-[[ -x "$sparkle/Versions/Current/Sparkle" ]]
-[[ -x "$sparkle/Versions/Current/Autoupdate" ]]
+sparkle_version_directory="$sparkle/Versions/B"
+[[ -d "$sparkle_version_directory" ]]
+if [[ ! -L "$sparkle/Versions/Current" || \
+    "$(readlink "$sparkle/Versions/Current")" != B ]]; then
+    echo "Sparkle Current version must point to B" >&2
+    exit 1
+fi
+require_executable_path "$sparkle_version_directory/Sparkle"
+require_executable_path "$sparkle_version_directory/Autoupdate"
+require_executable_path "$sparkle_version_directory/Updater.app/Contents/MacOS/Updater"
+require_executable_path "$sparkle_version_directory/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
+require_executable_path "$sparkle_version_directory/XPCServices/Installer.xpc/Contents/MacOS/Installer"
 sparkle_linkage="$(otool -L "$executable" | rg -F '@rpath/Sparkle.framework/Versions/B/Sparkle')"
 if [[ "$sparkle_linkage" != *"current version $(baseline_value sparkleVersion)"* ]]; then
     echo "Sparkle linkage version changed" >&2
