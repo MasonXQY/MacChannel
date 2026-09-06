@@ -1,3 +1,4 @@
+import Network
 import XCTest
 @testable import MacChannelAppKit
 @testable import MacChannelCore
@@ -81,5 +82,42 @@ final class OnboardingTests: XCTestCase {
         replacement.yield(.ready)
         for _ in 0..<20 { await Task.yield() }
         XCTAssertEqual(model.capability, .available)
+    }
+
+    func testPolicyDeniedWaitingShowsSettingsGuidanceAndExplicitRetryRecovers() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let browser = BonjourPeerBrowser(
+            directory: DeviceDirectory(trust: .allowing(peer)),
+            trust: .allowing(peer)
+        )
+        let advertiser = try BonjourPeerAdvertiser(device: peer, port: 7443) { $0.cancel() }
+        let model = LocalNetworkPermissionModel(
+            retry: {
+                browser.startAwaitingSystemStateForTesting()
+                advertiser.startWithoutSystemListenerForTesting()
+            },
+            stateProvider: { (browser.state(), advertiser.state()) }
+        )
+        model.observe(browser: browser.states(), advertiser: advertiser.states())
+        browser.startAwaitingSystemStateForTesting()
+        advertiser.startWithoutSystemListenerForTesting()
+
+        browser.receiveStateForTesting(
+            .waiting(NWError.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))),
+            generation: 1
+        )
+        for _ in 0..<100 where model.capability != .unavailable { await Task.yield() }
+        XCTAssertEqual(model.capability, .unavailable)
+        XCTAssertNotNil(model.guidanceText)
+
+        model.retry()
+        browser.receiveStateForTesting(.ready, generation: 2)
+        advertiser.receiveStateForTesting(.ready, generation: 1)
+        for _ in 0..<100 where model.capability != .available { await Task.yield() }
+        XCTAssertEqual(model.capability, .available)
+        XCTAssertNil(model.guidanceText)
+
+        await browser.stop()
+        await advertiser.stopAndWait()
     }
 }

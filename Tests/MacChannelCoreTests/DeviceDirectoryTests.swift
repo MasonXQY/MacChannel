@@ -56,6 +56,72 @@ final class DeviceDirectoryTests: XCTestCase {
         observed = await iterator.next(); XCTAssertEqual(observed, .stopped)
     }
 
+    func testBonjourBrowserPolicyDeniedWaitingEndsOwnedSessionAndRetryReachesReady() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer))
+        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing(peer))
+        let endpoint = NWEndpoint.service(
+            name: "opaque", type: BonjourPeerBrowser.serviceType,
+            domain: "local.", interface: nil
+        )
+
+        await directory.apply(.internet(peer, online: true))
+        browser.startAwaitingSystemStateForTesting()
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: peer))
+        for _ in 0..<100 where await directory.endpoint(for: peer) != .bonjour(endpoint) {
+            await Task.yield()
+        }
+
+        browser.receiveStateForTesting(
+            .waiting(NWError.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))),
+            generation: 1
+        )
+        for _ in 0..<100 where browser.state() != .failed("policy_denied") {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(browser.state(), .failed("policy_denied"))
+        let deniedSnapshot = await directory.snapshot()
+        XCTAssertEqual(deniedSnapshot.first?.availability, .internet)
+
+        browser.startAwaitingSystemStateForTesting()
+        XCTAssertEqual(browser.state(), .starting)
+        browser.receiveStateForTesting(.ready, generation: 2)
+        XCTAssertEqual(browser.state(), .ready)
+        browser.receiveStateForTesting(
+            .waiting(NWError.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))),
+            generation: 1
+        )
+        XCTAssertEqual(browser.state(), .ready)
+        await browser.stop()
+    }
+
+    func testBonjourAdvertiserPolicyDeniedWaitingCanRetryWhileTransientWaitingStaysPending() async throws {
+        let advertiser = try BonjourPeerAdvertiser(
+            device: DeviceID(rawValue: UUID()), port: 7443
+        ) { $0.cancel() }
+
+        advertiser.startWithoutSystemListenerForTesting()
+        advertiser.receiveStateForTesting(.waiting(NWError.posix(.ENETDOWN)), generation: 1)
+        XCTAssertEqual(advertiser.state(), .starting)
+        advertiser.receiveStateForTesting(
+            .waiting(NWError.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))),
+            generation: 1
+        )
+        XCTAssertEqual(advertiser.state(), .failed("policy_denied"))
+
+        advertiser.startWithoutSystemListenerForTesting()
+        XCTAssertEqual(advertiser.state(), .starting)
+        advertiser.receiveStateForTesting(.ready, generation: 2)
+        XCTAssertEqual(advertiser.state(), .ready)
+        advertiser.receiveStateForTesting(
+            .waiting(NWError.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))),
+            generation: 1
+        )
+        XCTAssertEqual(advertiser.state(), .ready)
+        await advertiser.stopAndWait()
+    }
+
     func testBonjourLifecycleStreamsBufferOnlyNewestSnapshotForStalledObservers() async throws {
         let peer = DeviceID(rawValue: UUID())
         let browser = BonjourPeerBrowser(

@@ -88,11 +88,23 @@ public final class BonjourPeerAdvertiser: @unchecked Sendable {
         queue.async { [weak self] in self?.setLifecycleState(state) }
     }
 
-    private func startOnQueue() {
+    func startWithoutSystemListenerForTesting() {
+        queue.async { [weak self] in self?.startOnQueue(launchSystemListener: false) }
+    }
+
+    func receiveStateForTesting(_ state: NWListener.State, generation: UInt64? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.record(state: state, generation: generation ?? self.generation)
+        }
+    }
+
+    private func startOnQueue(launchSystemListener: Bool = true) {
         guard listener == nil else { return }
         generation &+= 1
         let activeGeneration = generation
         setLifecycleState(.starting)
+        guard launchSystemListener else { return }
         do {
             let listener = try NWListener(using: .tcp, on: port)
             listener.service = service
@@ -110,15 +122,21 @@ public final class BonjourPeerAdvertiser: @unchecked Sendable {
         guard isCurrent(generation) else { return }
         switch state {
         case .ready: setLifecycleState(.ready)
+        case let .waiting(error) where BonjourFailureMapper.map(error) == .policyDenied:
+            failOnQueue("policy_denied")
         case let .failed(error):
-            setLifecycleState(.failed(
+            failOnQueue(
                 BonjourFailureMapper.map(error) == .policyDenied
                     ? "policy_denied" : "listener_failed"
-            ))
-            listener?.cancel(); listener = nil
+            )
         case .cancelled: setLifecycleState(.stopped); listener = nil
         default: break
         }
+    }
+    private func failOnQueue(_ reason: String) {
+        setLifecycleState(.failed(reason))
+        listener?.cancel()
+        listener = nil
     }
     private func isCurrent(_ candidate: UInt64) -> Bool {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -220,7 +238,16 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     /// Starts the same renewal and directory lifecycle without allowing a real
     /// NWBrowser result callback to overwrite synthetic test sightings.
     func startWithoutSystemBrowserForTesting() {
+        queue.async { [weak self] in self?.startOnQueue(launchSystemBrowser: false, assumeReady: true) }
+    }
+    func startAwaitingSystemStateForTesting() {
         queue.async { [weak self] in self?.startOnQueue(launchSystemBrowser: false) }
+    }
+    func receiveStateForTesting(_ state: NWBrowser.State, generation: UInt64? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.record(state: state, generation: generation ?? self.generation)
+        }
     }
     func setStateForTesting(_ state: BonjourLifecycleState) {
         queue.async { [weak self] in self?.setLifecycleState(state) }
@@ -251,7 +278,7 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
         queue.async { [weak self] in guard let self else { return }; self.acceptOnQueue(endpoint: endpoint, txtRecord: txtRecord, generation: generation ?? self.generation) }
     }
 
-    private func startOnQueue(launchSystemBrowser: Bool) {
+    private func startOnQueue(launchSystemBrowser: Bool, assumeReady: Bool = false) {
         guard browser == nil, directorySessionTask == nil else { return }
         generation &+= 1; let activeGeneration = generation; setLifecycleState(.starting)
         let directory = self.directory
@@ -262,7 +289,7 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
         directorySessionTask = sessionTask
         installRenewalTimer(generation: activeGeneration)
         guard launchSystemBrowser else {
-            setLifecycleState(.ready)
+            if assumeReady { setLifecycleState(.ready) }
             return
         }
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil), using: .tcp)
@@ -276,19 +303,26 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
         guard isCurrent(generation) else { return }
         switch state {
         case .ready: setLifecycleState(.ready)
+        case let .waiting(error) where BonjourFailureMapper.map(error) == .policyDenied:
+            failOnQueue("policy_denied")
         case let .failed(error):
-            setLifecycleState(.failed(
+            failOnQueue(
                 BonjourFailureMapper.map(error) == .policyDenied
                     ? "policy_denied" : "browser_failed"
-            ))
-            browser?.cancel(); browser = nil
-            renewalTimer?.cancel(); renewalTimer = nil
-            currentSightings = [:]
-            endDirectorySessionOnQueue()
-            cancelOwnedTasksOnQueue()
+            )
         case .cancelled: setLifecycleState(.stopped); browser = nil; endDirectorySessionOnQueue(); cancelOwnedTasksOnQueue()
         default: break
         }
+    }
+    private func failOnQueue(_ reason: String) {
+        setLifecycleState(.failed(reason))
+        browser?.cancel()
+        browser = nil
+        renewalTimer?.cancel()
+        renewalTimer = nil
+        currentSightings = [:]
+        endDirectorySessionOnQueue()
+        cancelOwnedTasksOnQueue()
     }
     private func consume(_ results: Set<NWBrowser.Result>, generation: UInt64) {
         guard isCurrent(generation) else { return }
