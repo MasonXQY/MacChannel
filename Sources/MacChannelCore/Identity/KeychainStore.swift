@@ -12,15 +12,18 @@ public enum KeychainAccessibility: String, Equatable, Sendable {
 
 public struct KeychainPolicy: Equatable, Sendable {
     public let service: String
+    public let accessGroup: String?
     public let accessibility: KeychainAccessibility
     public let synchronizable: Bool
 
     public init(
         service: String,
+        accessGroup: String? = nil,
         accessibility: KeychainAccessibility,
         synchronizable: Bool
     ) {
         self.service = service
+        self.accessGroup = accessGroup
         self.accessibility = accessibility
         self.synchronizable = synchronizable
     }
@@ -37,6 +40,7 @@ public struct KeychainStore: SecretStore, Sendable {
     public static let identityService = "com.mason.macchannel.identity"
     public static let identityPolicy = KeychainPolicy(
         service: identityService,
+        accessGroup: nil,
         accessibility: .afterFirstUnlockThisDeviceOnly,
         synchronizable: false
     )
@@ -49,15 +53,10 @@ public struct KeychainStore: SecretStore, Sendable {
 
     public func data(for account: String, policy: KeychainPolicy) throws -> Data? {
         try validate(policy)
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: policy.service,
-            kSecAttrAccount: account,
-            kSecReturnData: true,
-            kSecReturnAttributes: true,
-            kSecAttrSynchronizable: kSecAttrSynchronizableAny,
-            kSecMatchLimit: kSecMatchLimitOne,
-        ]
+        var query = recordQuery(account: account)
+        query[kSecReturnData] = true
+        query[kSecReturnAttributes] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
@@ -65,12 +64,8 @@ public struct KeychainStore: SecretStore, Sendable {
         case errSecSuccess:
             let validated = try validatedData(from: result, policy: policy)
             if validated.requiresAccessibilityMigration {
-                let migrationQuery: [CFString: Any] = [
-                    kSecClass: kSecClassGenericPassword,
-                    kSecAttrService: policy.service,
-                    kSecAttrAccount: account,
-                    kSecAttrSynchronizable: kCFBooleanFalse as Any,
-                ]
+                var migrationQuery = recordQuery(account: account)
+                migrationQuery[kSecAttrSynchronizable] = kCFBooleanFalse
                 let migrationStatus = SecItemUpdate(
                     migrationQuery as CFDictionary,
                     [
@@ -91,12 +86,7 @@ public struct KeychainStore: SecretStore, Sendable {
 
     public func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
         try validate(policy)
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: policy.service,
-            kSecAttrAccount: account,
-            kSecAttrSynchronizable: kSecAttrSynchronizableAny,
-        ]
+        let query = recordQuery(account: account)
         let updateStatus = SecItemUpdate(
             query as CFDictionary,
             [
@@ -124,14 +114,21 @@ public struct KeychainStore: SecretStore, Sendable {
     }
 
     public func removeAll() throws {
-        let status = SecItemDelete([
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: allowedPolicy.service,
-            kSecAttrSynchronizable: kSecAttrSynchronizableAny,
-        ] as CFDictionary)
+        let status = SecItemDelete(recordQuery(account: nil) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.operationFailed(status)
         }
+    }
+
+    func recordQuery(account: String?) -> [CFString: Any] {
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: allowedPolicy.service,
+            kSecAttrSynchronizable: kSecAttrSynchronizableAny,
+        ]
+        if let account { query[kSecAttrAccount] = account }
+        if let group = allowedPolicy.accessGroup { query[kSecAttrAccessGroup] = group }
+        return query
     }
 
     private func validate(_ policy: KeychainPolicy) throws {

@@ -4,8 +4,33 @@ import XCTest
 
 @testable import MacChannelAppKit
 @testable import MacChannelCore
+@testable import DropMeshAppStoreDistribution
 
 final class AppRuntimeTests: XCTestCase {
+    @MainActor
+    func testDistributionNamespacesAreDisjoint() throws {
+        let direct = RuntimeNamespace.direct
+        let store = AppStoreDistribution(info: [:], openURL: { _ in true }).runtimeNamespace
+        XCTAssertEqual(direct.applicationSupportComponent, "MacChannel")
+        XCTAssertEqual(direct.identityPolicy.service, "com.mason.macchannel.identity")
+        XCTAssertNil(direct.identityPolicy.accessGroup)
+        XCTAssertEqual(direct.defaultReceiveFolderName, "Mac 通道")
+        XCTAssertNotEqual(direct, store)
+        XCTAssertEqual(store.identityPolicy.accessGroup, "XKAZ67HN45.com.zensystech.dropmesh")
+        XCTAssertEqual(KeychainStore(policy: store.identityPolicy).recordQuery(account: "identity")[kSecAttrAccessGroup] as? String,
+                       "XKAZ67HN45.com.zensystech.dropmesh")
+        let legacy = try ProductionRuntimeConfiguration.current(namespace: direct, environment: [:], arguments: [])
+        let sandbox = try ProductionRuntimeConfiguration.current(namespace: store, environment: [:], arguments: [])
+        XCTAssertEqual(legacy.dataDirectory.lastPathComponent, "MacChannel")
+        XCTAssertEqual(sandbox.dataDirectory.lastPathComponent, "DropMesh")
+        XCTAssertEqual(sandbox.identityPolicy, store.identityPolicy)
+        XCTAssertEqual(legacy.identityPolicy, KeychainStore.identityPolicy)
+        for configuration in [legacy, sandbox] {
+            XCTAssertEqual(configuration.incomingDirectory, configuration.dataDirectory.appendingPathComponent("Incoming", isDirectory: true))
+            XCTAssertEqual(configuration.outgoingDirectory, configuration.dataDirectory.appendingPathComponent("Outgoing", isDirectory: true))
+        }
+    }
+
     func testFailedInitialPublicConnectRetriesWithoutRebuildingLocalRuntime() async throws {
         let connector = SequencedPublicServiceConnector(connectResults: [false, true])
         let lifecycle = PublicServiceLifecycle(
@@ -78,6 +103,7 @@ final class AppRuntimeTests: XCTestCase {
 
     func testNormalLaunchUsesPackagedEndpointAndOnlyIsolatedLaunchCanOverrideIt() throws {
         let normal = try ProductionRuntimeConfiguration.current(
+            namespace: .direct,
             environment: [
                 "MACCHANNEL_RENDEZVOUS_URL": "wss://example.test/v1/ws",
             ],
@@ -94,6 +120,7 @@ final class AppRuntimeTests: XCTestCase {
 
         let marker = "/tmp/macchannel-endpoint-\(UUID().uuidString)"
         let isolated = try ProductionRuntimeConfiguration.current(
+            namespace: .direct,
             environment: [
                 "MACCHANNEL_RENDEZVOUS_URL": "wss://example.test/v1/ws",
                 "MACCHANNEL_STUN_URLS": "stun:a.test, stun:b.test",
@@ -109,6 +136,7 @@ final class AppRuntimeTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try ProductionRuntimeConfiguration.current(
+                namespace: .direct,
                 environment: ["MACCHANNEL_RENDEZVOUS_URL": "ws://example.test/v1/ws"],
                 arguments: ["MacChannel", "--production-launch-test", marker]
             )
@@ -118,6 +146,7 @@ final class AppRuntimeTests: XCTestCase {
     func testIsolatedLaunchKeepsOutgoingRecoveryInsideItsRuntimeDirectory() throws {
         let marker = "/tmp/macchannel-storage-\(UUID().uuidString)"
         let configuration = try ProductionRuntimeConfiguration.current(
+            namespace: .direct,
             environment: [:],
             arguments: ["MacChannel", "--production-launch-test", marker]
         )
@@ -129,7 +158,7 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     func testPackagedConfigurationProvidesFixedOfficialEndpointWithoutEnvironment() throws {
-        let configuration = try ProductionRuntimeConfiguration.current(environment: [:])
+        let configuration = try ProductionRuntimeConfiguration.current(namespace: .direct, environment: [:])
 
         XCTAssertEqual(
             configuration.rendezvousWebSocketURL?.absoluteString,

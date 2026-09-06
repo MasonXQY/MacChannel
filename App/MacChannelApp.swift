@@ -20,14 +20,18 @@ public enum MacChannelApplication {
         case .production:
             let builder: any AppRuntimeBuilding
             do {
-                builder = try ProductionAppRuntimeBuilder()
+                builder = try ProductionAppRuntimeBuilder(namespace: distribution.runtimeNamespace)
             } catch {
                 builder = FailedProductionRuntimeBuilder()
             }
             delegate = MacChannelApplicationDelegate(
                 initialContainer: .loadingShell(),
                 initialStatus: .loading,
-                runtimeHost: AppRuntimeHost(builder: builder),
+                runtimeHost: AppRuntimeHost(
+                    builder: builder,
+                    eligibility: distribution.conflictingBundleIdentifiers.isEmpty ? nil :
+                        ConcurrentDistributionGuard(conflictingBundleIdentifiers: distribution.conflictingBundleIdentifiers)
+                ),
                 updateController: distribution.updates
             )
         }
@@ -247,6 +251,11 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             await self?.receiveNotificationController.prepare()
         }
         if let runtimeHost {
+            runtimeHost.onWillStop = { [weak self, weak runtimeHost] in
+                guard let self, let runtimeHost else { return }
+                await self.replace(.loadingShell(), status: runtimeHost.status)
+                self.updateLaunch.prepare(transfers: nil)
+            }
             runtimeHost.onChange = { [weak self] status, container in
                 guard let self else { return }
                 if let container {

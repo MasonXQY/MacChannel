@@ -6,6 +6,37 @@ import XCTest
 @testable import MacChannelCore
 
 final class IdentityTests: XCTestCase {
+    func testRemovingOnePolicyPreservesOtherIdentityRecords() throws {
+        let suffix = UUID().uuidString
+        let firstPolicy = KeychainPolicy(service: "test.direct.\(suffix)", accessGroup: nil,
+                                        accessibility: .afterFirstUnlockThisDeviceOnly, synchronizable: false)
+        let secondPolicy = KeychainPolicy(service: "test.store.\(suffix)", accessGroup: nil,
+                                         accessibility: .afterFirstUnlockThisDeviceOnly, synchronizable: false)
+        let first = KeychainStore(policy: firstPolicy)
+        let second = KeychainStore(policy: secondPolicy)
+        defer { try? first.removeAll(); try? second.removeAll() }
+        try first.store(Data([1]), for: "identity", policy: firstPolicy)
+        try second.store(Data([2]), for: "identity", policy: secondPolicy)
+        XCTAssertThrowsError(try first.data(for: "identity", policy: secondPolicy))
+        XCTAssertThrowsError(try first.store(Data([3]), for: "identity", policy: secondPolicy))
+        try first.removeAll()
+        XCTAssertNil(try first.data(for: "identity", policy: firstPolicy))
+        XCTAssertEqual(try second.data(for: "identity", policy: secondPolicy), Data([2]))
+    }
+
+    func testKeychainAccessGroupScopesEveryOperation() throws {
+        let policy = KeychainPolicy(service: "test.isolation", accessGroup: "test.team.group",
+                                    accessibility: .afterFirstUnlockThisDeviceOnly, synchronizable: false)
+        let store = KeychainStore(policy: policy)
+        XCTAssertEqual(store.recordQuery(account: "identity")[kSecAttrAccessGroup] as? String, policy.accessGroup)
+        XCTAssertEqual(store.recordQuery(account: nil)[kSecAttrAccessGroup] as? String, policy.accessGroup)
+        XCTAssertNil(KeychainStore().recordQuery(account: "identity")[kSecAttrAccessGroup])
+        XCTAssertNil(KeychainStore.identityPolicy.accessGroup)
+        XCTAssertThrowsError(try store.data(for: "identity", policy: KeychainStore.identityPolicy)) {
+            XCTAssertEqual($0 as? KeychainStoreError, .invalidPolicy)
+        }
+    }
+
     func testIssuerSequenceReservationSurvivesClockRollbackAndStoreRecreation() async throws {
         let secrets = MemorySecretStore()
         let url = FileManager.default.temporaryDirectory
@@ -60,6 +91,7 @@ final class IdentityTests: XCTestCase {
         let account = "p256-signing-private-key"
         let policy = KeychainPolicy(
             service: service,
+            accessGroup: nil,
             accessibility: .afterFirstUnlockThisDeviceOnly,
             synchronizable: false
         )

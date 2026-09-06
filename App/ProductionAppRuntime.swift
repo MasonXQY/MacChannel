@@ -18,7 +18,12 @@ struct ProductionRuntimeConfiguration {
         dataDirectory.appendingPathComponent("Outgoing", isDirectory: true)
     }
 
+    var incomingDirectory: URL {
+        dataDirectory.appendingPathComponent("Incoming", isDirectory: true)
+    }
+
     static func current(
+        namespace: RuntimeNamespace,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default,
         arguments: [String] = ProcessInfo.processInfo.arguments
@@ -34,17 +39,18 @@ struct ProductionRuntimeConfiguration {
         let directory =
             launchTestMarker.map {
                 URL(fileURLWithPath: $0).appendingPathExtension("runtime")
-            } ?? applicationSupport.appendingPathComponent("MacChannel", isDirectory: true)
+            } ?? applicationSupport.appendingPathComponent(namespace.applicationSupportComponent, isDirectory: true)
         let identityPolicy =
             launchTestMarker.map { marker in
                 let suffix = URL(fileURLWithPath: marker).lastPathComponent
                     .filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }
                 return KeychainPolicy(
-                    service: "com.mason.macchannel.identity.launch-test.\(suffix)",
+                    service: "\(namespace.identityPolicy.service).launch-test.\(suffix)",
+                    accessGroup: namespace.identityPolicy.accessGroup,
                     accessibility: .afterFirstUnlockThisDeviceOnly,
                     synchronizable: false
                 )
-            } ?? KeychainStore.identityPolicy
+            } ?? namespace.identityPolicy
         let resource =
             Bundle.module.url(
                 forResource: "RuntimeConfig",
@@ -141,8 +147,8 @@ final class ProductionAppRuntimeBuilder: AppRuntimeBuilding {
         self.configuration = configuration
     }
 
-    convenience init() throws {
-        try self.init(configuration: .current())
+    convenience init(namespace: RuntimeNamespace) throws {
+        try self.init(configuration: .current(namespace: namespace))
     }
 
     func build() async throws -> AppRuntimeLaunch {
@@ -176,7 +182,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let launchTestDataDirectory: URL?
     private var stopped = false
 
-    private init(
+    init(
         container: AppContainer,
         initialStatus: AppRuntimeStatus,
         browser: BonjourPeerBrowser?,
@@ -416,6 +422,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             trustRepository: trustRepository,
             settings: settingsStore,
             database: database,
+            incomingDirectory: configuration.incomingDirectory,
             ownerID: identity.id,
             onReceiveFinished: makeReceiveFinishedHandler(
                 recordInboundResult: { result in await history.recordInboundResult(result) },
@@ -568,7 +575,7 @@ enum RuntimePresenceConnect {
     }
 }
 
-private final class RuntimeStatusSource: @unchecked Sendable {
+final class RuntimeStatusSource: @unchecked Sendable {
     let stream: AsyncStream<AppRuntimeStatus>
     private let continuation: AsyncStream<AppRuntimeStatus>.Continuation
 
@@ -582,7 +589,12 @@ private final class RuntimeStatusSource: @unchecked Sendable {
     func finish() { continuation.finish() }
 }
 
-actor RuntimeSettingsStore {
+protocol RuntimeReceiveSettingsProviding: Sendable {
+    func current() async -> SettingsSurfaceSnapshot
+    func downloadDirectory() async -> DownloadDirectory
+}
+
+actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
     private struct DeviceWire: Codable {
         var displayName: String
         var autoAccept: Bool
@@ -1013,21 +1025,26 @@ func makeReceiveFinishedHandler(
     }
 }
 
-private actor IncomingRuntimeController {
+actor IncomingRuntimeController {
     private let source: any IncomingTransferConnectionSource
     private let trustRepository: TrustRepository
-    private let settings: RuntimeSettingsStore
+    private let settings: any RuntimeReceiveSettingsProviding
     private let database: TransferDatabase
+    private let incomingDirectory: URL
     private let ownerID: DeviceID
     private let onReceiveFinished: @Sendable (TransferReceiveResult?) async -> Void
     private var listener: IncomingTransferListener?
+    private var transitionTask: Task<Void, Never>?
+    private var transitionGeneration = 0
+    private var stopTask: Task<Void, Never>?
     private var stopped = false
 
     init(
         source: any IncomingTransferConnectionSource,
         trustRepository: TrustRepository,
-        settings: RuntimeSettingsStore,
+        settings: any RuntimeReceiveSettingsProviding,
         database: TransferDatabase,
+        incomingDirectory: URL,
         ownerID: DeviceID,
         onReceiveFinished: @escaping @Sendable (TransferReceiveResult?) async -> Void
     ) {
@@ -1035,29 +1052,55 @@ private actor IncomingRuntimeController {
         self.trustRepository = trustRepository
         self.settings = settings
         self.database = database
+        self.incomingDirectory = incomingDirectory
         self.ownerID = ownerID
         self.onReceiveFinished = onReceiveFinished
     }
 
     func start() async {
-        guard listener == nil, !stopped else { return }
-        let created = await makeListener()
-        listener = created
-        await created.start()
+        await configureListener(restart: false)
     }
 
     func restart() async {
+        await configureListener(restart: true)
+    }
+
+    private func configureListener(restart: Bool) async {
         guard !stopped else { return }
-        if let listener { await listener.stop() }
-        listener = nil
-        await start()
+        transitionGeneration += 1
+        let generation = transitionGeneration
+        let previous = transitionTask
+        let task = Task {
+            await previous?.value
+            guard !stopped else { return }
+            if restart {
+                let previousListener = listener
+                listener = nil
+                await previousListener?.stop()
+            }
+            guard !stopped, listener == nil else { return }
+            let created = await makeListener()
+            guard !stopped else { return }
+            listener = created
+            await created.start()
+        }
+        transitionTask = task
+        await task.value
+        if generation == transitionGeneration { transitionTask = nil }
     }
 
     func stop() async {
-        guard !stopped else { return }
+        if let stopTask { await stopTask.value; return }
         stopped = true
-        if let listener { await listener.stop() }
-        listener = nil
+        let pending = transitionTask
+        let task = Task {
+            await pending?.value
+            let previousListener = listener
+            listener = nil
+            await previousListener?.stop()
+        }
+        stopTask = task
+        await task.value
     }
 
     private func makeListener() async -> IncomingTransferListener {
@@ -1072,6 +1115,7 @@ private actor IncomingRuntimeController {
             policy: policy,
             directories: await settings.downloadDirectory(),
             database: database,
+            incomingDirectory: incomingDirectory,
             onReceiveFinished: onReceiveFinished
         )
     }

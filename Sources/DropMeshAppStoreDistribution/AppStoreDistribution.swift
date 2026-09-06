@@ -24,10 +24,10 @@ package final class AppStoreDistribution: ApplicationDistribution {
             applicationSupportComponent: "DropMesh",
             identityPolicy: KeychainPolicy(
                 service: Self.identityService,
+                accessGroup: Self.keychainAccessGroup,
                 accessibility: .afterFirstUnlockThisDeviceOnly,
                 synchronizable: false
             ),
-            keychainAccessGroup: Self.keychainAccessGroup,
             defaultReceiveFolderName: "DropMesh"
         )
         updates = AppStoreUpdateController(

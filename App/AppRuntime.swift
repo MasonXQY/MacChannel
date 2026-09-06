@@ -63,34 +63,55 @@ final class AppRuntimeHost {
     private var buildTask: Task<Void, Never>?
     private var runtime: (any AppRuntimeLifecycle)?
     private var statusTask: Task<Void, Never>?
-    private var stoppedRuntimeIDs: Set<ObjectIdentifier> = []
+    private var stopTask: Task<Void, Never>?
+    private let eligibility: (any RuntimeEligibilityMonitoring)?
+    private var eligibilityTask: Task<Void, Never>?
+    private var generation = 0
     private var isShuttingDown = false
 
     private(set) var status: AppRuntimeStatus = .loading
     var onChange: ((AppRuntimeStatus, AppContainer?) -> Void)?
+    var onWillStop: (() async -> Void)?
 
-    init(builder: any AppRuntimeBuilding) {
+    init(builder: any AppRuntimeBuilding, eligibility: (any RuntimeEligibilityMonitoring)? = nil) {
         self.builder = builder
+        self.eligibility = eligibility
+        if let eligibility {
+            let updates = eligibility.updates()
+            eligibilityTask = Task { [weak self] in
+                for await _ in updates {
+                    guard !Task.isCancelled else { return }
+                    await self?.checkEligibility()
+                }
+            }
+        }
     }
 
     func bootstrap() async {
+        await stopTask?.value
         guard !isShuttingDown, runtime == nil else { return }
+        guard eligibility?.current != .blocked else {
+            await checkEligibility()
+            return
+        }
         status = .loading
         onChange?(.loading, nil)
         if buildTask == nil {
+            let generation = generation
             buildTask = Task { [weak self] in
-                await self?.performBuild()
+                await self?.performBuild(generation: generation)
             }
         }
         await buildTask?.value
     }
 
-    private func performBuild() async {
+    private func performBuild(generation: Int) async {
         defer { buildTask = nil }
         do {
             let launch = try await builder.build()
-            guard !isShuttingDown else {
-                await stopOnce(launch.runtime)
+            guard !isShuttingDown, generation == self.generation,
+                  eligibility?.current != .blocked else {
+                await launch.runtime.shutdown()
                 return
             }
             runtime = launch.runtime
@@ -99,14 +120,14 @@ final class AppRuntimeHost {
             if let updates = launch.runtime.statusUpdates() {
                 statusTask = Task { [weak self] in
                     for await status in updates {
-                        guard !Task.isCancelled else { return }
+                        guard !Task.isCancelled, self?.generation == generation else { return }
                         self?.status = status
                         self?.onChange?(status, nil)
                     }
                 }
             }
         } catch {
-            guard !isShuttingDown else { return }
+            guard !isShuttingDown, generation == self.generation else { return }
             let presentation = Self.failurePresentation(for: error)
             status = .startupError(presentation.message, canRetry: presentation.canRetry)
             onChange?(status, nil)
@@ -128,24 +149,43 @@ final class AppRuntimeHost {
 
     func shutdown() async {
         isShuttingDown = true
+        eligibilityTask?.cancel()
+        eligibilityTask = nil
+        await stopCurrentRuntime()
+    }
+
+    func stopCurrentRuntime() async {
+        if let stopTask { await stopTask.value; return }
+        generation += 1
         statusTask?.cancel()
+        let oldStatusTask = statusTask
         statusTask = nil
         buildTask?.cancel()
-        await buildTask?.value
-        if let runtime { await stopOnce(runtime) }
+        let pendingBuild = buildTask
+        let oldRuntime = runtime
         runtime = nil
-        buildTask = nil
+        let task = Task {
+            if !isShuttingDown { await onWillStop?() }
+            await pendingBuild?.value
+            await oldStatusTask?.value
+            await oldRuntime?.shutdown()
+        }
+        stopTask = task
+        await task.value
+        stopTask = nil
+    }
+
+    private func checkEligibility() async {
+        guard !isShuttingDown, eligibility?.current == .blocked else { return }
+        status = .startupError(RuntimeEligibility.conflictMessage, canRetry: true)
+        onChange?(status, nil)
+        await stopCurrentRuntime()
     }
 
     func reconnectPublicService() async {
         await runtime?.reconnectPublicService()
     }
 
-    private func stopOnce(_ runtime: any AppRuntimeLifecycle) async {
-        let identifier = ObjectIdentifier(runtime)
-        guard stoppedRuntimeIDs.insert(identifier).inserted else { return }
-        await runtime.shutdown()
-    }
 }
 
 @MainActor
