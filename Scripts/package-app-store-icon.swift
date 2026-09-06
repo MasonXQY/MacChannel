@@ -1,6 +1,8 @@
 #!/usr/bin/env swift
 import AppKit
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 private struct Representation {
     let filename: String
@@ -21,6 +23,7 @@ private let representations = [
 private enum PackagingError: LocalizedError {
     case usage
     case invalidSource
+    case invalidFormat
     case cannotRender(Int)
     case iconutilFailed(Int32)
     case emptyOutput
@@ -29,6 +32,7 @@ private enum PackagingError: LocalizedError {
         switch self {
         case .usage: "usage: package-app-store-icon.swift <source-1024.png> <output.icns>"
         case .invalidSource: "source PNG must be a decodable 1024x1024 image"
+        case .invalidFormat: "source image format must be PNG"
         case let .cannotRender(pixels): "could not render Store icon at \(pixels)x\(pixels)"
         case let .iconutilFailed(status): "iconutil failed with exit status \(status)"
         case .emptyOutput: "iconutil did not create a non-empty Store icon"
@@ -48,6 +52,12 @@ private func packageIcon() throws {
         fputs("package-app-store-icon: source PNG must be a regular file\n", stderr)
         exit(1)
     }
+    guard let imageSource = CGImageSourceCreateWithURL(source as CFURL, nil)
+    else { throw PackagingError.invalidSource }
+    guard let sourceType = CGImageSourceGetType(imageSource) as String?
+    else { throw PackagingError.invalidSource }
+    guard sourceType == UTType.png.identifier
+    else { throw PackagingError.invalidFormat }
     guard let image = NSImage(contentsOf: source),
           let sourceRep = image.representations.first,
           sourceRep.pixelsWide == 1024,

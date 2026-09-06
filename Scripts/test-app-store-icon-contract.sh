@@ -30,6 +30,14 @@ if xcrun swift "$generator" "$test_root/malformed.png" "$test_root/malformed.icn
 fi
 grep -F "source PNG must be a decodable 1024x1024 image" "$test_root/malformed.log" >/dev/null
 
+sips -s format jpeg "$source_png" --out "$test_root/jpeg-source.jpg" >/dev/null
+mv "$test_root/jpeg-source.jpg" "$test_root/jpeg-named.png"
+if xcrun swift "$generator" "$test_root/jpeg-named.png" "$test_root/jpeg.icns" 2>"$test_root/jpeg.log"; then
+    echo "JPEG bytes named .png unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -F "source image format must be PNG" "$test_root/jpeg.log" >/dev/null
+
 xcrun swift "$generator" "$source_png" "$test_root/DropMesh.icns"
 test -s "$test_root/DropMesh.icns"
 iconutil -c iconset "$test_root/DropMesh.icns" -o "$test_root/DropMesh.iconset"
