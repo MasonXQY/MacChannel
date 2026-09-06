@@ -26,9 +26,10 @@ Source revision: `540130b17f33687230df139bd2cf544ff19f6c95`; report-only HEAD: `
 
 ## User/account prerequisites
 
-- Apple Developer was checked in the local Codex browser and showed the sign-in form. Sign in at [Apple Developer](https://developer.apple.com/account/); enter passwords and verification codes only on Apple's page.
+- Apple Developer login verified on 2026-09-06: organization ZENSYS TECHNOLOGIES - FZCO, Team `XKAZ67HN45`, Account Holder role. Registered explicit App ID `com.zensystech.dropmesh` with description DropMesh and verified its row in the portal; no optional managed capabilities were enabled. App Sandbox remains a signed app-target entitlement, not a portal toggle.
+- The portal reports the August 18, 2026 Apple Developer Program License Agreement accepted September 6, 2026. However, App Store Connect's New App action is explicitly blocked by an Agreement Update modal: the Paid Applications agreement is outdated. The company Business page must be reviewed by the account holder; no agreement was accepted by the agent.
 - The local code-signing inventory contains Apple Development and Developer ID Application only. A matching Store distribution identity/private key and explicit `com.zensystech.dropmesh` profile remain unverified/unavailable; installer signing and upload authentication also need provisioning checks.
-- Provide a monitored public support/privacy contact address. Do not use the retired `zensys-tech.com` domain or publish a guessed mailbox.
+- User supplied the monitored public support/privacy contact `xuqy87@gmail.com` on 2026-09-06. Use this for the bilingual support/privacy pages; do not use the retired `zensys-tech.com` domain. The pages have not yet been published.
 
 ## Safety boundary
 
