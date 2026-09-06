@@ -37,3 +37,13 @@ Base: `6f9fceb4199cd39c0f4ed60c5709b839af640d3b`.
 ## Remaining acceptance limits
 
 The three full-suite skips are unchanged: the live Go router test needs its httptest URL, and the Internet ICE plus forced-relay 1 GiB tests need the Docker local stack. Local tests and an unsigned Direct build do not prove a Store-entitled bookmark against a signed sandbox container. Real AppStore-signed/TestFlight operation, two physical Macs, provisioning/distribution identities, upload, and submission remain the later external acceptance gates. No such readiness is claimed here.
+
+## Review correction: pinned destination effective authorization
+
+Review identified that the first permission-loss fix mixed pathname authorization with descriptor-based publication and required `st_uid == geteuid()` plus owner-write mode bits. That incorrectly rejected destinations writable through ACL/group policy, while `renameatx_np` publishes through the pinned destination descriptor.
+
+- `.superpowers/sdd/task-5-review-acl-red.log`: an actual macOS ACL granted the current user directory create/search/delete access while owner write remained unset. The old implementation rejected it as `destinationNotWritable`, proving the owner-bit assumption.
+- Destination authorization now performs an actual descriptor-relative capability probe with `openat(O_CREAT | O_EXCL | O_NOFOLLOW)` and `unlinkat` on the pinned directory. This exercises effective ACL/group/sandbox authorization on the same directory object used for publication; no pathname `access` preflight decides security.
+- The duplicate owner/mode assumption in descriptor-based final publication was removed. `fstat` still requires a directory, pathname `stat` still checks the pinned dev/inode identity, `renameatx_np(RENAME_EXCL)` remains the atomic commit, and its actual `EACCES`, `EPERM`, or `EROFS` failures map to recoverable `destinationNotWritable`.
+- The private Incoming directory's same-owner and mode-0700 enforcement is unchanged.
+- `.superpowers/sdd/task-5-review-focused-green.log`: ReceiveStore/RecentReceiveStore 75 tests, zero failures; TransferIntegrationTests 25 tests, 2 existing Docker skips and zero failures; destination-scope listener drain 1 test, zero failures. This covers ACL-authorized publication, permission revocation, pinned path replacement, symlink/digest/cross-volume behavior, and transfer-level unwritable-destination handling. No full-suite repeat was run because this correction is confined to destination publication authorization.

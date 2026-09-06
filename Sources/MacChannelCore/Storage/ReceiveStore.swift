@@ -1888,13 +1888,7 @@ private final class PinnedReceiveDirectory: @unchecked Sendable {
             current.st_dev == device,
             current.st_ino == inode
         else { throw ReceiveStoreError.atomicPlacementUnavailable }
-        // The destination may lose its grant or write permission after staging.
-        // Check again at the pinned-descriptor publication boundary so the caller
-        // can recover by reauthorizing, without ever marking the row completed.
-        guard current.st_uid == geteuid(), current.st_mode & S_IWUSR != 0,
-              access(url.path, W_OK | X_OK) == 0 else {
-            throw ReceiveStoreError.destinationNotWritable
-        }
+        try requireEffectiveWriteAccess()
     }
 
     func lockForPublication() throws {
@@ -1913,6 +1907,21 @@ private final class PinnedReceiveDirectory: @unchecked Sendable {
             throw ReceiveStoreError.atomicPlacementUnavailable
         }
     }
+
+    private func requireEffectiveWriteAccess() throws {
+        let probe = ".macchannel-write-probe-\(UUID().uuidString.lowercased())"
+        let probeDescriptor = openat(
+            descriptor,
+            probe,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR
+        )
+        guard probeDescriptor >= 0 else { throw ReceiveStoreError.destinationNotWritable }
+        Darwin.close(probeDescriptor)
+        guard unlinkat(descriptor, probe, 0) == 0 else {
+            throw ReceiveStoreError.destinationNotWritable
+        }
+    }
 }
 
 private func prepareWritableDestination(_ directory: URL) throws -> PinnedReceiveDirectory {
@@ -1928,14 +1937,18 @@ private func prepareWritableDestination(_ directory: URL) throws -> PinnedReceiv
     guard descriptor >= 0 else { throw ReceiveStoreError.destinationNotWritable }
     var status = stat()
     guard fstat(descriptor, &status) == 0,
-        status.st_mode & S_IFMT == S_IFDIR,
-        status.st_uid == geteuid(),
-        status.st_mode & S_IWUSR != 0
+        status.st_mode & S_IFMT == S_IFDIR
     else {
         Darwin.close(descriptor)
         throw ReceiveStoreError.destinationNotWritable
     }
-    return PinnedReceiveDirectory(url: directory, descriptor: descriptor, status: status)
+    let pinned = PinnedReceiveDirectory(url: directory, descriptor: descriptor, status: status)
+    do {
+        try pinned.requirePathIdentity()
+        return pinned
+    } catch {
+        throw ReceiveStoreError.destinationNotWritable
+    }
 }
 
 private func preparePrivateIncomingDirectory(_ directory: URL) throws {

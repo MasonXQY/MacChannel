@@ -1436,9 +1436,7 @@ final class DescriptorStagingTree: @unchecked Sendable {
         let destination = destinationDirectory.standardizedFileURL
         var status = stat()
         guard fstat(descriptor, &status) == 0,
-            status.st_mode & S_IFMT == S_IFDIR,
-            status.st_uid == geteuid(),
-            status.st_mode & S_IWUSR != 0
+            status.st_mode & S_IFMT == S_IFDIR
         else { throw TransferProtocolError.destinationEscape }
         try requireStagingPathIdentity()
 
@@ -1472,6 +1470,9 @@ final class DescriptorStagingTree: @unchecked Sendable {
             if errno == EEXIST {
                 number += 1
                 continue
+            }
+            if errno == EACCES || errno == EPERM || errno == EROFS {
+                throw ReceiveStoreError.destinationNotWritable
             }
             throw TransferProtocolError.destinationEscape
         }
