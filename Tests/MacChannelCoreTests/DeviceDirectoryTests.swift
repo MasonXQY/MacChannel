@@ -994,6 +994,50 @@ final class DeviceDirectoryTests: XCTestCase {
         XCTAssertTrue(rejectedSnapshot.isEmpty)
     }
 
+    func testBeginningReplacementLANSessionPurgesOldSightingsBeforeDelayedTeardown() async {
+        let peer = DeviceID(rawValue: UUID())
+        let directPeer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer, directPeer))
+        let oldEndpoint = NWEndpoint.service(
+            name: "old", type: BonjourPeerBrowser.serviceType,
+            domain: "local.", interface: nil
+        )
+        let replacementEndpoint = NWEndpoint.service(
+            name: "replacement", type: BonjourPeerBrowser.serviceType,
+            domain: "local.", interface: nil
+        )
+
+        await directory.apply(.internet(peer, online: true))
+        await directory.apply(.lan(directPeer, host: "direct.local", port: 8_443))
+        let oldToken = await directory.beginLANDiscoverySession()
+        await directory.applyLAN(peer, endpoint: oldEndpoint, token: oldToken)
+        let activeOldEndpoint = await directory.endpoint(for: peer)
+        XCTAssertEqual(activeOldEndpoint, .bonjour(oldEndpoint))
+
+        // Model immediate browser retry winning the race with delayed teardown.
+        let replacementToken = await directory.beginLANDiscoverySession()
+        let replacementSnapshot = await directory.snapshot()
+        let endpointAfterReplacement = await directory.endpoint(for: peer)
+        let directEndpointAfterReplacement = await directory.endpoint(for: directPeer)
+        XCTAssertEqual(
+            replacementSnapshot.first { $0.id == peer }?.availability,
+            .internet
+        )
+        XCTAssertNil(endpointAfterReplacement)
+        XCTAssertEqual(
+            directEndpointAfterReplacement,
+            .hostPort(host: "direct.local", port: 8_443)
+        )
+
+        // The delayed old teardown must neither resurrect old LAN state nor
+        // invalidate the replacement session.
+        await directory.endLANDiscoverySession(oldToken)
+        await directory.applyLAN(peer, endpoint: replacementEndpoint, token: replacementToken)
+        let activeReplacementEndpoint = await directory.endpoint(for: peer)
+        XCTAssertEqual(activeReplacementEndpoint, .bonjour(replacementEndpoint))
+        await directory.endLANDiscoverySession(replacementToken)
+    }
+
     func testBonjourObserveTrustAndStopRemainQueueSafeUnderConcurrency() async throws {
         let owner = try DeviceIdentity.ephemeral()
         let repository = try TrustRepository(

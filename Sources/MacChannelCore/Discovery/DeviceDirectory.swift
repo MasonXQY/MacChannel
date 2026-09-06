@@ -143,7 +143,13 @@ public actor DeviceDirectory {
 
     public func beginLANDiscoverySession() -> LANDiscoverySessionToken {
         let token = LANDiscoverySessionToken(value: UUID())
+        let displacedSession = activeLANDiscoverySession
         activeLANDiscoverySession = token.value
+        guard let displacedSession else { return token }
+        let before = lanSightings.count
+        lanSightings = lanSightings.filter { $0.value.discoverySession != displacedSession }
+        scheduleExpiryRefresh()
+        if lanSightings.count != before { publishSnapshot() }
         return token
     }
 
