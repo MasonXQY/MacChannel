@@ -17,7 +17,9 @@ release approval. Existing runtime and Store privacy gates retain exit 2.
 
 ## Implementation choice
 
-Use a separate standard-library-only Go module in `Tools/PrivacyEvidenceVerifier`.
+Use a separate Go module in `Tools/PrivacyEvidenceVerifier`, with no third-party
+modules. Cryptography and parsing use the standard library; a minimal cgo bridge
+to macOS libc openat preserves the required no-follow filesystem boundary.
 The current machine has Go 1.27.0; set `go 1.27.0`, with no downloaded dependencies
 or automatic toolchain upgrade in verification commands. Neither Swift Package.swift
 nor the rendezvous module imports this module.
