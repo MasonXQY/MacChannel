@@ -221,6 +221,49 @@ final class LocalizationTests: XCTestCase {
     }
 
     @MainActor
+    func testRetainedDeviceFanRefreshesUnchangedTargetsAcrossLanguages() async throws {
+        let suite = "localization-fan-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let localization = LocalizationController(defaults: defaults)
+        localization.setLanguage(.english)
+        let targets: [DeviceFanTarget] = [
+            .device(DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Studio Mac", availability: .lan)),
+            .device(DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Travel Mac", availability: .internet)),
+            .device(DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Desk Mac", availability: .offline)),
+            .more(hiddenCount: 3)
+        ]
+        let model = DeviceFanViewModel(targets: targets)
+        let host = NSHostingView(rootView: DeviceFanView(localization: localization, model: model))
+        let window = retainedWindow(host, size: DeviceFanStripLayout.contentSize(count: targets.count))
+        defer { window.close() }
+        let hostID = ObjectIdentifier(host)
+        for (index, language) in [AppLanguage.english, .simplifiedChinese, .english].enumerated() {
+            localization.setLanguage(language)
+            try await Task.sleep(for: .milliseconds(150))
+            host.layoutSubtreeIfNeeded()
+            let text = try nativeRenderedText(host, language: language, artifactName: "retained-fan-\(index)-\(language.localeIdentifier())")
+            print("retained-fan-\(index): \(text)")
+            // The existing 96-point targets truncate the long English availability copy.
+            let visibleLabels = language == .english
+                ? ["Online on loc", "Online over", "Offline", "More"]
+                : ["局域网在线", "互联网在线", "离线", "更多"]
+            for label in visibleLabels {
+                XCTAssertTrue(text.contains(label.replacingOccurrences(of: " ", with: "")), "Missing retained fan text: \(label)")
+            }
+            for target in targets.prefix(3) {
+                XCTAssertEqual(target.accessibilityLabel, L10n.text(.deviceSendAccessibility, target.title, target.statusText))
+                XCTAssertEqual(target.accessibilityHelp, L10n.text(.sendRelease))
+            }
+            XCTAssertEqual(targets[3].accessibilityLabel, "\(L10n.text(.deviceMore))，\(L10n.text(.deviceHiddenCount, Int64(3)))")
+            XCTAssertEqual(targets[3].accessibilityHelp, L10n.text(.deviceExpandAll))
+            XCTAssertEqual(ObjectIdentifier(host), hostID)
+            XCTAssertEqual(model.targets, targets)
+            XCTAssertNil(model.hoveredTarget)
+        }
+    }
+
+    @MainActor
     private func retainedWindow(_ view: NSView, size: NSSize) -> NSWindow {
         let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10_000, y: -10_000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false

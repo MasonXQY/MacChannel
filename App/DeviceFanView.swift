@@ -256,7 +256,7 @@ final class DeviceFanViewModel: ObservableObject {
 }
 
 struct DeviceFanView: View {
-    @ObservedObject private var localization = LocalizationController.shared
+    @ObservedObject var localization = LocalizationController.shared
     @ObservedObject var model: DeviceFanViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
