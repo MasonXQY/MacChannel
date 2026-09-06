@@ -703,7 +703,14 @@ final class AppRuntimeTests: XCTestCase {
         )
         XCTAssertEqual(
             sourceRoots,
-            ["App", "Sources/MacChannelApp", "Sources/MacChannelCore"]
+            [
+                "App",
+                "Sources/DropMeshAppStore",
+                "Sources/DropMeshAppStoreDistribution",
+                "Sources/MacChannelApp",
+                "Sources/MacChannelCore",
+                "Sources/MacChannelDirectDistribution",
+            ]
         )
 
         var inventoriedSources: [String: String] = [:]

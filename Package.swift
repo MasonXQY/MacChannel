@@ -8,6 +8,7 @@ let package = Package(
     products: [
         .library(name: "MacChannelCore", targets: ["MacChannelCore"]),
         .executable(name: "MacChannelApp", targets: ["MacChannelApp"]),
+        .executable(name: "DropMeshAppStore", targets: ["DropMeshAppStore"]),
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6"),
@@ -25,20 +26,38 @@ let package = Package(
         ),
         .target(
             name: "MacChannelAppKit",
-            dependencies: [
-                "MacChannelCore",
-                .product(name: "Sparkle", package: "Sparkle"),
-            ],
+            dependencies: ["MacChannelCore"],
             path: "App",
             resources: [.copy("Resources")]
         ),
+        .target(
+            name: "MacChannelDirectDistribution",
+            dependencies: [
+                "MacChannelCore",
+                "MacChannelAppKit",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ]
+        ),
+        .target(
+            name: "DropMeshAppStoreDistribution",
+            dependencies: ["MacChannelCore", "MacChannelAppKit"]
+        ),
         .executableTarget(
             name: "MacChannelApp",
-            dependencies: ["MacChannelCore", "MacChannelAppKit"]
+            dependencies: ["MacChannelAppKit", "MacChannelDirectDistribution"]
+        ),
+        .executableTarget(
+            name: "DropMeshAppStore",
+            dependencies: ["MacChannelAppKit", "DropMeshAppStoreDistribution"]
         ),
         .testTarget(
             name: "MacChannelCoreTests",
-            dependencies: ["MacChannelCore", "MacChannelAppKit"]
+            dependencies: [
+                "MacChannelCore",
+                "MacChannelAppKit",
+                "MacChannelDirectDistribution",
+                "DropMeshAppStoreDistribution",
+            ]
         ),
         .testTarget(
             name: "MacChannelIntegrationTests",

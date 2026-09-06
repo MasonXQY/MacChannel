@@ -1,4 +1,5 @@
 import Foundation
+import MacChannelAppKit
 import MacChannelCore
 import Sparkle
 
@@ -14,7 +15,7 @@ protocol UpdateAvailabilityDriving: AnyObject {
 }
 
 @MainActor
-final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
+final class SparkleUpdateController: NSObject, SoftwareUpdateControlling {
     private static let sparkleErrorDomain = "SUSparkleErrorDomain"
     private static let noUpdateError = 1001
     private static let installationCancelledError = 4007
@@ -52,6 +53,7 @@ final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
     private(set) var snapshot: SoftwareUpdateSnapshot
 
     var isAvailable: Bool { true }
+    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { snapshot }
 
     override convenience init() {
         self.init(
@@ -131,6 +133,10 @@ final class SparkleUpdateController: NSObject, SoftwareUpdateServicing {
                 }
             }
         }
+    }
+
+    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot> {
+        snapshots()
     }
 
     func checkForUpdates() {

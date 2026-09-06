@@ -5,7 +5,7 @@ import Network
 
 @MainActor
 public enum MacChannelApplication {
-    public static func run() {
+    package static func run(distribution: any ApplicationDistribution) {
         let application = NSApplication.shared
         let mode = AppLaunchMode.resolve()
         let delegate: MacChannelApplicationDelegate
@@ -14,7 +14,8 @@ public enum MacChannelApplication {
             delegate = MacChannelApplicationDelegate(
                 initialContainer: .localShell(),
                 initialStatus: .offline("本地测试模式；网络服务未启动。"),
-                runtimeHost: nil
+                runtimeHost: nil,
+                updateController: distribution.updates
             )
         case .production:
             let builder: any AppRuntimeBuilding
@@ -26,7 +27,8 @@ public enum MacChannelApplication {
             delegate = MacChannelApplicationDelegate(
                 initialContainer: .loadingShell(),
                 initialStatus: .loading,
-                runtimeHost: AppRuntimeHost(builder: builder)
+                runtimeHost: AppRuntimeHost(builder: builder),
+                updateController: distribution.updates
             )
         }
         application.delegate = delegate
@@ -34,17 +36,6 @@ public enum MacChannelApplication {
         application.run()
     }
 }
-
-@MainActor
-protocol SoftwareUpdateLaunchControlling: AnyObject {
-    func observeTransfers(
-        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>,
-        onReady: @escaping @MainActor () -> Void
-    )
-    func start()
-}
-
-extension SparkleUpdateController: SoftwareUpdateLaunchControlling {}
 
 @MainActor
 final class SoftwareUpdateLaunchCoordinator {
@@ -191,7 +182,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private var productionLaunchDiagnostics: ProductionLaunchDiagnostics?
     private var networkMonitor: NWPathMonitor?
     private var networkWasAvailable = false
-    private let updateController = SparkleUpdateController()
+    private let updateController: any SoftwareUpdateControlling
     private lazy var updateLaunch = SoftwareUpdateLaunchCoordinator(controller: updateController)
     private let receiveNotificationController: ReceiveNotificationController
     private let receiveDirectoryResolver = ApplicationReceiveDirectoryResolver()
@@ -223,6 +214,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         initialContainer: AppContainer,
         initialStatus: AppRuntimeStatus,
         runtimeHost: AppRuntimeHost?,
+        updateController: (any SoftwareUpdateControlling)? = nil,
         receiveNotificationController: ReceiveNotificationController = ReceiveNotificationController(),
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
         beforeReceiveResultRecord: (@MainActor (TransferReceiveResult) async -> Void)? = nil,
@@ -236,6 +228,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         container = initialContainer
         self.initialStatus = initialStatus
         self.runtimeHost = runtimeHost
+        self.updateController = updateController ?? InactiveSoftwareUpdateController()
         self.receiveNotificationController = receiveNotificationController
         self.transferSurfacePresentation = transferSurfacePresentation
         self.beforeReceiveResultRecord = beforeReceiveResultRecord
@@ -635,6 +628,38 @@ private struct ProductionLaunchDiagnostics {
     let identityID: String
     let settingsAvailable: Bool
     let statusInstalled: Bool
+}
+
+@MainActor
+private final class InactiveSoftwareUpdateController: SoftwareUpdateControlling {
+    private let snapshot = SoftwareUpdateSnapshot(
+        installedVersion: InstalledAppVersion(),
+        phase: .idle,
+        canCheck: false,
+        lastCheckedAt: nil
+    )
+
+    let isAvailable = false
+    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { snapshot }
+
+    func checkForUpdates() {}
+    func showAvailableUpdate() {}
+    func start() {}
+    func stop() {}
+
+    func observeTransfers(
+        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>,
+        onReady: @escaping @MainActor () -> Void
+    ) {
+        onReady()
+    }
+
+    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot> {
+        AsyncStream { continuation in
+            continuation.yield(snapshot)
+            continuation.finish()
+        }
+    }
 }
 
 @MainActor

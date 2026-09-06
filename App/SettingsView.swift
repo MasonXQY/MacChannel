@@ -728,7 +728,8 @@ private struct SoftwareUpdateSection: View {
     private var isFailure: Bool {
         switch snapshot.phase {
         case .failed, .securityFailure: true
-        case .idle, .checking, .upToDate, .available, .downloading, .installDeferred: false
+        case .idle, .checking, .upToDate, .available, .downloading, .installDeferred,
+             .managedByAppStore: false
         }
     }
 }

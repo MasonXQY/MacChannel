@@ -3,17 +3,6 @@ import MacChannelCore
 import SwiftUI
 
 @MainActor
-protocol SoftwareUpdateSnapshotProviding: AnyObject {
-    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { get }
-    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot>
-}
-
-extension SparkleUpdateController: SoftwareUpdateSnapshotProviding {
-    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { snapshot }
-    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot> { snapshots() }
-}
-
-@MainActor
 protocol ReceiveNotificationServicing: AnyObject {
     func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot>
     func refreshReceiveNotifications() async

@@ -2,6 +2,7 @@ import XCTest
 
 @testable import MacChannelCore
 @testable import MacChannelAppKit
+@testable import MacChannelDirectDistribution
 
 final class SoftwareUpdateTests: XCTestCase {
     func testInstalledVersionUsesBundleValuesAndFallsBackWithoutCrashing() {
@@ -20,10 +21,12 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertEqual(SoftwareUpdatePhase.checking.statusText, "正在检查更新…")
         XCTAssertEqual(SoftwareUpdatePhase.upToDate.statusText, "当前已是最新版本。")
         XCTAssertEqual(SoftwareUpdatePhase.available(version: "1.2.1").statusText, "发现新版本 1.2.1。")
+        XCTAssertEqual(SoftwareUpdatePhase.managedByAppStore.statusText, "更新由 Mac App Store 管理。")
         XCTAssertEqual(SoftwareUpdatePhase.failed.statusText, "暂时无法检查更新，请稍后重试。")
         XCTAssertTrue(SoftwareUpdatePhase.available(version: "1.2.1").hasAvailableUpdate)
         XCTAssertTrue(SoftwareUpdatePhase.downloading.hasAvailableUpdate)
         XCTAssertTrue(SoftwareUpdatePhase.installDeferred.hasAvailableUpdate)
+        XCTAssertTrue(SoftwareUpdatePhase.managedByAppStore.hasAvailableUpdate)
         XCTAssertFalse(SoftwareUpdatePhase.securityFailure.hasAvailableUpdate)
     }
 
