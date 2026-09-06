@@ -18,6 +18,13 @@ func TestCanonicalRejectsAmbiguity(t *testing.T) {
 	}
 }
 
+func TestCanonicalRejectsMalformedUTF8(t *testing.T) {
+	raw := []byte{'{', '"', 'a', '"', ':', '"', 0xff, '"', '}'}
+	if _, failure := ParseCanonical(raw, 65536); failure == nil {
+		t.Fatal("malformed UTF-8 accepted")
+	}
+}
+
 func TestCanonicalAcceptsRestrictedObject(t *testing.T) {
 	if _, failure := ParseCanonical([]byte(`{"a":[0,true,"value"],"b":false}`), 65536); failure != nil {
 		t.Fatalf("canonical JSON rejected: %v", failure)

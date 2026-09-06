@@ -134,6 +134,35 @@ func TestManifestRequiresExactSortedArtifactInventory(t *testing.T) {
 	}
 }
 
+func TestArtifactRequiresEveryExactTypedField(t *testing.T) {
+	valid := validManifestMap()
+	artifact := valid["artifacts"].([]any)[0].(map[string]any)
+	for field := range artifact {
+		candidate := cloneMap(t, valid)
+		delete(candidate["artifacts"].([]any)[0].(map[string]any), field)
+		if _, failure := ParseManifest(candidate); failure == nil {
+			t.Errorf("missing artifact field %q accepted", field)
+		}
+	}
+	candidate := cloneMap(t, valid)
+	candidate["artifacts"].([]any)[0].(map[string]any)["unknown"] = true
+	if _, failure := ParseManifest(candidate); failure == nil {
+		t.Error("unknown artifact field accepted")
+	}
+	for _, field := range []string{"name", "sha256"} {
+		candidate = cloneMap(t, valid)
+		candidate["artifacts"].([]any)[0].(map[string]any)[field] = true
+		if _, failure := ParseManifest(candidate); failure == nil {
+			t.Errorf("boolean artifact string field %q accepted", field)
+		}
+	}
+	candidate = cloneMap(t, valid)
+	candidate["artifacts"].([]any)[0].(map[string]any)["size"] = "1"
+	if _, failure := ParseManifest(candidate); failure == nil {
+		t.Error("string artifact integer accepted")
+	}
+}
+
 func TestPolicyRequiresExactShapeUniqueIDsAndTypedBooleans(t *testing.T) {
 	if _, failure := ParsePolicy(validPolicyMap()); failure != nil {
 		t.Fatalf("valid policy rejected: %v", failure)
@@ -177,6 +206,11 @@ func TestPolicyRejectsMissingUnknownAndInvalidKeyFields(t *testing.T) {
 	if _, failure := ParsePolicy(candidate); failure == nil {
 		t.Error("unknown policy field accepted")
 	}
+	candidate = cloneMap(t, valid)
+	candidate["schemaVersion"] = "1"
+	if _, failure := ParsePolicy(candidate); failure == nil {
+		t.Error("string policy integer accepted")
+	}
 	key := valid["keys"].([]any)[0].(map[string]any)
 	for field := range key {
 		candidate = cloneMap(t, valid)
@@ -186,9 +220,9 @@ func TestPolicyRejectsMissingUnknownAndInvalidKeyFields(t *testing.T) {
 		}
 	}
 	mutations := map[string]any{
-		"id":           "Uppercase",
-		"publicKeyHex": strings.ToUpper(strings.Repeat("ab", 32)),
-		"notBeforeUTC": "2026-09-06T00:00:00+00:00",
+		"id":           true,
+		"publicKeyHex": true,
+		"notBeforeUTC": true,
 		"notAfterUTC":  true,
 	}
 	for field, value := range mutations {
@@ -197,6 +231,23 @@ func TestPolicyRejectsMissingUnknownAndInvalidKeyFields(t *testing.T) {
 		if _, failure := ParsePolicy(candidate); failure == nil {
 			t.Errorf("invalid key field %q accepted", field)
 		}
+	}
+	for field, value := range map[string]string{
+		"id":           "Uppercase",
+		"publicKeyHex": strings.ToUpper(strings.Repeat("ab", 32)),
+		"notBeforeUTC": "2026-09-06T00:00:00+00:00",
+		"notAfterUTC":  "2026-09-08T00:00:00.000Z",
+	} {
+		candidate = cloneMap(t, valid)
+		candidate["keys"].([]any)[0].(map[string]any)[field] = value
+		if _, failure := ParsePolicy(candidate); failure == nil {
+			t.Errorf("malformed key field %q accepted", field)
+		}
+	}
+	candidate = cloneMap(t, valid)
+	candidate["keys"].([]any)[0].(map[string]any)["unknown"] = true
+	if _, failure := ParsePolicy(candidate); failure == nil {
+		t.Error("unknown key field accepted")
 	}
 }
 
