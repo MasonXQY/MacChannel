@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import Vision
 import XCTest
 @testable import MacChannelAppKit
 @testable import MacChannelCore
@@ -123,6 +124,129 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(button.title, "Ready to Send")
         XCTAssertEqual(button.accessibilityValue() as? String, "Ready to send, choose a recipient")
         XCTAssertGreaterThan(button.preferredWidth, 72)
+    }
+
+    @MainActor
+    func testConfiguredUpdateActionsStillDispatchAfterEveryLanguageSwitchForBothChannels() throws {
+        for channel in [DistributionChannel.direct, .appStore] {
+            let suite = "localization-update-\(channel.rawValue)-\(UUID())"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let localization = LocalizationController(defaults: defaults)
+            localization.setLanguage(.english)
+            let controller = StatusItemController(
+                button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24)),
+                devices: [], transferCoordinator: LocalizationTransferCoordinator(), localization: localization
+            )
+            var callbacks = 0
+            controller.setUpdateAvailable(true, action: { callbacks += 1 })
+            for (index, language) in [AppLanguage.simplifiedChinese, .english].enumerated() {
+                localization.setLanguage(language)
+                let item = try XCTUnwrap(controller.statusMenu.item(withTitle: L10n.text(.updateAvailable)))
+                XCTAssertTrue(item.isEnabled, channel.rawValue)
+                XCTAssertFalse(item.isHidden, channel.rawValue)
+                XCTAssertEqual(item.accessibilityHelp(), L10n.text(.updateOpenWindow))
+                let action = try XCTUnwrap(item.action, "Lost configured \(channel.rawValue) update selector")
+                XCTAssertTrue(NSApplication.shared.sendAction(action, to: item.target, from: item))
+                XCTAssertEqual(callbacks, index + 1)
+            }
+        }
+    }
+
+    @MainActor
+    func testBlankPeerReceiveNameIsLocalizedAtReadTimeWhileRealNameRemainsVerbatim() {
+        L10n.select(.english)
+        let blank = DeviceID(rawValue: UUID())
+        let named = DeviceID(rawValue: UUID())
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24)),
+            devices: [DeviceSummary(id: blank, displayName: "  ", availability: .lan),
+                      DeviceSummary(id: named, displayName: "Other device", availability: .lan)],
+            transferCoordinator: LocalizationTransferCoordinator()
+        )
+        let store = RecentReceiveStore()
+        let blankID = TransferID(rawValue: UUID())
+        let namedID = TransferID(rawValue: UUID())
+        for (source, id) in [(blank, blankID), (named, namedID)] {
+            let result = TransferReceiveResult(transferID: id, receivedURLs: [URL(fileURLWithPath: "/tmp/localization-fixture.txt")], source: source)
+            store.record(result, sourceName: controller.knownSourceDisplayName(for: source) ?? "")
+        }
+        XCTAssertNil(controller.knownSourceDisplayName(for: blank))
+        XCTAssertEqual(store.snapshot.visible.first { $0.id == blankID }?.sourceName, "Other device")
+        L10n.select(.simplifiedChinese)
+        XCTAssertEqual(store.snapshot.visible.first { $0.id == blankID }?.sourceName, "其他设备")
+        XCTAssertEqual(store.snapshot.visible.first { $0.id == namedID }?.sourceName, "Other device")
+        XCTAssertEqual(store.snapshot.visible.first { $0.id == blankID }?.source, blank)
+    }
+
+    @MainActor
+    func testRetainedNativeHostsRefreshUnchangedNestedRowsAcrossLanguages() async throws {
+        let suite = "localization-retained-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let localization = LocalizationController(defaults: defaults)
+        localization.setLanguage(.english)
+        let device = DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Studio Mac", availability: .lan)
+        let settingsModel = SettingsSurfaceModel(
+            devices: [DeviceSetting(device: device)], runtimeStatus: .ready,
+            updateSnapshot: SoftwareUpdateSnapshot(installedVersion: InstalledAppVersion(info: ["CFBundleShortVersionString": "1.2.6", "CFBundleVersion": "21"]), phase: .available(version: "9.9"), canCheck: true, lastCheckedAt: nil),
+            receiveNotificationSnapshot: ReceiveNotificationSnapshot(authorizationState: .denied)
+        )
+        let snapshot = TransferSnapshot(id: TransferID(rawValue: UUID()), peer: device.id, phase: .transferring, completedBytes: 25, totalBytes: 100, route: .lan)
+        let transferModel = TransferSurfaceModel(active: [TransferSurfaceItem(snapshot: snapshot, peerName: "Studio Mac", displayName: "fixture.txt", bytesPerSecond: 1_000, estimatedTimeRemaining: 60, outputURL: nil, updatedAt: Date(timeIntervalSince1970: 1_000))])
+        // Instantiate the exact production child rows once, with unchanged snapshots/models.
+        // The observed parent mirrors Settings/TransferPopover; changing language must also
+        // invalidate its retained children, not merely its own heading.
+        let host = NSHostingView(rootView: RetainedLocalizationRows(settings: settingsModel, transfer: transferModel)
+            .environmentObject(localization))
+        let window = retainedWindow(host, size: NSSize(width: 640, height: 760))
+        defer { window.close() }
+        let hostID = ObjectIdentifier(host)
+        for (index, language) in [AppLanguage.english, .simplifiedChinese, .english].enumerated() {
+            localization.setLanguage(language)
+            try await Task.sleep(for: .milliseconds(150))
+            host.layoutSubtreeIfNeeded()
+            let text = try nativeRenderedText(host, language: language, artifactName: "retained-rows-\(index)-\(language.localeIdentifier())")
+            print("retained-rows-\(index): \(text)")
+            let expectedSettings = language == .english
+                ? ["Online Nearby", "Rename", "Receive Notifications", "Not Allowed", "Software Update", "Version 9.9 is available"]
+                : ["附近在线", "重命名", "接收通知", "未允许", "软件更新", "发现新版本"]
+            let expectedTransfer = language == .english ? ["Transferring", "Local network", "Pause"] : ["传输中", "局域网直连", "暂停"]
+            for value in expectedSettings + expectedTransfer {
+                XCTAssertTrue(text.contains(value.replacingOccurrences(of: " ", with: "")), "Missing retained native row: \(value)")
+            }
+            XCTAssertEqual(ObjectIdentifier(host), hostID)
+            XCTAssertEqual(transferModel.active.first?.snapshot, snapshot)
+        }
+    }
+
+    @MainActor
+    private func retainedWindow(_ view: NSView, size: NSSize) -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10_000, y: -10_000), size: size), styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        view.frame = NSRect(origin: .zero, size: size)
+        view.appearance = NSAppearance(named: .aqua)
+        view.layoutSubtreeIfNeeded()
+        return window
+    }
+
+    @MainActor
+    private func nativeRenderedText(_ view: NSView, language: AppLanguage, artifactName: String) throws -> String {
+        view.displayIfNeeded()
+        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        if let path = ProcessInfo.processInfo.environment["DROPMESH_LOCALIZATION_RENDER_DIR"] {
+            let directory = URL(fileURLWithPath: path, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: directory.appendingPathComponent(artifactName + ".png"))
+        }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = language == .simplifiedChinese ? ["zh-Hans", "en-US"] : ["en-US"]
+        try VNImageRequestHandler(cgImage: XCTUnwrap(bitmap.cgImage)).perform([request])
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+            .joined(separator: "\n").replacingOccurrences(of: " ", with: "")
     }
 
     @MainActor
@@ -273,6 +397,31 @@ private actor LocalizationTransferCoordinator: TransferCoordinating {
     func pause(_ id: TransferID) async {}
     func resume(_ id: TransferID) async throws {}
     func cancel(_ id: TransferID) async -> TransferCancellationResult { .requested }
+}
+
+@MainActor
+private struct RetainedLocalizationRows: View {
+    @EnvironmentObject private var localization: LocalizationController
+    let settings: SettingsSurfaceModel
+    let transfer: TransferSurfaceModel
+    private let settingsService = LocalizationSettingsService()
+    private let transferService = NativeTransferSurfaceService(coordinator: LocalizationTransferCoordinator())
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(localization.text(.settingsLanguage)).font(.title2)
+            DeviceSettingRow(device: settings.devices[0], model: settings, service: settingsService)
+            Divider()
+            ReceiveNotificationSettingsRow(snapshot: settings.receiveNotificationSnapshot, openSystemSettings: {})
+            Divider()
+            SoftwareUpdateSection(snapshot: settings.updateSnapshot, serviceAvailable: true, performAction: {})
+            Divider()
+            TransferRow(item: transfer.active[0], model: transfer, service: transferService)
+        }
+        .padding(24)
+        .frame(width: 640, height: 760, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
 }
 
 @MainActor

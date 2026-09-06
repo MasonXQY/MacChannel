@@ -228,11 +228,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         nativeButton?.setAccessibilityLabel(L10n.text(.appAccessibilityLabel))
         nativeButton?.setAccessibilityHelp(L10n.text(.appAccessibilityHelp))
         applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
-        if let availableUpdateItem {
-            availableUpdateItem.isHidden = !button.updateAvailable
-            availableUpdateItem.isEnabled = button.updateActionEnabled
-        }
-        renderPhase()
+        setUpdateAvailable(button.updateAvailable, action: availableUpdateAction)
     }
 
     convenience init(
@@ -447,8 +443,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func knownSourceDisplayName(for source: DeviceID?) -> String? {
         guard let source else { return nil }
-        return preferredDeviceNames[source]
-            ?? devices.first(where: { $0.id == source })?.userFacingDisplayName
+        let rawName = preferredDeviceNames[source]
+            ?? devices.first(where: { $0.id == source })?.displayName
+        guard let rawName, !rawName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return rawName
     }
 
     func reportReceiveRevealFailure() {

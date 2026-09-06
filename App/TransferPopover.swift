@@ -243,7 +243,8 @@ struct TransferPopover: View {
     }
 }
 
-private struct TransferRow: View {
+struct TransferRow: View {
+    @EnvironmentObject private var localization: LocalizationController
     let item: TransferSurfaceItem
     let model: TransferSurfaceModel
     let service: any TransferSurfaceServicing

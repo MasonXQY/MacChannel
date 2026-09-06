@@ -673,7 +673,8 @@ struct SettingsView: View {
     }
 }
 
-private struct ReceiveNotificationSettingsRow: View {
+struct ReceiveNotificationSettingsRow: View {
+    @EnvironmentObject private var localization: LocalizationController
     let snapshot: ReceiveNotificationSnapshot
     let openSystemSettings: () -> Void
 
@@ -714,7 +715,8 @@ struct SoftwareUpdateSectionPresentation: Equatable {
     }
 }
 
-private struct SoftwareUpdateSection: View {
+struct SoftwareUpdateSection: View {
+    @EnvironmentObject private var localization: LocalizationController
     let snapshot: SoftwareUpdateSnapshot
     let serviceAvailable: Bool
     let performAction: () -> Void
@@ -791,7 +793,8 @@ private struct SoftwareUpdateSection: View {
     }
 }
 
-private struct DeviceSettingRow: View {
+struct DeviceSettingRow: View {
+    @EnvironmentObject private var localization: LocalizationController
     let device: DeviceSetting
     let model: SettingsSurfaceModel
     let service: any DeviceSettingsServicing
