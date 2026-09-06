@@ -240,6 +240,20 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testRuntimeBootstrapDoesNotStartLocalNetworkUntilRelevantAction() async {
+        let runtime = RuntimeLifecycleSpy()
+        let host = AppRuntimeHost(builder: RuntimeBuilderStub(result: .success(
+            AppRuntimeLaunch(runtime: runtime, status: .ready)
+        )))
+
+        await host.bootstrap()
+        XCTAssertEqual(runtime.localNetworkStartCount, 0)
+
+        await host.startLocalNetwork()
+        XCTAssertEqual(runtime.localNetworkStartCount, 1)
+    }
+
+    @MainActor
     func testRuntimeHostPublishesChineseErrorWithoutFakeReadyContainer() async {
         let host = AppRuntimeHost(
             builder: RuntimeBuilderStub(result: .failure(RuntimeTestError.failed))
@@ -2455,6 +2469,11 @@ private actor CancellationInsensitivePresenceGate {
 private final class RuntimeLifecycleSpy: AppRuntimeLifecycle {
     let container = AppContainer.localShell()
     private(set) var shutdownCount = 0
+    private(set) var localNetworkStartCount = 0
+
+    func startLocalNetwork() async {
+        localNetworkStartCount += 1
+    }
 
     func shutdown() async {
         shutdownCount += 1

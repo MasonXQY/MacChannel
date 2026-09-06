@@ -134,6 +134,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var onShowTransfers: (() -> Void)?
     var onShowPairing: (() -> Void)?
     var onShowSettings: (() -> Void)?
+    var onUseLocalNetwork: (() -> Void)?
     var onRetryRuntime: (() -> Void)?
     var onAcknowledgeReceive: (() -> Void)?
     var onRevealRecentReceive: ((RecentReceiveSummary) -> Void)?
@@ -235,6 +236,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             pasteboardChangeCount: 0
         )
     ) -> StatusItemDragToken? {
+        onUseLocalNetwork?()
         let onlineDevices = devices.filter { $0.availability != .offline }
         guard !onlineDevices.isEmpty else {
             announce("没有在线接收设备，请先完成配对并确认对方 Mac 已启动。")
@@ -316,6 +318,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     func performKeyboardSend() {
         guard let urls = filePicker.chooseFiles() else { return }
+        onUseLocalNetwork?()
         presentKeyboardSend(urls: urls)
     }
 
@@ -330,6 +333,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             announce("无法准备剪贴板内容，请重试。")
             return
         }
+
+        onUseLocalNetwork?()
 
         presentKeyboardSend(
             urls: prepared.urls,

@@ -5,6 +5,17 @@ import XCTest
 @testable import MacChannelCore
 
 final class DeviceDirectoryTests: XCTestCase {
+    func testBonjourPolicyDenialIsUserActionable() {
+        let denied = BonjourFailureMapper.map(
+            NWError.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))
+        )
+        let ordinary = BonjourFailureMapper.map(
+            NWError.posix(.ECONNREFUSED)
+        )
+
+        XCTAssertEqual(denied, .policyDenied)
+        XCTAssertEqual(ordinary, .transport)
+    }
     func testLANDiscoveryAloneDoesNotClaimPeerIsReadyToTransfer() async {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))

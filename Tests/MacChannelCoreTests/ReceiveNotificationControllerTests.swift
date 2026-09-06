@@ -98,7 +98,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(finder.revealedURLs, [[first, second]])
     }
 
-    func testPrepareRequestsUndeterminedAuthorizationOnlyOnce() async {
+    func testPrepareDoesNotRequestUndeterminedAuthorization() async {
         let center = RecordingReceiveNotificationCenter(
             status: .notDetermined,
             requestedStatus: .authorized
@@ -111,7 +111,24 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         await controller.prepare()
         await controller.prepare()
 
+        XCTAssertEqual(center.authorizationRequestCount, 0)
+    }
+
+    func testFirstReceivedItemRequestsUndeterminedAuthorizationOnlyOnce() async {
+        let center = RecordingReceiveNotificationCenter(
+            status: .notDetermined,
+            requestedStatus: .authorized
+        )
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer()
+        )
+
+        await controller.notify(receive: receiveResult(named: "first.pdf"))
+        await controller.notify(receive: receiveResult(named: "second.pdf"))
+
         XCTAssertEqual(center.authorizationRequestCount, 1)
+        XCTAssertEqual(center.requests.count, 2)
     }
 
     func testDeniedAuthorizationSendsNothingAndPublishesDeniedState() async {
@@ -223,7 +240,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
             authorizationPromptTimeout: .seconds(30)
         )
         let cancelledPrepare = Task { @MainActor in
-            await controller.prepare()
+            await controller.notify(receive: self.receiveResult(named: "cancelled.pdf"))
         }
         await waitForAuthorizationQueries(1, in: center)
         center.resolveAuthorizationQuery(at: 0, with: .notDetermined)
@@ -430,14 +447,14 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         )
 
         let first = Task { @MainActor in
-            await controller.prepare()
+            await controller.notify(receive: self.receiveResult(named: "first.pdf"))
         }
         await waitForAuthorizationQueries(1, in: center)
         center.resolveAuthorizationQuery(at: 0, with: .notDetermined)
         await waitForAuthorizationRequests(1, in: center)
         await first.value
 
-        await controller.prepare()
+        await controller.notify(receive: receiveResult(named: "second.pdf"))
         XCTAssertEqual(center.authorizationRequestCount, 1)
         center.resolveAuthorizationRequest(at: 0, with: .authorized)
         for _ in 0..<100 { await Task.yield() }

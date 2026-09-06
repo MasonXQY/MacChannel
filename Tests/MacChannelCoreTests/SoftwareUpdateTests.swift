@@ -30,6 +30,21 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertFalse(SoftwareUpdatePhase.securityFailure.hasAvailableUpdate)
     }
 
+    func testAppStorePresentationUsesManagedCopyAndProductPageAction() {
+        let snapshot = SoftwareUpdateSnapshot(
+            installedVersion: InstalledAppVersion(info: [:]),
+            phase: .managedByAppStore,
+            canCheck: true,
+            lastCheckedAt: nil
+        )
+
+        let presentation = SoftwareUpdateSectionPresentation(snapshot: snapshot)
+
+        XCTAssertEqual(presentation.guidanceText, "更新由 Mac App Store 管理。")
+        XCTAssertEqual(presentation.actionTitle, "在 Mac App Store 中查看")
+        XCTAssertNil(presentation.statusText)
+    }
+
     func testAvailableUpdateActionCapabilityMatchesSparkleForegroundValidation() {
         let installed = InstalledAppVersion(info: [:])
         func snapshot(_ phase: SoftwareUpdatePhase, canCheck: Bool) -> SoftwareUpdateSnapshot {

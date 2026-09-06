@@ -311,17 +311,7 @@ final class ReceiveNotificationController {
             _ = await awaitAuthorizationRequest()
             return
         }
-
-        guard let state = await awaitAuthorizationQuery(), !Task.isCancelled else { return }
-
-        if authorizationRequestOperation != nil {
-            _ = await awaitAuthorizationRequest()
-            return
-        }
-
-        if state == .notDetermined, !didRequestAuthorization {
-            _ = await awaitAuthorizationRequest()
-        }
+        _ = await awaitAuthorizationQuery()
     }
 
     func refreshAuthorizationState() async {
@@ -336,6 +326,9 @@ final class ReceiveNotificationController {
         guard !Task.isCancelled, !result.receivedURLs.isEmpty else { return }
 
         await prepare()
+        if snapshot.authorizationState == .notDetermined, !didRequestAuthorization {
+            _ = await awaitAuthorizationRequest()
+        }
         guard !Task.isCancelled, snapshot.authorizationState.canDeliverNotifications else { return }
 
         let urls = result.receivedURLs

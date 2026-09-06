@@ -17,6 +17,7 @@ final class AppContainer {
     let receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)?
     let receiveCompletionState: RuntimeReceiveCompletionState?
     let runtimeIdentityID: DeviceID?
+    let localNetworkState: (() -> (BonjourLifecycleState, BonjourLifecycleState))?
 
     init(
         deviceDirectory: DeviceDirectory,
@@ -33,6 +34,7 @@ final class AppContainer {
         receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)? = nil,
         receiveCompletionState: RuntimeReceiveCompletionState? = nil,
         runtimeIdentityID: DeviceID? = nil,
+        localNetworkState: (() -> (BonjourLifecycleState, BonjourLifecycleState))? = nil,
         sourceAccess: (any UserSelectedSourceAccessing)? = nil
     ) {
         self.deviceDirectory = deviceDirectory
@@ -53,6 +55,7 @@ final class AppContainer {
         self.receiveEvents = receiveEvents
         self.receiveCompletionState = receiveCompletionState
         self.runtimeIdentityID = runtimeIdentityID
+        self.localNetworkState = localNetworkState
     }
 
     static func localShell() -> AppContainer {

@@ -418,6 +418,7 @@ struct SettingsView: View {
     let directorySelector: any DirectorySelecting
     let directoryRevealer: any DirectoryRevealing
     let updateService: any SoftwareUpdateServicing
+    @ObservedObject var localNetworkModel: LocalNetworkPermissionModel
     let loginItems: any LoginItemRegistering
     let onRetryRuntime: () -> Void
     let onDismiss: () -> Void
@@ -429,6 +430,7 @@ struct SettingsView: View {
         directorySelector: any DirectorySelecting,
         directoryRevealer: any DirectoryRevealing = NativeDirectoryRevealer.shared,
         updateService: any SoftwareUpdateServicing,
+        localNetworkModel: LocalNetworkPermissionModel = LocalNetworkPermissionModel(),
         loginItems: any LoginItemRegistering = LoginItemController.shared,
         onRetryRuntime: @escaping () -> Void = {},
         onDismiss: @escaping () -> Void
@@ -438,6 +440,7 @@ struct SettingsView: View {
         self.directorySelector = directorySelector
         self.directoryRevealer = directoryRevealer
         self.updateService = updateService
+        self.localNetworkModel = localNetworkModel
         self.loginItems = loginItems
         self.onRetryRuntime = onRetryRuntime
         self.onDismiss = onDismiss
@@ -510,6 +513,18 @@ struct SettingsView: View {
                     snapshot: model.receiveNotificationSnapshot,
                     openSystemSettings: model.openNotificationSettings
                 )
+
+                if localNetworkModel.capability == .unavailable {
+                    Section("局域网") {
+                        Text(localNetworkModel.guidanceText ?? "")
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(localNetworkModel.guidanceText ?? "")
+                        HStack {
+                            Button("打开系统设置", action: localNetworkModel.openSystemSettings)
+                            Button("重试局域网", action: localNetworkModel.retry)
+                        }
+                    }
+                }
 
                 SoftwareUpdateSection(
                     snapshot: model.updateSnapshot,
@@ -652,10 +667,18 @@ struct SoftwareUpdateSectionPresentation: Equatable {
     let statusText: String?
     let guidanceText: String
     let lastCheckedText: String
+    let actionTitle: String
 
     init(snapshot: SoftwareUpdateSnapshot, timeZone: TimeZone = .current) {
-        statusText = snapshot.phase == .idle ? nil : snapshot.phase.statusText
-        guidanceText = SoftwareUpdatePhase.idle.statusText
+        if snapshot.phase == .managedByAppStore {
+            statusText = nil
+            guidanceText = snapshot.phase.statusText
+            actionTitle = "在 Mac App Store 中查看"
+        } else {
+            statusText = snapshot.phase == .idle ? nil : snapshot.phase.statusText
+            guidanceText = SoftwareUpdatePhase.idle.statusText
+            actionTitle = snapshot.phase.hasAvailableUpdate ? "查看更新" : "检查更新"
+        }
         lastCheckedText = snapshot.lastCheckedText(timeZone: timeZone)
     }
 }
@@ -703,7 +726,7 @@ private struct SoftwareUpdateSection: View {
     }
 
     private var actionTitle: String {
-        snapshot.phase.hasAvailableUpdate ? "查看更新" : "检查更新"
+        presentation.actionTitle
     }
 
     private var presentation: SoftwareUpdateSectionPresentation {

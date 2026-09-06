@@ -1,159 +1,28 @@
-# Task 6 Report: DropMesh Public Rename and Distribution Migration
+# Task 6: App Store permission UX, onboarding, and updates
 
-## Scope and preserved compatibility anchors
+Base: `8255b8b96bcb1aa07996c8fcdd9c8e1d4345d478`.
 
-The current public product is **DropMesh**. Existing installations and updates keep these
-internal anchors so the rename does not create a second app or lose user data:
+## Implementation
 
-```text
-physical bundle path             MacChannel.app
-CFBundleDisplayName (raw)        MacChannel
-CFBundleDisplayName (localized)  DropMesh
-CFBundleName (raw/localized)     DropMesh
-CFBundleExecutable               MacChannelApp
-CFBundleIdentifier               com.mason.macchannel
-Sparkle/GitHub origin            MasonXQY/MacChannel
-```
+- Added a compact native SwiftUI first-run window containing exactly the five approved explanations: menu-bar location, `Downloads/DropMesh`, just-in-time permissions, six-digit pairing plus approval, and Direct-to-Store re-pairing. It is created only for the App Store distribution after the status item is installed. Closing or completing records the Store-container `UserDefaults` flag; Direct neither presents nor writes it. Settings and the menu-bar Quit command remain usable.
+- Notification launch preparation now queries state and restores delivered-notification identities without prompting. The first completed receive is the first relevant notification action and owns the one-time authorization request. Denial still skips system delivery only; receive history and unread-dot recording remain upstream and unchanged.
+- Added a privacy-safe typed Bonjour error mapper. `kDNSServiceErr_PolicyDenied` maps to `policyDenied`; all ordinary failures map to `transport`, while lifecycle presentation stores only fixed reason names and never raw endpoints or error descriptions.
+- App Store runtime bootstrap starts the public service but leaves Bonjour browser and advertiser stopped. Pairing, selecting a file, sending clipboard content, or beginning a direct drag activates the existing local-network objects. Direct activates them after runtime installation as before. Wake reconnects Bonjour only after local networking has previously been activated. Retry reuses the existing runtime identity, trust repository, browser, advertiser, and transfer coordinator.
+- Added independent local-network capability presentation in Settings. Policy denial explains that public connectivity, settings, and history remain usable, offers the macOS Local Network privacy pane, and offers retry. It does not rewrite the public-service status.
+- Login-item state remains off by default. Only the toggle calls the `SMAppService.mainApp` registrar; existing failed register/unregister and persistence paths roll the visible value back.
+- Store update presentation now shows `更新由 Mac App Store 管理。` and labels its action `在 Mac App Store 中查看`; the Store adapter opens only the configured product page. Direct Sparkle behavior is unchanged.
 
-The raw display name intentionally matches the physical bundle filename. Finder only
-uses the localized `InfoPlist.strings` display name when the raw name and filesystem name
-match. The build therefore sets `LSHasLocalizedDisplayName=true` and supplies DropMesh in
-`Base.lproj`, `en.lproj`, and `zh-Hans.lproj`. An isolated build-product probe changes the
-copy's Bundle ID to avoid LaunchServices cache reuse and verifies
-`FileManager.default.displayName(atPath:) == "DropMesh"` while the path remains
-`MacChannel.app`.
+## TDD and verification evidence
 
-The Bundle ID, executable, keychain identifiers, protocol salts, application-support
-paths, database/staging paths, and existing receive-directory bytes were not renamed.
+- `.superpowers/sdd/task-6-onboarding-red.log`: onboarding model and completion store were absent.
+- `.superpowers/sdd/task-6-notification-red.log`: launch preparation requested notification authorization (`expected 0, actual 1`).
+- `.superpowers/sdd/task-6-focused-green.log`: onboarding, Bonjour denial, notification, status-item, software-update, and runtime focused suites passed after implementation.
+- `.superpowers/sdd/task-6-final-full-swift-test.log`: the first complete run retained one exact unrelated concurrency-timing failure at `ReceiveEventSourceTests.swift:129`, `testCancellingSubscriptionReleasesBlockedPublisher`; 850 executed, 3 skipped, 1 failure. No production change was made for it. The unchanged test then passed 10/10 isolated repetitions.
+- `.superpowers/sdd/task-6-final-full-swift-test-green.log`: final complete serial run after the direct-send JIT wiring, 851 executed, 3 existing environment-gated skips, 0 failures, 44.070 seconds. SHA-256: `0f6bf645e493852ad89d0e0faf7eebc591d9122451d18ac8fc8fd2e06e66c8c5`.
+- `.superpowers/sdd/task-6-direct-build.log`: `bash Scripts/build-app.sh` completed successfully.
+- `.superpowers/sdd/task-6-direct-baseline.log`: `direct-regression PASS version=1.2.6 build=21`.
+- `git diff --check` passed.
 
-## Independent-review fixes
+## Acceptance limits
 
-### Finder and LaunchServices display name
-
-- `Scripts/build-app.sh` emits the raw/localized identity described above.
-- Build, release-signing, mounted-distribution, and update-feed contracts verify the
-  internal anchors and localized public name.
-- The build contract performs the cache-isolated `FileManager.displayName` probe and
-  passed against the real generated bundle.
-
-### Truthful receive-directory UI
-
-The existing default path remains `~/Downloads/Mac 通道`; no files are moved and no
-setting is silently rewritten. The Settings UI does not expose that legacy public name or
-falsely claim the root Downloads directory. It displays the neutral and truthful
-`下载文件夹内的兼容接收目录`. The new `在 Finder 中显示` action resolves the effective
-`DownloadDirectory.defaultDirectory`, creates it only when the user asks to reveal it,
-and selects it in Finder. A custom directory continues to display its real path.
-
-Focused tests verify the neutral label, exact compatibility URL, custom-path rendering,
-Finder reveal target, and unchanged nil setting.
-
-### Safe legacy distribution cleanup
-
-At the start of a distribution build, the explicit distribution root now removes only
-the exact obsolete public assets `MacChannel.dmg` and `MacChannel.manifest.json` in
-addition to the current DropMesh outputs. The update-feed regression first creates both
-legacy files in an isolated test distribution directory, performs the normal handoff,
-then proves they are gone and only the exact DropMesh release assets remain.
-
-### Tailscale-free personal installer
-
-`install-personal-mesh.sh` no longer discovers, invokes, or documents Tailscale and no
-longer accepts `--tailscale-cli`. Installation validates the signed DropMesh package,
-preserves the transition `MacChannel.app` target and user data, then explains that
-DropMesh automatically connects its built-in secure service. The acceptance script no
-longer exposes the obsolete network product in its user-facing evidence text.
-
-The installer contract rejects any return of Tailscale or the old “个人网络通道” guidance
-before it runs the signed install, rollback, commit-mismatch, and hash-mismatch cases.
-
-### Public-source audit
-
-The distribution gate audits current App/Sources strings, production scripts, README,
-distribution README, and the current v1.2.2 release note. It fails ordinary legacy-brand
-copy. Its allowlist is exact and limited to byte-compatible storage/protocol IDs, real
-transition artifact/executable/environment/repository anchors, and the precise historical
-rename sentence. v1.2.0 and v1.2.1 remain unchanged historical release notes.
-An adversarial `MacChannelBogus` probe proves that a new identifier sharing only the old
-prefix is not swallowed by a broad normalization rule.
-
-## TDD evidence
-
-Each independent-review finding received a failing contract before its implementation:
-
-- the display-name contract failed because localized `InfoPlist.strings`,
-  `LSHasLocalizedDisplayName`, and a real filesystem display-name probe were absent;
-- the Settings test initially failed to compile because receive-directory presentation
-  and reveal behavior did not exist;
-- a distribution handoff beginning with legacy public assets failed because the stale
-  files survived;
-- the installer source gate listed every Tailscale dependency and obsolete instruction;
-- the widened script audit first failed on old public local-stack certificate copy.
-
-Green results on the implementation diff:
-
-```text
-TransferSurfaceTests                 52 passed
-ReceiveStore default/override test   passed
-complete Swift suite                 639 passed, 3 Docker-only skipped, 0 failed
-direct-LAN integration               SHA-256 matched
-build app contract                   PASS
-update feed contract                 PASS
-Developer ID release signing        PASS
-```
-
-The complete Swift suite used `/tmp/dropmesh-task6-fix-full`. The signed app remained
-universal (`arm64`, `x86_64`), retained hardened runtime, satisfied its designated
-requirement, and completed the bounded smoke launches. Compact green transfer-progress
-rendering and its prior AppKit contracts remain unchanged.
-
-## Final clean-worktree release gates
-
-After the single repair commit, the exact committed revision is verified with:
-
-```sh
-MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
-  bash Scripts/test-distribution.sh
-MACCHANNEL_CODESIGN_IDENTITY='Developer ID Application: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' \
-  bash Scripts/test-personal-mesh-install.sh
-```
-
-Both clean-tree gates passed on the committed implementation. The distribution contract
-verified the source audit, fail-closed clean-tree behavior, exact DropMesh release assets,
-signed DMG read-only mount, localized Finder name, manifest schema, preserved internal
-identity, install copy, bounded launch, and tamper rejection. The personal installer
-contract passed signed installation, existing-data preservation, replacement rollback,
-commit mismatch, corrupted DMG rejection, and acceptance-schema checks without any
-auxiliary-network dependency.
-
-The generated release state was `internalSignedNotNotarized`, version 1.2.2, build 15.
-Live notarization and publication are outside this task.
-
-## Process safety
-
-Protected historical UE PIDs `38136`, `49361`, `80713`, `82338`, `25679`, `28690`, and
-`29145` were not signaled, terminated, or otherwise mutated.
-
-## Final multi-file container branding repair
-
-New multi-file selections now create, transmit, publish in Finder, and persist in transfer
-history as `DropMesh Transfer`; the old public name is no longer accepted by the production
-source audit. The internal outgoing storage path remains unchanged. A dedicated authenticated
-package fixture proves that an already-persisted version-2 package whose
-`metadata.displayFilename` is `MacChannel Transfer` still loads with those exact bytes, so
-restart and resumable-history compatibility are preserved without rewriting old metadata.
-
-TDD evidence for this repair:
-
-```text
-RED: mixed-selection receive/history regression failed on MacChannel Transfer
-GREEN: new multi-file receive/history plus authenticated legacy restore  2 passed
-full Swift suite                                                  640 passed, 3 skipped
-direct-LAN integration                                            SHA-256 matched
-clean-tree signed distribution gate                               PASS
-```
-
-The distribution gate passed on the committed repair after one retry; the first attempt
-was interrupted by a transient missing Apple timestamp on the signed DMG, while the retry
-verified the source audit, failure injection, signed app and DMG, mounted identity, and
-tamper rejection end to end.
+No installed application or remote Mac was launched or controlled. The tests exercise native AppKit/SwiftUI construction and behavior, but this task does not claim a physically installed, signed App Store permission prompt or two-Mac UX. The three full-suite skips remain the existing environment-gated live Go router and Docker Internet ICE/forced-relay tests. Store signing, TestFlight, and physical two-Mac acceptance remain later external gates.

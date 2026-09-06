@@ -9,6 +9,24 @@ public enum BonjourLifecycleState: Equatable, Sendable {
     case failed(String)
 }
 
+/// A privacy-safe reason for a Bonjour capability failure. Raw endpoints and
+/// system error descriptions never cross this boundary.
+public enum BonjourFailure: Equatable, Sendable {
+    case policyDenied
+    case transport
+}
+
+public enum BonjourFailureMapper {
+    public static func map(_ error: NWError) -> BonjourFailure {
+        if case let .dns(code) = error,
+           code == DNSServiceErrorType(kDNSServiceErr_PolicyDenied)
+        {
+            return .policyDenied
+        }
+        return .transport
+    }
+}
+
 public enum BonjourPeerAdvertiserError: Error, Equatable, Sendable { case invalidPort }
 
 public final class BonjourPeerAdvertiser: @unchecked Sendable {
@@ -69,7 +87,12 @@ public final class BonjourPeerAdvertiser: @unchecked Sendable {
         guard isCurrent(generation) else { return }
         switch state {
         case .ready: lifecycleState = .ready
-        case .failed: lifecycleState = .failed("listener_failed"); listener?.cancel(); listener = nil
+        case let .failed(error):
+            lifecycleState = .failed(
+                BonjourFailureMapper.map(error) == .policyDenied
+                    ? "policy_denied" : "listener_failed"
+            )
+            listener?.cancel(); listener = nil
         case .cancelled: lifecycleState = .stopped; listener = nil
         default: break
         }
@@ -208,8 +231,11 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
         guard isCurrent(generation) else { return }
         switch state {
         case .ready: lifecycleState = .ready
-        case .failed:
-            lifecycleState = .failed("browser_failed")
+        case let .failed(error):
+            lifecycleState = .failed(
+                BonjourFailureMapper.map(error) == .policyDenied
+                    ? "policy_denied" : "browser_failed"
+            )
             browser?.cancel(); browser = nil
             renewalTimer?.cancel(); renewalTimer = nil
             currentSightings = [:]

@@ -5,6 +5,34 @@ import XCTest
 
 final class StatusItemAppKitTests: XCTestCase {
     @MainActor
+    func testLoginItemPresentationStartsOffWithoutRegistrarMutation() {
+        let model = SettingsSurfaceModel()
+        let registrar = RecordingLoginItemStatusRegistrar()
+
+        XCTAssertFalse(model.launchAtLogin)
+        XCTAssertFalse(registrar.isEnabled)
+        XCTAssertEqual(registrar.mutationCount, 0)
+    }
+
+    @MainActor
+    func testFileSelectionAndDirectDragActivateLocalNetworkOnFirstRelevantAction() throws {
+        let peer = DeviceID(rawValue: UUID())
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: peer, displayName: "Desk", availability: .internet)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            filePicker: StubStatusItemFilePicker(result: [URL(fileURLWithPath: "/tmp/file.txt")]),
+            deviceMenuPresenter: RecordingStatusItemDeviceMenuPresenter()
+        )
+        var activations = 0
+        controller.onUseLocalNetwork = { activations += 1 }
+
+        controller.performKeyboardSend()
+        _ = controller.beginDrop(try DropIntent(items: [.fileURL(URL(fileURLWithPath: "/tmp/drag.txt"))]))
+
+        XCTAssertEqual(activations, 2)
+    }
+    @MainActor
     func testButtonRegistersFileURLsAndExposesTextualAccessibleState() {
         let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24))
 
@@ -1521,6 +1549,17 @@ final class StatusItemAppKitTests: XCTestCase {
             transferID: TransferID(rawValue: UUID()),
             receivedURLs: [URL(fileURLWithPath: "/tmp/Downloads/\(name)")]
         )
+    }
+}
+
+@MainActor
+private final class RecordingLoginItemStatusRegistrar: LoginItemRegistering {
+    private(set) var isEnabled = false
+    private(set) var mutationCount = 0
+
+    func setEnabled(_ enabled: Bool) throws {
+        mutationCount += 1
+        isEnabled = enabled
     }
 }
 

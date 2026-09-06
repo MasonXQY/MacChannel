@@ -39,12 +39,14 @@ protocol AppRuntimeLifecycle: AnyObject {
     var container: AppContainer { get }
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>?
     func reconnectPublicService() async
+    func startLocalNetwork() async
     func shutdown() async
 }
 
 extension AppRuntimeLifecycle {
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { nil }
     func reconnectPublicService() async {}
+    func startLocalNetwork() async {}
 }
 
 struct AppRuntimeLaunch {
@@ -184,6 +186,10 @@ final class AppRuntimeHost {
 
     func reconnectPublicService() async {
         await runtime?.reconnectPublicService()
+    }
+
+    func startLocalNetwork() async {
+        await runtime?.startLocalNetwork()
     }
 
 }

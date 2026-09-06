@@ -15,7 +15,8 @@ public enum MacChannelApplication {
                 initialContainer: .localShell(),
                 initialStatus: .offline("本地测试模式；网络服务未启动。"),
                 runtimeHost: nil,
-                updateController: distribution.updates
+                updateController: distribution.updates,
+                distributionChannel: distribution.channel
             )
         case .production:
             let builder: any AppRuntimeBuilding
@@ -32,7 +33,8 @@ public enum MacChannelApplication {
                     eligibility: distribution.conflictingBundleIdentifiers.isEmpty ? nil :
                         ConcurrentDistributionGuard(conflictingBundleIdentifiers: distribution.conflictingBundleIdentifiers)
                 ),
-                updateController: distribution.updates
+                updateController: distribution.updates,
+                distributionChannel: distribution.channel
             )
         }
         application.delegate = delegate
@@ -180,6 +182,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private let runtimeHost: AppRuntimeHost?
     private var statusItemController: StatusItemController?
     private var surfaceController: AppSurfaceController?
+    private var onboardingWindowController: OnboardingWindowController?
     private var bootstrapTask: Task<Void, Never>?
     private var terminationPending = false
     private var runtimeShutdownComplete = false
@@ -187,6 +190,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private var networkMonitor: NWPathMonitor?
     private var networkWasAvailable = false
     private let updateController: any SoftwareUpdateControlling
+    private let distributionChannel: DistributionChannel
     private lazy var updateLaunch = SoftwareUpdateLaunchCoordinator(controller: updateController)
     private let receiveNotificationController: ReceiveNotificationController
     private let receiveDirectoryResolver = ApplicationReceiveDirectoryResolver()
@@ -219,6 +223,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         initialStatus: AppRuntimeStatus,
         runtimeHost: AppRuntimeHost?,
         updateController: (any SoftwareUpdateControlling)? = nil,
+        distributionChannel: DistributionChannel = .direct,
         receiveNotificationController: ReceiveNotificationController = ReceiveNotificationController(),
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
         beforeReceiveResultRecord: (@MainActor (TransferReceiveResult) async -> Void)? = nil,
@@ -233,6 +238,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         self.initialStatus = initialStatus
         self.runtimeHost = runtimeHost
         self.updateController = updateController ?? InactiveSoftwareUpdateController()
+        self.distributionChannel = distributionChannel
         self.receiveNotificationController = receiveNotificationController
         self.transferSurfacePresentation = transferSurfacePresentation
         self.beforeReceiveResultRecord = beforeReceiveResultRecord
@@ -247,6 +253,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         install(container, status: initialStatus)
+        presentStoreOnboardingIfNeeded()
         Task { [weak self] in
             await self?.receiveNotificationController.prepare()
         }
@@ -259,6 +266,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             runtimeHost.onChange = { [weak self] status, container in
                 guard let self else { return }
                 if let container {
+                    if self.distributionChannel == .direct {
+                        Task { await runtimeHost.startLocalNetwork() }
+                    }
                     containerReplacementGeneration += 1
                     let generation = containerReplacementGeneration
                     Task { [weak self] in
@@ -311,6 +321,15 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func presentStoreOnboardingIfNeeded() {
+        guard distributionChannel == .appStore else { return }
+        let controller = OnboardingWindowController { [weak self] in
+            self?.statusItemController?.onShowSettings?()
+        }
+        onboardingWindowController = controller
+        controller.present()
+    }
+
     private func install(_ container: AppContainer, status: AppRuntimeStatus) {
         self.container = container
         surfaceController?.invalidate()
@@ -323,13 +342,23 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             pairingService: container.pairingSurfaceService,
             settingsService: container.settingsSurfaceService,
             directorySelector: container.directorySelector,
+            localNetworkModel: LocalNetworkPermissionModel(
+                retry: { [weak runtimeHost] in
+                    Task { await runtimeHost?.startLocalNetwork() }
+                },
+                stateProvider: container.localNetworkState
+            ),
             updateService: updateController,
             notificationService: receiveNotificationController,
             transferSurfacePresentation: transferSurfacePresentation,
             onRetryRuntime: { [weak runtimeHost] in
                 Task { await runtimeHost?.bootstrap() }
+            },
+            onUseLocalNetwork: { [weak runtimeHost] in
+                Task { await runtimeHost?.startLocalNetwork() }
             }
         )
+        surfaces.localNetworkModel.refresh()
         receiveDirectoryResolver.configure(
             initialSnapshot: container.initialSettingsSnapshot,
             waitForSnapshot: container.receiveDirectoryConfigurationPending

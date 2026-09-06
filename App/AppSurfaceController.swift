@@ -25,6 +25,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     let transferModel: TransferSurfaceModel
     let pairingModel: PairingSurfaceModel
     let settingsModel: SettingsSurfaceModel
+    let localNetworkModel: LocalNetworkPermissionModel
     let updateService: any SoftwareUpdateServicing
 
     private let transferService: any TransferSurfaceServicing
@@ -34,6 +35,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private let notificationService: (any ReceiveNotificationServicing)?
     private let transferSurfacePresentation: ((TransferSurfaceSection) -> Void)?
     private let onRetryRuntime: () -> Void
+    private let onUseLocalNetwork: () -> Void
     private let now: () -> Date
 
     private var activePopover: NSPopover?
@@ -67,10 +69,12 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         transferModel: TransferSurfaceModel = TransferSurfaceModel(),
         pairingModel: PairingSurfaceModel = PairingSurfaceModel(),
         settingsModel: SettingsSurfaceModel = SettingsSurfaceModel(),
+        localNetworkModel: LocalNetworkPermissionModel = LocalNetworkPermissionModel(),
         updateService: (any SoftwareUpdateServicing)? = nil,
         notificationService: (any ReceiveNotificationServicing)? = nil,
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
         onRetryRuntime: @escaping () -> Void = {},
+        onUseLocalNetwork: @escaping () -> Void = {},
         now: @escaping () -> Date = Date.init
     ) {
         self.fanPanel = fanPanel
@@ -81,15 +85,18 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         self.transferModel = transferModel
         self.pairingModel = pairingModel
         self.settingsModel = settingsModel
+        self.localNetworkModel = localNetworkModel
         self.updateService = updateService ?? InactiveSoftwareUpdateService()
         self.notificationService = notificationService
         self.transferSurfacePresentation = transferSurfacePresentation
         self.onRetryRuntime = onRetryRuntime
+        self.onUseLocalNetwork = onUseLocalNetwork
         self.now = now
     }
 
     func bind(to controller: StatusItemController) {
         statusController = controller
+        controller.onUseLocalNetwork = onUseLocalNetwork
         controller.updateDeviceNames(deviceNames)
         if let updates = updateService as? any SoftwareUpdateSnapshotProviding {
             updateSoftwareUpdate(updates.softwareUpdateSnapshot)
@@ -497,6 +504,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     private func showPairing(relativeTo anchor: NSView) {
+        onUseLocalNetwork()
         let popover = configuredPopover()
         popover.contentViewController = NSHostingController(
             rootView: PairingView(
@@ -510,6 +518,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     private func showSettings(relativeTo anchor: NSView) {
         startReceiveNotificationRefresh()
+        localNetworkModel.refresh()
         let popover = configuredPopover()
         popover.contentViewController = NSHostingController(
             rootView: SettingsView(
@@ -517,6 +526,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 service: settingsService,
                 directorySelector: directorySelector,
                 updateService: updateService,
+                localNetworkModel: localNetworkModel,
                 onRetryRuntime: onRetryRuntime,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
             )

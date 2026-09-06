@@ -183,6 +183,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let launchTestKeychain: KeychainStore?
     private let launchTestDataDirectory: URL?
     private var stopped = false
+    private var localNetworkStarted = false
 
     init(
         container: AppContainer,
@@ -304,7 +305,6 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             trust: DeviceTrust(trustedIDs: currentTrust.trustedDeviceIDs)
         )
         browser.observeTrust(trustRepository)
-        browser.start()
         cleanup.push { await browser.stop() }
         let advertiser = try BonjourPeerAdvertiser(
             device: identity.id,
@@ -314,7 +314,6 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             // advertised TCP endpoint is discovery evidence only.
             connection.cancel()
         }
-        advertiser.start()
         cleanup.push { await advertiser.stopAndWait() }
 
         let trustPersistenceTask = Task {
@@ -493,6 +492,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             receiveEvents: { await receiveEvents.stream() },
             receiveCompletionState: receiveEvents.completionState,
             runtimeIdentityID: identity.id,
+            localNetworkState: { (browser.state(), advertiser.state()) },
             sourceAccess: configuration.namespace.directoryAuthorizationMode == .securityScopedBookmarks ? UserSelectedSourceAccess() : nil
         )
         return ProductionAppRuntime(
@@ -556,6 +556,17 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
 
     func reconnectPublicService() async {
         await publicServiceLifecycle?.reconnectNow()
+        if localNetworkStarted {
+            browser?.start()
+            advertiser?.start()
+        }
+    }
+
+    func startLocalNetwork() async {
+        guard !stopped else { return }
+        localNetworkStarted = true
+        browser?.start()
+        advertiser?.start()
     }
 }
 
