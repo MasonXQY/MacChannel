@@ -2,6 +2,13 @@
 
 Status: PROPOSAL ONLY — no runtime approval, upload, or deployment.
 
+Apple requires accurate disclosure of the app's and integrated partners' data
+practices, including data retained for app functionality; its definition of
+collection depends on off-device access and retention beyond servicing the
+request in real time. See [Apple App Privacy details](https://developer.apple.com/app-store/app-privacy-details/),
+checked September 6, 2026. The independently signed evidence machinery below is
+this project's existing assurance requirement, not an Apple-mandated tool.
+
 ## Verified current blocker
 
 `Scripts/audit-privacy.sh` intentionally ignores runtime evidence and exits 2.
