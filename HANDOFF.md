@@ -12,7 +12,8 @@ Owner confirmed the offline fixture verifier design and asked to develop under t
 - Plan: docs/superpowers/plans/2026-09-06-offline-privacy-verifier.md.
 - Task 1 canonical/schema complete at `97d7d17`: tests/vet passed; missing coverage fixed; independent review Approved.
 - Task 2 in-memory signature/artifact/receipt/time integrity complete at `36f8196`: offline tests/race/vet passed per report (20 top-level tests, 88 pass events including subtests/package); independent review Approved. No real runtime privacy acceptance implied.
-- Tasks 3 safe native input loading and 4 CLI/contracts now in progress with disjoint file ownership. Root integrates and verifies the finished tool. Reports: `.superpowers/sdd/verifier-task-{1,2,3,4}-report.md`.
+- Task3 implemented c5fd9f9 + size coverage fc2ed51; task review Approved. Task4 implemented d42b0b5, report ba25885; task review Approved. Root fresh full runner passed atfc2ed51 with GOFLAGS=-count=1, preserving runtime/Store exit2. Reports: `.superpowers/sdd/verifier-task-{1,2,3,4}-report.md`.
+- Final whole-feature review ac40136..fc2ed51 found one P1: root symlink paths ending slash/dot may bypass no-follow root check. Fix in progress in reader files; do not hand off as complete until real filesystem regression, corrected implementation and focused re-review pass. No other actionable final findings.
 - Existing Store logo refresh and privacy scanner repair are complete in earlier commits. Latest scanner repair `3a076bd` removes fragile fingerprint stdout exceptions; review approved. Previous checks apply to that revision, not an implemented verifier.
 - App Store release is still blocked by production privacy evidence, final archive/disclosure/export checks and installed two-Mac acceptance. Offline test evidence cannot clear these gates.
 
