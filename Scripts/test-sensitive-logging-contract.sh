@@ -84,8 +84,8 @@ assert_adjacent_helper_leak_rejected audit-app-store-prerequisites.sh
 assert_rejected_copy test-app-store-prerequisites-contract.sh \
     $'payload="private fixture payload"\nprintf \'%s\\n\' "$payload"'
 
-# It must reject sensitive output from Swift, Go, and a test-named shell script.
-for mutation_root in App Services/rendezvous Scripts; do
+# It must reject sensitive output from Swift, service Go, tool Go, and a test-named shell script.
+for mutation_root in App Services/rendezvous Scripts Tools/PrivacyEvidenceVerifier; do
     temporary_path="$(mktemp "$repository_root/$mutation_root/SensitiveLoggingMutation.XXXXXX")"
     case "$mutation_root" in
         App)
@@ -104,6 +104,12 @@ for mutation_root in App Services/rendezvous Scripts; do
             mutation_path="$repository_root/Scripts/test-sensitive-console-${temporary_path##*.}.sh"
             mv "$temporary_path" "$mutation_path"
             mutation_source=$'#!/usr/bin/env bash\nprintf "filename=%s\\n" "$filename"'
+            printf '%s\n' "$mutation_source" > "$mutation_path"
+            ;;
+        Tools/PrivacyEvidenceVerifier)
+            mutation_path="$temporary_path.go"
+            mv "$temporary_path" "$mutation_path"
+            mutation_source=$'package verifiermutation\nimport "fmt"\nfunc sensitiveLoggingMutation(payload string) {\n    fmt.Printf("payload=%s", payload)\n}'
             printf '%s\n' "$mutation_source" > "$mutation_path"
             ;;
     esac
