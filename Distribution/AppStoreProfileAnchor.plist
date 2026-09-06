@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>product</key>
+    <string>DropMesh</string>
+    <key>bundleIdentifier</key>
+    <string>com.zensystech.dropmesh</string>
+    <key>applicationIdentifier</key>
+    <string>XKAZ67HN45.com.zensystech.dropmesh</string>
+    <key>teamID</key>
+    <string>XKAZ67HN45</string>
+    <key>sku</key>
+    <string>dropmesh-macos-130</string>
+    <key>appStoreID</key>
+    <string>BLOCKED_PENDING_APP_STORE_CONNECT</string>
+    <key>developmentProfileUUID</key>
+    <string>BLOCKED_PENDING_APPLE_DEVELOPER</string>
+    <key>distributionProfileUUID</key>
+    <string>BLOCKED_PENDING_APPLE_DEVELOPER</string>
+</dict>
+</plist>
