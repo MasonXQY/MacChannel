@@ -66,7 +66,10 @@ cat >"$security_output" <<'EOF'
   1) AAAABBBBCCCCDDDDEEEEFFFF0000111122223333 "Apple Distribution: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)"
      1 valid identities found
 EOF
-test "$(macchannel_resolve_store_identity 'Apple Distribution: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' "$security_output")" = AAAABBBBCCCCDDDDEEEEFFFF0000111122223333
+identity_stdout="$test_root/identity-stdout.txt"
+macchannel_resolve_store_identity 'Apple Distribution: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' "$security_output" >"$identity_stdout"
+test ! -s "$identity_stdout"
+test "$macchannel_resolved_store_identity_fingerprint" = AAAABBBBCCCCDDDDEEEEFFFF0000111122223333
 
 for rejected in \
     'Apple Development: Qianyao Xu (XKAZ67HN45)' \
@@ -75,6 +78,7 @@ for rejected in \
     if macchannel_resolve_store_identity "$rejected" "$security_output" >/dev/null 2>&1; then
         echo "invalid Store identity unexpectedly accepted: $rejected" >&2; exit 1
     fi
+    test -z "$macchannel_resolved_store_identity_fingerprint"
 done
 cat >"$security_output" <<'EOF'
   1) AAAABBBBCCCCDDDDEEEEFFFF0000111122223333 "Apple Distribution: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)"
@@ -83,6 +87,7 @@ EOF
 if macchannel_resolve_store_identity 'Apple Distribution: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)' "$security_output" >/dev/null 2>&1; then
     echo "ambiguous Store identity unexpectedly accepted" >&2; exit 1
 fi
+test -z "$macchannel_resolved_store_identity_fingerprint"
 
 store_identity='Apple Distribution: ZENSYS TECHNOLOGIES - FZCO (XKAZ67HN45)'
 /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -subj "/OU=XKAZ67HN45/CN=$store_identity" -days 1 \

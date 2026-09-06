@@ -26,8 +26,10 @@ trap 'rm -rf "$work_root"' EXIT
 block() { blockers+=("$1"); }
 plist_value() { plutil -extract "$2" raw -o - "$1" 2>/dev/null || true; }
 
+identity_fingerprint_result=""
 identity_fingerprint() {
     local requested="$1" listing="$2" policy="$3" count=0 fingerprint="" line label candidate
+    identity_fingerprint_result=""
     case "$policy:$requested" in
         development:"Apple Development: "*|development:"Mac Developer: "*)
             [[ "$requested" =~ \([A-Z0-9]{10}\)$ ]] || return 1
@@ -46,7 +48,7 @@ identity_fingerprint() {
         count=$((count + 1))
     done <"$listing"
     [[ "$count" -eq 1 ]] || return 1
-    printf '%s\n' "$fingerprint"
+    identity_fingerprint_result="$fingerprint"
 }
 
 check_profile() {
@@ -75,22 +77,25 @@ development_fingerprint=""; application_fingerprint=""; installer_fingerprint=""
 if ! security find-identity -v -p codesigning >"$codesigning_listing" 2>/dev/null; then
     block "installed code-signing identities and private keys could not be queried"
 else
-    if ! development_fingerprint="$(identity_fingerprint "$development_identity" "$codesigning_listing" development)"; then
+    if ! identity_fingerprint "$development_identity" "$codesigning_listing" development; then
         block "exactly one development identity with a private key is required"
     else
+        development_fingerprint="$identity_fingerprint_result"
         printf 'development certificate subject: %s\n' "$development_identity"
     fi
-    if ! application_fingerprint="$(identity_fingerprint "$application_identity" "$codesigning_listing" application)"; then
+    if ! identity_fingerprint "$application_identity" "$codesigning_listing" application; then
         block "exactly one Store application identity with a private key is required"
     else
+        application_fingerprint="$identity_fingerprint_result"
         printf 'application certificate subject: %s\n' "$application_identity"
     fi
 fi
 if ! security find-identity -v >"$all_listing" 2>/dev/null; then
     block "installed installer identities and private keys could not be queried"
-elif ! installer_fingerprint="$(identity_fingerprint "$installer_identity" "$all_listing" installer)"; then
+elif ! identity_fingerprint "$installer_identity" "$all_listing" installer; then
     block "exactly one Store installer identity with a private key is required"
 else
+    installer_fingerprint="$identity_fingerprint_result"
     printf 'installer certificate subject: %s\n' "$installer_identity"
 fi
 

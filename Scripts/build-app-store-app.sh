@@ -47,7 +47,8 @@ macchannel_validate_macos_profile "$profile_plist" distribution "$macchannel_app
 
 identity_listing="$work_root/identities.txt"
 security find-identity -v -p codesigning >"$identity_listing" 2>/dev/null || fail "unable to query signing identities"
-identity_fingerprint="$(macchannel_resolve_store_identity "$identity" "$identity_listing")" || fail "exactly one approved Store application identity for Team XKAZ67HN45 is required"
+macchannel_resolve_store_identity "$identity" "$identity_listing" || fail "exactly one approved Store application identity for Team XKAZ67HN45 is required"
+identity_fingerprint="$macchannel_resolved_store_identity_fingerprint"
 macchannel_require_profile_certificate "$profile_plist" "$identity_fingerprint" "$identity" || fail "selected Store signing certificate is not included in the provisioning profile or has inconsistent certificate identity"
 
 HOME_VALUE="${HOME:?}"

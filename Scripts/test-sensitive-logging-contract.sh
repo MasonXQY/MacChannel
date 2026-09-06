@@ -48,7 +48,7 @@ assert_adjacent_helper_leak_rejected() {
     local leak_line=$'    printf \'%s\\n\' "$private_key"'
     mutation_path="$test_root/Scripts/$source_name"
     cp "$repository_root/Scripts/$source_name" "$mutation_path"
-    sed -i '' '/^[[:space:]]*printf '\''%s\\n'\'' "$fingerprint"/a\
+    sed -i '' '/^[[:space:]]*[[:alnum:]_]*fingerprint[[:alnum:]_]*="$fingerprint"/a\
 '"$leak_line"'
 ' "$mutation_path"
     if bash "$repository_root/Scripts/check-sensitive-logging.sh" "$mutation_path" >/dev/null 2>&1; then
@@ -58,9 +58,26 @@ assert_adjacent_helper_leak_rejected() {
     mutation_path=""
 }
 
+assert_parser_confusion_rejected() {
+    local source_name="$1"
+    mutation_path="$test_root/Scripts/$source_name"
+    cp "$repository_root/Scripts/$source_name" "$mutation_path"
+    printf '\n%s\n' \
+        "cat <<'FAKE_FUNCTION_HEADER'" \
+        'macchannel_resolve_store_identity() {' \
+        'FAKE_FUNCTION_HEADER' \
+        'printf '\''%s\n'\'' "$fingerprint"' >>"$mutation_path"
+    if bash "$repository_root/Scripts/check-sensitive-logging.sh" "$mutation_path" >/dev/null 2>&1; then
+        echo "sensitive logging scan accepted output after a heredoc-spoofed helper boundary" >&2
+        exit 1
+    fi
+    mutation_path=""
+}
+
 assert_rejected_copy app-store-validation.sh \
     $'unrelated_fingerprint_output() {\n    local fingerprint="$1"\n    printf \'%s\\n\' "$fingerprint"\n}'
 assert_adjacent_helper_leak_rejected app-store-validation.sh
+assert_parser_confusion_rejected app-store-validation.sh
 assert_rejected_copy audit-app-store-prerequisites.sh \
     $'unrelated_fingerprint_output() {\n    local fingerprint="$1"\n    printf \'%s\\n\' "$fingerprint"\n}'
 assert_adjacent_helper_leak_rejected audit-app-store-prerequisites.sh

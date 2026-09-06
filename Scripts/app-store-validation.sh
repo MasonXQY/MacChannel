@@ -82,10 +82,12 @@ macchannel_validate_signed_app_entitlements() {
     done
 }
 
+macchannel_resolved_store_identity_fingerprint=""
 macchannel_resolve_store_identity() {
     local requested="$1"
     local identity_listing="$2"
     local expected_team=XKAZ67HN45
+    macchannel_resolved_store_identity_fingerprint=""
     case "$requested" in
         "Apple Distribution: "*" ($expected_team)"|\
         "Mac App Distribution: "*" ($expected_team)"|\
@@ -105,7 +107,7 @@ macchannel_resolve_store_identity() {
         count=$((count + 1))
     done <"$identity_listing"
     [[ "$count" -eq 1 ]] || return 1
-    printf '%s\n' "$fingerprint"
+    macchannel_resolved_store_identity_fingerprint="$fingerprint"
 }
 
 macchannel_require_profile_certificate() {
