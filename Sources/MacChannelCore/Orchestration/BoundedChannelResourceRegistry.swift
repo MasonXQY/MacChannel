@@ -41,9 +41,10 @@ actor BoundedChannelResourceRegistry {
 
     private var reservations: [UUID: Reservation] = [:]
     private struct ReservationWaiter {
+        let id: UUID
         let direction: Direction
         let onReleased: @Sendable () async -> Void
-        let continuation: CheckedContinuation<Token, Never>
+        let continuation: CheckedContinuation<Token?, Never>
     }
     private var reservationWaiters: [ReservationWaiter] = []
 
@@ -61,17 +62,28 @@ actor BoundedChannelResourceRegistry {
         _ direction: Direction,
         onReleased: @escaping @Sendable () async -> Void
     ) async -> Token? {
+        guard !Task.isCancelled else { return nil }
         if let token = makeReservation(direction, onReleased: onReleased) { return token }
         guard reservationWaiters.count < Self.maximumWaitingReservations else { return nil }
-        return await withCheckedContinuation { continuation in
-            reservationWaiters.append(
-                ReservationWaiter(
-                    direction: direction,
-                    onReleased: onReleased,
-                    continuation: continuation
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(returning: nil); return }
+                reservationWaiters.append(
+                    ReservationWaiter(
+                        id: id, direction: direction,
+                        onReleased: onReleased, continuation: continuation
+                    )
                 )
-            )
+            }
+        } onCancel: {
+            Task { await self.cancelReservationWaiter(id) }
         }
+    }
+
+    private func cancelReservationWaiter(_ id: UUID) {
+        guard let index = reservationWaiters.firstIndex(where: { $0.id == id }) else { return }
+        reservationWaiters.remove(at: index).continuation.resume(returning: nil)
     }
 
     private func makeReservation(
@@ -211,7 +223,9 @@ actor IncomingChannelCloseRegistry {
 
     private let resources = BoundedChannelResourceRegistry.shared
     private struct Waiter {
-        let continuation: CheckedContinuation<Permit, Never>
+        let id: UUID
+        let owner: UUID?
+        let continuation: CheckedContinuation<Permit?, Never>
     }
     private struct CloseRequest {
         let channel: any SecureChannel
@@ -220,6 +234,8 @@ actor IncomingChannelCloseRegistry {
     }
 
     private var admittedPermits: Set<Permit> = []
+    private var permitOwners: [Permit: UUID] = [:]
+    private var drainWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     private var admissionWaiters: [Waiter] = []
     private var closingPermits: Set<Permit> = []
     private var activeClosePermits: Set<Permit> = []
@@ -229,18 +245,25 @@ actor IncomingChannelCloseRegistry {
     /// Reserves cleanup ownership before a source is asked for its next
     /// channel. At most 34 channels and four additional channel-free readers
     /// may be retained process-wide.
-    func acquire() async -> Permit? {
+    func acquire(owner: UUID? = nil) async -> Permit? {
         guard !Task.isCancelled else { return nil }
         if admittedPermits.count < Self.maximumAdmittedChannels {
-            return makePermit()
+            return makePermit(owner: owner)
         }
         guard admissionWaiters.count < Self.maximumWaitingReaders else { return nil }
-        let permit = await waitForCapacity()
+        guard let permit = await waitForCapacity(owner: owner) else { return nil }
         guard !Task.isCancelled else {
             releasePermit(permit)
             return nil
         }
         return permit
+    }
+
+    /// The listener first joins its reader and scheduler, so no more permits
+    /// can enter this owner scope. Only this owner's permits join the drain.
+    func waitForDrain(owner: UUID) async {
+        guard permitOwners.values.contains(owner) else { return }
+        await withCheckedContinuation { drainWaiters[owner, default: []].append($0) }
     }
 
     func close(
@@ -273,25 +296,40 @@ actor IncomingChannelCloseRegistry {
         scheduleCloseWorker()
     }
 
-    private func makePermit() -> Permit {
+    private func makePermit(owner: UUID?) -> Permit {
         let permit = Permit(id: UUID())
         admittedPermits.insert(permit)
+        permitOwners[permit] = owner
         return permit
     }
 
-    private func waitForCapacity() async -> Permit {
-        await withCheckedContinuation { continuation in
-            admissionWaiters.append(Waiter(continuation: continuation))
+    private func waitForCapacity(owner: UUID?) async -> Permit? {
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(returning: nil); return }
+                admissionWaiters.append(Waiter(id: id, owner: owner, continuation: continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelAdmissionWaiter(id) }
         }
+    }
+
+    private func cancelAdmissionWaiter(_ id: UUID) {
+        guard let index = admissionWaiters.firstIndex(where: { $0.id == id }) else { return }
+        admissionWaiters.remove(at: index).continuation.resume(returning: nil)
     }
 
     private func releasePermit(_ permit: Permit) {
         guard admittedPermits.remove(permit) != nil else { return }
         closingPermits.remove(permit)
         activeClosePermits.remove(permit)
+        if let owner = permitOwners.removeValue(forKey: permit), !permitOwners.values.contains(owner) {
+            drainWaiters.removeValue(forKey: owner)?.forEach { $0.resume() }
+        }
         guard !admissionWaiters.isEmpty else { return }
         let waiter = admissionWaiters.removeFirst()
-        waiter.continuation.resume(returning: makePermit())
+        waiter.continuation.resume(returning: makePermit(owner: waiter.owner))
     }
 
     private func scheduleCloseWorker() {

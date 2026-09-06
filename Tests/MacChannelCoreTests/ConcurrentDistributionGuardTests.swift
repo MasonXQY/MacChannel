@@ -72,11 +72,16 @@ final class ConcurrentDistributionGuardTests: XCTestCase {
         let listener = WebRTCConnectionListener(directory: directory, identity: identity, trustRepository: trust,
                                                signaling: RendezvousWebRTCSignaling(session: signals),
                                                ice: ICEConfiguration(stunURLs: [], turnServers: []))
-        _ = await listener.connections()
         let events = RuntimeReceiveEventSource()
         let stream = await events.stream()
         let database = try TransferDatabase(url: root.appendingPathComponent("transfers.sqlite3"))
         let settings = try RuntimeSettingsStore(url: root.appendingPathComponent("settings.json"), trustedDevices: [])
+        let incoming = IncomingRuntimeController(source: listener, trustRepository: trust, settings: settings,
+            database: database, incomingDirectory: root.appendingPathComponent("Incoming"),
+            ownerID: identity.id, onReceiveFinished: { result in
+                if let result { await events.publish(result) }
+            })
+        await incoming.start()
         let history = RuntimeHistorySource(database: database, settings: settings,
                                           outputLocator: try RuntimeOutputLocator(url: root.appendingPathComponent("outputs.json")))
         let pipe = Pipe()
@@ -91,7 +96,7 @@ final class ConcurrentDistributionGuardTests: XCTestCase {
             historySource: history, receiveEvents: events, statusSource: RuntimeStatusSource(),
             publicServiceLifecycle: nil, publicServiceStatusTask: nil, publicServiceTrustTask: nil,
             signalSession: nil, pairingTransport: nil, connectionListener: listener,
-            incomingController: nil, transferCoordinator: nil, trustRepository: trust,
+            incomingController: incoming, transferCoordinator: nil, trustRepository: trust,
             trustStore: CoexistenceTrustStore(), launchTestKeychain: nil, launchTestDataDirectory: nil)
         let apps = RunningAppsFixture()
         let host = AppRuntimeHost(builder: ProductionResourceBuilder(runtime: runtime),

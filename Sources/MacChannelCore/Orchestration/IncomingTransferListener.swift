@@ -88,6 +88,7 @@ public actor IncomingTransferListener {
     private let onReceiveFailed: @Sendable (TransferID, IncomingTransferFailure) async -> Void
     private let resources = BoundedChannelResourceRegistry.shared
     private let closeRegistry = IncomingChannelCloseRegistry.shared
+    private let resourceOwner = UUID()
 
     private var readerTask: Task<Void, Never>?
     private var pending: [AdmittedConnection] = []
@@ -95,6 +96,7 @@ public actor IncomingTransferListener {
     private var activeTransferIDs: Set<TransferID> = []
     private var schedulingWorker: Task<Void, Never>?
     private var stopped = false
+    private var stopTask: Task<Void, Never>?
 
     public init(
         source: any IncomingTransferConnectionSource,
@@ -126,9 +128,9 @@ public actor IncomingTransferListener {
 
     public func start() {
         guard !stopped, readerTask == nil else { return }
-        readerTask = Task { [weak self, source, closeRegistry, timeout = inactivityTimeout] in
+        readerTask = Task { [weak self, source, closeRegistry, resourceOwner, timeout = inactivityTimeout] in
             do {
-                guard let initialPermit = await closeRegistry.acquire() else {
+                guard let initialPermit = await closeRegistry.acquire(owner: resourceOwner) else {
                     await self?.sourceEnded()
                     return
                 }
@@ -163,7 +165,7 @@ public actor IncomingTransferListener {
                         AdmittedConnection(connection: connection, permit: currentPermit)
                     )
                     guard !Task.isCancelled else { return }
-                    permit = await closeRegistry.acquire()
+                    permit = await closeRegistry.acquire(owner: resourceOwner)
                 }
             } catch {
                 await self?.sourceEnded()
@@ -172,30 +174,38 @@ public actor IncomingTransferListener {
     }
 
     public func stop() async {
-        guard !stopped else { return }
+        if let stopTask { await stopTask.value; return }
         stopped = true
+        let reader = readerTask
         readerTask?.cancel()
         readerTask = nil
+        let scheduler = schedulingWorker
+        schedulingWorker?.cancel()
         let queued = pending
         pending.removeAll()
         let receives = Array(active.values)
         active.removeAll()
         activeTransferIDs.removeAll()
         for receive in receives { receive.task.cancel() }
-        for receive in receives {
-            await resources.beginClose(
-                receive.channel,
-                token: receive.resourceToken,
-                timeout: inactivityTimeout
-            )
+        let task = Task {
+            // Start close before joining runners: close can unblock their I/O.
+            for receive in receives {
+                await resources.beginClose(receive.channel, token: receive.resourceToken,
+                                           timeout: inactivityTimeout)
+            }
+            for connection in queued {
+                await closeRegistry.close(connection.connection.channel, permit: connection.permit,
+                                          timeout: inactivityTimeout)
+            }
+            await reader?.value
+            await scheduler?.value
+            for receive in receives { await receive.task.value }
+            // Permits survive runner return until close and every detached I/O
+            // operation return. Drain only this listener, not the shared pool.
+            await closeRegistry.waitForDrain(owner: resourceOwner)
         }
-        for connection in queued {
-            await closeRegistry.close(
-                connection.connection.channel,
-                permit: connection.permit,
-                timeout: inactivityTimeout
-            )
-        }
+        stopTask = task
+        await task.value
     }
 
     private func enqueue(_ admitted: AdmittedConnection) async {
@@ -216,7 +226,7 @@ public actor IncomingTransferListener {
     }
 
     private func schedule() {
-        guard schedulingWorker == nil else { return }
+        guard !stopped, schedulingWorker == nil else { return }
         schedulingWorker = Task { [weak self] in
             await self?.drainSchedule()
         }
@@ -224,7 +234,7 @@ public actor IncomingTransferListener {
 
     private func drainSchedule() async {
         defer { schedulingWorker = nil }
-        while active.count < IncomingTransferCapacity.maximumActiveTransfers, !pending.isEmpty {
+        while !stopped, active.count < IncomingTransferCapacity.maximumActiveTransfers, !pending.isEmpty {
             let admitted = pending.removeFirst()
             let connection = admitted.connection
             let permit = admitted.permit
