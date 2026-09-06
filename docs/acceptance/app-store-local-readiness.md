@@ -33,6 +33,14 @@ Source revision: `540130b17f33687230df139bd2cf544ff19f6c95`; report-only HEAD: `
 - Apple generated `DropMesh Mac App Store 2026` (portal ID `G5HPS9SQ2Y`) and `DropMesh Mac Development 2026` (portal ID `7NFG8WD74K`), both for the explicit DropMesh App ID and expiring September 6, 2027. Development includes only the already registered `macstudioultra` and existing development certificate. Portal IDs are not profile UUIDs: do not substitute them into the profile anchor. Downloads, cryptographic profile verification, installation, and upload authentication remain pending.
 - User supplied the monitored public support/privacy contact `xuqy87@gmail.com` on 2026-09-06. Use this for the bilingual support/privacy pages; do not use the retired `zensys-tech.com` domain. The pages have not yet been published.
 
-## Safety boundary
+## Subsequent signing and universal-build checks
+
+On September 6, 2026, both downloaded provisioning profiles passed the native Apple-anchored CMS verifier and embedded-certificate matching. Installed copies were compared with their originals. Store UUID: `926d4f74-8df1-403a-b5d7-4036198e6fef`; development UUID: `c6673df6-8824-40f4-a117-1ddbae4d4a6c`. The anchor now records those UUIDs. Compatibility fix `bb91ab0` accepts Apple's macOS entitlement shape. Fresh validation, source, and prerequisite contracts passed. The actual installed-profile and identity audit exits 2 with exactly one blocker: upload authentication is missing. Independent compatibility review is pending; this is not a full prerequisite PASS.
+
+The universal `swift build -c release --product DropMeshAppStore --arch arm64 --arch x86_64` completed successfully. This is a compiled executable, not a signed Store app or installed acceptance result.
+
+Actual application signing and strict verification passed on an isolated harmless probe. Installer signing and `pkgutil --check-signature` passed on an isolated no-payload package using the new installer identity and Apple's certificate chain. Neither probe was installed or launched. These checks establish usable signing identities, not final candidate approval. Export compliance, privacy evidence, upload authentication, and installed acceptance remain pending.
+
+## Unchanged safety boundary
 
 No replacement of `/Applications`, installed Direct app, user data, remote Mac B, production services, or public website was performed. Portal setup subsequently created only the isolated DropMesh App ID and App Store Connect draft described above. No merge, release, build upload, or submission has occurred. Local build evidence is not proof of signed sandbox or installed coexistence behavior.
