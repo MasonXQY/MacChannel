@@ -56,3 +56,9 @@ Second-review RED/GREEN evidence:
 - `swift test --no-parallel --filter DeviceDirectoryTests`: 39 tests, 0 failures.
 - `swift test --no-parallel --filter ReceiveNotificationControllerTests`: 34 tests, 0 failures.
 - Final focused replacement and latest-snapshot tests each passed independently; `git diff --check` passed. Per review direction, the already-green full suite and Direct baseline were not rerun for this limited follow-up.
+
+## Final bounded-invalidation follow-up
+
+- Replaced the append-only stale notification identifier set with a capacity- and TTL-bounded cache using the existing notification target retention values. Capacity eviction cannot reopen a stale response during the defined response window: a single bounded replacement deadline rejects unregistered delivered responses, while notifications delivered by the current worker remain registered and actionable. Cancellation-insensitive late delivery still removes its stale system notification even if its cache entry has expired or been evicted.
+- `testInvalidatedNotificationIdentifiersStayBoundedAndExpire` verifies deterministic oldest-entry eviction and TTL pruning. The existing cancellation-insensitive replacement regression verifies stale removal/callback rejection and successful delivery from the current container.
+- Focused verification: `ReceiveNotificationControllerTests` 35 passed, 0 failures; the replacement regression passed independently; `git diff --check` passed. Per review direction, no full suite or Direct build/baseline was repeated.

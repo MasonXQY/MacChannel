@@ -6,6 +6,24 @@ import XCTest
 
 @MainActor
 final class ReceiveNotificationControllerTests: XCTestCase {
+    func testInvalidatedNotificationIdentifiersStayBoundedAndExpire() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        var identifiers = ExpiringReceiveNotificationIdentifiers(capacity: 2, ttl: 10)
+
+        identifiers.insert("first", now: start)
+        identifiers.insert("second", now: start.addingTimeInterval(1))
+        identifiers.insert("third", now: start.addingTimeInterval(2))
+
+        XCTAssertEqual(identifiers.count, 2)
+        XCTAssertFalse(identifiers.contains("first", now: start.addingTimeInterval(2)))
+        XCTAssertTrue(identifiers.contains("second", now: start.addingTimeInterval(2)))
+        XCTAssertTrue(identifiers.contains("third", now: start.addingTimeInterval(2)))
+        XCTAssertFalse(identifiers.contains("second", now: start.addingTimeInterval(12)))
+        XCTAssertEqual(identifiers.count, 1)
+        XCTAssertFalse(identifiers.contains("third", now: start.addingTimeInterval(13)))
+        XCTAssertEqual(identifiers.count, 0)
+    }
+
     func testForegroundNotificationUsesModernPresentationSurfacesAndCompletesOnce() {
         var completionCount = 0
         var observedOptions: UNNotificationPresentationOptions = []

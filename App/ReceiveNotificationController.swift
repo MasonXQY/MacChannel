@@ -191,6 +191,46 @@ private final class ReceiveAuthorizationOperationWaiters: @unchecked Sendable {
     }
 }
 
+struct ExpiringReceiveNotificationIdentifiers {
+    private struct Entry {
+        let createdAt: Date
+        let order: UInt64
+    }
+
+    private var entries: [String: Entry] = [:]
+    private var order: UInt64 = 0
+    let capacity: Int
+    let ttl: TimeInterval
+
+    init(capacity: Int, ttl: TimeInterval) {
+        self.capacity = max(1, capacity)
+        self.ttl = max(0, ttl)
+    }
+
+    mutating func insert(_ identifier: String, now: Date) {
+        prune(now: now)
+        while entries.count >= capacity,
+              let oldest = entries.min(by: { $0.value.order < $1.value.order })?.key
+        {
+            entries.removeValue(forKey: oldest)
+        }
+        order &+= 1
+        entries[identifier] = Entry(createdAt: now, order: order)
+    }
+
+    mutating func contains(_ identifier: String, now: Date) -> Bool {
+        prune(now: now)
+        return entries[identifier] != nil
+    }
+
+    var count: Int { entries.count }
+
+    private mutating func prune(now: Date) {
+        let expiry = now.addingTimeInterval(-ttl)
+        entries = entries.filter { $0.value.createdAt >= expiry }
+    }
+}
+
 @MainActor
 final class ReceiveNotificationController {
     private enum DeliveryOutcome: Sendable {
@@ -281,7 +321,8 @@ final class ReceiveNotificationController {
     private var pendingReceiveNotifications: [TransferReceiveResult] = []
     private var notificationWorker: Task<Void, Never>?
     private var notificationWorkerID: UUID?
-    private var invalidatedNotificationIdentifiers: Set<String> = []
+    private var invalidatedNotificationIdentifiers: ExpiringReceiveNotificationIdentifiers
+    private var rejectUnregisteredDeliveredResponsesUntil: Date?
     private let pendingReceiveNotificationLimit = 64
 
     var onReceiveOpened: ((TransferID) -> Void)?
@@ -314,6 +355,10 @@ final class ReceiveNotificationController {
         self.authorizationPromptTimeout = authorizationPromptTimeout
         self.deliveryTimeout = deliveryTimeout
         self.now = now
+        invalidatedNotificationIdentifiers = ExpiringReceiveNotificationIdentifiers(
+            capacity: notificationTargetCapacity,
+            ttl: notificationTargetTTL
+        )
 
         center.setDeliveredResponseHandler { [weak self] identifier in
             await self?.openDeliveredNotification(identifier: identifier)
@@ -419,7 +464,16 @@ final class ReceiveNotificationController {
         authorizationRequestOperation?.waiters.cancel()
         authorizationRequestOperation = nil
         if let deliveryOperation {
-            invalidatedNotificationIdentifiers.insert(deliveryOperation.identifier)
+            let invalidatedAt = now()
+            invalidatedNotificationIdentifiers.insert(
+                deliveryOperation.identifier,
+                now: invalidatedAt
+            )
+            let rejectionDeadline = invalidatedAt.addingTimeInterval(notificationTargetTTL)
+            rejectUnregisteredDeliveredResponsesUntil = max(
+                rejectUnregisteredDeliveredResponsesUntil ?? .distantPast,
+                rejectionDeadline
+            )
             deliveryOperation.task.cancel()
             self.deliveryOperation = nil
         }
@@ -467,10 +521,18 @@ final class ReceiveNotificationController {
         identifier: String,
         trustsDeliveredResponse: Bool
     ) async {
-        guard !invalidatedNotificationIdentifiers.contains(identifier) else { return }
+        guard !invalidatedNotificationIdentifiers.contains(identifier, now: now()) else { return }
         pruneNotificationTargets()
         guard let requestedIdentity = NotificationIdentity(identifier: identifier) else { return }
         guard !handledNotificationTransferIDs.contains(requestedIdentity.transferID) else { return }
+
+        if trustsDeliveredResponse,
+           let deadline = rejectUnregisteredDeliveredResponsesUntil,
+           now() <= deadline,
+           deliveredNotificationIdentities[requestedIdentity.transferID] != requestedIdentity
+        {
+            return
+        }
 
         let deliveredIdentity: NotificationIdentity
         if trustsDeliveredResponse {
@@ -650,9 +712,7 @@ final class ReceiveNotificationController {
     ) {
         guard deliveryOperation?.id == id else {
             let identity = NotificationIdentity(transferID: transferID, source: source)
-            if invalidatedNotificationIdentifiers.contains(identity.identifier) {
-                center.removeDeliveredNotifications(withIdentifiers: [identity.identifier])
-            }
+            center.removeDeliveredNotifications(withIdentifiers: [identity.identifier])
             return
         }
         deliveryOperation = nil
