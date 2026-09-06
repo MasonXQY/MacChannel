@@ -258,6 +258,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         settingsModel.defaultDirectory = snapshot.defaultDirectory
         settingsModel.autoReceive = snapshot.autoReceive
         settingsModel.launchAtLogin = snapshot.launchAtLogin
+        settingsModel.actionError = snapshot.directoryAuthorizationError
         updateDeviceSettings(snapshot.devices)
         if case let .confirmed(peer) = pairingModel.state,
            !snapshot.devices.contains(where: { $0.id == peer.id })

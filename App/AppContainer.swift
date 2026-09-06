@@ -32,10 +32,15 @@ final class AppContainer {
         transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil,
         receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)? = nil,
         receiveCompletionState: RuntimeReceiveCompletionState? = nil,
-        runtimeIdentityID: DeviceID? = nil
+        runtimeIdentityID: DeviceID? = nil,
+        sourceAccess: (any UserSelectedSourceAccessing)? = nil
     ) {
         self.deviceDirectory = deviceDirectory
-        self.transferCoordinator = transferCoordinator
+        if let sourceAccess {
+            self.transferCoordinator = SourceAccessTransferCoordinator(coordinator: transferCoordinator, access: sourceAccess)
+        } else {
+            self.transferCoordinator = transferCoordinator
+        }
         self.pairingSurfaceService = pairingSurfaceService
         self.settingsSurfaceService = settingsSurfaceService
         self.directorySelector = directorySelector

@@ -6,6 +6,14 @@ import XCTest
 
 final class TransferSurfaceTests: XCTestCase {
     @MainActor
+    func testReceiveAuthorizationFailureIsVisibleAndPreservesSelectedPath() {
+        let surfaces = AppSurfaceController(transferService: StubTransferSurfaceService(), pairingService: UnavailablePairingSurfaceService(), settingsService: UnavailableDeviceSettingsService(), directorySelector: NativeDirectorySelector())
+        let destination = URL(fileURLWithPath: "/tmp/selected")
+        surfaces.updateSettings(SettingsSurfaceSnapshot(defaultDirectory: destination, devices: [], directoryAuthorizationError: "接收目录授权已失效，请重新选择目录。"))
+        XCTAssertEqual(surfaces.settingsModel.defaultDirectory, destination)
+        XCTAssertTrue(surfaces.settingsModel.actionError?.contains("重新选择目录") == true)
+    }
+    @MainActor
     func testTransferPopoverCanStartOnHistory() {
         let view = TransferPopover(
             model: TransferSurfaceModel(),

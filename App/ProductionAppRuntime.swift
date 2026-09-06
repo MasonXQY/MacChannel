@@ -4,6 +4,7 @@ import Foundation
 import MacChannelCore
 
 struct ProductionRuntimeConfiguration {
+    let namespace: RuntimeNamespace
     let dataDirectory: URL
     let rendezvousWebSocketURL: URL?
     let rendezvousHTTPOrigin: URL?
@@ -74,6 +75,7 @@ struct ProductionRuntimeConfiguration {
             .filter { !$0.isEmpty } ?? []
         let port = environment["MACCHANNEL_BONJOUR_PORT"].flatMap(UInt16.init) ?? 45_873
         return ProductionRuntimeConfiguration(
+            namespace: namespace,
             dataDirectory: directory,
             rendezvousWebSocketURL: endpoints.webSocketURL,
             rendezvousHTTPOrigin: endpoints.httpOrigin,
@@ -272,7 +274,9 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
 
         let settingsStore = try RuntimeSettingsStore(
             url: configuration.dataDirectory.appendingPathComponent("settings.json"),
-            trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id])
+            trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id]),
+            authorization: SecurityScopedDirectoryStore(mode: configuration.namespace.directoryAuthorizationMode, namespace: configuration.namespace.applicationSupportComponent),
+            defaultReceiveFolderName: configuration.namespace.defaultReceiveFolderName
         )
         let settingsSnapshot = await settingsStore.current()
         let database = try TransferDatabase(
@@ -488,7 +492,8 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             transferHistory: { await history.stream() },
             receiveEvents: { await receiveEvents.stream() },
             receiveCompletionState: receiveEvents.completionState,
-            runtimeIdentityID: identity.id
+            runtimeIdentityID: identity.id,
+            sourceAccess: configuration.namespace.directoryAuthorizationMode == .securityScopedBookmarks ? UserSelectedSourceAccess() : nil
         )
         return ProductionAppRuntime(
             container: container,
@@ -592,6 +597,15 @@ final class RuntimeStatusSource: @unchecked Sendable {
 protocol RuntimeReceiveSettingsProviding: Sendable {
     func current() async -> SettingsSurfaceSnapshot
     func downloadDirectory() async -> DownloadDirectory
+    func authorizeReceiveDirectories() async throws -> AuthorizedReceiveDirectories
+    func reportDirectoryAuthorizationError(_ message: String?) async
+}
+
+extension RuntimeReceiveSettingsProviding {
+    func authorizeReceiveDirectories() async throws -> AuthorizedReceiveDirectories {
+        AuthorizedReceiveDirectories(directories: await downloadDirectory(), leases: [])
+    }
+    func reportDirectoryAuthorizationError(_ message: String?) async {}
 }
 
 actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
@@ -600,25 +614,34 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
         var autoAccept: Bool
         var maximumBytes: UInt64?
         var directoryPath: String?
+        var directoryReference: StoredDirectoryReference?
     }
     private struct Wire: Codable {
         var schemaVersion: Int?
         var localDisplayName: String?
         var defaultDirectoryPath: String?
+        var defaultDirectoryReference: StoredDirectoryReference?
         var autoReceive: Bool?
         var launchAtLogin: Bool?
         var devices: [UUID: DeviceWire]
     }
 
     private let url: URL
+    nonisolated let authorization: SecurityScopedDirectoryStore
+    private let defaultReceiveFolderName: String
     private var wire: Wire
+    private var directoryAuthorizationError: String?
     private var subscribers: [UUID: AsyncStream<SettingsSurfaceSnapshot>.Continuation] = [:]
 
     init(
         url: URL,
-        trustedDevices: Set<DeviceID>
+        trustedDevices: Set<DeviceID>,
+        authorization: SecurityScopedDirectoryStore = SecurityScopedDirectoryStore(mode: .directPath, namespace: "MacChannel"),
+        defaultReceiveFolderName: String = "Mac 通道"
     ) throws {
         self.url = url
+        self.authorization = authorization
+        self.defaultReceiveFolderName = defaultReceiveFolderName
         let existed = FileManager.default.fileExists(atPath: url.path)
         if existed {
             wire = try JSONDecoder().decode(Wire.self, from: Data(contentsOf: url))
@@ -632,7 +655,15 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
                 devices: [:]
             )
         }
-        wire.schemaVersion = 2
+        wire.schemaVersion = 3
+        if wire.defaultDirectoryReference == nil, let path = wire.defaultDirectoryPath {
+            wire.defaultDirectoryReference = StoredDirectoryReference(path: path, bookmark: nil)
+        }
+        for id in wire.devices.keys {
+            if wire.devices[id]?.directoryReference == nil, let path = wire.devices[id]?.directoryPath {
+                wire.devices[id]?.directoryReference = StoredDirectoryReference(path: path, bookmark: nil)
+            }
+        }
         if wire.localDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             != false
         {
@@ -688,7 +719,16 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
     }
 
     func updateDefaultDirectory(_ directory: URL) throws {
-        try mutate { $0.defaultDirectoryPath = directory.standardizedFileURL.path }
+        try updateDefaultDirectoryReference(authorization.select(directory, settingKey: "default"))
+    }
+
+    func updateDefaultDirectoryReference(_ reference: StoredDirectoryReference) throws {
+        let validated = try authorization.resolve(reference, settingKey: "default")
+        defer { validated.lease.release() }
+        try mutate {
+            $0.defaultDirectoryPath = validated.reference.path
+            $0.defaultDirectoryReference = validated.reference
+        }
     }
 
     func updateLocalDisplayName(_ name: String) throws {
@@ -706,11 +746,18 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
     }
 
     func updateDirectory(_ directory: URL?, for id: DeviceID) throws {
+        try updateDirectoryReference(directory.map { try authorization.select($0, settingKey: id.rawValue.uuidString) }, for: id)
+    }
+
+    func updateDirectoryReference(_ reference: StoredDirectoryReference?, for id: DeviceID) throws {
+        let validated = try reference.map { try authorization.resolve($0, settingKey: id.rawValue.uuidString) }
+        defer { validated?.lease.release() }
         try mutate { candidate in
             guard candidate.devices[id.rawValue] != nil else {
                 throw SettingsStoreError.unknownDevice
             }
-            candidate.devices[id.rawValue]?.directoryPath = directory?.standardizedFileURL.path
+            candidate.devices[id.rawValue]?.directoryPath = validated?.reference.path
+            candidate.devices[id.rawValue]?.directoryReference = validated?.reference
         }
     }
 
@@ -723,7 +770,8 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
                     : device.displayName,
                 autoAccept: previous?.autoAccept ?? true,
                 maximumBytes: previous?.maximumBytes,
-                directoryPath: previous?.directoryPath
+                directoryPath: previous?.directoryPath,
+                directoryReference: previous?.directoryReference
             )
         }
     }
@@ -734,8 +782,44 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
             perSource: Dictionary(
                 uniqueKeysWithValues: wire.devices.compactMap { id, value in
                     value.directoryPath.map { (DeviceID(rawValue: id), URL(fileURLWithPath: $0)) }
-                })
+                }),
+            defaultFolderName: defaultReceiveFolderName
         )
+    }
+
+    func authorizeReceiveDirectories() async throws -> AuthorizedReceiveDirectories {
+        var candidate = wire
+        var leases: [any UserSelectedSourceLease] = []
+        do {
+            if let reference = candidate.defaultDirectoryReference {
+                let resolved = try authorization.resolve(reference, settingKey: "default")
+                leases.append(resolved.lease)
+                candidate.defaultDirectoryReference = resolved.reference
+                candidate.defaultDirectoryPath = resolved.reference.path
+            }
+            for id in candidate.devices.keys {
+                if let reference = candidate.devices[id]?.directoryReference {
+                    let resolved = try authorization.resolve(reference, settingKey: id.uuidString)
+                    leases.append(resolved.lease)
+                    candidate.devices[id]?.directoryReference = resolved.reference
+                    candidate.devices[id]?.directoryPath = resolved.reference.path
+                }
+            }
+            // Commit all stale refreshes as a single durable settings transaction.
+            try persist(candidate)
+            wire = candidate
+            return AuthorizedReceiveDirectories(directories: downloadDirectory(), leases: leases)
+        } catch {
+            leases.forEach { $0.release() }
+            throw error
+        }
+    }
+
+    func reportDirectoryAuthorizationError(_ message: String?) {
+        guard directoryAuthorizationError != message else { return }
+        directoryAuthorizationError = message
+        let value = snapshot(wire)
+        subscribers.values.forEach { $0.yield(value) }
     }
 
     private func mutate(_ body: (inout Wire) throws -> Void) throws {
@@ -785,7 +869,8 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
     private func snapshot(_ wire: Wire) -> SettingsSurfaceSnapshot {
         SettingsSurfaceSnapshot(
             localDisplayName: wire.localDisplayName ?? "Mac",
-            defaultDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:)),
+            defaultDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:))
+                ?? (authorization.mode == .securityScopedBookmarks ? DownloadDirectory(defaultFolderName: defaultReceiveFolderName).defaultDirectory : nil),
             autoReceive: wire.autoReceive ?? true,
             launchAtLogin: wire.launchAtLogin ?? false,
             devices: wire.devices.map { id, value in
@@ -801,7 +886,8 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
                 )
             }.sorted {
                 $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
-            }
+            },
+            directoryAuthorizationError: directoryAuthorizationError
         )
     }
 
@@ -867,11 +953,13 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
         await onReceiveConfigurationChanged?()
     }
     func updateDefaultDirectory(_ directory: URL) async throws {
-        try await store.updateDefaultDirectory(directory)
+        let reference = try store.authorization.selectedOnMainActor(directory, settingKey: "default")
+        try await store.updateDefaultDirectoryReference(reference)
         await onReceiveConfigurationChanged?()
     }
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {
-        try await store.updateDirectory(directory, for: id)
+        let reference = try directory.map { try store.authorization.selectedOnMainActor($0, settingKey: id.rawValue.uuidString) }
+        try await store.updateDirectoryReference(reference, for: id)
         await onReceiveConfigurationChanged?()
     }
 }
@@ -1034,6 +1122,8 @@ actor IncomingRuntimeController {
     private let ownerID: DeviceID
     private let onReceiveFinished: @Sendable (TransferReceiveResult?) async -> Void
     private var listener: IncomingTransferListener?
+    private var directoryAuthorization: AuthorizedReceiveDirectories?
+    private(set) var directoryAuthorizationError: String?
     private var transitionTask: Task<Void, Never>?
     private var transitionGeneration = 0
     private var stopTask: Task<Void, Never>?
@@ -1077,11 +1167,14 @@ actor IncomingRuntimeController {
                 let previousListener = listener
                 listener = nil
                 await previousListener?.stop()
+                directoryAuthorization?.release()
+                directoryAuthorization = nil
             }
             guard !stopped, listener == nil else { return }
-            let created = await makeListener()
-            guard !stopped else { return }
+            guard let (created, authorized) = await makeListener() else { return }
+            guard !stopped else { authorized.release(); return }
             listener = created
+            directoryAuthorization = authorized
             await created.start()
         }
         transitionTask = task
@@ -1098,26 +1191,38 @@ actor IncomingRuntimeController {
             let previousListener = listener
             listener = nil
             await previousListener?.stop()
+            directoryAuthorization?.release()
+            directoryAuthorization = nil
         }
         stopTask = task
         await task.value
     }
 
-    private func makeListener() async -> IncomingTransferListener {
+    private func makeListener() async -> (IncomingTransferListener, AuthorizedReceiveDirectories)? {
         let trust = await trustRepository.currentTrustStore()
         let snapshot = await settings.current()
         let policy = RuntimeReceivePolicy.make(
             snapshot: snapshot,
             trustedSources: trust.trustedDeviceIDs.subtracting([ownerID])
         )
-        return IncomingTransferListener(
+        let authorized: AuthorizedReceiveDirectories
+        do {
+            authorized = try await settings.authorizeReceiveDirectories()
+            directoryAuthorizationError = nil
+            await settings.reportDirectoryAuthorizationError(nil)
+        } catch {
+            directoryAuthorizationError = DirectoryAuthorizationError.reselect.localizedDescription
+            await settings.reportDirectoryAuthorizationError(directoryAuthorizationError)
+            return nil
+        }
+        return (IncomingTransferListener(
             source: source,
             policy: policy,
-            directories: await settings.downloadDirectory(),
+            directories: authorized.directories,
             database: database,
             incomingDirectory: incomingDirectory,
             onReceiveFinished: onReceiveFinished
-        )
+        ), authorized)
     }
 }
 

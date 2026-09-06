@@ -1888,6 +1888,13 @@ private final class PinnedReceiveDirectory: @unchecked Sendable {
             current.st_dev == device,
             current.st_ino == inode
         else { throw ReceiveStoreError.atomicPlacementUnavailable }
+        // The destination may lose its grant or write permission after staging.
+        // Check again at the pinned-descriptor publication boundary so the caller
+        // can recover by reauthorizing, without ever marking the row completed.
+        guard current.st_uid == geteuid(), current.st_mode & S_IWUSR != 0,
+              access(url.path, W_OK | X_OK) == 0 else {
+            throw ReceiveStoreError.destinationNotWritable
+        }
     }
 
     func lockForPublication() throws {

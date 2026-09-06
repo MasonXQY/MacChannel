@@ -7,6 +7,24 @@ import XCTest
 @testable import MacChannelCore
 
 final class ReceiveStoreTests: XCTestCase {
+    func testSeparateSandboxIncomingPermissionLossNeverPublishesCompletedOutput() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("verified in private sandbox staging".utf8)
+        let manifest = try makeManifest(name: "authorized.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        XCTAssertNotEqual(fixture.incoming, fixture.downloads)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.downloads.appendingPathComponent("authorized.txt").path))
+        try await store.write(bytes, index: 0, entry: 0)
+        XCTAssertEqual(chmod(fixture.downloads.path, S_IRUSR | S_IXUSR), 0)
+        defer { _ = chmod(fixture.downloads.path, S_IRWXU) }
+        await assertReceiveError(.destinationNotWritable) { _ = try await store.finalize() }
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertNotEqual(history.first?.phase, .completed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.downloads.appendingPathComponent("authorized.txt").path))
+        XCTAssertEqual(chmod(fixture.downloads.path, S_IRWXU), 0)
+        let output = try await store.finalize()
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+    }
     func testPendingChunksBecomeDurableInOneExplicitCheckpoint() async throws {
         let fixture = try StorageFixture()
         let first = Data(repeating: 0x31, count: TransferProtocolLimits.maximumChunkBytes)

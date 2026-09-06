@@ -4,6 +4,7 @@ import Foundation
 import XCTest
 
 @testable import MacChannelCore
+@testable import MacChannelAppKit
 
 private actor IncomingResultRecorder {
     private var results: [TransferReceiveResult?] = []
@@ -18,6 +19,52 @@ private actor IncomingResultRecorder {
 }
 
 final class TransferCoordinatorTests: XCTestCase {
+    func testSendUsesImmutableOutgoingPackage() async throws {
+        let fixture = try CoordinatorFixture(twoPeers: false)
+        defer { fixture.removeTemporaryFiles() }
+        let calls = ScopeCalls()
+        let scoped = SourceAccessTransferCoordinator(coordinator: fixture.sender, access: UserSelectedSourceAccess(start: { calls.start($0); return true }, stop: { calls.stop($0) }))
+        let id = try await scoped.send(items: [fixture.file], to: fixture.peerA)
+        XCTAssertEqual(calls.counts, [1, 1])
+        try FileManager.default.removeItem(at: fixture.file)
+        try await fixture.waitUntilCompleted(id)
+        XCTAssertEqual(try fixture.receivedData(on: fixture.peerA), fixture.sourceData)
+        await fixture.sender.shutdownForRestart()
+    }
+
+    func testDestinationScopeIsHeldThroughListenerOwnedIODrain() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let identity = try DeviceIdentity.ephemeral()
+        let trust = try TrustRepository(ownerIdentity: identity, trustStore: TrustStore(owner: identity.id), persistedGeneration: 0)
+        let source = MemoryIncomingTransferSource()
+        let frames = CancellationInsensitiveFrameGate()
+        let closes = BlockingCloseGate()
+        let pipe = Pipe()
+        let calls = ScopeCalls()
+        let settings = ListenerAuthorizedSettings(calls: calls, peer: identity.id)
+        let controller = IncomingRuntimeController(source: source, trustRepository: trust, settings: settings,
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")),
+            incomingDirectory: root.appendingPathComponent("Incoming"), ownerID: DeviceID(rawValue: UUID()), onReceiveFinished: { _ in })
+        await controller.start()
+        await source.offer(IncomingTransferConnection(source: identity.id, transferID: TransferID(rawValue: UUID()), channel: StopBoundaryChannel(frames: frames, closes: closes, handle: pipe.fileHandleForReading)))
+        try await frames.waitUntilStarted(1)
+        let stopping = Task { await controller.stop() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await closes.hasStarted()) {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            await Task.yield()
+        }
+        XCTAssertEqual(calls.counts, [1, 0])
+        await closes.release()
+        for _ in 0..<30 { await Task.yield() }
+        XCTAssertEqual(calls.counts, [1, 0], "Close completion alone must not release a scope still used by frame I/O")
+        await frames.release()
+        await stopping.value
+        XCTAssertEqual(calls.counts, [1, 1])
+        await controller.stop()
+        XCTAssertEqual(calls.counts, [1, 1])
+    }
     func testIncomingOwnerDrainDoesNotWaitForAnotherOwnersSuspendedClose() async throws {
         let registry = IncomingChannelCloseRegistry.shared
         let owner = UUID()
@@ -1794,6 +1841,7 @@ final class TransferCoordinatorTests: XCTestCase {
         let id = try await first.send(items: [payload], to: receiverDevice)
         try await firstConnector.waitUntilSenderHasSent(4)
         await first.shutdownForRestart()
+        try FileManager.default.removeItem(at: payload)
         try await waitForDatabasePhase(.failed, id: id, database: receiveDatabase)
 
         let secondConnector = CancellationMemoryConnector(
@@ -3515,6 +3563,20 @@ private actor RouteEscalatingMemoryConnector: RouteEscalatingPeerConnector {
 private actor IncomingStopCompletion {
     private(set) var finished = false
     func finish() { finished = true }
+}
+
+private struct ListenerAuthorizedSettings: RuntimeReceiveSettingsProviding {
+    let calls: ScopeCalls
+    let peer: DeviceID
+    func current() async -> SettingsSurfaceSnapshot {
+        SettingsSurfaceSnapshot(defaultDirectory: nil, devices: [DeviceSetting(device: DeviceSummary(id: peer, displayName: "Peer", availability: .lan))])
+    }
+    func downloadDirectory() async -> DownloadDirectory { DownloadDirectory() }
+    func authorizeReceiveDirectories() async throws -> AuthorizedReceiveDirectories {
+        let url = URL(fileURLWithPath: "/tmp/authorized-test-destination")
+        calls.start(url)
+        return AuthorizedReceiveDirectories(directories: DownloadDirectory(), leases: [SecurityScopeLease(urls: [url], stop: { calls.stop($0) })])
+    }
 }
 
 private final class StopBoundaryChannel: SecureChannel, @unchecked Sendable {

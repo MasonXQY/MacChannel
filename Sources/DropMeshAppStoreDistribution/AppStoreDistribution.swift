@@ -28,7 +28,8 @@ package final class AppStoreDistribution: ApplicationDistribution {
                 accessibility: .afterFirstUnlockThisDeviceOnly,
                 synchronizable: false
             ),
-            defaultReceiveFolderName: "DropMesh"
+            defaultReceiveFolderName: "DropMesh",
+            directoryAuthorizationMode: .securityScopedBookmarks
         )
         updates = AppStoreUpdateController(
             appStoreURL: Self.appStoreURL(from: info["DropMeshAppStoreID"]),

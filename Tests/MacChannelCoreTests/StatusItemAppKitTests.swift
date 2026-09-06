@@ -1159,11 +1159,13 @@ final class StatusItemAppKitTests: XCTestCase {
         let prepared = try ownedClipboardTransfer(fileManager: fileManager)
         defer { prepared.discardTemporaryFiles() }
         let transfer = BlockingBeforeReadTransferCoordinator()
+        let scopes = ScopeCalls()
+        let scopedTransfer = SourceAccessTransferCoordinator(coordinator: transfer, access: UserSelectedSourceAccess(start: { scopes.start($0); return true }, stop: { scopes.stop($0) }, readable: { FileManager.default.isReadableFile(atPath: $0.path) }))
         let menu = RecordingStatusItemDeviceMenuPresenter()
         var controller: StatusItemController? = StatusItemController(
             button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
             devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
-            transferCoordinator: transfer,
+            transferCoordinator: scopedTransfer,
             clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
             deviceMenuPresenter: menu
         )
@@ -1180,6 +1182,7 @@ final class StatusItemAppKitTests: XCTestCase {
             "admission still needs to read the generated source"
         )
         XCTAssertEqual(fileManager.removeCount, 0)
+        XCTAssertEqual(scopes.counts, [1, 0], "Controller destruction must preserve admission scope")
 
         await transfer.allowRead()
         let received = try await transfer.waitForRead()
@@ -1189,6 +1192,7 @@ final class StatusItemAppKitTests: XCTestCase {
         }
 
         XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertEqual(scopes.counts, [1, 1], "Admission and clipboard cleanup balance the scope once")
         XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
     }
 

@@ -65,19 +65,22 @@ struct SettingsSurfaceSnapshot: Equatable, Sendable {
     let autoReceive: Bool
     let launchAtLogin: Bool
     let devices: [DeviceSetting]
+    let directoryAuthorizationError: String?
 
     init(
         localDisplayName: String = Host.current().localizedName ?? "Mac",
         defaultDirectory: URL?,
         autoReceive: Bool = true,
         launchAtLogin: Bool = false,
-        devices: [DeviceSetting]
+        devices: [DeviceSetting],
+        directoryAuthorizationError: String? = nil
     ) {
         self.localDisplayName = localDisplayName
         self.defaultDirectory = defaultDirectory
         self.autoReceive = autoReceive
         self.launchAtLogin = launchAtLogin
         self.devices = devices
+        self.directoryAuthorizationError = directoryAuthorizationError
     }
 }
 
@@ -310,7 +313,7 @@ final class SettingsSurfaceModel: ObservableObject {
             defaultDirectory = directory
             actionError = nil
         } catch {
-            publishError("无法保存默认接收目录，请确认目录仍可访问后重试。")
+            publishError(error is DirectoryAuthorizationError ? error.localizedDescription : "无法保存默认接收目录，请确认目录仍可访问后重试。")
         }
     }
 
@@ -324,7 +327,7 @@ final class SettingsSurfaceModel: ObservableObject {
             mutate(id) { $0.directory = directory }
             actionError = nil
         } catch {
-            publishError("无法保存接收目录，请确认目录仍可访问后重试。")
+            publishError(error is DirectoryAuthorizationError ? error.localizedDescription : "无法保存接收目录，请确认目录仍可访问后重试。")
         }
     }
 
