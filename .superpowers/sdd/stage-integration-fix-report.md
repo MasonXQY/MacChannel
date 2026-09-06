@@ -50,3 +50,36 @@ local-network activation boundaries, and runtime conflict teardown/retry remain
 independent and green.
 
 `git diff --check` also completed with no errors before the fix commit.
+
+## Immediate-retry race follow-up
+
+- Fix commit: `540130b17f33687230df139bd2cf544ff19f6c95`
+
+An immediate retry could install a replacement discovery token before the old
+session's asynchronous teardown reached `DeviceDirectory`. The old teardown
+then correctly ignored its stale token, but the old token's Bonjour sightings
+remained until expiry. `beginLANDiscoverySession()` now atomically retires only
+the displaced session's scoped Bonjour sightings while installing the
+replacement token. Independent internet presence and unscoped Direct-mode LAN
+sightings are preserved.
+
+RED command:
+
+```sh
+swift test --filter 'DeviceDirectoryTests/testBeginningReplacementLANSessionPurgesOldSightingsBeforeDelayedTeardown'
+```
+
+Before the fix: 1 test executed with 2 failures; the displaced peer remained
+LAN-available and exposed its old Bonjour endpoint. A safety assertion then
+caught an over-broad first draft removing the unscoped Direct LAN sighting: 1
+test executed with 1 failure.
+
+GREEN command:
+
+```sh
+swift test --filter 'OnboardingTests/testPolicyDeniedWaitingShowsSettingsGuidanceAndExplicitRetryRecovers|DeviceDirectoryTests/test(Bonjour|DirectoryEndSession|BeginningReplacementLANSession)'
+```
+
+Result: 15 tests executed, 0 failures. The replacement session immediately
+purges the displaced Bonjour route, preserves internet and Direct LAN state,
+accepts the new token, and ignores delayed teardown of the old token.
