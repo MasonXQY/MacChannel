@@ -8,7 +8,8 @@ if [[ $# -eq 0 ]]; then
     find "$repository_root/App" "$repository_root/Sources" \
       "$repository_root/Services/rendezvous" "$repository_root/Scripts" -type f \
       \( -name '*.swift' -o -name '*.go' -o -name '*.sh' \) \
-      ! -name 'audit-privacy.sh' ! -name 'check-sensitive-logging.sh' -print
+      ! -name 'audit-privacy.sh' ! -name 'audit-app-store-privacy.sh' \
+      ! -name 'check-sensitive-logging.sh' -print
   )
   set -- "${source_files[@]}"
 fi
@@ -57,6 +58,15 @@ for source_file in "$@"; do
         */Scripts/test-personal-mesh-install.sh)
           matches="$(remove_fixture_data_write "$matches" 'MacChannel.app/Contents/MacChannelApp')"
           matches="$(remove_fixture_data_write "$matches" 'MacChannel.app/Contents/Resources/state.bin')"
+          ;;
+        */Scripts/test-direct-regression-baseline.sh)
+          # Test-only failure diagnostics describe the caller-supplied fixture.
+          matches="$(printf '%s\n' "$matches" | rg -v 'required Direct Sparkle component is missing or not executable' || true)"
+          ;;
+        */Scripts/app-store-validation.sh)
+          # This helper returns a public certificate fingerprint to its caller;
+          # it is not a production log sink and never prints private key data.
+          matches="$(printf '%s\n' "$matches" | rg -v '^26:[[:space:]]+printf .+fingerprint' || true)"
           ;;
         */Scripts/test-sensitive-logging-contract.sh|*/Scripts/test-privacy-audit-contract.sh)
           matches="$(remove_fixture_data_write "$matches" '"$mutation_path"')"
