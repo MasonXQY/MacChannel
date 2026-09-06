@@ -2,7 +2,7 @@
 
 ## Scope completed
 
-Implemented only the local, non-mutating prerequisite audit, contract test, truthful profile anchor skeleton, and operator runbook. No Apple account, certificate, private-key, profile installation, upload, app installation, or production mutation was performed by this work.
+Implemented only the local, non-mutating prerequisite audit, contract test, profile anchor, and operator runbook. The anchor began as a truthful pending skeleton and was later updated by the separately verified portal work with numeric Apple ID `6809209993`. No Apple account, certificate, private-key, profile installation, upload, app installation, or production mutation was performed by this local-gate work.
 
 ## RED / GREEN evidence
 
@@ -23,7 +23,7 @@ Implemented only the local, non-mutating prerequisite audit, contract test, trut
 - Verifies explicit `XKAZ67HN45.com.zensystech.dropmesh`, Team ID, App Sandbox entitlement, development/distribution type, registered devices for development, no device/all-device distribution profile, and future expiration.
 - Verifies each profile embeds the certificate selected for that profile.
 - Requires exact Team-scoped development, Store application, and Store installer identity subjects backed by identities returned from Keychain; Developer ID cannot satisfy Store gates.
-- Requires a numeric App Store ID matching the committed anchor. The anchor remains `BLOCKED_PENDING_APP_STORE_CONNECT`; no ID was guessed.
+- Requires a numeric App Store ID matching the committed anchor. The anchor now contains the portal-verified Apple ID `6809209993`; the earlier pending placeholder was never treated as PASS and no ID was guessed.
 - Requires current-user ownership, no ACL entries, and owner-only API private-key permissions, then makes a real, output-suppressed `altool --list-apps` authentication request from an isolated temporary credential home.
 - Prints profile names, UUIDs, expiry, and certificate subjects but never key contents, API key ID, issuer ID, private-key path, or App Store Connect response payload.
 - Documents that App Sandbox is a signed macOS entitlement, not an App ID portal toggle, and that list-apps authentication does not itself prove upload or release readiness.
@@ -42,7 +42,7 @@ Implemented only the local, non-mutating prerequisite audit, contract test, trut
 - numeric App Store ID is anchored as `6809209993`, but the required private release configuration value remains unset in this audit run;
 - upload authentication absent.
 
-The explicit Developer App ID and macOS App Store Connect record were created separately during portal work; the numeric Apple ID is `6809209993`. Signing certificates/private keys, provisioning profiles, and upload authentication remain absent or unproven, so Task 10 is not release-ready.
+The explicit Developer App ID and macOS App Store Connect record were created separately during portal work; the numeric Apple ID is `6809209993`, and the Paid Apps Agreement is Active. Signing certificates/private keys, provisioning profiles, and upload authentication remain absent or unproven, so Task 10 is not release-ready.
 
 ## Verification commands
 
