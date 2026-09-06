@@ -1,6 +1,8 @@
 # Production privacy audit boundary proposal
 
-Date: 2026-09-07. Status: awaiting owner decision on custody and access boundaries.
+Date: 2026-09-07. Status: owner accepted recommended local custody with explicit
+per-signature confirmation. Exact production access and key provisioning remain
+unapproved; the custody decision is not permission to collect production data.
 This is not authorization to create keys, connect to production, collect logs or
 approve a release. Offline fixture verifier phase1 is complete at64f9442.
 

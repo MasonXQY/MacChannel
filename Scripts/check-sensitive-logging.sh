@@ -7,7 +7,8 @@ if [[ $# -eq 0 ]]; then
   while IFS= read -r source_file; do source_files+=("${source_file}"); done < <(
     find "$repository_root/App" "$repository_root/Sources" \
       "$repository_root/Services/rendezvous" "$repository_root/Scripts" \
-      "$repository_root/Tools/PrivacyEvidenceVerifier" -type f \
+      "$repository_root/Tools/PrivacyEvidenceVerifier" \
+      "$repository_root/Tools/AuditOwnerPreflight" -type f \
       \( -name '*.swift' -o -name '*.go' -o -name '*.sh' \) \
       ! -name 'audit-privacy.sh' ! -name 'audit-app-store-privacy.sh' \
       ! -name 'check-sensitive-logging.sh' -print
