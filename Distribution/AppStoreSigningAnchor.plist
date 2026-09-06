@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>product</key><string>DropMesh</string>
+<key>bundleIdentifier</key><string>com.zensystech.dropmesh</string>
+<key>bundleExecutable</key><string>DropMeshAppStore</string>
+<key>teamID</key><string>XKAZ67HN45</string>
+<key>applicationIdentifier</key><string>XKAZ67HN45.com.zensystech.dropmesh</string>
+<key>keychainGroup</key><string>XKAZ67HN45.com.zensystech.dropmesh</string>
+<key>defaultVersion</key><string>1.3.0</string>
+<key>minimumBuildNumber</key><integer>1</integer>
+<key>allowedEntitlements</key><array>
+<string>com.apple.security.app-sandbox</string><string>com.apple.security.network.client</string>
+<string>com.apple.security.network.server</string><string>com.apple.security.files.downloads.read-write</string>
+<string>com.apple.security.files.user-selected.read-write</string><string>com.apple.application-identifier</string>
+<string>com.apple.developer.team-identifier</string><string>keychain-access-groups</string>
+</array>
+</dict></plist>
