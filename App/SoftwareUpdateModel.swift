@@ -15,8 +15,8 @@ package struct InstalledAppVersion: Equatable, Sendable {
     }
 
     package var localizedText: String {
-        guard let shortVersion, let build else { return "DropMesh，版本未知" }
-        return "DropMesh \(shortVersion)（\(build)）"
+        guard let shortVersion, let build else { return L10n.text(.updateVersionUnknown) }
+        return L10n.text(.updateVersion, shortVersion, build)
     }
 }
 
@@ -34,23 +34,23 @@ package enum SoftwareUpdatePhase: Equatable, Sendable {
     package var statusText: String {
         switch self {
         case .idle:
-            "每天自动检查一次，是否安装由你决定。"
+            L10n.text(.updateAutomaticExplanation)
         case .checking:
-            "正在检查更新…"
+            L10n.text(.updateChecking)
         case .upToDate:
-            "当前已是最新版本。"
+            L10n.text(.updateUpToDate)
         case let .available(version):
-            "发现新版本 \(version)。"
+            L10n.text(.updateVersionAvailable, String(version))
         case .downloading:
-            "正在下载更新…"
+            L10n.text(.updateDownloading)
         case .installDeferred:
-            "更新已下载，将在退出后安装。"
+            L10n.text(.updateDeferred)
         case .managedByAppStore:
-            "更新由 Mac App Store 管理。"
+            L10n.text(.updateStoreManaged)
         case .failed:
-            "暂时无法检查更新，请稍后重试。"
+            L10n.text(.updateCheckFailed)
         case .securityFailure:
-            "无法验证更新的安全性。"
+            L10n.text(.updateSecurityFailure)
         }
     }
 
@@ -87,8 +87,9 @@ package struct SoftwareUpdateSnapshot: Equatable, Sendable {
     }
 
     package func lastCheckedText(timeZone: TimeZone = .current) -> String {
-        guard let lastCheckedAt else { return "尚未检查" }
+        guard let lastCheckedAt else { return L10n.text(.updateNeverChecked) }
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: L10n.language.localeIdentifier())
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         formatter.timeZone = timeZone

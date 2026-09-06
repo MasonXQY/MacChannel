@@ -84,10 +84,16 @@ final class StatusItemButton: NSStatusBarButton {
 
     override var acceptsFirstResponder: Bool { true }
 
+    func refreshLocalization() {
+        setAccessibilityLabel(L10n.text(.appAccessibilityLabel))
+        setAccessibilityHelp(L10n.text(.appAccessibilityHelp))
+        render()
+    }
+
     var preferredWidth: CGFloat {
         switch phase {
         case .idle: 30
-        case .ready: 72
+        case .ready: max(72, ceil((L10n.text(.sendReady) as NSString).size(withAttributes: [.font: NSFont.menuBarFont(ofSize: 0)]).width) + 24)
         case .transferring: 30
         }
     }
@@ -178,14 +184,14 @@ final class StatusItemButton: NSStatusBarButton {
         registerForDraggedTypes([.fileURL])
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel("DropMesh 文件传输")
-        setAccessibilityHelp("打开状态菜单，或将本地文件拖到这里选择接收设备。")
+        setAccessibilityLabel(L10n.text(.appAccessibilityLabel))
+        setAccessibilityHelp(L10n.text(.appAccessibilityHelp))
         render()
     }
 
     private func render() {
         let presentation = phase.presentation
-        title = presentation.progress == nil ? presentation.title : ""
+        title = phase == .ready ? L10n.text(.sendReady) : ""
         alignment = .center
         let symbolName = presentation.symbolName ?? "paperplane"
         image = {
@@ -201,12 +207,12 @@ final class StatusItemButton: NSStatusBarButton {
         var accessibilityParts = [phase.localizedAccessibilityValue]
         if updateAvailable {
             let updateValue = updateActionEnabled
-                ? "有新版本可用"
-                : "有新版本可用，暂时无法查看"
+                ? L10n.text(.updateAvailable)
+                : L10n.text(.updateAvailableUnavailable)
             accessibilityParts.append(updateValue)
         }
-        if hasUnreadReceive { accessibilityParts.append("有新接收文件") }
-        let accessibilityValue = accessibilityParts.joined(separator: "，")
+        if hasUnreadReceive { accessibilityParts.append(L10n.text(.receiveUnread)) }
+        let accessibilityValue = accessibilityParts.joined(separator: L10n.text(.presentationListSeparator))
         setAccessibilityValue(accessibilityValue)
         toolTip = accessibilityValue
         needsDisplay = true
@@ -237,11 +243,11 @@ extension StatusItemPhase {
     var localizedAccessibilityValue: String {
         switch self {
         case .idle:
-            "空闲"
+            L10n.text(.statusIdle)
         case .ready:
-            presentation.accessibilityValue
+            L10n.text(.sendReadyAccessibility)
         case .transferring:
-            "正在传输，\(presentation.title)"
+            L10n.text(.statusTransferring, String(presentation.title))
         }
     }
 }

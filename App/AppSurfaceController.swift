@@ -265,7 +265,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         settingsModel.defaultDirectory = snapshot.defaultDirectory
         settingsModel.autoReceive = snapshot.autoReceive
         settingsModel.launchAtLogin = snapshot.launchAtLogin
-        settingsModel.actionError = snapshot.directoryAuthorizationError
+        settingsModel.actionErrorContent = snapshot.directoryAuthorizationError == nil
+            ? nil : .keys([.receiveDirectoryReauthorize])
         updateDeviceSettings(snapshot.devices)
         if case let .confirmed(peer) = pairingModel.state,
            !snapshot.devices.contains(where: { $0.id == peer.id })
@@ -329,10 +330,10 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 snapshot: snapshot,
                 peerName: persistedHistory[snapshot.id]?.peerName
                     ?? deviceNames[snapshot.peer]
-                    ?? "未知设备",
+                    ?? "",
                 displayName: persistedHistory[snapshot.id]?.displayName
                     ?? liveTerminalHistory[snapshot.id]?.displayName
-                    ?? "文件传输",
+                    ?? "",
                 bytesPerSecond: speed,
                 estimatedTimeRemaining: remaining,
                 outputURL: persistedHistory[snapshot.id]?.outputURL
@@ -387,7 +388,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                     totalBytes: Int64(clamping: record.aggregateSize),
                     route: record.route
                 ),
-                peerName: deviceNames[record.peer] ?? "未知设备",
+                peerName: deviceNames[record.peer] ?? "",
                 displayName: record.displayFilename,
                 bytesPerSecond: nil,
                 estimatedTimeRemaining: nil,
@@ -499,7 +500,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 service: transferService,
                 initialSection: initialSection,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
-            )
+            ).environmentObject(LocalizationController.shared)
         )
         show(popover, relativeTo: anchor)
     }
@@ -512,7 +513,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 model: pairingModel,
                 service: pairingService,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
-            )
+            ).environmentObject(LocalizationController.shared)
         )
         show(popover, relativeTo: anchor)
     }
@@ -530,7 +531,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 localNetworkModel: localNetworkModel,
                 onRetryRuntime: onRetryRuntime,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
-            )
+            ).environmentObject(LocalizationController.shared)
         )
         show(popover, relativeTo: anchor)
     }

@@ -4,7 +4,7 @@ package enum RuntimeEligibility: Equatable, Sendable {
     case eligible
     case blocked
 
-    static let conflictMessage = "另一个 DropMesh 版本正在运行，请退出后重试。"
+    static var conflictMessage: String { L10n.text(.statusDistributionConflict) }
 }
 
 @MainActor

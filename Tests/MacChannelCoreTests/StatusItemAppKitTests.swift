@@ -4,6 +4,17 @@ import XCTest
 @testable import MacChannelCore
 
 final class StatusItemAppKitTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     @MainActor
     func testFileSelectionAndDirectDragActivateLocalNetworkOnFirstRelevantAction() throws {
         let peer = DeviceID(rawValue: UUID())

@@ -324,6 +324,10 @@ for localization in Base zh-Hans; do
     mkdir -p "$contents_path/Resources/$localization.lproj"
     cp -X "$localized_info" "$contents_path/Resources/$localization.lproj/InfoPlist.strings"
 done
+for localization in en zh-Hans; do
+    cp -X "App/Resources/$localization.lproj/InfoPlist.strings" \
+        "$contents_path/Resources/$localization.lproj/InfoPlist.strings"
+done
 
 if [[ -n "$codesign_identity" ]]; then
     xattr -cr "$working_app"

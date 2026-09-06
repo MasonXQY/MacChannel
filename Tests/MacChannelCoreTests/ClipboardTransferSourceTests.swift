@@ -6,6 +6,17 @@ import XCTest
 @testable import MacChannelAppKit
 
 final class ClipboardTransferSourceTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     private var temporaryRoot: URL!
     private let fixedDate = Date(timeIntervalSince1970: 1_704_164_245)
 

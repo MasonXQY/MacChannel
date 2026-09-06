@@ -4,6 +4,17 @@ import XCTest
 
 @MainActor
 final class OnboardingTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     func testStoreOnboardingExplainsExactlyTheFiveApprovedConcepts() {
         XCTAssertEqual(OnboardingContent.items.map(\.concept), [
             .menuBarLocation,

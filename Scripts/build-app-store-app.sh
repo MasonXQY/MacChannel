@@ -89,11 +89,14 @@ cat >"$contents/Info.plist" <<PLIST
 <key>CFBundleExecutable</key><string>$macchannel_app_store_executable</string>
 <key>CFBundleIdentifier</key><string>$macchannel_app_store_bundle_identifier</string>
 <key>CFBundleName</key><string>DropMesh</string><key>CFBundleDisplayName</key><string>DropMesh</string>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
 <key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIconFile</key><string>DropMesh</string>
 <key>CFBundleShortVersionString</key><string>$app_version</string><key>CFBundleVersion</key><string>$build_number</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string><key>LSUIElement</key><true/>
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
 <key>NSBonjourServices</key><array><string>_macchannel._tcp</string></array>
+<key>NSLocalNetworkUsageDescription</key><string>Find paired Macs nearby and transfer files securely over your local network.</string>
 <key>NSDownloadsFolderUsageDescription</key><string>Save files received from your paired Macs to Downloads.</string>
 <key>NSDocumentsFolderUsageDescription</key><string>Save received files to a folder you choose.</string>
 <key>DropMeshDistributionChannel</key><string>app-store</string>
@@ -105,18 +108,10 @@ cat >"$contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$contents/Info.plist" >/dev/null
 
-cat >"$contents/Resources/en.lproj/InfoPlist.strings" <<'STRINGS'
-"CFBundleDisplayName" = "DropMesh";
-"CFBundleName" = "DropMesh";
-"NSDownloadsFolderUsageDescription" = "Save files received from your paired Macs to Downloads.";
-"NSDocumentsFolderUsageDescription" = "Save received files to a folder you choose.";
-STRINGS
-cat >"$contents/Resources/zh-Hans.lproj/InfoPlist.strings" <<'STRINGS'
-"CFBundleDisplayName" = "DropMesh";
-"CFBundleName" = "DropMesh";
-"NSDownloadsFolderUsageDescription" = "将从已配对 Mac 收到的文件保存到“下载”文件夹。";
-"NSDocumentsFolderUsageDescription" = "将收到的文件保存到您选择的文件夹。";
-STRINGS
+for localization in en zh-Hans; do
+    cp -X "$repo_root/App/Resources/$localization.lproj/InfoPlist.strings" \
+        "$contents/Resources/$localization.lproj/InfoPlist.strings"
+done
 plutil -lint "$contents/Resources/en.lproj/InfoPlist.strings" "$contents/Resources/zh-Hans.lproj/InfoPlist.strings" >/dev/null
 
 xattr -cr "$app"

@@ -1,0 +1,5 @@
+"CFBundleDisplayName" = "DropMesh";
+"CFBundleName" = "DropMesh";
+"NSLocalNetworkUsageDescription" = "发现附近已配对的 Mac，并通过局域网安全传输文件。";
+"NSDownloadsFolderUsageDescription" = "将从已配对 Mac 收到的文件保存到“下载”文件夹。";
+"NSDocumentsFolderUsageDescription" = "将收到的文件保存到您选择的文件夹。";

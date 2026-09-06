@@ -323,7 +323,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                 do {
                     try await trustStore.persistLatest(from: trustRepository)
                 } catch {
-                    statusSource.yield(.error("无法保存设备信任状态；请检查本地存储权限。"))
+                    statusSource.yield(.serviceError(.statusTrustSaveFailed))
                 }
             }
         }
@@ -441,13 +441,13 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                 guard !Task.isCancelled else { return }
                 switch state {
                 case .connecting:
-                    statusSource.yield(.offline("正在恢复安全服务；局域网和设置仍可使用。"))
+                    statusSource.yield(.serviceOffline(.statusServiceRecovering))
                 case .online:
                     statusSource.yield(.ready)
                 case .degraded:
-                    statusSource.yield(.offline("安全服务暂时不可用；正在后台重试。"))
+                    statusSource.yield(.serviceOffline(.statusServiceRetrying))
                 case .offline:
-                    statusSource.yield(.offline("安全服务离线；局域网和设置仍可使用。"))
+                    statusSource.yield(.serviceOffline(.statusServiceOffline))
                 }
             }
         }
@@ -498,7 +498,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         )
         return ProductionAppRuntime(
             container: container,
-            initialStatus: .offline("正在连接安全服务；局域网和设置已经可用。"),
+            initialStatus: .serviceOffline(.statusServiceConnecting),
             browser: browser,
             advertiser: advertiser,
             trustPersistenceTask: trustPersistenceTask,
@@ -540,7 +540,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         do {
             try await trustStore.persistLatest(from: trustRepository)
         } catch {
-            statusSource.yield(.error("无法保存设备信任状态；请检查本地存储权限。"))
+            statusSource.yield(.serviceError(.statusTrustSaveFailed))
         }
         trustPersistenceTask.cancel()
         await trustPersistenceTask.value
@@ -685,7 +685,7 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
         if wire.launchAtLogin == nil { wire.launchAtLogin = false }
         for device in trustedDevices where wire.devices[device.rawValue] == nil {
             wire.devices[device.rawValue] = DeviceWire(
-                displayName: "已配对 Mac",
+                displayName: "",
                 autoAccept: true,
                 maximumBytes: nil,
                 directoryPath: nil
@@ -778,7 +778,7 @@ actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
             let previous = candidate.devices[device.id.rawValue]
             candidate.devices[device.id.rawValue] = DeviceWire(
                 displayName: device.displayName.isEmpty
-                    ? (previous?.displayName ?? "已配对 Mac")
+                    ? (previous?.displayName ?? "")
                     : device.displayName,
                 autoAccept: previous?.autoAccept ?? true,
                 maximumBytes: previous?.maximumBytes,
@@ -954,9 +954,7 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
         }
         await onReceiveConfigurationChanged?()
         if hadPersistenceFailure {
-            return .committedWithWarning(
-                "设备信任已撤销，但部分本地记录未保存；请检查存储权限后重启确认。"
-            )
+            return SurfaceActionResult(warningKeys: [.trustRevokePartial])
         }
         return .committed
     }
@@ -1016,19 +1014,19 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     }
     func approve() async throws -> SurfaceActionResult {
         let pendingPeer = await coordinator.pendingPeerSummary()
-        var warnings: [String] = []
+        var warnings: [LocalizedKey] = []
         do {
             _ = try await coordinator.approvePendingPairing()
         } catch {
             guard let pendingPeer,
                 await trustRepository.isTrusted(pendingPeer.id)
             else { throw error }
-            warnings.append("本机信任已建立，但对端授权确认未完成；请在设置中撤销后重新配对。")
+            warnings.append(.trustPeerApprovalIncomplete)
         }
         do {
             try await trustStore.persistLatest(from: trustRepository)
         } catch {
-            warnings.append("设备信任已建立，但本地信任记录未保存；请检查存储权限后重启确认。")
+            warnings.append(.trustRecordsSaveFailed)
         }
         if let device = pendingPeer,
             await trustRepository.isTrusted(device.id)
@@ -1036,35 +1034,35 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
             do {
                 try await settings.recordPaired(device)
             } catch {
-                warnings.append("设备信任已建立，但设备设置未保存；请检查存储权限后重试。")
+                warnings.append(.trustSettingsSaveFailed)
             }
         } else if let device = pendingPeer {
             persistWhenBilateralTrustCommits(device)
         }
         await onReceiveConfigurationChanged?()
         guard !warnings.isEmpty else { return .committed }
-        return .committedWithWarning(warnings.joined(separator: " "))
+        return SurfaceActionResult(warningKeys: warnings)
     }
     func reject() async throws { try await coordinator.rejectPendingPairing() }
     func awaitHostApproval() async throws -> SurfaceActionResult {
         let pendingPeer = await coordinator.pendingPeerSummary()
         _ = try await coordinator.awaitHostApproval()
-        var warnings: [String] = []
+        var warnings: [LocalizedKey] = []
         do {
             try await trustStore.persistLatest(from: trustRepository)
         } catch {
-            warnings.append("设备信任已建立，但本地信任记录未保存；请检查存储权限后重启确认。")
+            warnings.append(.trustRecordsSaveFailed)
         }
         if let device = pendingPeer, await trustRepository.isTrusted(device.id) {
             do {
                 try await settings.recordPaired(device)
             } catch {
-                warnings.append("设备信任已建立，但设备设置未保存；请检查存储权限后重试。")
+                warnings.append(.trustSettingsSaveFailed)
             }
         }
         await onReceiveConfigurationChanged?()
         guard !warnings.isEmpty else { return .committed }
-        return .committedWithWarning(warnings.joined(separator: " "))
+        return SurfaceActionResult(warningKeys: warnings)
     }
     func cancel() async throws { try await coordinator.cancelPendingPairing() }
     func pendingPeer() async -> DeviceSummary? { await coordinator.pendingPeerSummary() }
@@ -1346,7 +1344,7 @@ actor RuntimeHistorySource {
                         totalBytes: Int64(clamping: record.aggregateSize),
                         route: record.route
                     ),
-                    peerName: names[record.peer] ?? "未知设备",
+                    peerName: names[record.peer] ?? "",
                     displayName: record.displayFilename,
                     bytesPerSecond: nil,
                     estimatedTimeRemaining: nil,

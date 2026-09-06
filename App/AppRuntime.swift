@@ -22,14 +22,25 @@ enum AppRuntimeStatus: Equatable {
     case offline(String)
     case startupError(String, canRetry: Bool)
     case error(String)
+    case serviceOffline(LocalizedKey)
+    case serviceError(LocalizedKey)
+    case startupFailure(LocalizedKey, canRetry: Bool)
+
+    var isStartupFailure: Bool {
+        switch self {
+        case .startupError, .startupFailure: true
+        default: false
+        }
+    }
 
     var localizedText: String {
         switch self {
-        case .loading: "正在启动安全服务…"
-        case .ready: "安全服务已连接"
+        case .loading: L10n.text(.statusServiceStarting)
+        case .ready: L10n.text(.statusServiceConnected)
         case let .offline(message): message
         case let .startupError(message, _): message
         case let .error(message): message
+        case let .serviceOffline(key), let .serviceError(key), let .startupFailure(key, _): L10n.text(key)
         }
     }
 }
@@ -131,22 +142,22 @@ final class AppRuntimeHost {
         } catch {
             guard !isShuttingDown, generation == self.generation else { return }
             let presentation = Self.failurePresentation(for: error)
-            status = .startupError(presentation.message, canRetry: presentation.canRetry)
+            status = .startupFailure(presentation.message, canRetry: presentation.canRetry)
             onChange?(status, nil)
         }
     }
 
-    private static func failurePresentation(for error: Error) -> (message: String, canRetry: Bool) {
+    private static func failurePresentation(for error: Error) -> (message: LocalizedKey, canRetry: Bool) {
         if case .operationFailed = error as? KeychainStoreError {
             return (
-                "无法启动 DropMesh。请先允许钥匙串访问，然后点“重试启动”。",
+                .statusStartupKeychain,
                 true
             )
         }
         if error is KeychainStoreError || error is DeviceIdentityError {
-            return ("无法读取这台 Mac 的安全身份。现有身份和配对数据没有被更改。", false)
+            return (.statusStartupIdentity, false)
         }
-        return ("无法启动 DropMesh。请检查本地存储权限，然后点“重试启动”。", true)
+        return (.statusStartupStorage, true)
     }
 
     func shutdown() async {
@@ -179,7 +190,7 @@ final class AppRuntimeHost {
 
     private func checkEligibility() async {
         guard !isShuttingDown, eligibility?.current == .blocked else { return }
-        status = .startupError(RuntimeEligibility.conflictMessage, canRetry: true)
+        status = .startupFailure(.statusDistributionConflict, canRetry: true)
         onChange?(status, nil)
         await stopCurrentRuntime()
     }

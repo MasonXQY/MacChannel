@@ -6,6 +6,17 @@ import XCTest
 @testable import MacChannelDirectDistribution
 
 final class DistributionChannelTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     func testSharedAppKitTargetHasNoSparkleDependencyOrImport() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

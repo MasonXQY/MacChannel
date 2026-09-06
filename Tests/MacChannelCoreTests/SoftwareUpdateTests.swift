@@ -5,6 +5,17 @@ import XCTest
 @testable import MacChannelDirectDistribution
 
 final class SoftwareUpdateTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     func testInstalledVersionUsesBundleValuesAndFallsBackWithoutCrashing() {
         XCTAssertEqual(
             InstalledAppVersion(info: [
@@ -73,6 +84,7 @@ final class SoftwareUpdateTests: XCTestCase {
             lastCheckedAt: Date(timeIntervalSince1970: 0)
         )
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh-Hans")
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -535,7 +547,7 @@ final class SoftwareUpdateTests: XCTestCase {
         )
 
         XCTAssertTrue(source.contains("updateLaunch.prepare(transfers: container.transferSnapshots)"))
-        XCTAssertTrue(source.contains("if case .startupError = status"))
+        XCTAssertTrue(source.contains("if status.isStartupFailure"))
         XCTAssertGreaterThanOrEqual(source.components(separatedBy: "updateLaunch.prepare(transfers: nil)").count - 1, 2)
         XCTAssertFalse(source.contains("updateController.start()"))
     }

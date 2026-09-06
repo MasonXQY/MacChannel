@@ -6,6 +6,17 @@ import XCTest
 
 @MainActor
 final class ReceiveNotificationControllerTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     func testInvalidatedNotificationIdentifiersStayBoundedAndExpire() {
         let start = Date(timeIntervalSince1970: 1_000)
         var identifiers = ExpiringReceiveNotificationIdentifiers(capacity: 2, ttl: 10)

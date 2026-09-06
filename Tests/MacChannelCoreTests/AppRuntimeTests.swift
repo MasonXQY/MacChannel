@@ -7,6 +7,17 @@ import XCTest
 @testable import DropMeshAppStoreDistribution
 
 final class AppRuntimeTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     @MainActor
     func testDistributionNamespacesAreDisjoint() throws {
         let direct = RuntimeNamespace.direct
@@ -311,10 +322,10 @@ final class AppRuntimeTests: XCTestCase {
 
         await host.bootstrap()
 
-        guard case let .startupError(message, canRetry) = host.status else {
+        guard case let .startupFailure(key, canRetry) = host.status else {
             return XCTFail("expected error state")
         }
-        XCTAssertTrue(message.contains("无法启动"))
+        XCTAssertEqual(key, .statusStartupStorage)
         XCTAssertTrue(canRetry)
         XCTAssertFalse(receivedContainer)
     }
@@ -335,10 +346,10 @@ final class AppRuntimeTests: XCTestCase {
         }
 
         await host.bootstrap()
-        guard case let .startupError(message, canRetry) = host.status else {
+        guard case let .startupFailure(key, canRetry) = host.status else {
             return XCTFail("expected recoverable keychain error")
         }
-        XCTAssertTrue(message.contains("钥匙串"))
+        XCTAssertEqual(key, .statusStartupKeychain)
         XCTAssertTrue(canRetry)
 
         await host.bootstrap()

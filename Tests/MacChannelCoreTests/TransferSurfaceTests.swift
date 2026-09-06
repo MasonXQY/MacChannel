@@ -5,6 +5,17 @@ import XCTest
 @testable import MacChannelCore
 
 final class TransferSurfaceTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     @MainActor
     func testReceiveAuthorizationFailureIsVisibleAndPreservesSelectedPath() {
         let surfaces = AppSurfaceController(transferService: StubTransferSurfaceService(), pairingService: UnavailablePairingSurfaceService(), settingsService: UnavailableDeviceSettingsService(), directorySelector: NativeDirectorySelector())
@@ -100,7 +111,7 @@ final class TransferSurfaceTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(settings.contains("在 Finder 中显示"))
+        XCTAssertTrue(settings.contains("L10n.text(.receiveReveal)"))
         XCTAssertTrue(settings.contains("revealDefaultDirectory"))
     }
 
@@ -615,10 +626,10 @@ final class TransferSurfaceTests: XCTestCase {
             encoding: .utf8
         )
 
-        for label in ["接收通知", "已允许", "未允许", "打开系统设置"] {
+        for label in [".settingsNotifications", ".permissionAllowed", ".permissionNotAllowed", ".commonSystemSettings"] {
             XCTAssertTrue(settings.contains(label), "missing visible notification label: \(label)")
         }
-        XCTAssertFalse(settings.contains("Toggle(\"接收通知\""))
+        XCTAssertFalse(settings.contains("Toggle(L10n.text(.settingsNotifications)"))
     }
 
     func testSettingsSourceContainsIndependentNativeSoftwareUpdateSection() throws {
@@ -632,9 +643,9 @@ final class TransferSurfaceTests: XCTestCase {
         )
 
         for required in [
-            "软件更新",
-            "检查更新",
-            "最近检查：",
+            ".updateTitle",
+            ".updateCheck",
+            ".updateLastChecked",
             "Text(presentation.guidanceText)",
             ".foregroundStyle(.orange)",
         ] {
@@ -648,7 +659,7 @@ final class TransferSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(
             (settings + updateModel)
-                .components(separatedBy: "每天自动检查一次，是否安装由你决定。").count - 1,
+                .components(separatedBy: "L10n.text(.updateAutomaticExplanation)").count - 1,
             1
         )
         XCTAssertFalse(settings.contains("尚未检查更新"))
@@ -702,8 +713,8 @@ final class TransferSurfaceTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(pairing.contains("本机已信任"))
-        XCTAssertTrue(pairing.contains("请确认另一台 Mac 也显示配对成功"))
+        XCTAssertTrue(pairing.contains("L10n.text(.pairingTrusted,"))
+        XCTAssertTrue(pairing.contains("L10n.text(.pairingConfirmOtherMac)"))
         XCTAssertFalse(pairing.contains("已与 \\(device.displayName) 建立信任"))
     }
 
@@ -718,8 +729,8 @@ final class TransferSurfaceTests: XCTestCase {
         )
 
         XCTAssertTrue(settings.contains("switch model.runtimeStatus"))
-        XCTAssertTrue(settings.contains("正在启动 DropMesh"))
-        XCTAssertTrue(settings.contains("重试启动"))
+        XCTAssertTrue(settings.contains("L10n.text(.statusStartingApp)"))
+        XCTAssertTrue(settings.contains("L10n.text(.statusRetryStartup)"))
     }
 
     @MainActor

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import MacChannelCore
 
 @MainActor
@@ -23,7 +24,7 @@ struct RecentReceiveMenuText: Equatable {
             title = primaryTitle
             subtitle = sourceName
         } else {
-            title = "\(primaryTitle) — \(sourceName)"
+            title = L10n.text(.receiveMenuFallback, primaryTitle, sourceName)
             subtitle = nil
         }
     }
@@ -174,6 +175,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var statusMenuTrackingGeneration = 0
     private var preparedContentLeases: [StatusItemDragToken: PreparedContentOwnershipLease] = [:]
     private var sendAdmissionTasks: [StatusItemDragToken: Task<Void, Never>] = [:]
+    private var languageSubscription: AnyCancellable?
 
     init(
         button: StatusItemButton,
@@ -182,7 +184,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         filePicker: (any StatusItemFilePicking)? = nil,
         clipboardPreparer: (any ClipboardTransferPreparing)? = nil,
         deviceMenuPresenter: (any StatusItemDeviceMenuPresenting)? = nil,
-        dragRegionSchedule: DragRegionSchedule? = nil
+        dragRegionSchedule: DragRegionSchedule? = nil,
+        localization: LocalizationController = .shared
     ) {
         self.button = button
         preferredDeviceNames = Dictionary(
@@ -212,6 +215,24 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         configureMenu()
         configureButton()
         renderPhase()
+        languageSubscription = localization.$language.dropFirst().sink { [weak self] _ in
+            self?.refreshLocalization()
+        }
+    }
+
+    private func refreshLocalization() {
+        // Replace presentation only; drag sessions, admission tasks and coordinator stay alive.
+        statusMenu.removeAllItems()
+        configureMenu()
+        button.refreshLocalization()
+        nativeButton?.setAccessibilityLabel(L10n.text(.appAccessibilityLabel))
+        nativeButton?.setAccessibilityHelp(L10n.text(.appAccessibilityHelp))
+        applyRecentReceiveSnapshot(latestRecentReceiveSnapshot)
+        if let availableUpdateItem {
+            availableUpdateItem.isHidden = !button.updateAvailable
+            availableUpdateItem.isEnabled = button.updateActionEnabled
+        }
+        renderPhase()
     }
 
     convenience init(
@@ -239,7 +260,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         onUseLocalNetwork?()
         let onlineDevices = devices.filter { $0.availability != .offline }
         guard !onlineDevices.isEmpty else {
-            announce("没有在线接收设备，请先完成配对并确认对方 Mac 已启动。")
+            announce(L10n.text(.sendNoOnlineDevice))
             return nil
         }
         replacePendingSelection()
@@ -327,10 +348,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         do {
             prepared = try clipboardPreparer.prepare()
         } catch ClipboardTransferPreparationError.noSupportedContent {
-            announce("剪贴板中没有可发送的内容。")
+            announce(L10n.text(.clipboardEmpty))
             return
         } catch {
-            announce("无法准备剪贴板内容，请重试。")
+            announce(L10n.text(.clipboardPrepareFailed))
             return
         }
 
@@ -348,7 +369,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     ) {
         guard let intent = try? DropIntent(items: urls.map(DropItem.fileURL)) else {
             _ = cleanup?()
-            announce("所选内容无法发送。")
+            announce(L10n.text(.sendInvalidSelection))
             return
         }
 
@@ -360,14 +381,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         guard !onlineDevices.isEmpty else {
             _ = cleanup?()
-            announce("没有在线设备。")
+            announce(L10n.text(.sendNoDevices))
             return
         }
 
         replacePendingSelection()
         guard let token = state.begin(intent: intent) else {
             _ = cleanup?()
-            announce("已有传输正在进行。")
+            announce(L10n.text(.sendTransferInProgress))
             return
         }
         if let cleanup {
@@ -421,14 +442,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func sourceDisplayName(for source: DeviceID?) -> String {
-        guard let source else { return "其他设备" }
+        knownSourceDisplayName(for: source) ?? L10n.text(.deviceOther)
+    }
+
+    func knownSourceDisplayName(for source: DeviceID?) -> String? {
+        guard let source else { return nil }
         return preferredDeviceNames[source]
             ?? devices.first(where: { $0.id == source })?.userFacingDisplayName
-            ?? "其他设备"
     }
 
     func reportReceiveRevealFailure() {
-        announce("找不到接收文件或接收文件夹。")
+        announce(L10n.text(.receiveNotFound))
     }
 
     func setRuntimeStatus(_ status: AppRuntimeStatus) {
@@ -453,8 +477,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         availableUpdateItem?.isEnabled = availableUpdateAction != nil
         availableUpdateItem?.setAccessibilityHelp(
             available && action == nil
-                ? "更新窗口暂时不可用，请稍后再试。"
-                : "打开软件更新窗口"
+                ? L10n.text(.updateWindowUnavailable)
+                : L10n.text(.updateOpenWindow)
         )
         button.updateActionEnabled = available && action != nil
         button.updateAvailable = available
@@ -475,7 +499,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard devices.contains(where: { $0.id == device && $0.availability != .offline }) else {
             if activeSelectionToken == token, announcedOfflineToken != token {
                 announcedOfflineToken = token
-                announce("目标设备已离线，请重新选择。")
+                announce(L10n.text(.sendDeviceOffline))
             }
             return false
         }
@@ -512,7 +536,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 sendAdmissionTasks.removeValue(forKey: token)
                 lease?.admissionFailed()
                 if let lease { removeReleasedLease(lease, for: token) }
-                announce("无法开始传输，请检查连接和设备状态。")
+                announce(L10n.text(.sendStartFailed))
                 state.finishTransfer(token: token)
                 renderPhase()
             }
@@ -612,7 +636,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(runtime)
 
         let retry = NSMenuItem(
-            title: "重试启动",
+            title: L10n.text(.statusRetryStartup),
             action: #selector(retryRuntime(_:)),
             keyEquivalent: ""
         )
@@ -623,7 +647,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(retry)
         statusMenu.addItem(.separator())
 
-        let recentHeading = NSMenuItem(title: "刚刚收到", action: nil, keyEquivalent: "")
+        let recentHeading = NSMenuItem(title: L10n.text(.receiveRecent), action: nil, keyEquivalent: "")
         recentHeading.isEnabled = false
         recentHeading.isHidden = true
         recentReceiveHeadingItem = recentHeading
@@ -639,7 +663,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             item.isHidden = true
             item.image = NSImage(
                 systemSymbolName: "tray.and.arrow.down",
-                accessibilityDescription: "在 Finder 中显示"
+                accessibilityDescription: L10n.text(.receiveReveal)
             )
             statusMenu.addItem(item)
             return item
@@ -652,7 +676,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(recentOverflow)
 
         let recentHistory = NSMenuItem(
-            title: "查看全部历史…",
+            title: L10n.text(.receiveAllHistory),
             action: #selector(showReceiveHistory(_:)),
             keyEquivalent: ""
         )
@@ -667,7 +691,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(recentSeparator)
 
         let send = NSMenuItem(
-            title: "发送文件…",
+            title: L10n.text(.sendFiles),
             action: #selector(chooseFiles(_:)),
             keyEquivalent: "s"
         )
@@ -676,7 +700,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(send)
 
         let clipboard = NSMenuItem(
-            title: "发送剪贴板…",
+            title: L10n.text(.sendClipboard),
             action: #selector(chooseClipboard(_:)),
             keyEquivalent: "c"
         )
@@ -686,7 +710,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(.separator())
 
         let transfers = NSMenuItem(
-            title: "传输与历史",
+            title: L10n.text(.transferTitle),
             action: #selector(showTransfers(_:)),
             keyEquivalent: "t"
         )
@@ -695,7 +719,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(transfers)
 
         let pairing = NSMenuItem(
-            title: "配对设备",
+            title: L10n.text(.pairingTitle),
             action: #selector(showPairing(_:)),
             keyEquivalent: "p"
         )
@@ -704,7 +728,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(pairing)
 
         let settings = NSMenuItem(
-            title: "设置",
+            title: L10n.text(.settingsTitle),
             action: #selector(showSettings(_:)),
             keyEquivalent: ","
         )
@@ -713,7 +737,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         statusMenu.addItem(settings)
 
         let availableUpdate = NSMenuItem(
-            title: "有新版本可用",
+            title: L10n.text(.updateAvailable),
             action: nil,
             keyEquivalent: ""
         )
@@ -721,15 +745,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         availableUpdate.isEnabled = false
         availableUpdate.image = NSImage(
             systemSymbolName: "arrow.down.circle",
-            accessibilityDescription: "有新版本可用"
+            accessibilityDescription: L10n.text(.updateAvailable)
         )
-        availableUpdate.setAccessibilityLabel("有新版本可用")
+        availableUpdate.setAccessibilityLabel(L10n.text(.updateAvailable))
         availableUpdateItem = availableUpdate
         statusMenu.addItem(availableUpdate)
         statusMenu.addItem(.separator())
 
         let quit = NSMenuItem(
-            title: "退出 DropMesh",
+            title: L10n.text(.appQuit),
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -746,9 +770,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         host.focusRingType = .default
         host.setAccessibilityElement(true)
         host.setAccessibilityRole(.button)
-        host.setAccessibilityLabel("DropMesh 文件传输")
+        host.setAccessibilityLabel(L10n.text(.appAccessibilityLabel))
         host.setAccessibilityHelp(
-            "打开状态菜单，或将本地文件拖到这里选择接收设备。"
+            L10n.text(.appAccessibilityHelp)
         )
         button.setAccessibilityElement(false)
         button.frame = host.bounds
@@ -790,12 +814,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if button.updateAvailable {
             accessibilityParts.append(
                 button.updateActionEnabled
-                    ? "有新版本可用"
-                    : "有新版本可用，暂时无法查看"
+                    ? L10n.text(.updateAvailable)
+                    : L10n.text(.updateAvailableUnavailable)
             )
         }
-        if button.hasUnreadReceive { accessibilityParts.append("有新接收文件") }
-        let accessibilityValue = accessibilityParts.joined(separator: "，")
+        if button.hasUnreadReceive { accessibilityParts.append(L10n.text(.receiveUnread)) }
+        let accessibilityValue = accessibilityParts.joined(separator: L10n.text(.presentationListSeparator))
         button.setAccessibilityValue(accessibilityValue)
         nativeButton?.setAccessibilityValue(accessibilityValue)
         nativeButton?.toolTip = accessibilityValue
@@ -861,13 +885,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
             item.representedObject = summary.id.rawValue.uuidString
             item.setAccessibilityLabel(
-                "来自\(summary.sourceName)的\(summary.title)，在 Finder 中显示"
+                L10n.text(.receiveItemAccessibility, String(summary.sourceName), String(summary.title))
             )
             item.isHidden = false
         }
 
         if snapshot.overflowCount > 0 {
-            recentReceiveOverflowItem?.title = "另有 \(snapshot.overflowCount) 个新接收项目…"
+            recentReceiveOverflowItem?.title = L10n.text(.receiveOverflow, Int64(snapshot.overflowCount))
             recentReceiveOverflowItem?.isHidden = false
         } else {
             recentReceiveOverflowItem?.isHidden = true
@@ -942,6 +966,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 private extension AppRuntimeStatus {
     var canRetry: Bool {
         if case let .startupError(_, canRetry) = self { return canRetry }
+        if case let .startupFailure(_, canRetry) = self { return canRetry }
         return false
     }
 
@@ -949,9 +974,9 @@ private extension AppRuntimeStatus {
         switch self {
         case .loading: "hourglass"
         case .ready: "checkmark.shield"
-        case .offline: "network.slash"
-        case .startupError: "exclamationmark.triangle"
-        case .error: "exclamationmark.triangle"
+        case .offline, .serviceOffline: "network.slash"
+        case .startupError, .startupFailure: "exclamationmark.triangle"
+        case .error, .serviceError: "exclamationmark.triangle"
         }
     }
 }

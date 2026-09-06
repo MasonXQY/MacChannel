@@ -10,7 +10,7 @@ struct StoredDirectoryReference: Codable, Equatable, Sendable {
 
 enum DirectoryAuthorizationError: LocalizedError {
     case reselect
-    var errorDescription: String? { "接收目录授权已失效，请重新选择目录。" }
+    var errorDescription: String? { L10n.text(.receiveDirectoryReauthorize) }
 }
 
 struct AuthorizedDirectory: Sendable {

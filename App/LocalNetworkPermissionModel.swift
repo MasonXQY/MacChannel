@@ -40,7 +40,7 @@ final class LocalNetworkPermissionModel: ObservableObject {
 
     var guidanceText: String? {
         capability == .unavailable
-            ? "局域网访问未允许。公网连接、设置和历史仍可使用。"
+            ? L10n.text(.permissionLocalNetworkDenied)
             : nil
     }
 

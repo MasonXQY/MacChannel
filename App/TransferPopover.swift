@@ -13,6 +13,8 @@ struct TransferSurfaceItem: Identifiable, Sendable {
     let updatedAt: Date
 
     var id: TransferID { snapshot.id }
+    var localizedPeerName: String { peerName.isEmpty ? L10n.text(.deviceUnknown) : peerName }
+    var localizedDisplayName: String { displayName.isEmpty ? L10n.text(.transferFallbackName) : displayName }
     var progress: Double {
         guard snapshot.totalBytes > 0 else { return 0 }
         return min(max(Double(snapshot.completedBytes) / Double(snapshot.totalBytes), 0), 1)
@@ -20,15 +22,15 @@ struct TransferSurfaceItem: Identifiable, Sendable {
 
     var phaseText: String {
         switch snapshot.phase {
-        case .preparing: "正在准备"
-        case .connecting: "正在连接"
-        case .transferring: "传输中"
-        case .paused: "已暂停"
-        case .verifying: "正在校验"
-        case .cancelling: "正在取消"
-        case .completed: "已完成"
-        case .failed: "传输失败"
-        case .cancelled: "已取消"
+        case .preparing: L10n.text(.transferPreparing)
+        case .connecting: L10n.text(.transferConnecting)
+        case .transferring: L10n.text(.transferTransferring)
+        case .paused: L10n.text(.transferPaused)
+        case .verifying: L10n.text(.transferVerifying)
+        case .cancelling: L10n.text(.transferCancelling)
+        case .completed: L10n.text(.transferCompleted)
+        case .failed: L10n.text(.transferFailed)
+        case .cancelled: L10n.text(.transferCancelled)
         }
     }
 
@@ -48,9 +50,9 @@ struct TransferSurfaceItem: Identifiable, Sendable {
 
     var routeText: String {
         switch snapshot.route {
-        case .lan: "局域网直连"
-        case .directInternet: "互联网直连"
-        case .relay: "加密中继"
+        case .lan: L10n.text(.transferRouteLan)
+        case .directInternet: L10n.text(.transferRouteDirectInternet)
+        case .relay: L10n.text(.transferRouteRelay)
         }
     }
 
@@ -64,26 +66,26 @@ struct TransferSurfaceItem: Identifiable, Sendable {
 
     var failureHelpText: String? {
         guard snapshot.phase == .failed else { return nil }
-        return "请确认对方 DropMesh 已打开并显示“安全服务已连接”，然后重试。"
+        return L10n.text(.transferFailureHelp)
     }
 
     var speedText: String {
         guard let bytesPerSecond, bytesPerSecond.isFinite, bytesPerSecond > 0 else {
-            return "正在计算速度"
+            return L10n.text(.transferSpeedCalculating)
         }
-        return "\(Self.decimalByteText(bytesPerSecond))/秒"
+        return L10n.text(.transferSpeedValue, String(Self.decimalByteText(bytesPerSecond)))
     }
 
     var etaText: String {
         guard let estimatedTimeRemaining,
               estimatedTimeRemaining.isFinite,
               estimatedTimeRemaining >= 0
-        else { return "正在计算剩余时间" }
+        else { return L10n.text(.transferEtaCalculating) }
         let seconds = Int(estimatedTimeRemaining.rounded(.up))
         if seconds >= 60 {
-            return "剩余 \(seconds / 60)分\(seconds % 60)秒"
+            return L10n.text(.transferEtaMinutes, Int64(seconds / 60), Int64(seconds % 60))
         }
-        return "剩余 \(seconds)秒"
+        return L10n.text(.transferEtaSeconds, Int64(seconds))
     }
 
     var canPause: Bool { snapshot.phase == .transferring }
@@ -121,7 +123,11 @@ protocol TransferSurfaceServicing: AnyObject {
 final class TransferSurfaceModel: ObservableObject {
     @Published var active: [TransferSurfaceItem]
     @Published var history: [TransferSurfaceItem]
-    @Published var actionError: String?
+    @Published var actionErrorContent: LocalizedContent?
+    var actionError: String? {
+        get { actionErrorContent?.text }
+        set { actionErrorContent = newValue.map(LocalizedContent.verbatim) }
+    }
     private let announcer: any AccessibilityAnnouncing
 
     init(
@@ -132,41 +138,43 @@ final class TransferSurfaceModel: ObservableObject {
     ) {
         self.active = active
         self.history = history
-        self.actionError = actionError
+        self.actionErrorContent = actionError.map(LocalizedContent.verbatim)
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
     }
 
     func pause(_ id: TransferID, using service: any TransferSurfaceServicing) async {
-        await perform("无法暂停传输，请稍后重试。") { try await service.pause(id) }
+        await perform(.transferPauseFailed) { try await service.pause(id) }
     }
 
     func resume(_ id: TransferID, using service: any TransferSurfaceServicing) async {
-        await perform("无法继续传输，请检查设备连接后重试。") { try await service.resume(id) }
+        await perform(.transferResumeFailed) { try await service.resume(id) }
     }
 
     func cancel(_ id: TransferID, using service: any TransferSurfaceServicing) async {
-        await perform("无法取消传输，传输可能已经结束。") { try await service.cancel(id) }
+        await perform(.transferCancelFailed) { try await service.cancel(id) }
     }
 
-    private func perform(_ message: String, action: () async throws -> Void) async {
+    private func perform(_ key: LocalizedKey, action: () async throws -> Void) async {
         actionError = nil
         do {
             try await action()
         } catch {
-            actionError = message
-            announcer.announce(message)
+            actionErrorContent = .keys([key])
+            announcer.announce(L10n.text(key))
         }
     }
 }
 
 enum TransferSurfaceSection: String, CaseIterable, Identifiable {
-    case active = "进行中"
-    case history = "历史"
+    case active
+    case history
 
     var id: String { rawValue }
+    var title: String { L10n.text(self == .active ? .transferSectionActive : .transferSectionHistory) }
 }
 
 struct TransferPopover: View {
+    @EnvironmentObject private var localization: LocalizationController
     @ObservedObject var model: TransferSurfaceModel
     let service: any TransferSurfaceServicing
     let initialSection: TransferSurfaceSection
@@ -189,18 +197,18 @@ struct TransferPopover: View {
     var body: some View {
         VStack(spacing: 12) {
             HStack {
-                Label("传输与历史", systemImage: "arrow.up.arrow.down")
+                Label(L10n.text(.transferTitle), systemImage: "arrow.up.arrow.down")
                     .font(.headline)
                 Spacer()
-                Button("关闭", systemImage: "xmark", action: onDismiss)
+                Button(L10n.text(.commonClose), systemImage: "xmark", action: onDismiss)
                     .labelStyle(.iconOnly)
                     .frame(minWidth: 40, minHeight: 40)
-                    .accessibilityLabel("关闭传输与历史")
+                    .accessibilityLabel(L10n.text(.transferClose))
                     .keyboardShortcut(.cancelAction)
             }
-            Picker("内容", selection: $section) {
+            Picker(L10n.text(.transferContent), selection: $section) {
                 ForEach(TransferSurfaceSection.allCases) { section in
-                    Text(section.rawValue).tag(section)
+                    Text(section.title).tag(section)
                 }
             }
             .pickerStyle(.segmented)
@@ -217,7 +225,7 @@ struct TransferPopover: View {
                     let items = section == .active ? model.active : model.history
                     if items.isEmpty {
                         ContentUnavailableView(
-                            section == .active ? "没有正在进行的传输" : "暂无传输历史",
+                            section == .active ? L10n.text(.transferEmptyActive) : L10n.text(.transferEmptyHistory),
                             systemImage: section == .active ? "arrow.up.arrow.down" : "clock"
                         )
                         .frame(minHeight: 180)
@@ -244,11 +252,11 @@ private struct TransferRow: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.displayName)
+                    Text(item.localizedDisplayName)
                         .font(.headline)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(item.peerName)
+                    Text(item.localizedPeerName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -259,7 +267,7 @@ private struct TransferRow: View {
             }
 
             ProgressView(value: item.progress)
-                .accessibilityLabel("传输进度")
+                .accessibilityLabel(L10n.text(.transferProgress))
                 .accessibilityValue("\(Int((item.progress * 100).rounded()))%")
 
             HStack(spacing: 14) {
@@ -282,30 +290,30 @@ private struct TransferRow: View {
 
             HStack(spacing: 8) {
                 if item.canPause {
-                    Button("暂停", systemImage: "pause") {
+                    Button(L10n.text(.commonPause), systemImage: "pause") {
                         Task { await model.pause(item.id, using: service) }
                     }
                     .frame(minHeight: 40)
                 }
                 if item.canResume {
-                    Button("继续", systemImage: "play") {
+                    Button(L10n.text(.commonResume), systemImage: "play") {
                         Task { await model.resume(item.id, using: service) }
                     }
                     .frame(minHeight: 40)
                 }
                 if item.canCancel {
-                    Button("取消", systemImage: "xmark", role: .destructive) {
+                    Button(L10n.text(.commonCancel), systemImage: "xmark", role: .destructive) {
                         Task { await model.cancel(item.id, using: service) }
                     }
                     .frame(minHeight: 40)
                 }
                 Spacer()
                 if item.canShowInFinder, let url = item.outputURL {
-                    Button("在 Finder 中显示", systemImage: "folder") {
+                    Button(L10n.text(.receiveReveal), systemImage: "folder") {
                         service.showInFinder(url)
                     }
                     .frame(minHeight: 40)
-                    .accessibilityHint("在 Finder 中选中已完成的文件")
+                    .accessibilityHint(L10n.text(.receiveRevealHint))
                 }
             }
         }

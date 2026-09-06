@@ -399,7 +399,7 @@ final class ReceiveNotificationController {
         let request = ReceiveNotificationRequest(
             identifier: identifier,
             content: ReceiveNotificationContent(
-                title: "已收到新文件",
+                title: L10n.text(.receiveNotificationTitle),
                 body: notificationBody(for: urls)
             )
         )
@@ -734,9 +734,9 @@ final class ReceiveNotificationController {
 
     private func notificationBody(for urls: [URL]) -> String {
         if urls.count == 1 {
-            return "\(urls[0].lastPathComponent) 已保存到接收文件夹"
+            return L10n.text(.receiveNotificationSingle, String(urls[0].lastPathComponent))
         }
-        return "已收到 \(urls.count) 个文件，已保存到接收文件夹"
+        return L10n.text(.receiveNotificationMultiple, Int64(urls.count))
     }
 
     private func storeNotificationTarget(

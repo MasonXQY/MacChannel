@@ -1,413 +1,84 @@
-# Task 7 Report: Encrypted resumable transfer protocol
+# Task 7 — shared Chinese / English localization
 
-## Status
+Base: `ada4e67ea2857a228c49f752b3699b4fe458d18d`.
+Implementation commit message: `feat: localize DropMesh for Chinese and English`. See the enclosing Git commit for the final SHA; validation ran against the identical application/test source before this report was committed.
 
-Complete after repeated independent security follow-ups. The protocol now provides
-encrypted manifest/chunk transfer, bounded verified resumption, explicit session
-control, replay separation, immutable source pinning, crash-tolerant journals,
-and descriptor-relative receiver materialization over the audited
-`SecureChannel`.
+## Result
 
-## TDD evidence
+- Added 225 stable semantic `LocalizedKey` cases and matching `en` / `zh-Hans` catalogs. No source-language sentence keys. Tests compare exact key sets, reject duplicate/missing/empty entries, validate placeholder count and string/integer signatures, and format every entry.
+- Added each locale's `InfoPlist.strings`: display name, local network, Downloads, and selected Documents purpose. Store assembly declares development region `en` and both locales. Direct preserves raw `MacChannel` / localized `DropMesh` naming and `1.2.6 (21)` defaults.
+- Settings offers System / 简体中文 / English. The `appLanguage` preference uses each distribution's separate standard defaults bundle/container. Production defaults to System. Existing Chinese assertions explicitly inject a Chinese presentation locale; no assertion groups were disabled.
+- `LocalizationController` publishes presentation changes only. SwiftUI popovers receive the shared controller as an environment object; the fan observes the same shared controller. Native menus, recent receives, tooltips, accessibility, update enablement, and onboarding window title refresh in place.
+- Runtime status, action failures, and trust warnings retain typed content and resolve at display time. Visible failures change language without retrying operations. Unknown names resolve at presentation time; generated clipboard filenames use the selected language at creation. User names, paths, existing filenames, IDs, database identifiers, and protocol error identifiers remain data.
+- Core/protocol source is unchanged. The Core ready-state legacy presentation is localized at the App boundary, with dedicated English title/accessibility coverage. Native ready-button width fits the translated title.
 
-- The original implementation began with the required compile-failing protocol
-  tests before `TransferManifest` existed.
-- The follow-up hardening also used red/green tests. Observed red states included
-  accepted case-equivalent paths, accepted decomposed Unicode, no fresh-session
-  challenge API, source replacement terminating the receiver, torn journal tails
-  producing `unexpectedFrame`, and unbounded resume-map construction.
-- Adversarial green coverage now includes APFS `A`/`a` and NFC/NFD behavior,
-  source pathname replacement and in-place mutation, same-exporter cross-session
-  replay, torn and corrupt journal records, sender/receiver pause-resume-cancel,
-  typed sender termination, bounded manifest/map limits, and staged hardlink
-  replacement after the receiver has opened the file.
-- The second follow-up reproduced cancellation deadlocks at the local-pause,
-  remote-pause, ACK-window, receiver-read, and final-completion waits, plus a
-  permanently backpressured terminal send. Red tests also covered a recognized
-  crash-left checkpoint blocking finalization and manifest roots equivalent to
-  protocol metadata names on case-insensitive APFS.
-- The final review then exposed a simultaneous frame/control selection race,
-  startup and ordinary-send cancellation gaps, and metadata cleanup identity
-  races. Deterministic red/green regressions now cover ready frame plus control,
-  initial challenge/offer waits, blocked ordinary sends in both directions,
-  checkpoint replacement, and metadata-directory replacement.
-- The last adversarial pass found that a transport can deliver ciphertext and
-  delay returning long enough for cancellation to race a terminal frame. It also
-  found deletion races in pathname-based cleanup and an inconsistent result when
-  the completion notification fails after publication. Regressions now delay a
-  send after delivery, swap private quarantine names, and fail the final receiver
-  notification after the destination has been atomically published.
+## RED / GREEN
 
-## Implemented contract
+- `task-7-localization-red.log`: absent catalogs and existing Chinese UI literals caused three expected failures before implementation.
+- `task-7-live-error-red.log`: a visible Settings error stayed English after switching to Chinese. Retained typed content fixed it without repeating the action.
+- `task-7-core-presentation-red.log`: English ready title, accessibility value, and width failed before the App adapter fix.
+- `task-7-focused-green.log`: requested Localization / TransferSurface / StatusItemAppKit / AppRuntime groups, 156 tests and zero failures at that stage.
+- `task-7-render-green.log`: catalog and offscreen-render gate passed.
+- `task-7-performance-diagnostic.log`: final localization/ready coverage and independent Core/restart diagnostics passed.
+- `task-7-date-green.log`: date fixture explicitly uses Chinese while preserving timezone assertions.
+- **Final `task-7-final-full-swift-test.log`: 868 tests, 3 existing environment skips, zero failures, serial, 50.647 seconds.** Includes final offscreen renders. SHA-256: `cb1a3beaae23094fc4ebb865e3a171a4fdc69c0ede6c97d12a0dbabd6d9e48c4`.
 
-- Manifest traversal is streamed and stops at 4,096 entries. Aggregate bytes,
-  chunk count, path bytes, and encoded offer size are checked before hashing or
-  snapshot cloning. Aggregate transfer state is capped at 1,000,000 chunks.
-- Relative paths reject absolute paths, dot segments, NUL, non-NFC input,
-  unsupported nodes, and source symlinks. Before staging, receiver paths are
-  canonical-normalized and case-folded according to the actual destination
-  volume; filesystem-equivalent collisions fail closed.
-- Every source file is opened with `O_NOFOLLOW`, its pathname and descriptor
-  identities must match, and `fclonefileat` creates an APFS copy-on-write snapshot.
-  The clone pathname is immediately unlinked. Manifest hashing, validation, and
-  every chunk read use only the stable retained descriptor; no mutable source
-  pathname remains in the manifest.
-- Calls to `exportKey` remain exactly
-  `label: "macchannel-transfer-v1"`, `context: encodedTransferID`, `length: 32`.
-  The receiver first contributes a fresh 32-byte challenge over authenticated
-  `SecureChannel`; HKDF mixes that challenge into each directional session key.
-  Recorded frames therefore fail in a new session even if the exporter repeats.
-- Strict versioned binary frames cover `offer`, `accept`, `chunk`, `ackRanges`,
-  `pause`, `resume`, `cancel`, `complete`, and typed `error`. AES-GCM authenticates
-  the wire header and encrypted body. Direction, transfer ID, monotonic sequence,
-  and fresh cipher epoch enforce nonce uniqueness and replay/order checks.
-- The maximum chunk is calculated so its complete authenticated wire frame is
-  exactly 65,536 bytes. The sender retains at most 64 outstanding coordinates,
-  not an unbounded sent-history array. Optional coordinate recording is an
-  internal test injection only.
-- Receiver ACKs are canonical continuous ranges after 16 chunks, at completion,
-  or after 250 ms. Resume advertisements are conservatively bounded to one
-  verified run per manifest entry, at most 4,096 ranges and within one frame;
-  omitted verified chunks are safely resent.
-- Resume journal version 2 uses fingerprint-bound SHA-256 checksums per record.
-  A torn final record is discarded and the valid prefix is recovered. A corrupt
-  complete record is rejected. Compaction uses a synchronized temporary
-  checkpoint and atomic descriptor-relative rename.
-- Journal and checkpoint files live in a private protocol directory alongside,
-  rather than inside, the received manifest root. Both staging and metadata
-  directory names are compared with the same canonical/case filesystem key used
-  for destination validation. Case-equivalent manifest roots therefore cannot
-  alias protocol state. Resume initialization removes only exact, lowercase,
-  UUID-shaped `.resume-checkpoint-*` and crash-left `.resume-retired-*` files.
-  Each recognized file is first atomically moved to a fresh private quarantine
-  name, then descriptor-validated as a same-owner, single-link regular file before
-  deletion. Unknown names are preserved at their original paths and make final
-  cleanup fail closed.
-- Receiver staging uses private same-owner directories and descriptor-relative
-  `mkdirat`/`openat` with `O_NOFOLLOW`. Staged files remain pinned, must be regular
-  with link count one, and are rechecked for device/inode identity before final
-  publication. `renameatx_np(RENAME_EXCL)` prevents final destination replacement.
-- `TransferSessionControl` makes pause, resume, and cancel operational from either
-  side. Revisioned continuations wake local paused waits immediately, and each
-  remote-resume, ACK, receiver-read, and final-completion wait races incoming
-  frames against control changes without adding another channel receiver.
-  Cancellation maps to `cancelled`. Typed terminal `cancel`/`error` transmission
-  is bounded to 100 ms, after which both sessions still await `channel.close()`;
-  permanent send backpressure cannot strand the peer or the session task.
-- Frame/control selection drains both racers and preserves any authenticated
-  frame already removed from the bounded inbox. Startup reads and every ordinary
-  protocol send also observe control cancellation. Every encrypted sequence is
-  reserved and burned before transport I/O starts, so an ambiguously delivered
-  send can never reuse its AES-GCM nonce for a racing terminal frame.
-- Checkpoint cleanup atomically quarantines a recognized name before opening,
-  validating, and deleting the quarantined inode. Metadata cleanup first requires
-  the pinned directory to be empty, atomically moves it to an unpredictable
-  quarantine name, validates that directory against the original descriptor, and
-  only then removes it. Root publication is the explicit commit point; the final
-  authenticated `complete` notification is bounded best effort. Notification
-  failure or cancellation therefore cannot turn a visible verified result into a
-  reported receive failure; failure/timeout explicitly closes the channel so the
-  sender also terminates. Non-security staging housekeeping is likewise best
-  effort after the exclusive rename.
-- Tamper, replay, duplicate, out-of-order, invalid ACK/resume, journal corruption,
-  staged path replacement, and final digest failures all fail closed. Each side
-  still has exactly one receiver for `channel.frames()`.
+Final command:
 
-## Verification
-
-- `swift test --filter TransferProtocolTests`: 55 tests, 0 failures.
-- `swift test --filter WebRTCLoopbackTests`: 14 tests, 0 failures, including the
-  ordered/reliable 1 MiB loopback and inclusive 64 KiB cap regressions.
-- `swift test`: 159 tests, 0 failures.
-- `swift-format lint` with the repository's four-space style over all Task 7
-  source and test files: exit 0, no diagnostics.
-- `git diff --check`: clean.
-- Verification host data volume: APFS, case-insensitive, canonical-normalization
-  insensitive, and width-sensitive.
-
-## Self-review and constraints
-
-- No known blocking defect remains in Task 7 scope. Disk-capacity policy remains
-  intentionally deferred to Task 8; protocol aggregate limits are enforced here.
-- Source pinning intentionally supports APFS copy-on-write clones only. It also
-  needs permission to create a private, same-volume temporary snapshot directory
-  adjacent to each source file. If `fclonefileat`, the filesystem, or permissions
-  cannot provide that invariant, manifest construction fails closed with
-  `unsupportedSource`; there is no mutable-file fallback.
-- Symlinks are deliberately rejected rather than transferred or materialized.
-- Resume format version 1 is not migrated; version mismatch fails closed and the
-  caller must restart that transfer with fresh staging.
-
-## Commits
-
-- Original implementation: `10268fb feat: add encrypted resumable transfers`.
-- Independent-review hardening: `fix: harden resumable transfer invariants`
-  (`890a307`).
-- Second independent-review hardening: `fix: make transfer cancellation and
-  resume cleanup fail safe` (`8012458`).
-- Follow-up cancellation/cleanup race hardening: `fix: close transfer
-  cancellation races` (`a42687b`).
-- Final nonce/quarantine/commit-point hardening: `fix: prevent ambiguous transfer
-  send and cleanup races` (this report is committed with that follow-up).
-
----
-
-# Task 7 Release Acceptance Report: DropMesh 1.2.2 (15)
-
-Date: 2026-09-02 (Asia/Dubai)
-
-## Release decision
-
-**NOT PUBLISHED.** The automated, production-signing, notarization, installed-app,
-and physical two-Mac acceptance checks below passed. Publication remains held for
-the primary agent's final full-branch review and explicit release approval. The
-physical evidence came from two separate Macs; local Docker networking and one-Mac
-UI evidence were not used as substitutes.
-
-## Verification correction
-
-The first notarized candidate exposed a public-branding defect in the generated
-Sparkle feed: the RSS channel title was the transition bundle's raw display name
-instead of `DropMesh`. A regression assertion first failed on that exact value.
-`Scripts/build-update-feed.sh` now changes only the known transition title, re-signs
-the feed with Sparkle's verified `sign_update` tool, and fails closed for any unknown
-title. The corrected test passed, and the production-source audit was strengthened so
-the fix did not introduce a new ordinary legacy-brand literal.
-
-Correction commit:
-
-```text
-9a6c57ccae827881cdea2288fa6eb7b64968aebf fix: brand DropMesh update feed
+```bash
+DROPMESH_LOCALIZATION_RENDER_DIR="$PWD/.superpowers/sdd/task-7-renders" swift test --no-parallel
 ```
 
-## Automated verification on the corrected implementation
+The active-transfer test uses a real `AppRuntimeHost`, retained runtime/coordinator, live status/transfer-stream tasks and a `25 / 100` byte active snapshot. Across English then Chinese it asserts identical host/runtime/coordinator identities, transfer ID/bytes, unchanged live task counts, one build, and zero reconnects/shutdowns. Actual native menu labels and status-button accessibility/tooltips change. This is deterministic in-process lifecycle/snapshot evidence, not signed two-Mac acceptance.
 
-- The complete Swift coverage passed as 619 non-network tests plus 21 network
-  integration tests, with no failures. The full Docker run had one deliberate skip in
-  the non-network partition and then ran all 21 network tests with no skips.
-- The local-only gate passed its direct-LAN integration and printed exactly one
-  `update-acceptance full-matrix-complete cases=17` marker.
-- The real Docker stack started PostgreSQL, rendezvous, STUN, and coturn on isolated
-  networks and shut them down through the gate's cleanup path.
-- Internet ICE gathered an actual server-reflexive candidate.
-- Direct LAN source and destination SHA-256 both equalled
-  `77beecbc3fec52949142c29b38f26665666491c29dbe7e8a79611dcdc673eab4`.
-- Forced relay reported `route=relay` with an opaque short-lived credential.
-- The forced-relay resume case transferred 1 GiB. Source and destination SHA-256 both
-  equalled `102bca71040977130e0a87f2e980dce728e34840a1cf5b5a3bc33f0e4f96902a`;
-  peak resident memory was 119,947,264 bytes.
-- Go race tests and `go vet` passed.
-- The production Developer ID signing contract passed for arm64 and x86_64, hardened
-  runtime, nested-code sealing, strict verification, designated requirement, and two
-  bounded accessory-app smoke launches.
+The copy audit inventories `App`, `Sources/MacChannelDirectDistribution`, and `Sources/DropMeshAppStoreDistribution`. Chinese literals allow only the exact legacy directory name `Mac 通道`; UI-sink inspection permits only the brand-only `DropMesh` menu title. Core ready-state consumption has a separate behavioral guard. This targeted lexical audit is not a general Swift AST proof.
 
-## Final notarized candidate evidence
+## Preserved slow / failing run and investigation
 
-After the initial report commit, the production candidate was rebuilt from clean commit
-`1ca7434bc4c769e3af72d7177a123a5fb005ec09`. That candidate remains the current
-handoff artifact; this later report-only correction does not rebuild or alter it.
+`task-7-pre-final-full-swift-test.log`: 866 tests, 4 skips (including optional rendering), two LAN timeout/routeUnavailable failures, 360.448 seconds. SHA-256: `75ca2b248d31a55f331bbf137f695db96ab20a4f2fb30fbbb0ab1f49926cce73`. No timeout, retry limit, Core behavior, or safety assertion was weakened.
 
-The generated manifest actually records the candidate's product, bundle identifier,
-version `1.2.2`, build `15`, Git commit
-`1ca7434bc4c769e3af72d7177a123a5fb005ec09`, Team ID `XKAZ67HN45`, signing
-identity, designated requirement, `notarized` release state, volume name, staged
-filesystem digest, DMG SHA-256
-`102c3a3f5c7ffbee6dad2e0b06b1f723acaa62639d82f5dc5857d918b087857f`, and
-source/build timestamps. It does **not** contain an Apple submission ID or DMG byte
-length.
+- 10,000 steady-state `L10n.text` calls took 0.104 seconds during diagnosis and 0.102 seconds in the final run. The implementation creates Foundation bundle wrappers for lookups, not manual catalog reads/parses per call. The measured cost did not support a cache rewrite as the cause of multi-second Core storage operations.
+- Ran the unmodified **September 5** binary at `/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.build/arm64-apple-macosx/debug/MacChannelPackageTests.xctest` directly with `xcrun xctest` and one Core filter. `testOutgoingPackageFailureAfterRenameCannotRestoreAsOrphan` took **9.409s**, versus **6.418s** in the current isolated binary; historical log was 0.035s. No baseline source/binary was rebuilt or changed. Evidence: `task-7-preexisting-binary-core-diagnostic.log`, SHA-256 `0c7b96bbe063cc45284ae68da919bd7b952bcde2e19c1e4a30eeae1898bbe3b8`.
+- Both failed integrations passed independently on the unchanged current binary: restart **6.184s**, repeated parallel LAN **1.421s** (`task-7-performance-diagnostic.log`, `task-7-repeat-lan-diagnostic.log`).
+- Final full-run sampled Core timings recovered to **0.090s** and **1.243s**; the two integration tests passed in **0.953s** and **1.161s**.
+- Read-only system checks showed load around 8.58 and unrelated busy processes. Old-binary reproduction plus later recovery is consistent with host contention; attribution to a specific process is not proven. No user processes were stopped or changed.
 
-Those two values come from separate final-build evidence: `notarytool` history and the
-successful build output identified Apple submission
-`2d063a5d-8d46-4877-a49a-191199574c26` as accepted, while `stat` measured the final
-DMG at 19,492,207 bytes. Independent strict app/DMG code-signature checks, production
-designated-requirement matching, stapler validation, Gatekeeper, the signed Sparkle
-enclosure, and the signed appcast all passed. The appcast channel title was `DropMesh`
-and its sole item was version `1.2.2`, build `15`.
+## Builds / distribution
 
-An earlier notarized candidate from the correction commit was superseded by this final
-build; its submission identifier and digest are intentionally omitted to prevent it
-from being mistaken for the handoff artifact.
+- `task-7-direct-product-build.log`: MacChannelApp product build passed.
+- `task-7-store-product-build.log`: DropMeshAppStore product build passed.
+- `task-7-direct-bundle-build.log`: local Direct bundle assembly passed.
+- `task-7-direct-baseline.log`: `direct-regression PASS version=1.2.6 build=21`, including Sparkle and legacy identity contract.
+- `task-7-store-source-contract.log`: Store source/entitlement/isolation contract passed.
+- Actual Store executable linkage showed no Sparkle; its strings lacked `SUFeedURL`, `SUPublicEDKey`, `Sparkle.framework`, and `SUScheduledCheckInterval`. New locale resources contain no Sparkle/feed/public-update-key material.
+- Shared catalogs embedded by Direct contain no Store-only bundle ID, team ID, or Store-ID metadata literals (`com.zensystech.dropmesh`, `XKAZ67HN45`, `DropMeshAppStoreID`).
+- Direct bundle inspection confirmed raw `CFBundleDisplayName=MacChannel`, English localized `CFBundleDisplayName=DropMesh`, and the checked-in Chinese local-network permission purpose.
 
-## Mac A upgrade and installed UI acceptance
+## Visual evidence and limits
 
-Before installation, the previous v1.2.1 (14) app, Application Support data, settings,
-trust data, and history database were copied to an owner-controlled temporary backup.
-There were no active transfers. The previous app was quit normally and the notarized
-candidate was installed over the transition-compatible `/Applications/MacChannel.app`
-path.
+Final native offscreen captures, without launching the installed runtime:
 
-Observed after launching the installed v1.2.2 (15) candidate:
+- `.superpowers/sdd/task-7-renders/onboarding-en.png`
+- `.superpowers/sdd/task-7-renders/onboarding-zh-Hans.png`
+- `.superpowers/sdd/task-7-renders/settings-en.png`
+- `.superpowers/sdd/task-7-renders/settings-zh-Hans.png`
+- `.superpowers/sdd/task-7-renders/menu-en.txt`
+- `.superpowers/sdd/task-7-renders/menu-zh-Hans.txt`
 
-- Finder and LaunchServices displayed `DropMesh`; the 1024 px and 16 px icon assets
-  both showed the graphite document-and-green-nodes artwork, with no blank template or
-  paper-plane artwork.
-- The installed app passed strict code-signature and Gatekeeper execution assessment as
-  a notarized Developer ID application.
-- Settings displayed `DropMesh 1.2.2 (15)` and the real notification authorization
-  state (`not allowed` on this Mac).
-- The receive-directory setting, every settings field, two paired-device records,
-  13 history records, and trust database were preserved. Canonical settings, logical
-  history, and trust fingerprints were byte-stable across installation. The runtime
-  loaded the existing device state without exporting private key material.
-- The `Transfer & History`, `Paired Devices`, and `Settings` installed popovers were
-  each opened from the live status menu and disappeared when another application was
-  activated. Closing these idle UI surfaces did not change persisted state.
-- Controlled screenshots were kept only under temporary storage because they contain
-  unrelated desktop content and device labels; they are not release assets and were
-  not committed.
+All four images were inspected: onboarding body/buttons fit both languages; visible Settings language/name/receive-folder/paired-device labels are readable and uncut. Settings retains its native scrolling form; lower scrolled sections and dark appearance were not separately captured. Menu evidence is native-object title/accessibility assertions plus inventory, not an open-system-menu screenshot. This does not establish installed VoiceOver, real OS permission prompts, signed Store behavior, or signed two-Mac acceptance.
 
-## Physical two-Mac acceptance
+No installed production app, remote Mac, server, privacy producer/verifier, release tag/feed, Store record, or external publication was modified. Signing/TestFlight prerequisites are unchanged. This is bilingual implementation/regression evidence, not App Store release readiness.
 
-Both physical Macs ran the installed DropMesh version `1.2.2` build `15`. Mac A had
-system notifications denied and Mac B had them allowed. Before every result was
-accepted, the transfer history/database route and terminal phase were checked on the
-participating Mac, and the materialized file was hashed independently on the receiver.
+The commit contains the 44 intended application/resource/script/test files plus this already-tracked task report. Temporary migration helpers stayed under `/tmp`; screenshots and diagnostic logs remain ignored under `.superpowers/sdd`, outside release directories and outside the commit. No plan/progress files were changed. The stale pre-existing Task 7 report was replaced with this task's evidence.
 
-### Successful transfer matrix
+## Changed files
 
-| Direction | Network condition | Recorded route and result | Receiver SHA-256 |
-| --- | --- | --- | --- |
-| Mac B to Mac A | Same LAN | Mac A inbound `route=lan`, `phase=completed`, `67,108,864/67,108,864` bytes | `f8a5396eb3acc520978f8945e09ba4d36bfb04a249b2bbd0c49e1b1d105feb1e` |
-| Mac A to Mac B | Same LAN | Mac A outbound `route=lan`, `phase=completed`, `67,108,864/67,108,864` bytes | `2662b2135768ca6a799ffbb2028be5f3327d3bec328122ac54d82b06a34cfa74` |
-| Mac B to Mac A | Macs deliberately separated onto different networks | Mac A inbound `route=relay`, `phase=completed`, `67,108,864/67,108,864` bytes | `f8a5396eb3acc520978f8945e09ba4d36bfb04a249b2bbd0c49e1b1d105feb1e` |
-| Mac A to Mac B | Macs deliberately separated onto different networks | Mac A outbound `route=relay`, `phase=completed`, `67,108,864/67,108,864` bytes | `2662b2135768ca6a799ffbb2028be5f3327d3bec328122ac54d82b06a34cfa74` |
+New: `App/Localization.swift`; `App/Resources/{en,zh-Hans}.lproj/{Localizable,InfoPlist}.strings`; `Tests/MacChannelCoreTests/LocalizationTests.swift`.
 
-The source hashes matched the corresponding receiver hashes in all four cases. The
-two separated-network runs displayed the encrypted-relay route in the live UI and
-recorded `relay` in the transfer database; the result was not inferred merely from
-the network topology.
+App `.swift` files: AccessibilityAnnouncer, AppRuntime, AppSurfaceController, ClipboardTransferSource, ConcurrentDistributionGuard, DeviceFanPanel, DeviceFanView, DeviceSummary+Presentation, LocalNetworkPermissionModel, MacChannelApp, OnboardingView, PairingView, ProductionAppRuntime, ReceiveNotificationController, RecentReceiveStore, SecurityScopedDirectoryStore, SettingsView, SoftwareUpdateModel, StatusItemButton, StatusItemController, StatusItemKeyboardFlow, TransferPopover.
 
-### Notification, unread-dot, and popover behavior
+Assembly: `Scripts/build-app.sh`, `Scripts/build-app-store-app.sh`.
 
-- When Mac B received successfully, the system posted exactly one DropMesh success
-  notification and the menu-bar item showed exactly one green unread dot. Mac A, the
-  sender, showed no unread dot. Opening Mac B's status menu cleared the dot immediately.
-- With notifications denied on Mac A, successful receipt still completed over both
-  LAN and relay. No system notification was posted, exactly one green unread dot was
-  shown, and opening the status menu cleared it. Mac B, the sender, showed no unread
-  dot. This verifies that notification authorization does not gate receipt or the
-  in-app unread indicator.
-- During the live Mac B to Mac A relay transfer, the transfer popover was closed and
-  reopened. The reopened view showed later byte progress and a shorter remaining time,
-  and the same transfer then completed with the expected receiver SHA-256.
+Core test files: AppRuntimeTests, ClipboardTransferSourceTests, ConcurrentDistributionGuardTests, DeviceFanLayoutTests, DistributionChannelTests, OnboardingTests, PersonalMeshRuntimeTests, ReceiveNotificationControllerTests, RecentReceiveStoreTests, SecurityScopedDirectoryStoreTests, SoftwareUpdateTests, StatusItemAppKitTests, TransferSurfaceTests. Also explicit Chinese setup in `Tests/Integration/TransferIntegrationTests.swift`. Source-copy contracts now assert semantic-key wiring while behavioral assertions retain Chinese expectations.
 
-### Cancelled and failed negative cases
-
-- A fresh Mac B to Mac A transfer was cancelled after `4,188,928` of `67,108,864`
-  bytes. Mac A recorded the inbound transfer as `phase=cancelled`; neither endpoint
-  showed a success notification or a new green unread dot.
-- For a separate failure case, Mac A's DropMesh process was intentionally stopped only
-  after Mac B began a fresh LAN-direct connection attempt. Mac B recorded a fresh
-  outbound `phase=failed` result at `0/67,108,864` bytes and displayed `传输失败` in
-  history. Because the connection never became established, no route was committed to
-  that database row. Mac B's notification center contained no fresh success
-  notification, neither endpoint showed a new green unread dot, and Mac A was then
-  relaunched successfully.
-
-### Network restoration and residue
-
-After forced-relay testing, Mac B was restored to its original saved 5 GHz Wi-Fi. Its
-previous LAN reachability returned, the secure service reconnected, and a Bonjour
-browse showed two distinct `_macchannel._tcp` service instances for the two Macs. Mac
-B's receiver chooser again listed Mac A, and a subsequent failure-injection attempt
-began on the LAN-direct route before the receiver was deliberately stopped. Mac B was
-relaunched once to force a clean Bonjour re-advertisement; Mac A was relaunched after
-the intentional failure case. No temporary DropMesh Bonjour proxy or browse process
-was left running.
-
-No `v1.2.2` GitHub release, tag, or asset was created or changed during this acceptance,
-and no `latest` feed was updated.
-
-## Safety and residue
-
-The historical protected UE PIDs `38136`, `49361`, `80713`, `82338`, `25679`,
-`28690`, and `29145` were not signaled or terminated. Test infrastructure used isolated
-temporary roots and uniquely named Docker resources; the E2E runner completed its own
-stack cleanup. Existing historical mounted volumes were left untouched.
-
----
-
-# Publication Addendum: DropMesh 1.2.2 (15)
-
-Date: 2026-09-03 (Asia/Dubai)
-
-This addendum supersedes the earlier `NOT PUBLISHED` decision and the earlier candidate
-identity above. The user explicitly authorized publication and explicitly accepted the
-remaining Mac B verification limitation recorded below.
-
-## Published candidate
-
-- Release tag: annotated `v1.2.2`, peeled commit
-  `fedd2290e6f948d85794aaf23dd62aa33e317174`.
-- Version/build: `1.2.2` / `15`.
-- Bundle/Team: `com.mason.macchannel` / `XKAZ67HN45`.
-- Apple notarization: submission `6fd35e94-6c64-47bb-8c28-6f4aefb5c38e`, freshly
-  queried as `Accepted` before publication.
-- `DropMesh.dmg`: 19,775,506 bytes, SHA-256
-  `22ba82ffccf59525755cc84858a0930b35f9816c138546b589ff41a94f59e47f`.
-- `DropMesh.manifest.json`: SHA-256
-  `adcc47b9b1fb2d5b14382ae61a8d53b8bbb4159426565478ac92caaa02d343e3`.
-- `appcast.xml`: SHA-256
-  `10b6a7a9cd82886f99d7fb6ac6dacc4b6ad75f36cd242a947485fb4d943b83f4`.
-
-Before any remote mutation, the worktree was clean and the manifest's commit, DMG hash,
-product, bundle identifier, version, build, Team, release state, and designated
-requirement were checked against the candidate and the repository-owned production
-anchor. The DMG passed strict code-signing, signer-Team, stapler, and Gatekeeper-open
-checks. The mounted App passed deep/strict verification, the exact production
-designated requirement, Gatekeeper execution assessment, universal `x86_64` and
-`arm64` architecture checks, public bundle metadata, the full icon set, embedded
-Sparkle presence, and public-key/feed-URL checks. Sparkle's tool verified both the DMG
-enclosure signature and the signed appcast. Fresh installer and update-feed
-publication-boundary suites also passed.
-
-## Installed acceptance and accepted limitation
-
-The installed Mac A bundle at `/Applications/MacChannel.app` is version `1.2.2` build
-`15`, mode `0755`, passed deep/strict code-signing, the exact production designated
-requirement and Gatekeeper, and compared file-for-file identical with the published
-candidate's mounted App.
-
-The user confirmed that Mac B displays DropMesh `1.2.2 (15)`. The exact Mac B bundle
-hash and the click-notification-to-Finder behavior were not re-verified against this
-final `fedd229` binary after the last notification, installer, and feed hardening
-changes. The user explicitly chose to stop further Mac B testing, accepted this risk,
-and directed publication. Earlier two-Mac LAN/relay/negative-case evidence remains
-historical evidence for the prior candidate; it is not represented as a byte-for-byte
-acceptance of this final candidate.
-
-## GitHub publication and public re-download
-
-Both `origin/feature/mac-channel-v1` and `origin/main` were ordinary, non-forced
-fast-forwards from `20853fdf172747f1a06c31c8b0db68dd5f4af308` to the candidate. The
-annotated tag was created only after those ancestry checks and remains pinned to the
-candidate commit.
-
-The final, non-prerelease, non-draft latest GitHub Release is:
-
-`https://github.com/MasonXQY/MacChannel/releases/tag/v1.2.2`
-
-Its public asset list was checked to contain exactly:
-
-1. `DropMesh.dmg`
-2. `DropMesh.manifest.json`
-3. `appcast.xml`
-
-No screenshots, reports, or older artifacts were uploaded. All three assets and the
-`latest/download/appcast.xml` endpoint were downloaded anonymously from their public
-HTTPS URLs into an owner-only temporary directory. The downloaded bytes matched the
-three SHA-256 values above; `latest` matched the versioned appcast byte-for-byte. The
-public GitHub tag API resolved the annotated tag to the exact candidate commit. The
-downloaded appcast had channel title `DropMesh`, one item, version `1.2.2`, build `15`,
-the exact versioned DMG URL and byte length, and valid enclosure/appcast signatures.
-The downloaded DMG and mounted App then repeated all strict signature, Team, staple,
-Gatekeeper, designated-requirement, bundle, executable, version/build, icon, Sparkle,
-and architecture checks successfully.
-
-## Publication safety
-
-Public-download and mount verification used a newly created owner-`0700` temporary
-root and removed it after validation. No credential value was printed or persisted.
-No protected Unreal Engine process was inspected, signaled, or terminated. The release
-tag intentionally stays at the candidate commit; this report-only publication record
-is not part of the released binary.
+`App/UpdateInstallationGate.swift` and distribution adapter implementation files needed no localization edits because they contain no UI copy; their behavior/source inventory remains covered. `Sources/MacChannelCore` is unchanged.

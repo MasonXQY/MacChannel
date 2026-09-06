@@ -13,7 +13,7 @@ public enum MacChannelApplication {
         case .localShell:
             delegate = MacChannelApplicationDelegate(
                 initialContainer: .localShell(),
-                initialStatus: .offline("本地测试模式；网络服务未启动。"),
+                initialStatus: .serviceOffline(.statusLocalTest),
                 runtimeHost: nil,
                 updateController: distribution.updates,
                 distributionChannel: distribution.channel
@@ -293,7 +293,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                     self.statusItemController?.setRuntimeStatus(status)
                     self.surfaceController?.updateRuntimeStatus(status)
                     self.updateReceiveDirectoryAvailability(for: status)
-                    if case .startupError = status {
+                    if status.isStartupFailure {
                         self.updateLaunch.prepare(transfers: nil)
                     }
                 }
@@ -544,7 +544,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         guard ids.insert(result.transferID).inserted else { return }
         receiveEventDeduplicationIDs[generation] = ids
         observedReceiveEventCount += 1
-        let sourceName = statusItemController?.sourceDisplayName(for: result.source) ?? "其他设备"
+        let sourceName = statusItemController?.knownSourceDisplayName(for: result.source) ?? ""
         recentReceiveStore.record(result, sourceName: sourceName)
     }
 
@@ -585,7 +585,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
            container.receiveDirectoryConfigurationPending
         {
             receiveDirectoryResolver.configure(initialSnapshot: nil, waitForSnapshot: true)
-        } else if case .startupError = status {
+        } else if status.isStartupFailure {
             receiveDirectoryResolver.markConfigurationUnavailable()
         }
     }
@@ -637,8 +637,8 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         let statusName: String
         switch status {
         case .ready: statusName = "ready"
-        case .offline: statusName = "offline"
-        case .loading, .startupError, .error: return
+        case .offline, .serviceOffline: statusName = "offline"
+        case .loading, .startupError, .startupFailure, .error, .serviceError: return
         }
         productionLaunchDiagnostics = ProductionLaunchDiagnostics(
             marker: URL(fileURLWithPath: arguments[flag + 1]),

@@ -132,7 +132,7 @@ final class ConcurrentDistributionGuardTests: XCTestCase {
         let host = AppRuntimeHost(builder: builder, eligibility: guardMonitor)
         await host.bootstrap()
         XCTAssertEqual(builder.count, 0)
-        XCTAssertEqual(host.status, .startupError("另一个 DropMesh 版本正在运行，请退出后重试。", canRetry: true))
+        XCTAssertEqual(host.status, .startupFailure(.statusDistributionConflict, canRetry: true))
         let direct = AppRuntimeHost(builder: builder, eligibility: ConcurrentDistributionGuard(conflictingBundleIdentifiers: [], provider: apps))
         await direct.bootstrap()
         XCTAssertEqual(builder.count, 1)

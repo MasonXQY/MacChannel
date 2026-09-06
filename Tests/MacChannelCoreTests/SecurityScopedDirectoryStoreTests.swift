@@ -4,6 +4,17 @@ import XCTest
 @testable import MacChannelCore
 
 final class SecurityScopedDirectoryStoreTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     func testFailedAuthorizationPreservesPriorSettingsAndStaleRefreshIsPersisted() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
