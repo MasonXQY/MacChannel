@@ -29,7 +29,9 @@ plist_value() { plutil -extract "$2" raw -o - "$1" 2>/dev/null || true; }
 identity_fingerprint() {
     local requested="$1" listing="$2" policy="$3" count=0 fingerprint="" line label candidate
     case "$policy:$requested" in
-        development:"Apple Development: "*" ($expected_team)"|development:"Mac Developer: "*" ($expected_team)"|\
+        development:"Apple Development: "*|development:"Mac Developer: "*)
+            [[ "$requested" =~ \([A-Z0-9]{10}\)$ ]] || return 1
+            ;;
         application:"Apple Distribution: "*" ($expected_team)"|application:"Mac App Distribution: "*" ($expected_team)"|application:"3rd Party Mac Developer Application: "*" ($expected_team)"|\
         installer:"Mac Installer Distribution: "*" ($expected_team)"|installer:"3rd Party Mac Developer Installer: "*" ($expected_team)") ;;
         *) return 1 ;;
@@ -54,8 +56,8 @@ check_profile() {
         return
     fi
     local decoded="$work_root/$kind.plist"
-    if ! security cms -D -i "$profile" >"$decoded" 2>/dev/null || ! plutil -lint "$decoded" >/dev/null 2>&1; then
-        block "$kind profile CMS signature or payload could not be verified"
+    if ! xcrun swift Scripts/verify-apple-provisioning-profile.swift "$profile" "$decoded" >/dev/null 2>&1 || ! plutil -lint "$decoded" >/dev/null 2>&1; then
+        block "$kind profile CMS signature, Apple signer trust, or payload could not be verified"
         return
     fi
     local name uuid expiry expiry_epoch app_id team sandbox task_allow
@@ -123,7 +125,14 @@ elif [[ ! "$api_key_id" =~ ^[A-Z0-9]+$ || ! "$api_issuer_id" =~ ^[0-9A-Fa-f]{8}-
     block "upload authentication identifiers are malformed"
 else
     key_mode="$(stat -f '%Lp' "$api_private_key" 2>/dev/null || true)"
-    if [[ "$key_mode" != 600 && "$key_mode" != 400 ]]; then
+    key_owner="$(stat -f '%u' "$api_private_key" 2>/dev/null || true)"
+    current_uid="$(id -u)"
+    key_acl="$(ls -lde "$api_private_key" 2>/dev/null | sed -n '2,$p')"
+    if [[ "$key_owner" != "$current_uid" ]]; then
+        block "upload authentication private key is not owned by the current user"
+    elif [[ -n "$key_acl" ]]; then
+        block "upload authentication private key has ACL entries"
+    elif [[ "$key_mode" != 600 && "$key_mode" != 400 ]]; then
         block "upload authentication private key permissions are not owner-only"
     else
         credential_home="$work_root/upload-home"
