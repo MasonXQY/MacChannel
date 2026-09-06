@@ -28,11 +28,17 @@ plutil -insert ProvisionedDevices -array "$wrong_type_profile"
 plutil -insert ProvisionedDevices.0 -string SANITIZED-MAC "$wrong_type_profile"
 all_devices_profile="$(mutate_profile all-devices "$development_profile")"
 plutil -insert ProvisionsAllDevices -bool true "$all_devices_profile"
+false_all_devices_profile="$(mutate_profile false-all-devices "$store_profile")"
+plutil -insert ProvisionsAllDevices -bool false "$false_all_devices_profile"
 wrong_platform_profile="$(mutate_profile wrong-platform "$store_profile")"
 plutil -replace Platform.0 -string iOS "$wrong_platform_profile"
+dictionary_platform_profile="$(mutate_profile dictionary-platform "$store_profile")"
+plutil -replace Platform -json '{"0":"OSX"}' "$dictionary_platform_profile"
+extra_platform_profile="$(mutate_profile extra-platform "$store_profile")"
+plutil -insert Platform.1 -string '' "$extra_platform_profile"
 wrong_group_profile="$(mutate_profile wrong-group "$store_profile")"
 plutil -replace Entitlements.keychain-access-groups.0 -string 'AAAAAAAAAA.*' "$wrong_group_profile"
-for rejected in "$wildcard_profile" "$wrong_team_profile" "$wrong_type_profile" "$all_devices_profile" "$wrong_platform_profile" "$wrong_group_profile"; do
+for rejected in "$wildcard_profile" "$wrong_team_profile" "$wrong_type_profile" "$all_devices_profile" "$false_all_devices_profile" "$wrong_platform_profile" "$dictionary_platform_profile" "$extra_platform_profile" "$wrong_group_profile"; do
     if macchannel_validate_macos_profile "$rejected" distribution XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh >/dev/null 2>&1; then
         echo "invalid macOS profile unexpectedly accepted: $(basename "$rejected")" >&2; exit 1
     fi
@@ -44,6 +50,16 @@ macchannel_validate_signed_app_entitlements "$signed_entitlements" XKAZ67HN45.co
 /usr/libexec/PlistBuddy -c 'Add :com.apple.security.cs.allow-jit bool true' "$signed_entitlements"
 if macchannel_validate_signed_app_entitlements "$signed_entitlements" XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh >/dev/null 2>&1; then
     echo "extra signed app entitlement unexpectedly accepted" >&2; exit 1
+fi
+cp Distribution/AppStore.entitlements "$signed_entitlements"
+plutil -insert 'unexpected entitlement' -bool true "$signed_entitlements"
+if macchannel_validate_signed_app_entitlements "$signed_entitlements" XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh >/dev/null 2>&1; then
+    echo "spaced extra signed app entitlement unexpectedly accepted" >&2; exit 1
+fi
+cp Distribution/AppStore.entitlements "$signed_entitlements"
+/usr/libexec/PlistBuddy -c 'Add :keychain-access-groups:1 string ' "$signed_entitlements"
+if macchannel_validate_signed_app_entitlements "$signed_entitlements" XKAZ67HN45.com.zensystech.dropmesh XKAZ67HN45 XKAZ67HN45.com.zensystech.dropmesh >/dev/null 2>&1; then
+    echo "extra empty signed app group unexpectedly accepted" >&2; exit 1
 fi
 security_output="$test_root/identities.txt"
 cat >"$security_output" <<'EOF'

@@ -26,7 +26,7 @@ Observed expected failure before production changes:
 Scripts/test-app-store-validation.sh: line 13: macchannel_validate_macos_profile: command not found
 ```
 
-The test was added first with sanitized store/development profile shapes and negative mutants for wildcard app ID, wrong team, wrong platform, wrong profile type, all-device provisioning, wrong keychain authorization, and an extra signed-app entitlement. Existing certificate mismatch and CMS tamper/self-signed tests remain active.
+The test was added first with sanitized store/development profile shapes and negative mutants for wildcard app ID, wrong team, wrong platform, wrong profile type, present true/false all-device provisioning, wrong plist container type, extra empty array members, wrong keychain authorization, and extra signed-app entitlements (including a key containing whitespace). Existing certificate mismatch and CMS unsigned/tamper/self-signed tests remain active.
 
 ## GREEN
 

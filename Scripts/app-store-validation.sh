@@ -6,8 +6,19 @@ macchannel_plist_value() {
 
 macchannel_plist_array_is_exactly() {
     local plist="$1" key="$2" expected="$3"
-    [[ "$(macchannel_plist_value "$plist" "$key:0")" == "$expected" ]] || return 1
-    [[ -z "$(macchannel_plist_value "$plist" "$key:1")" ]] || return 1
+    [[ "$(plutil -extract "$key" raw -expect array -o - "$plist" 2>/dev/null || true)" == 1 ]] || return 1
+    [[ "$(plutil -extract "$key.0" raw -expect string -o - "$plist" 2>/dev/null || true)" == "$expected" ]] || return 1
+}
+
+macchannel_plist_nested_array_is_exactly() {
+    local plist="$1" dictionary="$2" key="$3" expected="$4" extracted
+    extracted="$(mktemp "${TMPDIR:-/tmp}/dropmesh-plist-dictionary.XXXXXX")" || return 1
+    if ! plutil -extract "$dictionary" xml1 -expect dictionary -o "$extracted" "$plist" >/dev/null 2>&1 ||
+        ! macchannel_plist_array_is_exactly "$extracted" "$key" "$expected"; then
+        rm -f "$extracted"
+        return 1
+    fi
+    rm -f "$extracted"
 }
 
 macchannel_validate_macos_profile() {
@@ -19,24 +30,22 @@ macchannel_validate_macos_profile() {
     macchannel_plist_array_is_exactly "$profile_plist" TeamIdentifier "$expected_team" || return 1
     macchannel_plist_array_is_exactly "$profile_plist" Platform OSX || return 1
 
-    local profile_application_id profile_team profile_group expected_profile_group
+    local profile_application_id profile_team expected_profile_group
     profile_application_id="$(macchannel_plist_value "$profile_plist" 'Entitlements:com.apple.application-identifier')"
     [[ "$profile_application_id" == "$expected_application_id" && "$profile_application_id" != *'*'* ]] || return 1
     profile_team="$(macchannel_plist_value "$profile_plist" 'Entitlements:com.apple.developer.team-identifier')"
     [[ "$profile_team" == "$expected_team" ]] || return 1
     expected_profile_group="$expected_team.*"
-    profile_group="$(macchannel_plist_value "$profile_plist" 'Entitlements:keychain-access-groups:0')"
-    [[ "$profile_group" == "$expected_profile_group" && "$expected_app_group" == "$expected_team."* ]] || return 1
-    [[ -z "$(macchannel_plist_value "$profile_plist" 'Entitlements:keychain-access-groups:1')" ]] || return 1
+    [[ "$expected_app_group" == "$expected_team."* ]] || return 1
+    macchannel_plist_nested_array_is_exactly "$profile_plist" Entitlements keychain-access-groups "$expected_profile_group" || return 1
 
-    local provisions_all
-    provisions_all="$(macchannel_plist_value "$profile_plist" ProvisionsAllDevices)"
-    [[ "$provisions_all" != true ]] || return 1
+    if plutil -type ProvisionsAllDevices "$profile_plist" >/dev/null 2>&1; then
+        return 1
+    fi
     if [[ "$kind" == development ]]; then
-        [[ -n "$(macchannel_plist_value "$profile_plist" 'ProvisionedDevices:0')" ]] || return 1
+        [[ "$(plutil -extract ProvisionedDevices raw -expect array -o - "$profile_plist" 2>/dev/null || true)" =~ ^[1-9][0-9]*$ ]] || return 1
     else
-        [[ -z "$(macchannel_plist_value "$profile_plist" 'ProvisionedDevices:0')" ]] || return 1
-        plutil -extract ProvisionedDevices xml1 -o - "$profile_plist" >/dev/null 2>&1 && return 1
+        plutil -type ProvisionedDevices "$profile_plist" >/dev/null 2>&1 && return 1
     fi
 
     local expiry expiry_epoch
@@ -56,12 +65,17 @@ macchannel_validate_signed_app_entitlements() {
     local entitlements="$1" expected_application_id="$2" expected_team="$3" expected_app_group="$4"
     plutil -lint "$entitlements" >/dev/null 2>&1 || return 1
     local keys expected_keys
-    keys="$(/usr/libexec/PlistBuddy -c Print "$entitlements" | sed -nE 's/^    ([^ ]+) = .*/\1/p' | sort)"
+    keys="$(plutil -convert xml1 -o - "$entitlements" | sed -nE 's@.*<key>([^<]+)</key>.*@\1@p' | sort)"
     expected_keys=$'com.apple.application-identifier\ncom.apple.developer.team-identifier\ncom.apple.security.app-sandbox\ncom.apple.security.files.downloads.read-write\ncom.apple.security.files.user-selected.read-write\ncom.apple.security.network.client\ncom.apple.security.network.server\nkeychain-access-groups'
     [[ "$keys" == "$expected_keys" ]] || return 1
     [[ "$(macchannel_plist_value "$entitlements" com.apple.application-identifier)" == "$expected_application_id" ]] || return 1
     [[ "$(macchannel_plist_value "$entitlements" com.apple.developer.team-identifier)" == "$expected_team" ]] || return 1
     macchannel_plist_array_is_exactly "$entitlements" keychain-access-groups "$expected_app_group" || return 1
+    local xml true_count string_count
+    xml="$(plutil -convert xml1 -o - "$entitlements")" || return 1
+    true_count="$(printf '%s\n' "$xml" | grep -c '<true/>')"
+    string_count="$(printf '%s\n' "$xml" | grep -c '<string>')"
+    [[ "$true_count" -eq 5 && "$string_count" -eq 3 ]] || return 1
     local key
     for key in com.apple.security.app-sandbox com.apple.security.network.client com.apple.security.network.server com.apple.security.files.downloads.read-write com.apple.security.files.user-selected.read-write; do
         [[ "$(macchannel_plist_value "$entitlements" "$key")" == true ]] || return 1
