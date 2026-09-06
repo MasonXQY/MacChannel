@@ -6,7 +6,7 @@
 
 **Architecture:** Separate Go module with strict canonical schema validation, signature/receipt verification, bounded directory access, and a fixed-output CLI. Tests generate synthetic keys and signed fixtures in temporary directories. The app and service never import the module.
 
-**Tech Stack:** Go 1.27.0 standard library only, macOS, Ed25519, SHA-256, os.Root, syscall flags, Bash contracts.
+**Tech Stack:** Go 1.27.0, standard-library cryptography/JSON, macOS libc openat through cgo, SHA-256, Bash contracts. No third-party module dependencies.
 
 ## Global Constraints
 
@@ -179,7 +179,7 @@ func verifySignature(pub, sig, manifest []byte) bool {
 
 ### Task 3: Safe macOS input loading
 
-**Files:** Create read_darwin.go and read_darwin_test.go.
+**Files:** Create read_darwin.go, openat_darwin.go (tiny cgo bridge) and read_darwin_test.go.
 
 - [ ] **1. RED filesystem tests.** Materialize synthetic fixtures using `t.TempDir()`.
   Test bundle root symlink; artifact/policy symlink; hardlink; directory artifact;
@@ -189,9 +189,12 @@ func verifySignature(pub, sig, manifest []byte) bool {
 - [ ] **2. Run focused tests and observe failure.**
   `GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test ./internal/evidence -run TestRead -count=1`.
 - [ ] **3. Implement descriptor-anchored loading.** Reject non-directory or symlink root
-  via Lstat, open os.Root once, open `.` through root and compare opened metadata with
-  the initial root. Enumerate root entries using that descriptor; require exact flat
-  allowlist. All child opens use `Root.OpenFile` with `syscall.O_NOFOLLOW|syscall.O_NONBLOCK`.
+  via Lstat, open root with O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC and compare opened metadata
+  with the initial root. Enumerate root entries using that descriptor; require exact flat
+  allowlist. All child opens use native macOS openat with O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC.
+  Use a tiny cgo bridge calling system libc, with fixed flags and allowlisted names;
+  free C strings, preserve errno and keep the root Go file alive across the C call.
+  No C crypto/parser or third-party library is added. CGO_ENABLED=1 is a build prerequisite.
   Opened metadata must be regular with `syscall.Stat_t.Nlink == 1`; compare metadata
   before and after the bounded read. This flag combination avoids FIFO blocking before
   rejecting special files. Compare root identity again at completion and reject root
@@ -286,6 +289,14 @@ bash Scripts/test-privacy-runtime-block.sh
 - [ ] **7. Commit** only scoped changes and append completion to the existing ledger.
 
 ## Plan self-review and handoff
+
+September 7 implementation investigation: Go 1.27.0 os.Root.OpenFile resolves an
+in-root symlink even with O_NOFOLLOW supplied (root_unix.go retries checkSymlink).
+A local synthetic probe returned regular=true for the symlink. Native libc openat
+with the flags above accepted the regular fixture and rejected the link. Task 3
+therefore uses the native bridge to preserve the already approved no-follow boundary;
+it must not rely on the superseded Root.OpenFile suggestion. This is an implementation
+correction, not permission to follow links or loosen tests.
 
 - Canonical/schema/policy: Task 1.
 - Signature, artifact digests, time windows and receipts: Task 2.
