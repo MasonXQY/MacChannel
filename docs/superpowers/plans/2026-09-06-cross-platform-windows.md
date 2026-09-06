@@ -1,5 +1,7 @@
 # DropMesh 1.3.0 Cross-Platform Windows Implementation Plan
 
+> **PAUSED — DO NOT EXECUTE.** On 2026-09-06 the product owner stopped Windows development to focus on the Mac App Store release. A new explicit approval is required before any task in this plan may begin.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship a signed, bilingual Windows 10/11 x64 DropMesh client that transfers files bidirectionally with Mac 1.2.6 and Mac 1.3.0 without regressing the existing Mac application.
