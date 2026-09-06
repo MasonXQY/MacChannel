@@ -27,10 +27,10 @@ Source revision: `540130b17f33687230df139bd2cf544ff19f6c95`; report-only HEAD: `
 ## User/account prerequisites
 
 - Apple Developer login verified on 2026-09-06: organization ZENSYS TECHNOLOGIES - FZCO, Team `XKAZ67HN45`, Account Holder role. Registered explicit App ID `com.zensystech.dropmesh` with description DropMesh and verified its row in the portal; no optional managed capabilities were enabled. App Sandbox remains a signed app-target entitlement, not a portal toggle.
-- The portal reports the August 18, 2026 Apple Developer Program License Agreement accepted September 6, 2026. However, App Store Connect's New App action is explicitly blocked by an Agreement Update modal: the Paid Applications agreement is outdated. The company Business page must be reviewed by the account holder; no agreement was accepted by the agent.
+- Both Free Apps and Paid Apps agreements now show Active after the user's update. Created and verified the macOS DropMesh App Store Connect record: Apple ID `6809209993`, SKU `dropmesh-macos-130`, primary Simplified Chinese, limited app access without adding other users. Version `1.3.0`, no sign-in required, and manual release were saved. No agreement was accepted by the agent.
 - The local code-signing inventory contains Apple Development and Developer ID Application only. A matching Store distribution identity/private key and explicit `com.zensystech.dropmesh` profile remain unverified/unavailable; installer signing and upload authentication also need provisioning checks.
 - User supplied the monitored public support/privacy contact `xuqy87@gmail.com` on 2026-09-06. Use this for the bilingual support/privacy pages; do not use the retired `zensys-tech.com` domain. The pages have not yet been published.
 
 ## Safety boundary
 
-No replacement of `/Applications`, installed Direct app, user data, remote Mac B, production services, public website, or App Store record was performed during this local implementation stage. No merge, release, upload, or submission has occurred. Local build evidence is not proof of signed sandbox or installed coexistence behavior.
+No replacement of `/Applications`, installed Direct app, user data, remote Mac B, production services, or public website was performed. Portal setup subsequently created only the isolated DropMesh App ID and App Store Connect draft described above. No merge, release, build upload, or submission has occurred. Local build evidence is not proof of signed sandbox or installed coexistence behavior.
