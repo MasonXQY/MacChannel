@@ -5,6 +5,14 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
 source Scripts/app-store-build-defaults.sh
 source Scripts/app-store-validation.sh
+source Scripts/app-store-export-fragment.sh
+
+build_mode=release
+case "$#:${1:-}" in
+    0:) ;;
+    1:--review-candidate) build_mode=review-candidate ;;
+    *) echo 'usage: build-app-store-app.sh [--review-candidate]' >&2; exit 2 ;;
+esac
 
 identity="${MACCHANNEL_APP_STORE_SIGNING_IDENTITY:-}"
 profile="${MACCHANNEL_APP_STORE_PROFILE:-}"
@@ -28,10 +36,10 @@ output_parent="$(dirname "$output_abs")"
 mkdir -p "$output_parent"
 [[ "$(macchannel_validate_store_output_path "$repo_root" "$output_abs")" == "$output_abs" ]] || fail "App Store output ancestry changed during preparation"
 
-[[ -f "$export_record" && ! -L "$export_record" ]] || fail "approved export-compliance record is required: docs/security/app-store-export-compliance.md"
-grep -Eiq '^Status:[[:space:]]*approved[[:space:]]*$' "$export_record" || fail "export-compliance record is not approved"
-encryption_value="$(sed -nE 's/^Decision:[[:space:]]*ITSAppUsesNonExemptEncryption[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*$/\1/p' "$export_record")"
-[[ "$encryption_value" == true || "$encryption_value" == false ]] || fail "export-compliance record has no supported encryption decision"
+# ITSAppUsesNonExemptEncryption is omitted for an explicitly marked review candidate.
+export_fragment="$(macchannel_store_export_fragment "$build_mode" "$export_record")" || fail "export-compliance record is not approved or has no supported encryption decision"
+source_commit="$(git rev-parse HEAD)"
+[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail "Store candidate requires a clean committed worktree"
 
 work_root="$(mktemp -d "$output_parent/.dropmesh-store.XXXXXX")"
 chmod 700 "$work_root"
@@ -91,7 +99,8 @@ cat >"$contents/Info.plist" <<PLIST
 <key>DropMeshAppStoreID</key><string>$store_id</string>
 <key>DropMeshPrivacyURL</key><string>https://masonxqy.github.io/MacChannel/privacy/</string>
 <key>DropMeshSupportURL</key><string>https://masonxqy.github.io/MacChannel/support/</string>
-<key>ITSAppUsesNonExemptEncryption</key><$encryption_value/>
+$export_fragment
+<key>DropMeshSourceCommit</key><string>$source_commit</string>
 </dict></plist>
 PLIST
 plutil -lint "$contents/Info.plist" >/dev/null
@@ -112,4 +121,4 @@ bash "$repo_root/Scripts/test-app-store-bundle.sh" "$app"
 mv "$app" "$output_abs"
 trap - EXIT
 rm -rf "$work_root"
-echo "App Store app published: $output_abs"
+echo "App Store app assembled ($build_mode; not installed or uploaded): $output_abs"

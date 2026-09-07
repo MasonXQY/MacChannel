@@ -10,8 +10,11 @@ docs/acceptance/publishing-critical-path.md. Recommend deferring custom audit
 signing platform from first-release prerequisites while retaining real production
 privacy review, candidate-bound evidence and TestFlight acceptance. This changes
 the previously approved acceptance model; no gate was changed or bypassed.
-Await that decision before implementing the alternate gate. No new production,
-key, upload, installed-app or remote-Mac operation was performed.
+Owner approved this change: “同意，我的目的是上架”. Custom audit signing
+platform is deferred; retain actual privacy review and TestFlight acceptance.
+Proceed with isolated candidate construction and publishing materials. No new
+production, key provisioning, upload, installed-app or remote-Mac authority is
+inferred. Historical offline-only scope below applies to that completed work.
 
 Owner confirmed the offline fixture verifier design and asked to develop under the supplied Engineering Working Agreement. Adopted into AGENTS.md; attachment HANDOFF was a blank template, not project evidence. Proceed through the approved plan without repeated stage approvals. No production collection, keys, release, upload, server or installed-app changes.
 

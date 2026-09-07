@@ -1,7 +1,8 @@
-# Publishing critical path — decision required
+# Publishing critical path — owner approved
 
 2026-09-07. Inspected source revision: `9f32639`. This is a proposed acceptance
-change, not permission to publish or evidence that privacy checks passed.
+change, approved by the owner on 2026-09-07: “同意，我的目的是上架”.
+It is not permission to publish or evidence that privacy checks passed.
 
 ## Fresh findings
 

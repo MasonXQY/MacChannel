@@ -1,0 +1,3 @@
+Synthetic parser fixture only, not a product export-compliance decision.
+Status: approved
+Decision: ITSAppUsesNonExemptEncryption = true
