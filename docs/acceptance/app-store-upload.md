@@ -1,5 +1,11 @@
 # App Store Connect delivery
 
+Subsequent exact-build compliance completion: owner requested it and logged in.
+Selected standard encryption beyond Apple OS and FranceNo, then saved. TestFlight
+UI now shows build2 Ready to Submit and90day expiry; Missing Compliance is cleared.
+No test group/invitation, beta review or public release was performed. Prior API
+missing-compliance observations below are historical, not the current UI status.
+
 Owner authorized build2 upload for TestFlight only on2026-09-07.
 No App Review submission, public release or external tester invitation authorized
 or performed in this operation.

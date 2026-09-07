@@ -4,6 +4,14 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+Latest: owner requested completing build2 compliance and logged back into ASC.
+Saved exact-build questionnaire: standard encryption in addition to/instead of
+Apple OS encryption; FranceNo per existing owner decision. UI now shows build2
+Ready to Submit and expires in90days; Missing Compliance removed. No tester
+group/invitation, beta review, App Review or public release performed. This is
+TestFlight build status, not product submission readiness. Next: configure an
+authorized internal test group and perform real-device acceptance.
+
 Latest owner explicitly authorized uploading build2 to App Store Connect only
 for TestFlight, not App Review, public release or external tester invitations.
 Upload executed successfully (altool exit0, success-message: no errors uploading).

@@ -2,6 +2,23 @@
 
 EXPORT COMPLIANCE DECISION: BLOCKED
 
+## Build 2 TestFlight questionnaire — completed September 7, 2026
+
+This supersedes the missing-compliance status for this exact uploaded build only,
+not the broader release/legal review or a reusable Info.plist declaration.
+Owner requested completing the questionnaire and reauthenticated in ASC.
+For build de602055-effa-49e7-a338-634aebc8bd49 /1.3.0(2), selected:
+
+- Standard encryption algorithms instead of, or in addition to, Apple OS encryption.
+- Distribution in France: No, following the existing owner territory decision.
+
+Clicked Save. TestFlight build list changed from Missing Compliance to Ready to
+Submit, with90day expiry. No documents were requested in this flow. No testers
+were added and no review/release was submitted. The generic Apple helper text
+said the build did not contain encryption despite the selected standard-encryption
+answer; that helper text is not evidence about this app. Do not describe DropMesh
+as unencrypted or infer universal export-law exemption. Candidate binary unchanged.
+
 This document inventories cryptography; it does not decide exemption status, claim authorization, or record an App Store Connect submission. Consult Apple's [export compliance overview](https://developer.apple.com/help/app-store-connect/manage-app-information/overview-of-export-compliance) and [encryption-documentation workflow](https://developer.apple.com/help/app-store-connect/manage-app-information/determine-and-upload-app-encryption-documentation) for the final build and distribution territories.
 
 | Layer | Repository evidence | Purpose |
