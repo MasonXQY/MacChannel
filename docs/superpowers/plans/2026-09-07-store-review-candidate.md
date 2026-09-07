@@ -13,9 +13,9 @@ Apple reference (checked 2026-09-07):
 https://developer.apple.com/documentation/bundleresources/information-property-list/itsappusesnonexemptencryption
 An absent key results in a per-upload encryption questionnaire, not exemption.
 
-- [ ] Add failing mode/argument/export fragment tests before implementation.
-- [ ] Implement shared small export-fragment function; wire explicit build mode.
-- [ ] Run focused and existing Store source/validation contracts.
-- [ ] Build and inspect an isolated real signed candidate with existing approved
+- [x] Add failing mode/argument/export fragment tests before implementation.
+- [x] Implement shared small export-fragment function; wire explicit build mode.
+- [x] Run focused and existing Store source/validation contracts.
+- [x] Build and inspect an isolated real signed candidate with existing approved
   distribution identity/profile; no installed app or production service changes.
-- [ ] Record actual outcome and remaining submission requirements in HANDOFF.
+- [x] Record actual outcome and remaining submission requirements in HANDOFF.

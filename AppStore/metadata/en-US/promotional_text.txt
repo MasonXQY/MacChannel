@@ -1,0 +1,1 @@
+Send files from your menu bar to a paired Mac. Transfer over a local network or the internet, and share supported clipboard content.

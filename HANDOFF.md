@@ -24,6 +24,32 @@ and key-free verification, not actual key provisioning or production access.
 
 ## Current work
 
+- Latest real candidate: source1b4a64179516c8cc0f305b5d7a6972ea5b648cad,
+  Store1.3.0(1), signed App built under
+  /private/tmp/dropmesh-store-review-1b4a641/DropMesh.app. Full bundle check passed:
+  distribution signature, sandbox entitlements, profile, arm64+x86_64, no Sparkle.
+  Signed plist review-candidate marker and exact commit verified; encryption
+  declaration intentionally absent, not a false exemption claim.
+- Initial same build under repository .build failed codesign with resource-fork/
+  Finder-info detritus. Changing only output/staging to /private/tmp succeeded.
+  Use non-synced local staging for now; script staging-location fix not implemented.
+- Productbuild signing subsequently completed (session39678 exit0). Installer:
+  /Users/mason/Developer/DropMesh-Releases/DropMesh-1.3.0-1-review-1b4a641.pkg.
+  pkgutil certificate-chain check passed (Mac Installer Distribution subject);
+  SHA256:5c5d8e06632d1aa57ae559b5963090f12138a41049367858771ecd867f281b1e.
+  Earlier security-prompt wait resolved; no further prompt action needed.
+  App copied to /Users/mason/Developer/DropMesh-Releases/DropMesh-review-1b4a641.app
+  and full bundle verification rerun successfully. Executable SHA256:
+  486ac5fb8404a10b913e1648a59202e732c5e0e0fb1a854c0548dcad98484869.
+  Not installed, uploaded, Apple-validated or TestFlight accepted.
+- Read-only public service check: channel.zensys-tech.com resolves and HTTPS
+  /healthz returned {"status":"ok"}. This is not transfer or ownership evidence.
+  Asked owner whether this old-domain transfer service remains under their control
+  and should stay. Do not change endpoint or production before that answer.
+- Added local draft bilingual store text (12 fields), text-only validation passed;
+  default metadata validation remains blocked for missing final media/TestFlight.
+  No website publication or App Store Connect metadata edits performed.
+
 - Approved spec: docs/superpowers/specs/2026-09-06-offline-privacy-verifier-design.md.
 - Plan: docs/superpowers/plans/2026-09-06-offline-privacy-verifier.md.
 - Task 1 canonical/schema complete at `97d7d17`: tests/vet passed; missing coverage fixed; independent review Approved.
