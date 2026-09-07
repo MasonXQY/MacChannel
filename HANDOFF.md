@@ -4,6 +4,16 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-07: owner supplied the missing reviewer phone specifically for Apple.
+Completed beta contact information, bilingual description/test instructions,
+and no-sign-in-required declaration; kept automatic tester notification enabled.
+Submitted 1.3.0 (2) for TestFlight beta review. Fresh Apple UI confirmed external
+group 2 Testers / 1 Build and build status Waiting for Review. No public App Store
+submission, approval, delivered invitation, installation or transfer acceptance
+is implied. Previous phone blocker below is resolved. Do not store the phone in
+repository documentation. Next: Apple beta review result; existing Store
+privacy/site/final public-release acceptance gaps remain separate.
+
 Owner subsequently authorized external invitations to xuqy87@gmail.com and
 xuqy06@163.com plus TestFlight beta review (not public App Store submission).
 Created DropMesh External QA, ID 8bf73c56-3553-4527-beab-24355c0091c0;
