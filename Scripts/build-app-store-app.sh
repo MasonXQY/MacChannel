@@ -71,6 +71,7 @@ mkdir -p "$contents/MacOS" "$contents/Frameworks" "$contents/Resources/en.lproj"
 cp -X "$product_path/$macchannel_app_store_executable" "$contents/MacOS/$macchannel_app_store_executable"
 cp -X -R "$product_path/WebRTC.framework" "$contents/Frameworks/WebRTC.framework"
 cp -X -R "$product_path/MacChannel_MacChannelAppKit.bundle" "$contents/Resources/MacChannel_MacChannelAppKit.bundle"
+bash "$repo_root/Scripts/normalize-store-resource-bundle.sh" "$contents/Resources/MacChannel_MacChannelAppKit.bundle"
 clean_tool xcrun swift "$repo_root/Scripts/package-app-store-icon.swift" \
     "$repo_root/Distribution/AppStoreBrand/app-icon-1024.png" \
     "$contents/Resources/DropMesh.icns"

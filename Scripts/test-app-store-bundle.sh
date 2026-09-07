@@ -41,6 +41,12 @@ test -d "$app/Contents/Resources/en.lproj"
 test -d "$app/Contents/Resources/zh-Hans.lproj"
 test -s "$app/Contents/Resources/PrivacyInfo.xcprivacy"
 test -s "$app/Contents/embedded.provisionprofile"
+resource_plist="$app/Contents/Resources/MacChannel_MacChannelAppKit.bundle/Contents/Info.plist"
+[[ -f "$resource_plist" ]] || { echo 'missing resource bundle metadata' >&2; exit 1; }
+if plutil -extract CFBundleExecutable raw -o - "$resource_plist" >/dev/null 2>&1; then
+    echo 'resource-only bundle declares an executable' >&2
+    exit 1
+fi
 
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$app"
 /usr/bin/codesign --verify --strict --verbose=2 "$executable"
