@@ -4,6 +4,15 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+Latest publishing request: owner asked to fill gaps and make publishing ready.
+Reassessed actual critical path at9f32639. Proposal requiring owner decision:
+docs/acceptance/publishing-critical-path.md. Recommend deferring custom audit
+signing platform from first-release prerequisites while retaining real production
+privacy review, candidate-bound evidence and TestFlight acceptance. This changes
+the previously approved acceptance model; no gate was changed or bypassed.
+Await that decision before implementing the alternate gate. No new production,
+key, upload, installed-app or remote-Mac operation was performed.
+
 Owner confirmed the offline fixture verifier design and asked to develop under the supplied Engineering Working Agreement. Adopted into AGENTS.md; attachment HANDOFF was a blank template, not project evidence. Proceed through the approved plan without repeated stage approvals. No production collection, keys, release, upload, server or installed-app changes.
 
 September7 latest: owner accepted the recommended owner-held local audit identity
