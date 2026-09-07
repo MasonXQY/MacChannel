@@ -4,6 +4,19 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+Latest owner explicitly authorized uploading build2 to App Store Connect only
+for TestFlight, not App Review, public release or external tester invitations.
+Upload executed successfully (altool exit0, success-message: no errors uploading).
+Evidence: /Users/mason/Developer/DropMesh-Releases/apple-upload-build2.3mLsCV.
+Exact package SHA256 remains a688a36d8589cf14056aeb4177406f94ac6e065644fe84ce4a25ea69b9f59e95.
+At2026-09-07T08:09:56Z read-only ASC query confirmed build UUID
+de602055-effa-49e7-a338-634aebc8bd49, version2 / preRelease1.3.0 / MAC_OS,
+processingStateVALID, expiredfalse. Internal and external beta states are
+MISSING_EXPORT_COMPLIANCE; usesNonExemptEncryption is null. Next: complete the
+exact-build export questionnaire truthfully with required owner confirmation;
+do not invent exemption or say installation is enabled. No App Review/public
+release/external tester invitation occurred. Initial empty queries were transient.
+
 Latest publishing request: owner asked to fill gaps and make publishing ready.
 Reassessed actual critical path at9f32639. Proposal requiring owner decision:
 docs/acceptance/publishing-critical-path.md. Recommend deferring custom audit
