@@ -4,6 +4,16 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+Owner subsequently authorized external invitations to xuqy87@gmail.com and
+xuqy06@163.com plus TestFlight beta review (not public App Store submission).
+Created DropMesh External QA, ID 8bf73c56-3553-4527-beab-24355c0091c0;
+fresh UI confirmed both testers added, 2 Testers / 0 Builds, each No Builds
+Available. No public link or ASC role/user changes. Selected build 1.3.0 (2)
+and reached the beta Test Information form; submission is NOT complete and
+no installation invitation is verified. Required reviewer contact phone is
+missing; asked owner for it. Form also needs description, feedback/contact
+email/name and truthful no-sign-in setting. Browser retained at this form.
+
 2026-09-07 internal testing setup after owner requested continuing:
 created DropMesh Internal QA, with automatic distribution disabled. Added only
 Store 1.3.0 (2); Apple UI confirmed Ready to Test. Invited only the existing
