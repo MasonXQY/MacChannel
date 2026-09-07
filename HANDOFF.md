@@ -102,6 +102,39 @@ Detailed historical progress: .superpowers/sdd/progress.md. Do not repeat comple
   Do not restart the completed preflight or session work, or call this a complete
   production signing tool.
 
+## Native review/provider slice (latest continuation)
+
+- Implementation `becedf4c88301de97e2fcd294aa15a362428b54f`, locally verified only.
+  Acceptance: docs/acceptance/audit-owner-review.md. Spec/plan dated2026-09-07
+  audit-owner-review. User asked to continue after90679e1; no new real-key or
+  production authority inferred.
+- Added OwnerReview, OwnerReviewDialog and HardwareProvider under existing Tools
+  directory. Frozen derived summary, one-use trusted presenter, native zh/en
+  checkbox confirmation, Escape cancel/no Return-default, preview never authorizes.
+- Provider compiles actual SecureEnclave/LAContext adapter: fresh explicit owner
+  authentication, reuse0, wrapped-key restoration, public-point check, signing,
+  invalidation. Native branch never executed; fake contexts and synthetic software
+  test scalars only. No enrollment, Keychain search/storage or signing CLI exists.
+-62core cases (14+38+10) passed, plus actual modal UI tests in2languages. TSan
+  provider test run10cases passed. Serial native/scanner mutation/static privacy/
+  source-scope/runtime-block contracts passed. Final bilingual screenshot-output
+  extension was separately rerun with UI tests and logging scanner.
+- Independent review P2: original timeout covered auth only; RED regression
+  reproduced blocked signature returning. Fixed full-operation deadline (max60s),
+  invalidate-once and suppression of late results; injected blocked-sign test
+  and re-review approved. Cannot undo an OS operation already started.
+- UI RED findings: NSAlert rewrites shortcuts/default-cell state during layout;
+  use Escape and no Return-default after each layout. Accessory initially had
+  zero frame despite intrinsic layout; explicit fitting frame fixed missing rows.
+  Both actual native renders inspected and tracked under
+  docs/acceptance/evidence/audit-owner-review/. No App/prod/preflight entrypoint
+  or release gate change, no installs/uploads or real hardware signing.
+- Next: dedicated storage/enrollment/revocation + signed helper identity/access
+  design and implementation, before asking for the exact real-key provisioning
+  operation. Then live hardware acceptance and restricted collector/semantic
+  validation. Current caller must run native provider off UI main; presenter
+  dispatches only modal work to main. Do not call these components production-ready.
+
 ## Implementation findings
 
 - Native macOS filesystem probe: Go os.Root.OpenFile retries symlinks even when O_NOFOLLOW is supplied. Direct libc openat accepted the regular synthetic fixture and rejected the symlink. Plan/spec now use a minimal cgo system-call bridge, not an external Go module; no-follow acceptance is unchanged. Commits `0268403`, `7ae1582` document this correction. Local probe files are temporary synthetic data only.
