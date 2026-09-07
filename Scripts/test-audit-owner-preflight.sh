@@ -18,6 +18,10 @@ xcrun swiftc -warnings-as-errors "$tool_root/Preflight.swift" "$tool_root/Tests.
 "$build_root/tests"
 xcrun swiftc -warnings-as-errors "$tool_root/SigningSession.swift" "$tool_root/SigningSessionTests.swift" -o "$build_root/signing-session-tests"
 "$build_root/signing-session-tests"
+xcrun swiftc -warnings-as-errors "$tool_root/SigningSession.swift" "$tool_root/OwnerReview.swift" "$tool_root/HardwareProvider.swift" "$tool_root/OwnerReviewTests.swift" -o "$build_root/owner-review-tests"
+"$build_root/owner-review-tests"
+xcrun swiftc -warnings-as-errors "$tool_root/SigningSession.swift" "$tool_root/OwnerReview.swift" "$tool_root/OwnerReviewDialog.swift" "$tool_root/OwnerReviewDialogTests.swift" -o "$build_root/owner-dialog-tests"
+"$build_root/owner-dialog-tests"
 xcrun swiftc -warnings-as-errors "$tool_root/Preflight.swift" "$tool_root/NativeMain.swift" -o "$build_root/audit-owner-preflight"
 
 assert_usage() {

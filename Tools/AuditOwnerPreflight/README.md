@@ -37,7 +37,28 @@ The runner tests genuine ECDSA operations using fixed synthetic keys in memory.
 These files are **not linked into the preflight CLI or either app target**.
 
 A matching digest is not proof that a person reviewed anything. A signature over
-arbitrary bytes is not a privacy audit. The trusted review UI, native key provider,
-external policy enrollment/revocation, semantic evidence validation and restricted
-collector remain unimplemented. No production signing command is available.
+arbitrary bytes is not a privacy audit. Local review/provider components are
+described below; external policy enrollment/revocation, semantic evidence validation
+and the restricted collector remain unimplemented. No production signing command is available.
 See `docs/superpowers/specs/2026-09-07-audit-signing-session-design.md` for boundaries.
+
+## Native review and provider components
+
+OwnerReview connects a trusted summary presenter to the one-use signing session.
+OwnerReviewDialog is an AppKit Chinese/English confirmation surface: unchecked
+consent, Escape cancels, no Return-default action; preview confirmation always
+returns false. The runner now requires a macOS GUI session and briefly exercises
+native modal test dialogs, then writes `.build/audit-owner-review-preview.png`.
+
+HardwareProvider accepts an already-enrolled, pinned hardware-wrapped identity.
+The compiled native adapter explicitly authenticates with a fresh LAContext,
+restores that hardware identity, verifies the public point, signs and invalidates.
+An overall deadline (maximum60seconds) covers authentication and signing; timeout
+invalidates once and discards late results. The operating system may still finish
+an already-started cryptographic operation; no late signature is returned.
+
+Tests inject fake contexts and fixed software test keys. **No native hardware key
+operation has been run.** Dedicated storage/enrollment, signed helper identity,
+production semantic validator and collector remain absent. Neither the capability
+CLI nor either app links these components; no production signing command exists.
+See `docs/superpowers/specs/2026-09-07-audit-owner-review-design.md`.
