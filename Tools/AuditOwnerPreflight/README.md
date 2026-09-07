@@ -58,7 +58,27 @@ invalidates once and discards late results. The operating system may still finis
 an already-started cryptographic operation; no late signature is returned.
 
 Tests inject fake contexts and fixed software test keys. **No native hardware key
-operation has been run.** Dedicated storage/enrollment, signed helper identity,
+operation has been run.** Signed helper identity,
 production semantic validator and collector remain absent. Neither the capability
 CLI nor either app links these components; no production signing command exists.
 See `docs/superpowers/specs/2026-09-07-audit-owner-review-design.md`.
+
+## Isolated registration and local revocation
+
+AuditVault adds a bounded binary record, exact fingerprint approval, immutable
+add-only registration/readback and a persistent local revocation marker. Signing
+checks the active identity before and after the backend operation. A revocation
+observed during that operation suppresses its result; it cannot undo crypto
+already started. No identity overwrite, deletion or automatic replacement exists.
+
+NativeAuditVault compiles fixed device-only Keychain slots and a Secure Enclave
+generator protected by user presence. Tests inject fake Keychain operations;
+only LAContext policy objects and a key-free access-control object are exercised.
+**No system Keychain read/write or hardware key generation has been executed.**
+The preflight CLI still does not link these components or offer enrollment.
+
+Fixed service/account names are not an access-control boundary. Signed helper
+identity/access-group enforcement, real provisioning acceptance and external
+verifier trust enrollment/revocation remain open. The local marker does not
+protect against administrator rollback. See
+`docs/superpowers/specs/2026-09-07-audit-vault-design.md`.

@@ -135,6 +135,28 @@ Detailed historical progress: .superpowers/sdd/progress.md. Do not repeat comple
   validation. Current caller must run native provider off UI main; presenter
   dispatches only modal work to main. Do not call these components production-ready.
 
+## Audit vault slice (latest continuation)
+
+- Continued from f100fee. Added AuditVault and NativeAuditVault plus separate
+  tests; spec/plan dated2026-09-07 audit-vault. Acceptance:
+  docs/acceptance/audit-vault.md. Immutable bounded record, exact approval,
+  atomic add-only identity, local tombstone and before/after signing rechecks.
+- RED/GREEN vault20cases and native parameter10cases. Full runner exited0:
+  92core cases plus2language modal tests; native capability only, scanner and
+  runtime block passed. Serial logging mutation/static privacy/source-scope
+  contracts passed. Independent read-only review approved, no actionable findings.
+- Native wrappers execute with fake system operations only; LAContext policy and
+  access-control object construction are key-free. Secure Enclave generator and
+  real SecItem calls compiled but never invoked. No CLI integration, real key,
+  production access, installed app change, upload or release.
+- Fixed service/accounts are not an ACL. Next safe implementation scope is signed
+  helper identity/access-group enforcement and external trust-policy integration.
+  Before real provisioning, present the exact operation for approval. External
+  revocation/admin rollback defense and collector/semantic audit remain open.
+  Do not reimplement completed local vault or call it a production-ready signer.
+- Test lesson: snapshot LAContext.interactionNotAllowed inside injected operation,
+  not after invalidate (can block/return false). No system query needed to test it.
+
 ## Implementation findings
 
 - Native macOS filesystem probe: Go os.Root.OpenFile retries symlinks even when O_NOFOLLOW is supplied. Direct libc openat accepted the regular synthetic fixture and rejected the symlink. Plan/spec now use a minimal cgo system-call bridge, not an external Go module; no-follow acceptance is unchanged. Commits `0268403`, `7ae1582` document this correction. Local probe files are temporary synthetic data only.
