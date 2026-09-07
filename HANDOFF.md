@@ -24,6 +24,26 @@ and key-free verification, not actual key provisioning or production access.
 
 ## Current work
 
+- Latest owner confirmation: zensys-tech.com remains under their control; retain
+  channel.zensys-tech.com as the transfer endpoint. Do not ask ownership again.
+- Apple validation of build1 actually failed (altool exit1 /409): SwiftPM resource
+  bundle declares CFBundleExecutable but has no executable. Protected evidence:
+  /Users/mason/Developer/DropMesh-Releases/apple-validation.8errJJ.
+- Fix5f343ad normalizes only the copied Store resource bundle before signing;
+  new regression test and bundle guard reject recurrence. REDmissingnormalizer,
+  GREEN resource/source/candidate/validation/metadata contracts; independent review
+  Approved. App/Sources/Package/Infrastructure unchanged againstb52923a.
+- Rebuilt signed Store1.3.0(2), source5f343ad, in
+  /private/tmp/dropmesh-store-review-5f343ad/DropMesh.app. Full bundle check and
+  installer signature-chain check passed. Package:
+  /Users/mason/Developer/DropMesh-Releases/DropMesh-1.3.0-2-review-5f343ad.pkg,
+  SHA256a688a36d8589cf14056aeb4177406f94ac6e065644fe84ce4a25ea69b9f59e95.
+  Apple revalidation completed exit0: success-message reports no errors validating
+  this archive. Evidence /Users/mason/Developer/DropMesh-Releases/apple-validation-build2.9dIxSz.
+  No build upload or submission. Next owner action: authorize this exact candidate
+  upload for TestFlight testing (not review/public release). Privacy/site/final
+  export answers and actual two-Mac acceptance remain required before submission.
+
 - Latest real candidate: source1b4a64179516c8cc0f305b5d7a6972ea5b648cad,
   Store1.3.0(1), signed App built under
   /private/tmp/dropmesh-store-review-1b4a641/DropMesh.app. Full bundle check passed:
@@ -44,8 +64,7 @@ and key-free verification, not actual key provisioning or production access.
   Not installed, uploaded, Apple-validated or TestFlight accepted.
 - Read-only public service check: channel.zensys-tech.com resolves and HTTPS
   /healthz returned {"status":"ok"}. This is not transfer or ownership evidence.
-  Asked owner whether this old-domain transfer service remains under their control
-  and should stay. Do not change endpoint or production before that answer.
+  Owner subsequently confirmed continued control and retention of this endpoint.
 - Added local draft bilingual store text (12 fields), text-only validation passed;
   default metadata validation remains blocked for missing final media/TestFlight.
   No website publication or App Store Connect metadata edits performed.
