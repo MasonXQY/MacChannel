@@ -4,6 +4,18 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-07 internal testing setup after owner requested continuing:
+created DropMesh Internal QA, with automatic distribution disabled. Added only
+Store 1.3.0 (2); Apple UI confirmed Ready to Test. Invited only the existing
+Account Holder qianyao.xu@icloud.com (no new ASC user or role changes). Fresh UI
+confirmed 1 Tester / 1 Build and tester status Invited. No external testers,
+installation, remote Mac control, beta review or public submission performed.
+Group ID: fcf2fe5e-3c3d-4d05-895e-a354f9aa5a51. Invitation acceptance and actual
+two-Mac TestFlight acceptance remain pending. Details: docs/acceptance/app-store-upload.md.
+
+Historical compliance/upload observations follow; the internal setup above
+supersedes their then-current statements about having no test group/invitation.
+
 Latest: owner requested completing build2 compliance and logged back into ASC.
 Saved exact-build questionnaire: standard encryption in addition to/instead of
 Apple OS encryption; FranceNo per existing owner decision. UI now shows build2

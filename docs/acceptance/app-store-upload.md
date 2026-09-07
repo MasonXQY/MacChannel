@@ -1,5 +1,27 @@
 # App Store Connect delivery
 
+## Internal testing setup — 2026-09-07
+
+Owner requested continuing with internal testing setup. Created internal group
+`DropMesh Internal QA`, ID `fcf2fe5e-3c3d-4d05-895e-a354f9aa5a51`.
+Automatic distribution was unchecked before creation. Added only version
+1.3.0 (2), build UUID `de602055-effa-49e7-a338-634aebc8bd49`.
+Fresh group Builds UI confirmed `Ready to Test`, macOS, expiry in 90 days.
+
+Invited only the existing Account Holder, `qianyao.xu@icloud.com`.
+The other available admin was not selected. Final Testers UI confirmed
+`1 Tester ∙ 1 Build`, `1 tester has been added to this group`, and `Invited`.
+No new ASC user, role change, external invitation, public link, remote Mac
+operation, installation, beta review or App Review submission was performed.
+Mail delivery/opening, acceptance, installation and real transfers are not yet
+verified. Ready to Test is not installed acceptance or public release readiness.
+
+Next: owner accepts the TestFlight invitation on the intended test Mac; retain
+the installed Direct app unchanged. Verify the separately identified Store app
+and complete actual two-Mac acceptance before treating this candidate as tested.
+
+## Earlier compliance and delivery observations
+
 Subsequent exact-build compliance completion: owner requested it and logged in.
 Selected standard encryption beyond Apple OS and FranceNo, then saved. TestFlight
 UI now shows build2 Ready to Submit and90day expiry; Missing Compliance is cleared.
