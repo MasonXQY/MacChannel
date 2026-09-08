@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+bash Scripts/test-store-staging.sh
 [[ -f Scripts/app-store-export-fragment.sh ]] || { echo 'candidate contract FAIL: export fragment missing'; exit 1; }
 source Scripts/app-store-export-fragment.sh
 for decision in true false; do

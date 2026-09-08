@@ -41,7 +41,7 @@ export_fragment="$(macchannel_store_export_fragment "$build_mode" "$export_recor
 source_commit="$(git rev-parse HEAD)"
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || fail "Store candidate requires a clean committed worktree"
 
-work_root="$(mktemp -d "$output_parent/.dropmesh-store.XXXXXX")"
+work_root="$(bash "$repo_root/Scripts/create-store-staging.sh")"
 chmod 700 "$work_root"
 cleanup() { rm -rf "$work_root"; }
 trap cleanup EXIT
@@ -69,6 +69,7 @@ app="$work_root/DropMesh.app"
 contents="$app/Contents"
 mkdir -p "$contents/MacOS" "$contents/Frameworks" "$contents/Resources/en.lproj" "$contents/Resources/zh-Hans.lproj"
 cp -X "$product_path/$macchannel_app_store_executable" "$contents/MacOS/$macchannel_app_store_executable"
+bash "$repo_root/Scripts/fix-store-rpath.sh" "$contents/MacOS/$macchannel_app_store_executable"
 cp -X -R "$product_path/WebRTC.framework" "$contents/Frameworks/WebRTC.framework"
 cp -X -R "$product_path/MacChannel_MacChannelAppKit.bundle" "$contents/Resources/MacChannel_MacChannelAppKit.bundle"
 bash "$repo_root/Scripts/normalize-store-resource-bundle.sh" "$contents/Resources/MacChannel_MacChannelAppKit.bundle"

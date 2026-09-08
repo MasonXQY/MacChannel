@@ -77,6 +77,18 @@ and key-free verification, not actual key provisioning or production access.
 
 ## Current work
 
+- Continued local Store development: isolated signing staging from the requested
+  output parent using Scripts/create-store-staging.sh. It uses a unique
+  /private/tmp/dropmesh-store.XXXXXX directory with umask077 and ignores TMPDIR.
+  Addresses the previously observed Documents-staging signing failure mechanism;
+  no claim that the modified builder has completed a new signed archive yet.
+  RED: new staging test failed because helper was absent. GREEN: staging checks
+  (location, uniqueness, mode700, current owner, builder wiring), candidate,
+  source and validation contracts passed. No App/Sources/Direct changes,
+  installation, signing, upload or production operation. TestFlight build2 stays
+  unchanged. Next packaging run must verify the final output bundle too,
+  particularly if the destination is on another volume or synchronized storage.
+
 - Latest owner confirmation: zensys-tech.com remains under their control; retain
   channel.zensys-tech.com as the transfer endpoint. Do not ask ownership again.
 - Apple validation of build1 actually failed (altool exit1 /409): SwiftPM resource

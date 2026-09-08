@@ -32,6 +32,8 @@ if otool -L "$executable" | grep -Fq Sparkle; then
     exit 1
 fi
 
+bash "$repo_root/Scripts/check-store-rpath.sh" "$executable"
+[[ -f "$app/Contents/Frameworks/WebRTC.framework/WebRTC" ]] || { echo 'missing embedded WebRTC framework' >&2; exit 1; }
 test "$(plutil -extract CFBundleIdentifier raw -o - "$plist")" = com.zensystech.dropmesh
 test "$(plutil -extract CFBundleExecutable raw -o - "$plist")" = DropMeshAppStore
 test "$(plutil -extract LSUIElement raw -o - "$plist")" = true
