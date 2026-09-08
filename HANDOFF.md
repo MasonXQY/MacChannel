@@ -4,6 +4,29 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-08 owner authorized continuing with build3 TestFlight upload. Uploaded
+exact DropMesh-1.3.0-3-745f24b.pkg successfully (altool exit0, zero warnings).
+SHA256 d2215eca695d84c4a95ed00402f24200c3e982a0a9aecfbba6ac0c5839ba38a7.
+Delivery UUID eb86dbf0-e901-4dd6-acec-866d87f90da8. First read-only status query
+at17:29:28Z returned no build3 yet; not proof of failure, do not reupload.
+Pending Apple processing, exact-build compliance and existing test-group
+availability; installed startup still unverified. No formal Store submission.
+
+2026-09-08 installed build2 startup failure diagnosed from local crash report:
+DYLD Library missing @rpath/WebRTC.framework/WebRTC. Actual installed app at
+DropMesh-review-1b4a641.app had been replaced with source5f343ad/build2 (old
+directory name was misleading); its rpath only points to Contents/lib while
+WebRTC is in Contents/Frameworks. Owner requested resolving the issue.
+Fix745f24b adds Frameworks rpath before signing, per-architecture bundle guard,
+and real SwiftPM executable regression (RED absent repair, GREEN both slices and
+idempotence). Existing staging changes included. Source/candidate/validation
+contracts passed. Signed universal 1.3.0(3) built successfully at
+/Users/mason/Developer/DropMesh-Releases/build3-745f24b/DropMesh.app.
+Signed installer: /Users/mason/Developer/DropMesh-Releases/DropMesh-1.3.0-3-745f24b.pkg.
+No installed app changed; actual startup is NOT yet verified. Prior exact-build
+upload authority was build2; request upload authority for build3 TestFlight only.
+Do not claim issue fully fixed until installed build3 startup/menu bar checked.
+
 2026-09-07: owner supplied the missing reviewer phone specifically for Apple.
 Completed beta contact information, bilingual description/test instructions,
 and no-sign-in-required declaration; kept automatic tester notification enabled.
