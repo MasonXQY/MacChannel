@@ -4,6 +4,14 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+Build3 follow-up: owner explicitly requested filling compliance. Saved standard
+encryption in addition to/instead of OS encryption, FranceNo, same as build2.
+Apple cleared missing compliance. Saved bilingual startup-fix testing notes,
+selected existing Internal QA and External QA groups and submitted TestFlight
+review with automatic tester notification enabled. At2026-09-08T17:41:03Z API
+confirmed build3 internal IN_BETA_TESTING, external WAITING_FOR_BETA_REVIEW.
+No public Store submission. Installed build3 startup still needs verification.
+
 2026-09-08 owner authorized continuing with build3 TestFlight upload. Uploaded
 exact DropMesh-1.3.0-3-745f24b.pkg successfully (altool exit0, zero warnings).
 SHA256 d2215eca695d84c4a95ed00402f24200c3e982a0a9aecfbba6ac0c5839ba38a7.
