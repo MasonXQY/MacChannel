@@ -4,6 +4,37 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-10 owner explicitly chose the simplified publishing path. Defer log-age
+changes and backup encryption; do not provision recovery keys, change the server,
+or treat that hardening as a new first-release prerequisite. Retain truthful
+privacy disclosure and essential installed/transfer acceptance. Owner approved
+continuing required public pages, build upload and App Review readiness at the
+previously approved one-time US$1.99 price. Public review still requires completed
+materials and verification; upload is not review approval.
+
+This turn: ASC version draft still Prepare for Submission, no screenshots/build,
+support URL or reviewer contact. Added bilingual support text and privacy draft
+in AppStore/metadata. Privacy remains unpublished; it avoids unverified time-bound
+deletion or encrypted-backup promises. Text metadata test12 fields passed and
+git diff --check passed; these do not validate privacy or installed behavior.
+
+Build4 upload succeeded at13:08:54Z, altool exit0/zero warnings. Delivery UUID
+08c198a4-f08c-446f-8c49-d5374a3b64ff. Exact package SHA256 unchanged (above).
+Fresh Apple GET13:10:55Z confirms processingState VALID, prerelease1.3.0/MAC_OS,
+build4, not expired; both beta states MISSING_EXPORT_COMPLIANCE and encryption
+answer null. Do not reupload. Next: exact-build export answers consistent with
+build3, test-group availability and actual installed acceptance. No App Review
+submission or installation occurred.
+
+GitHub repo admin access confirmed; no prior Pages site/gh-pages ref. Created a
+separate public documentation-only gh-pages branch at
+a1f77ae9b5b1dedde0fba9f7c5b0651343dfca3b (support/index.md, index.md, _config.yml).
+Enabled Pages from that branch/root. Creation returned empty body (jq error),
+but fresh GET verified site exists and is building at
+https://masonxqy.github.io/MacChannel/. First support URL check still404 while
+building; verify HTTPS/content before filling ASC URL. Main and app branch were
+not pushed or merged. No private drafts or repository internals in site tree.
+
 2026-09-10 latest: owner approved the proposed bounded production read-only
 configuration/schema/retention inspection. Executed via existing SSH credentials
 with strict host-key verification, no secrets printed, no table rows/raw logs,
