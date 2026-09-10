@@ -30,10 +30,20 @@ GitHub repo admin access confirmed; no prior Pages site/gh-pages ref. Created a
 separate public documentation-only gh-pages branch at
 a1f77ae9b5b1dedde0fba9f7c5b0651343dfca3b (support/index.md, index.md, _config.yml).
 Enabled Pages from that branch/root. Creation returned empty body (jq error),
-but fresh GET verified site exists and is building at
-https://masonxqy.github.io/MacChannel/. First support URL check still404 while
-building; verify HTTPS/content before filling ASC URL. Main and app branch were
-not pushed or merged. No private drafts or repository internals in site tree.
+but fresh GET verified site exists. Build completed13:11:45Z; HTTPS support page
+returned success and expected English/Chinese content and contact link at
+https://masonxqy.github.io/MacChannel/support/. Main and app branch were not
+pushed or merged. No private drafts or repository internals in site tree.
+
+ASC API attempt to update support URL failed403 before any PATCH (first GET).
+Used logged-in browser instead: saved English and Chinese support URL, copyright,
+owner-provided reviewer contact and no-account/two-Mac review instructions.
+Phone kept out of repo. Save returned disabled; reload verified Chinese support
+URL, copyright, name and notes. Screenshot of reloaded contact fields confirmed
+phone/email populated correctly; screenshot not stored in repo.
+No Add for Review action, final screenshots, privacy declaration or build
+attachment completed. Privacy draft still contains internal review notes and
+must not be published verbatim.
 
 2026-09-10 latest: owner approved the proposed bounded production read-only
 configuration/schema/retention inspection. Executed via existing SSH credentials
