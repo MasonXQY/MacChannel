@@ -4,6 +4,19 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-10 latest: owner approved the proposed bounded production read-only
+configuration/schema/retention inspection. Executed via existing SSH credentials
+with strict host-key verification, no secrets printed, no table rows/raw logs,
+files or device keys read; no production writes/restarts. Results and exact image
+identities: docs/acceptance/production-privacy-config-review.md. Key gaps:
+capacity-only container log rotation (not14-day TTL), gzip plain SQL backups
+(not encrypted by the script), non-strict seven-day deletion rule, retained
+device UUID/security state. Provider encryption/snapshots/monitoring and actual
+cleanup behavior remain unverified. No privacy disclosure or release gate cleared.
+Recommended next production changes (age-bounded logs and encrypted new backups)
+need separate approval; do not delete existing backups or restart services under
+the read-only permission. Website/privacy draft must reflect actual findings.
+
 Latest candidate: source4c69c52, Store1.3.0(4), signed universal application at
 /Users/mason/Developer/DropMesh-Releases/build4-4c69c52/DropMesh.app.
 Builder and separate final-output full bundle checks passed; productbuild and
