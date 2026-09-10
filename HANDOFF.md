@@ -4,6 +4,17 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-10 owner approved updating/relaunching THIS Mac's Store edition through
+TestFlight to build4 for acceptance/screenshots. No Direct replacement or Mac B
+control. Attempt blocked by distribution availability: local TestFlight app
+details show1.3.0(3)/Open and Previous Builds contains only3/Open and2/Install.
+Fresh Apple GET13:30:27Z confirms build4 VALID, internal IN_BETA_TESTING, external
+WAITING_FOR_BETA_REVIEW. No update button/build4 available to this local tester.
+Do not install build2, bypass TestFlight, change tester roles/accounts or claim
+build4 installed. Existing app not quit/overwritten. Update authority is retained
+for the same operation when available; no need to ask it again. No automatic
+monitor or wakeup created. TestFlight left at Previous Builds.
+
 2026-09-10 privacy continuation: published bilingual policy at
 https://masonxqy.github.io/MacChannel/privacy/ on gh-pages commit
 6fdc6506cc956e0b7571338635fabe0fedaa921a. Pages built and HTTPS content verified,
