@@ -4,6 +4,23 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-10 continuation: completed build4 export questionnaire using the same
+standard-encryption-in-addition-to-OS answer as build3 and FranceNo. Apple cleared
+Missing Compliance (API usesNonExemptEncryption=false; this is Apple's field,
+not a claim that the app uses no encryption). Added build4 to existing Internal
+QA and External QA only; no new testers. Submitted bilingual pairing-layout,
+startup and transfer test notes with existing automatic notifications enabled.
+Fresh UI confirmed build4 Waiting for Review with both groups selected. This is
+TestFlight beta review, not formal App Review. Installed build4 acceptance and
+public-release prerequisites remain unfinished; no local app/server changes.
+Also selected and saved exact1.3.0(4) in the formal Store1.3.0 draft; Save returned
+disabled with build4 visible. No Add for Review click. App Privacy live page has
+empty policy/choices URLs and Get Started, so the questionnaire is unstarted.
+Store screenshots remain0. Inspected GitHub's current privacy statement for
+website-host processing; privacy draft still unpublished and needs hosting
+disclosure and final field-category review. Do not turn the previously deferred
+audit-signing platform or backup hardening back into first-release requirements.
+
 2026-09-10 owner explicitly chose the simplified publishing path. Defer log-age
 changes and backup encryption; do not provision recovery keys, change the server,
 or treat that hardening as a new first-release prerequisite. Retain truthful
