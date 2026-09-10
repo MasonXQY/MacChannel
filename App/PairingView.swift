@@ -265,10 +265,21 @@ struct PairingView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             TextField(L10n.text(.pairingSixDigitCode), text: codeBinding)
-                .font(.system(size: 26, weight: .semibold, design: .monospaced))
+                .font(model.entryCode.isEmpty ? .body : .system(size: 26, weight: .semibold, design: .monospaced))
                 .multilineTextAlignment(.center)
-                .textFieldStyle(.roundedBorder)
-                .frame(minHeight: 40)
+                // A native rounded bezel constrains the text cell to 22pt.
+                // A plain field lets AppKit fit the full 30pt digit line.
+                .textFieldStyle(.plain)
+                .frame(minHeight: 32)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(codeFieldFocused ? Color.accentColor : Color.secondary.opacity(0.4),
+                                      lineWidth: codeFieldFocused ? 2 : 1)
+                        .allowsHitTesting(false)
+                }
                 .focused($codeFieldFocused)
                 .onSubmit(join)
                 .accessibilityLabel(L10n.text(.pairingSixDigitCode))

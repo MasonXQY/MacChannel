@@ -4,6 +4,29 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-10 publishing continuation: owner approved one-time US$1.99 public
+Store pricing (not subscription) and continued readiness work. Live ASC price
+was saved and reopened: USA1.99, China15CNY, other territories Apple-equivalent;
+existing availability unchanged. Paid Apps agreement, bank and tax forms Active.
+No new agreement signed or financial details changed. Build3 externally Testing
+was observed in the preceding UI check; this is not public App Review approval.
+Reinvited only the existing xuqy06@163.com tester on owner request.
+
+Latest local UI slice: fixed pairing-code clipping in App/PairingView.swift;
+new real NSHostingView regression and four bilingual empty/digit screenshots.
+See docs/acceptance/pairing-input-layout.md for RED/GREEN and limitations.
+71 selected tests, zero failures, one optional screenshot test skipped. The
+pairing-render test itself ran. No installed app, protocol, service or keys changed.
+
+Saved zh-Hans and newly added en-US version-localized description, promotional
+text and keywords in ASC1.3.0 draft; Save returned disabled for each locale and
+English values were read back. Source text drafts remain in AppStore/metadata.
+Support/marketing URLs left blank pending verified pages; no invented URLs or
+privacy answers. No build attached, screenshots uploaded or public review submitted.
+Remaining: new signed candidate with UI fix, installed acceptance, real production
+privacy observations under bounded authorization, public pages, final screenshots
+and metadata/privacy/export review before formal submission.
+
 Build3 follow-up: owner explicitly requested filling compliance. Saved standard
 encryption in addition to/instead of OS encryption, FranceNo, same as build2.
 Apple cleared missing compliance. Saved bilingual startup-fix testing notes,
