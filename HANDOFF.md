@@ -4,6 +4,28 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+2026-09-10 privacy continuation: published bilingual policy at
+https://masonxqy.github.io/MacChannel/privacy/ on gh-pages commit
+6fdc6506cc956e0b7571338635fabe0fedaa921a. Pages built and HTTPS content verified,
+including both languages and accurate unencrypted-by-script backup statement.
+Source renamed AppStore/metadata/privacy-draft.md -> privacy.md; internal notes
+removed and GitHub-hosted website processing disclosure added. No server change.
+Saved Chinese policy URL in ASC. Saved three data categories as a DRAFT:
+Device ID, Other Diagnostic Data, Other Data Types. Each setup uses App
+Functionality, linked to identity, not tracking. Device ID maps to persisted
+UUIDs; Other Data to network-source hashes and authorization/revocation state;
+diagnostics to operational error/connection logging. Linkage is conservative,
+not a claim that all logs contain raw identifiers. Final provider/SDK scope and
+support-data category review remains necessary before Publish; no label Publish
+or public App Review action performed. Fresh UI confirmed all three categories
+configured, each App Functionality/linked, and Publish enabled (not clicked).
+Local read-only check found running Store app at
+/Users/mason/Developer/DropMesh-Releases/DropMesh-review-1b4a641.app,
+Info.plist1.3.0(3), com.zensystech.dropmesh. /Applications/MacChannel.app remains.
+Need owner permission to update/relaunch the running Store app for build4
+acceptance/screenshots; do not control Mac B or replace Direct. English policy
+URL localization not yet filled; both languages are present on public page.
+
 2026-09-10 continuation: completed build4 export questionnaire using the same
 standard-encryption-in-addition-to-OS answer as build3 and FranceNo. Apple cleared
 Missing Compliance (API usesNonExemptEncryption=false; this is Apple's field,

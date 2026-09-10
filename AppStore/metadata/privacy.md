@@ -1,6 +1,6 @@
 # DropMesh privacy notice / 隐私说明
 
-Draft for publication review, 10 September 2026. Not yet published.
+Last updated / 更新日期: 10 September 2026 / 2026 年 9 月 10 日。
 
 Operator: ZENSYS TECHNOLOGIES - FZCO. Privacy and support contact: [xuqy87@gmail.com](mailto:xuqy87@gmail.com).
 
@@ -28,6 +28,10 @@ If you email support, we receive your email address and the content and attachme
 
 You can stop using DropMesh, remove paired devices and delete locally received files. Contact us to request access to or deletion of service data associated with your device. We may need information to verify the request; some security or legally required records may need to remain. Do not send private keys or pairing codes with your request.
 
+### This website
+
+GitHub Pages hosts our support and privacy pages. Visiting them sends request information, including your IP address, to GitHub. See [GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement). We have not added an advertising or analytics script to these pages. Website visits are separate from transfers between your Macs.
+
 ## 简体中文
 
 ### 传输和本地数据
@@ -52,9 +56,6 @@ DropMesh 支持直接连接；无法直连时，可通过加密中继传输。�
 
 你可以停止使用 DropMesh、移除配对设备并删除本地接收的文件。如需访问或删除与设备相关的服务数据，请联系我们。我们可能需要信息来核验请求；部分安全或法律要求的记录可能需要保留。请勿在请求中发送私钥或配对码。
 
-## Internal publication checks (remove before publishing)
+### 本网站
 
-- Reconcile provider processing and website-hosting disclosure with the selected public host.
-- Confirm the final App Privacy categories against retained device/security data and diagnostics. Do not select Data Not Collected.
-- This notice does not certify runtime behavior, legal compliance, installed acceptance or provider encryption.
-- Source evidence: docs/acceptance/production-privacy-config-review.md. No raw records were used to draft this notice.
+GitHub Pages 托管我们的支持和隐私页面。访问页面时，GitHub 会收到包括 IP 地址在内的请求信息，详情见 [GitHub 隐私声明](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)。我们没有在这些页面中添加广告或分析脚本。访问网站与 Mac 之间的文件传输是不同的处理流程。
