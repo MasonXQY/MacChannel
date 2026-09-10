@@ -4,6 +4,20 @@ Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepse
 
 ## Current authorization
 
+Latest candidate: source4c69c52, Store1.3.0(4), signed universal application at
+/Users/mason/Developer/DropMesh-Releases/build4-4c69c52/DropMesh.app.
+Builder and separate final-output full bundle checks passed; productbuild and
+pkgutil installer certificate-chain check passed. Installer:
+/Users/mason/Developer/DropMesh-Releases/DropMesh-1.3.0-4-4c69c52.pkg
+SHA25688c1c935b5416a144495b9b2caef17d44aebc7edd2ee575b9ab8e3c615d935df.
+Not uploaded, installed, Apple-validated or reviewed. Independent UI code review
+approved with no actionable findings. Both configured public GitHub Pages URLs
+(/MacChannel/privacy/ and /MacChannel/support/) returned HTTP404 at12:02Z Sep10.
+Do not claim those pages are published. Next authority needed for privacy work:
+bounded read-only inspection of channel.zensys-tech.com service configuration,
+schema/field names and logging/retention/backup/monitoring settings, no raw user
+records/log content, file content, device keys, service changes or restarts.
+
 2026-09-10 publishing continuation: owner approved one-time US$1.99 public
 Store pricing (not subscription) and continued readiness work. Live ASC price
 was saved and reopened: USA1.99, China15CNY, other territories Apple-equivalent;
