@@ -10,6 +10,9 @@ struct MobileAppSnapshot: Sendable {
     var names: [DeviceID: String] = [:]
     var failure: MobileRuntimeFailure?
     var transfers: [TransferSnapshot] = []
+    var localNetworkAvailable = false
+    var localDiscoveryEnabled = false
+    var historyAvailabilityFailure: MobileHistoryAvailabilityFailure?
 }
 
 protocol MobileAppSession: Sendable {
@@ -28,4 +31,7 @@ protocol MobileAppSession: Sendable {
     func pause(_ id: TransferID) async throws
     func resume(_ id: TransferID) async throws
     func cancel(_ id: TransferID) async -> TransferCancellationResult
+    func history(limit: Int) async throws -> [MobileHistoryEntry]
+    func availableReceivedURL(for id: TransferID) async -> URL?
+    func setLocalDiscoveryEnabled(_ enabled: Bool) async throws
 }

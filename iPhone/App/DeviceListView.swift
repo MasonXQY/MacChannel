@@ -12,6 +12,13 @@ struct DeviceListView: View {
                 .navigationTitle("app.name")
                 .toolbar {
                     if model.bootstrapState == .ready {
+                        if let settings = model.settings {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                NavigationLink { MobileSettingsView(model: settings) } label: {
+                                    Label("settings.title", systemImage: "gearshape")
+                                }.accessibilityIdentifier("settings-open-button")
+                            }
+                        }
                         ToolbarItem(placement: .topBarTrailing) {
                             Button {
                                 model.presentPairing()
@@ -29,6 +36,10 @@ struct DeviceListView: View {
         }
         .sheet(isPresented: $showingSend, onDismiss: { model.send?.requestCancellation() }) {
             if let sender = model.send { MobileSendView(model: sender, devices: model.pairedDevices) }
+        }
+        .sheet(item: Binding(get: { model.history?.presentation },
+            set: { model.history?.presentation = $0 })) { item in
+            MobileReceivedFileSheet(item: item)
         }
         .alert("devices.remove.title", isPresented: Binding(
             get: { removalCandidate != nil }, set: { if !$0 { removalCandidate = nil } }
@@ -75,6 +86,10 @@ struct DeviceListView: View {
                 } else if model.serviceState == .reconnecting {
                     Button("action.retry") { model.retryConnection() }
                 }
+            }
+
+            if let history = model.history {
+                MobileHistorySection(model: history, latestOnly: true)
             }
 
             Section("devices.title") {
@@ -125,7 +140,7 @@ struct DeviceListView: View {
                 }
             }
         }
-        .refreshable { await model.refreshDevices() }
+        .refreshable { await model.refreshDevices(); await model.history?.refresh() }
     }
 
     private var serviceLabel: LocalizedStringKey {

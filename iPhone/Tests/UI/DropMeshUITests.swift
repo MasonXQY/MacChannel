@@ -2,6 +2,56 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
+    func testEnglishHistoryAndSettings() { runHistory(language: "en", locale: "en_US", prefix: "English") }
+    func testChineseHistoryAndSettings() { runHistory(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
+
+    private func runHistory(language: String, locale: String, prefix: String) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-history-evidence"]
+        app.launch()
+        let filename = app.staticTexts["history-entry-name"].firstMatch
+        XCTAssertTrue(filename.waitForExistence(timeout: 5))
+        positionExplanation(filename, in: app)
+        attach(app.screenshot(), named: "\(prefix)-Home-Filename")
+        let open = app.buttons["received-preview-button"].firstMatch
+        reveal(open, in: app)
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "\(prefix)-Home-Latest")
+        open.tap()
+        let unavailable = app.staticTexts["history-action-message"]
+        reveal(unavailable, in: app)
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 3))
+        positionExplanation(unavailable, in: app)
+        attach(app.screenshot(), named: "\(prefix)-Home-Unavailable")
+        let share = app.buttons["received-share-button"].firstMatch
+        reveal(share, in: app)
+        XCTAssertTrue(share.isHittable)
+        attach(app.screenshot(), named: "\(prefix)-Home-Actions")
+        let history = app.buttons["history-open-button"]
+        reveal(history, in: app)
+        history.tap()
+        XCTAssertTrue(app.staticTexts["history-entry-name"].firstMatch.waitForExistence(timeout: 3))
+        attach(app.screenshot(), named: "\(prefix)-History")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let settings = app.buttons["settings-open-button"]
+        revealAbove(settings, in: app)
+        settings.tap()
+        let toggle = app.switches["discovery-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3))
+        attach(app.screenshot(), named: "\(prefix)-Settings")
+        let location = app.staticTexts["received-location-instructions"]
+        reveal(location, in: app)
+        positionExplanation(location, in: app)
+        attach(app.screenshot(), named: "\(prefix)-Settings-Location")
+        app.terminate()
+        app.launchArguments += ["-history-error"]
+        app.launch()
+        let failedHistory = app.buttons["history-open-button"]
+        reveal(failedHistory, in: app)
+        failedHistory.tap()
+        XCTAssertTrue(app.staticTexts["history-load-error"].waitForExistence(timeout: 3))
+        attach(app.screenshot(), named: "\(prefix)-History-Error")
+    }
     func testEnglishSendAndProgress() { runSend(language: "en", locale: "en_US", prefix: "English") }
     func testChineseSendAndProgress() { runSend(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
     func testEnglishPreparedAndCleanupError() { runPrepared(language: "en", locale: "en_US", prefix: "English") }

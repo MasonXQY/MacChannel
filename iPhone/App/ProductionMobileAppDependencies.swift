@@ -9,6 +9,8 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     private let runtime: MobileForegroundRuntime
     private var names: MobilePeerNames
     private let durableTrust: MobileDurableTrust
+    private let discoveryPreference: MobileDiscoveryPreference
+    private var discoveryEnabled: Bool
 
     static func load() async throws -> ProductionMobileAppDependencies {
         let manager = FileManager.default
@@ -19,13 +21,18 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         let context = try await MobileIdentityContext.load(
             layout: MobileStorageLayout(applicationSupport: support, documents: documents),
             secrets: KeychainStore(policy: MobileIdentityPolicy.policy))
-        return try ProductionMobileAppDependencies(context: context)
+        let dependencies = try ProductionMobileAppDependencies(context: context)
+        await dependencies.applyInitialDiscoveryPreference()
+        return dependencies
     }
     private init(context: MobileIdentityContext<KeychainStore>) throws {
         self.context = context
         durableTrust = MobileDurableTrust(repository: context.repository,
             persistedState: { await context.persistedTrustState() })
         runtime = try MobileForegroundRuntime(context: context)
+        discoveryPreference = MobileDiscoveryPreference(
+            url: context.layout.stateDirectory.appendingPathComponent("local-discovery.json"))
+        discoveryEnabled = try discoveryPreference.load()
         names = MobilePeerNames(url: context.layout.stateDirectory.appendingPathComponent("peer-display-names.json"))
     }
     func snapshot() async -> MobileAppSnapshot {
@@ -33,7 +40,9 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         let trustedIDs = await durableTrust.trustedIDs()
         return MobileAppSnapshot(state: current.state, localID: context.identity.id,
             trustedIDs: trustedIDs, reachable: current.devices,
-            names: names.values, failure: current.failure, transfers: current.transfers)
+            names: names.values, failure: current.failure, transfers: current.transfers,
+            localNetworkAvailable: current.localNetworkAvailable, localDiscoveryEnabled: discoveryEnabled,
+            historyAvailabilityFailure: current.historyAvailabilityFailure)
     }
     func observe(_ changed: @escaping @Sendable () async -> Void) async {
         let runtime = runtime
@@ -71,6 +80,20 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     func pause(_ id: TransferID) async throws { try await runtime.pause(id) }
     func resume(_ id: TransferID) async throws { try await runtime.resume(id) }
     func cancel(_ id: TransferID) async -> TransferCancellationResult { await runtime.cancel(id) }
+    private func applyInitialDiscoveryPreference() async {
+        await runtime.setLocalDiscoveryEnabled(discoveryEnabled)
+    }
+    func history(limit: Int) async throws -> [MobileHistoryEntry] {
+        try await runtime.history(limit: limit).map(MobileHistoryEntry.init)
+    }
+    func availableReceivedURL(for id: TransferID) async -> URL? {
+        await runtime.availableReceivedURL(for: id)
+    }
+    func setLocalDiscoveryEnabled(_ enabled: Bool) async throws {
+        try discoveryPreference.save(enabled)
+        discoveryEnabled = enabled
+        await runtime.setLocalDiscoveryEnabled(enabled)
+    }
     func revoke(_ id: DeviceID) async throws { try await context.repository.revoke(id) }
     func persistTrust() async throws { try await context.persistTrust() }
     func rememberConfirmedPeer(_ peer: DeviceSummary) async {

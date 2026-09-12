@@ -18,6 +18,12 @@ actor InertMobileSession: MobileAppSession {
     private var beforeSend: @Sendable () async -> Void = {}
     private(set) var sendCount = 0
     private var cancelResult: TransferCancellationResult = .tooLate
+    private var historyRows: [MobileHistoryEntry] = []
+    private var receivedURL: URL?
+    private var historyFailed = false
+    private var discoverySaveFailed = false
+    private var beforeHistory: @Sendable () async -> Void = {}
+    private(set) var resolvedHistoryIDs: [TransferID] = []
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var revokeCount = 0
@@ -88,6 +94,25 @@ actor InertMobileSession: MobileAppSession {
     func resume(_ id: TransferID) {}
     func cancel(_ id: TransferID) -> TransferCancellationResult { cancelResult }
     func setCancelResult(_ result: TransferCancellationResult) { cancelResult = result }
+    func history(limit: Int) async throws -> [MobileHistoryEntry] {
+        let rows = historyRows
+        await beforeHistory()
+        if historyFailed { throw CocoaError(.fileReadUnknown) }
+        return Array(rows.prefix(limit))
+    }
+    func availableReceivedURL(for id: TransferID) -> URL? { resolvedHistoryIDs.append(id); return receivedURL }
+    func setHistory(_ rows: [MobileHistoryEntry]) { historyRows = rows }
+    func setReceivedURL(_ url: URL?) { receivedURL = url }
+    func setHistoryFailure(_ failed: Bool) { historyFailed = failed }
+    func setBeforeHistory(_ operation: @escaping @Sendable () async -> Void) { beforeHistory = operation }
+    func setHistoryDiagnostic(_ failed: Bool) {
+        value.historyAvailabilityFailure = failed ? .receivedOutputIndexUnavailable : nil; publish()
+    }
+    func setDiscoverySaveFailure(_ failed: Bool) { discoverySaveFailed = failed }
+    func setLocalDiscoveryEnabled(_ enabled: Bool) throws {
+        if discoverySaveFailed { throw CocoaError(.fileWriteNoPermission) }
+        value.localDiscoveryEnabled = enabled; publish()
+    }
     func setTransfers(_ transfers: [TransferSnapshot]) { value.transfers = transfers; publish() }
     func setTrustedIDs(_ ids: Set<DeviceID>) { value.trustedIDs = ids; publish() }
     func setPresence(_ state: MobileRuntimeState, peers: [DeviceSummary]) {

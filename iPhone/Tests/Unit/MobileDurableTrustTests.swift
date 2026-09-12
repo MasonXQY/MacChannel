@@ -196,6 +196,9 @@ private actor NativeTrustSession: MobileAppSession {
     func pause(_ id: TransferID) throws { throw CancellationError() }
     func resume(_ id: TransferID) throws { throw CancellationError() }
     func cancel(_ id: TransferID) -> TransferCancellationResult { .tooLate }
+    func history(limit: Int) -> [MobileHistoryEntry] { [] }
+    func availableReceivedURL(for id: TransferID) -> URL? { nil }
+    func setLocalDiscoveryEnabled(_ enabled: Bool) {}
     func makePairingAttempt() throws -> any PairingAttempt { throw CancellationError() }
     func rememberConfirmedPeer(_ peer: DeviceSummary) {}
     func revoke(_ id: DeviceID) async throws { try await context.repository.revoke(id) }

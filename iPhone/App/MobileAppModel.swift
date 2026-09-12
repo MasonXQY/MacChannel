@@ -20,6 +20,8 @@ final class MobileAppModel {
     private(set) var removalState: MobileRemovalState = .idle
     var pairing: PairingModel?
     private(set) var send: MobileSendModel?
+    private(set) var history: MobileHistoryModel?
+    private(set) var settings: MobileSettingsModel?
     private let loadSession: @Sendable () async throws -> any MobileAppSession
     private var session: (any MobileAppSession)?
     private var desiredForeground: Bool?
@@ -54,11 +56,14 @@ final class MobileAppModel {
                 self.session = session
                 guard !self.closed else { await session.stopForeground(); return }
                 self.send = MobileSendModel(session: session)
+                self.history = MobileHistoryModel(session: session)
+                self.settings = MobileSettingsModel(session: session)
                 self.send?.setForeground(self.desiredForeground == true)
                 self.observationTask = Task { [weak self] in
                     await session.observe { [weak self] in await self?.refreshDevices() }
                 }
                 await self.refreshDevices()
+                await self.history?.refresh()
                 self.bootstrapState = .ready
                 self.reconcileScene()
             } catch {
@@ -119,6 +124,7 @@ final class MobileAppModel {
                 _ = await (network, pair, importing)
             }
             await self?.refreshDevices()
+            if foreground, self?.desiredForeground == true { await self?.history?.refresh() }
             self?.lifecycleTasks[id] = nil
         }
     }
@@ -162,6 +168,8 @@ final class MobileAppModel {
         guard !closed else { return }
         serviceState = snapshot.state
         runtimeFailure = snapshot.failure
+        history?.update(snapshot)
+        settings?.update(snapshot)
         var sendSnapshot = snapshot
         sendSnapshot.trustedIDs.subtract(revokedIDs)
         send?.update(sendSnapshot, blockedIDs: revokedIDs)
@@ -246,6 +254,7 @@ final class MobileAppModel {
         closed = true
         desiredForeground = false
         send?.setForeground(false)
+        history?.close()
         retryRecoveryRequest = nil
         retryCommandReturned = false
         observationTask?.cancel()
