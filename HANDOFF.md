@@ -14,8 +14,15 @@ the extended production pasteboard audit passes. Independent re-review approves
 the native task after dismissal and cleanup-error fixes. Foreground runtime
 network stage A plus fixes through 5328e4b passes 42 mobile tests and both iOS
 library builds. Independent review approves the stage after socket ownership,
-draining state, late errors and retry-retirement fixes. Stage B now composes the
-actual transfer owner. A source audit added a mandatory re-entry barrier for
+draining state, late errors and retry-retirement fixes. Stage B source33d8f1b
+(reportfdd33a7) composes the actual transfer owner;58mobile tests and both iOS
+library builds pass. Independent review found production WebRTC stop is not a
+joined drain; a narrowly additive awaited listener drain is being implemented,
+preserving existing Mac stop semantics and wire/security/server contracts.
+Exact-source full runs941tests/5skips each exposed an existing fixture timing
+failure; test-only fix932c880 passes50focused+2postcommit tests and independent
+review approves it. Full integrated regression remains pending. A source audit
+added a mandatory re-entry barrier for
 initial sends hidden from durable snapshots; see iphone-late-send-audit.md. Durable
 execution ledger: `.superpowers/sdd/progress.md`; scoped briefs/reports there.
 Read-only runtime composition and pairing lifecycle audits are complete. No
