@@ -83,6 +83,9 @@ final class MobilePresenceSupervisorTests: XCTestCase {
         })
         await supervisor.start()
         try await eventually { await supervisor.state == .online }
+        // Online is published just before run enters receive. The fixture's
+        // failReceive injects into an existing waiter, so wait for that boundary.
+        try await eventually { await first.waitingForFrame }
         await first.failReceive()
         try await eventually { await supervisor.state == .reconnecting }
         await supervisor.retryConnection()
