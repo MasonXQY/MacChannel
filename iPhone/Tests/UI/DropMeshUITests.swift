@@ -20,11 +20,29 @@ final class DropMeshUITests: XCTestCase {
         positionExplanation(guidance, in: app)
         attach(app.screenshot(), named: "\(prefix)-Failed-Send-Guidance")
         let reselect = app.buttons["transfer-reselect-originals"]
-        reveal(reselect, in: app)
+        // SwiftUI Menu can report isHittable for an offscreen descendant of a
+        // tall List cell. Scroll normally and establish actual viewport geometry.
+        XCTContext.runActivity(named: "Verify recovery action viewport after native scrolling") { _ in
+            for _ in 0..<12 {
+                let frame = reselect.frame
+                if frame.height > 0, frame.minY > app.frame.minY + 140,
+                   frame.maxY < app.frame.maxY - 40 { break }
+                app.swipeUp()
+            }
+        }
+        let frame = reselect.frame
+        guard frame.height > 0, frame.minY > app.frame.minY + 140,
+              frame.maxY < app.frame.maxY - 40 else {
+            XCTFail("Recovery action must be visibly reachable by scrolling")
+            return
+        }
         XCTAssertTrue(reselect.isEnabled)
         XCTAssertEqual(reselect.label, language == "en" ? "Select originals again" : "重新选择原件")
         attach(app.screenshot(), named: "\(prefix)-Failed-Send-Reselect")
-        reselect.tap()
+        // Tap the verified visible center, avoiding XCTest's erroneous attempt
+        // to scroll the entire (larger than viewport) containing cell into view.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            .withOffset(CGVector(dx: frame.midX - app.frame.minX, dy: frame.midY - app.frame.minY)).tap()
         let photoLabel = language == "en" ? "Choose Photos or Videos" : "选择照片或视频"
         let menuPhoto = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@",
             photoLabel, "send-photos-button"))
