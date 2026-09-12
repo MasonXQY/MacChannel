@@ -25,7 +25,11 @@ final class DropMeshUITests: XCTestCase {
         XCTAssertEqual(reselect.label, language == "en" ? "Select originals again" : "重新选择原件")
         attach(app.screenshot(), named: "\(prefix)-Failed-Send-Reselect")
         reselect.tap()
-        app.buttons[language == "en" ? "Choose Photos or Videos" : "选择照片或视频"].tap()
+        let photoLabel = language == "en" ? "Choose Photos or Videos" : "选择照片或视频"
+        let menuPhoto = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@",
+            photoLabel, "send-photos-button"))
+        XCTAssertEqual(menuPhoto.count, 1)
+        menuPhoto.element.tap()
         XCTAssertTrue(app.buttons["photos-use-button"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.buttons["photos-use-button"].isEnabled)
         app.buttons["photos-cancel-button"].tap()
