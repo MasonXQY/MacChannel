@@ -81,6 +81,9 @@ final class DeviceDirectoryTests: XCTestCase {
         }
 
         XCTAssertEqual(browser.state(), .failed("policy_denied"))
+        try await waitUntilDeviceDirectory {
+            await directory.snapshot().first?.availability == .internet
+        }
         let deniedSnapshot = await directory.snapshot()
         XCTAssertEqual(deniedSnapshot.first?.availability, .internet)
 
@@ -1214,6 +1217,25 @@ private func XCTAssertThrowsErrorAsync<T>(
         XCTFail("Expected error")
     } catch { handler(error) }
 }
+
+private func waitUntilDeviceDirectory(
+    timeout: Duration = .seconds(2),
+    predicate: @escaping @Sendable () async -> Bool
+) async throws {
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask {
+            while !(await predicate()) { try await Task.sleep(for: .milliseconds(5)) }
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw DeviceDirectoryTestTimeout()
+        }
+        _ = try await group.next()
+        group.cancelAll()
+    }
+}
+
+private struct DeviceDirectoryTestTimeout: Error {}
 
 private final class ManualDirectoryClock: @unchecked Sendable {
     private let lock = NSLock()
