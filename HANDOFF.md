@@ -12,7 +12,11 @@ device library builds pass on the fixed source. Native app implementation at
 unsigned simulator/device app builds. Root inspected retained screenshots and
 the extended production pasteboard audit passes. Independent re-review approves
 the native task after dismissal and cleanup-error fixes. Foreground runtime
-implementation is now delegated, owning only mobile library/runtime tests. Durable
+network stage A plus fixes through 5328e4b passes 42 mobile tests and both iOS
+library builds. Independent review approves the stage after socket ownership,
+draining state, late errors and retry-retirement fixes. Stage B now composes the
+actual transfer owner. A source audit added a mandatory re-entry barrier for
+initial sends hidden from durable snapshots; see iphone-late-send-audit.md. Durable
 execution ledger: `.superpowers/sdd/progress.md`; scoped briefs/reports there.
 Read-only runtime composition and pairing lifecycle audits are complete. No
 physical device detected by devicectl; user asked asynchronously to connect an

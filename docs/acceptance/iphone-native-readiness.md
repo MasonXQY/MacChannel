@@ -13,6 +13,7 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
 - Independent review then found stale dismissal permission on background/retry and hidden cleanup errors. Fix 9ef3642 adds targeted regressions, shared error rendering and truthful spinner state. Fresh runs pass 14 unit tests, 2 bilingual UI tests including swipe resistance, and unsigned device build. Initial result-bundle writes failed with CASDB/mkstemp errors; fresh result bundles and four exported screenshots succeeded. Independent re-review: spec compliant, quality Approved. This is not release acceptance.
 - Coordinator inspected four retained English/Chinese home/pairing screenshots in `.build/iphone-ui-evidence`: labels and code field are visible without clipping. Final-source production pasteboard inventory audit passes (`.build/iphone-source-audit.log`); native app sources are now included and test fixtures excluded explicitly.
 - `xcrun devicectl list devices`: No devices found. Physical acceptance has not started.
+- Foreground networking primitives fixed through 5328e4b: 42 mobile tests pass and both iOS library builds pass; independent re-review is compliant/Approved after session ownership, draining state, late errors and retry-retirement corrections. Full transfer runtime composition is in progress; actual native send/receive remains unimplemented.
 
 ## Required installed acceptance
 
