@@ -1,0 +1,293 @@
+import Foundation
+import XCTest
+@testable import MacChannelCore
+@testable import DropMeshMobileRuntime
+
+final class MobilePresenceSupervisorTests: XCTestCase {
+    func testStartStopReentrancyAuthenticatesExactlyOneSocket() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let socket = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([socket])
+        let supervisor = try makeSupervisor(identity, factory: factory)
+        await supervisor.start()
+        await supervisor.start()
+        try await eventually { await supervisor.state == .online }
+        let sentTypes = await socket.sentTypes
+        XCTAssertEqual(sentTypes, ["auth"])
+        async let firstStop: Void = supervisor.stop()
+        async let secondStop: Void = supervisor.stop()
+        _ = await (firstStop, secondStop)
+        await supervisor.start()
+        let count = await factory.count
+        let state = await supervisor.state
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(state, .stopped)
+    }
+
+    func testReconnectReusesBridgeAndJoinsOldSocketBeforeReplacement() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let first = try SupervisorSocket(identity: identity)
+        let second = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([first, second])
+        let supervisor = try makeSupervisor(identity, factory: factory)
+        let stream = await supervisor.bridge.signalFrames()
+        await supervisor.start()
+        try await eventually { await supervisor.state == .online }
+        await first.failReceive()
+        try await eventually {
+            let count = await factory.count
+            let state = await supervisor.state
+            return count == 2 && state == .online
+        }
+        let firstClosed = await first.closed
+        XCTAssertTrue(firstClosed)
+        let peer = DeviceID(rawValue: UUID())
+        await second.push(try frame(["type": "signal", "from": peer.rawValue.uuidString,
+                                     "payload": Data([9]).base64EncodedString()]))
+        var iterator = stream.makeAsyncIterator()
+        let received = await iterator.next()
+        XCTAssertEqual(received?.payload, Data([9]))
+        await supervisor.stop()
+    }
+
+    func testStopWaitsForCancellationInsensitiveAuthenticationAndCannotRestart() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let socket = try SupervisorSocket(identity: identity, delayAuthentication: true)
+        let factory = SupervisorSocketFactory([socket])
+        let supervisor = try makeSupervisor(identity, factory: factory)
+        await supervisor.start()
+        try await eventually { await socket.waitingForFrame }
+        let stop = Task { await supervisor.stop() }
+        try await eventually { await socket.closed }
+        await supervisor.start()
+        let stopping = await supervisor.state
+        XCTAssertEqual(stopping, .stopping)
+        await socket.push(try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]))
+        await stop.value
+        let state = await supervisor.state
+        let count = await factory.count
+        XCTAssertEqual(state, .stopped)
+        XCTAssertEqual(count, 1)
+    }
+
+    func testBackoffIsCappedAndManualRetryInterruptsSleep() async throws {
+        XCTAssertEqual((0..<8).map(MobilePresenceSupervisor.reconnectDelay),
+                       [.seconds(1), .seconds(2), .seconds(4), .seconds(8),
+                        .seconds(15), .seconds(15), .seconds(15), .seconds(15)])
+        let identity = try DeviceIdentity.ephemeral()
+        let first = try SupervisorSocket(identity: identity)
+        let second = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([first, second])
+        let supervisor = try makeSupervisor(identity, factory: factory, sleep: { _ in
+            try await Task.sleep(for: .seconds(60))
+        })
+        await supervisor.start()
+        try await eventually { await supervisor.state == .online }
+        await first.failReceive()
+        try await eventually { await supervisor.state == .reconnecting }
+        await supervisor.retryConnection()
+        try await eventually {
+            let count = await factory.count
+            let state = await supervisor.state
+            return count == 2 && state == .online
+        }
+        await supervisor.stop()
+    }
+
+    func testProductionConfigurationMatchesExistingMacEndpoints() {
+        XCTAssertEqual(MobileRuntimeConfiguration.webSocketURL.absoluteString, "wss://channel.zensys-tech.com/v1/ws")
+        XCTAssertEqual(MobileRuntimeConfiguration.httpOrigin.absoluteString, "https://channel.zensys-tech.com")
+    }
+
+    func testCancelledSocketCreationDoesNotScheduleReconnect() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let factory = SupervisorSocketFactory([])
+        let supervisor = try makeSupervisor(identity, factory: factory)
+        await supervisor.start()
+        do { try await eventually { await supervisor.state == .stopped } }
+        catch { await supervisor.stop() }
+        let count = await factory.count
+        XCTAssertEqual(count, 1)
+    }
+
+    func testReconnectWaitsForEarlierConcurrentCloseToReturn() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let first = try SupervisorSocket(identity: identity, delayFirstClose: true)
+        let second = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([first, second])
+        let supervisor = try makeSupervisor(identity, factory: factory)
+        await supervisor.start()
+        try await eventually { await supervisor.state == .online }
+        let retry = Task { await supervisor.retryConnection() }
+        try await eventually { await first.closePending }
+        try await Task.sleep(for: .milliseconds(30))
+        let countWhileClosing = await factory.count
+        await first.releaseClose()
+        await retry.value
+        try await eventually { await factory.count == 2 }
+        await supervisor.stop()
+        XCTAssertEqual(countWhileClosing, 1, "No new session while an old stop can still mutate the directory")
+    }
+
+    func testSignalOverflowClosesAndDrainsForwarderBeforeReconnect() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let first = try SupervisorSocket(identity: identity)
+        let second = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([first, second])
+        let supervisor = try makeSupervisor(identity, factory: factory)
+        await supervisor.start()
+        try await eventually { await supervisor.state == .online }
+        let signal = try frame(["type": "signal", "from": UUID().uuidString,
+                                "payload": Data([1]).base64EncodedString()])
+        // No router consumes the bounded bridge in this fixture.
+        for _ in 0..<129 { await first.push(signal) }
+        try await eventually { await factory.count == 2 }
+        await supervisor.stop()
+    }
+
+    func testManualRetryDuringLateAuthenticationCannotPublishOldOnline() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let first = try SupervisorSocket(identity: identity, delayAuthentication: true)
+        let second = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([first, second])
+        let states = SupervisorStateRecorder()
+        let supervisor = try makeSupervisor(identity, factory: factory, onState: { await states.append($0) })
+        await supervisor.start()
+        try await eventually { await first.waitingForFrame }
+        await supervisor.retryConnection()
+        await first.push(try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]))
+        try await eventually {
+            let count = await factory.count
+            let state = await supervisor.state
+            return count == 2 && state == .online
+        }
+        await supervisor.stop()
+        let onlineCount = await states.values.filter { $0 == .online }.count
+        XCTAssertEqual(onlineCount, 1, "Only the replacement socket may become online")
+    }
+
+    func testTrustUpdateSendFailureReauthenticatesWithCurrentRepository() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        let trust = TrustStore(owner: identity.id)
+        let repository = try TrustRepository(ownerIdentity: identity, trustStore: trust, persistedGeneration: 0)
+        let first = try SupervisorSocket(identity: identity, rejectTrustUpdate: true)
+        let second = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([first, second])
+        let supervisor = MobilePresenceSupervisor(identity: identity, repository: repository,
+                                                  directory: DeviceDirectory(trust: trust),
+                                                  makeSocket: { try await factory.next() }, sleep: { _ in })
+        await supervisor.start()
+        try await eventually { await supervisor.state == .online }
+        // Fixture-only authorization of an ephemeral identity, no production trust.
+        _ = try await repository.issueAuthorization(subject: peer.id,
+                                                    subjectPublicKey: peer.publicKey.rawRepresentation,
+                                                    timestamp: Date())
+        await supervisor.refreshTrust()
+        try await eventually {
+            let count = await factory.count
+            let state = await supervisor.state
+            return count == 2 && state == .online
+        }
+        let records = await second.authenticationRecordCount
+        XCTAssertEqual(records, 1)
+        await supervisor.stop()
+    }
+
+    private func makeSupervisor(
+        _ identity: DeviceIdentity, factory: SupervisorSocketFactory,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in },
+        onState: @escaping @Sendable (MobilePresenceState) async -> Void = { _ in }
+    ) throws -> MobilePresenceSupervisor {
+        let trust = TrustStore(owner: identity.id)
+        let repository = try TrustRepository(ownerIdentity: identity, trustStore: trust, persistedGeneration: 0)
+        return MobilePresenceSupervisor(identity: identity, repository: repository,
+                                        directory: DeviceDirectory(trust: trust),
+                                        makeSocket: { try await factory.next() }, sleep: sleep, onState: onState)
+    }
+
+    private func eventually(_ condition: @escaping @Sendable () async -> Bool) async throws {
+        for _ in 0..<2_000 {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTFail("Timed out waiting for lifecycle transition")
+        throw CancellationError()
+    }
+
+    private func frame(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
+}
+
+private actor SupervisorStateRecorder {
+    var values: [MobilePresenceState] = []
+    func append(_ state: MobilePresenceState) { values.append(state) }
+}
+
+private actor SupervisorSocketFactory {
+    private var sockets: [SupervisorSocket]
+    var count = 0
+    init(_ sockets: [SupervisorSocket]) { self.sockets = sockets }
+    func next() throws -> any PresenceWebSocket {
+        count += 1
+        guard !sockets.isEmpty else { throw CancellationError() }
+        return sockets.removeFirst()
+    }
+}
+
+private actor SupervisorSocket: PresenceWebSocket {
+    private var incoming: [Data]
+    private var receiver: CheckedContinuation<Data, Error>?
+    private let delayAuthentication: Bool
+    private let delayFirstClose: Bool
+    private let rejectTrustUpdate: Bool
+    private var closeWaiter: CheckedContinuation<Void, Never>?
+    private var closeCalls = 0
+    var closePending: Bool { closeWaiter != nil }
+    var sentTypes: [String] = []
+    var authenticationRecordCount = 0
+    var closed = false
+    var waitingForFrame: Bool { receiver != nil }
+    init(identity: DeviceIdentity, delayAuthentication: Bool = false, delayFirstClose: Bool = false,
+         rejectTrustUpdate: Bool = false) throws {
+        self.delayAuthentication = delayAuthentication
+        self.delayFirstClose = delayFirstClose
+        self.rejectTrustUpdate = rejectTrustUpdate
+        incoming = [try JSONSerialization.data(withJSONObject: [
+            "type": "challenge", "nonce": Data(repeating: 3, count: 32).base64EncodedString(), "expiresAt": 1234
+        ])]
+        if !delayAuthentication {
+            incoming.append(try JSONSerialization.data(withJSONObject: [
+                "type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()
+            ]))
+        }
+    }
+    func send(_ data: Data) throws {
+        guard !closed || delayAuthentication else { throw CancellationError() }
+        let frame = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        sentTypes.append(frame?["type"] as? String ?? (frame?["envelope"] != nil ? "auth" : "invalid"))
+        if frame?["envelope"] != nil { authenticationRecordCount = (frame?["trustRecords"] as? [Any])?.count ?? 0 }
+        if rejectTrustUpdate, frame?["type"] as? String == "trust-update" {
+            throw AuthenticatedPresenceError.transport("fixture")
+        }
+    }
+    func ping() { }
+    func receive() async throws -> Data {
+        if !incoming.isEmpty { return incoming.removeFirst() }
+        if closed { throw CancellationError() }
+        return try await withCheckedThrowingContinuation { receiver = $0 }
+    }
+    func push(_ frame: Data) {
+        if let receiver { self.receiver = nil; receiver.resume(returning: frame) }
+        else { incoming.append(frame) }
+    }
+    func failReceive() { receiver?.resume(throwing: AuthenticatedPresenceError.transport("fixture")); receiver = nil }
+    func close() async {
+        closed = true
+        if !delayAuthentication { failReceive() }
+        closeCalls += 1
+        if delayFirstClose, closeCalls == 1 {
+            await withCheckedContinuation { closeWaiter = $0 }
+        }
+    }
+    func releaseClose() { closeWaiter?.resume(); closeWaiter = nil }
+}
