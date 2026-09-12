@@ -52,15 +52,20 @@ Approved;61nativeunit+3UI,20focused,bothunsignedshippingbuilds/scoped audits pas
 This is adapter ownership, not yet send UI. Bounded Photos presentation preflight
 is complete: app-owned inline systemPhotosPicker avoids unspecified modal
 selection/dismiss ordering, admission only after explicit selection commitment.
-Fresh iphone_native_send_ui is activebase89f6a9a using
-iphone-native-send-brief.md; no root build session is active.
+Native send/progress implementation is now source5804b21/2df84dd,
+test-only supplemental capturesc853b8e and report/evidencebe68272. Final native
+76unit+7UI, sixmaximum-typeUI and four supplementalAXUI cases pass; actual
+unsigned simulator/device app builds pass. Root inspected standard and maximum
+size EN/ZH screenshots, including explicit recipient and error-region evidence.
+Fresh independent iphone_native_send_review is active over89f6a9a..be68272;
+no remaining build/test session is active. This is not physical transfer proof.
 Send preflight confirms actual
 publicsend-return is the import-copy release boundary; Photos must explicitly
 cancel/join its copy. Root has no active build/test session.
 Trackedfinalscreenshots inspected byroot; source/logtimeline mismatch investigated
 without establishing a cache defect. AppIntentsmetadatawarning disclosed.
-Picker/send, history/settings UI and Share are subsequent independently
-reviewed slices. A source audit
+History/settings UI and Share follow after send review; the latest device check
+still reports no physical iPhone. A source audit
 added a mandatory re-entry barrier for
 initial sends hidden from durable snapshots; see iphone-late-send-audit.md. Durable
 execution ledger: `.superpowers/sdd/progress.md`; scoped briefs/reports there.

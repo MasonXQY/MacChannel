@@ -4,6 +4,17 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
 
 ## Verified this continuation
 
+- Native send UI source5804b21/2df84dd, screenshot-helper-onlyc853b8e and
+  report/evidencebe68272: final76unit+7UI, sixmaximum-Dynamic-Type UI and four
+  supplementalerror-regionUI tests pass. Both actual unsigned shipping builds
+  pass, known AppIntentsmetadatawarning disclosed. Root checked full-suite/build
+  logs and ten actual EN/ZH standard/AX screenshots; no horizontal loss observed
+  in reviewed app-owned controls. System Photos search placeholder truncates at
+  maximumsize. Photos captures show browsing/no selection, not provider delivery.
+  Prepared files/progress/errors use an inert host and actual local import copies,
+  not remote transfer. Independent task review is in progress from89f6a9a..be68272.
+  History/settings and Share remain next; latest device enumeration still empty.
+
 - Starting revision 14034d6; mobile baseline: 11 tests, 0 failures.
 - Runtime/API audit: existing authenticated core can be composed without importing AppKit. This is source evidence, not live compatibility proof.
 - Private import staging fixed revision 0efdcde: 8 focused / 19 mobile tests passing; independent review approved after containment/FIFO/cleanup corrections.
