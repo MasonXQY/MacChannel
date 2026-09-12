@@ -808,6 +808,7 @@ final class AppRuntimeTests: XCTestCase {
                 "App",
                 "Sources/DropMeshAppStore",
                 "Sources/DropMeshAppStoreDistribution",
+                "Sources/DropMeshMobileRuntime",
                 "Sources/MacChannelApp",
                 "Sources/MacChannelCore",
                 "Sources/MacChannelDirectDistribution",

@@ -2,6 +2,22 @@
 
 ## Current iPhone work — 2026-09-12
 
+Mobile runtime foundation added as a separate DropMeshMobileRuntime library:
+private state/staging vs Documents/DropMesh; device-only mobile keychain policy;
+stable identity/trust bootstrap with fail-closed corruption; constructor for the
+existing PairingCoordinator. No protocol changes, auto-approval, network startup
+or production secret access. Tests use in-memory secrets and temporary files.
+Focused 5 tests pass. Full suite initially failed the expected production-root
+inventory because of the new library; extended audited inventory, preserving all
+pasteboard restrictions. Rerun: 888 tests, 5 skipped, 0 failures, exit 0.
+iOS simulator and unsigned device full Xcode target builds pass using existing
+dependency caches; fresh cache resolution attempt was terminated after stalling.
+See `docs/acceptance/iphone-runtime-foundation.md`. No iPhone app target, actual
+iOS keychain runtime verification, completed mobile pairing or file transfer yet.
+Next: native app bootstrap and pairing lifecycle, ensuring trust persistence at
+completion/revocation boundaries before presenting success; foreground receiving
+and picker/share UI remain downstream. Keep branch isolated from Mac releases.
+
 Portability implementation now compiles the entire MacChannelCore for both
 iOS simulator and unsigned iPhone device destinations. Fixed conditional AppKit
 availability, macOS-only legacy debug define and platform home-directory default.

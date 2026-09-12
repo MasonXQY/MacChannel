@@ -6,6 +6,7 @@ let package = Package(
     name: "MacChannel",
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
+        .library(name: "DropMeshMobileRuntime", targets: ["DropMeshMobileRuntime"]),
         .library(name: "MacChannelCore", targets: ["MacChannelCore"]),
         .executable(name: "MacChannelApp", targets: ["MacChannelApp"]),
         .executable(name: "DropMeshAppStore", targets: ["DropMeshAppStore"]),
@@ -15,6 +16,8 @@ let package = Package(
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "150.0.0"),
     ],
     targets: [
+        .target(name: "DropMeshMobileRuntime", dependencies: ["MacChannelCore"]),
+        .testTarget(name: "DropMeshMobileRuntimeTests", dependencies: ["DropMeshMobileRuntime", "MacChannelCore"]),
         .target(
             name: "MacChannelCore",
             dependencies: [
