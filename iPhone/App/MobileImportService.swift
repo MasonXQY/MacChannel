@@ -23,6 +23,10 @@ enum MobileImportError: LocalizedError, Equatable, Sendable {
            [NSFileWriteOutOfSpaceError, NSFileWriteNoPermissionError, NSFileWriteUnknownError].contains(cocoa.code) {
             return .storage
         }
+        if cocoa.domain == NSPOSIXErrorDomain,
+           [POSIXErrorCode.ENOSPC, .EDQUOT].contains(where: { Int($0.rawValue) == cocoa.code }) {
+            return .storage
+        }
         return .unavailable
     }
 }

@@ -68,6 +68,23 @@ final class MobileImportAdapterTests: XCTestCase {
             }
         }
         XCTAssertEqual(MobileImportError.category(CocoaError(.fileWriteOutOfSpace)), .storage)
+        XCTAssertEqual(MobileImportError.category(POSIXError(.EACCES)), .unavailable)
+        XCTAssertEqual(MobileImportError.category(CancellationError()), .cancelled)
+    }
+
+    func testActualPOSIXDiskFullFromStagerMapsToStorage() async throws {
+        let fixture = try ImportFixture()
+        defer { fixture.remove() }
+        let service = MobileImportService(makeStager: { FailingImportStager(error: POSIXError(.ENOSPC)) })
+        let attempt = try await service.begin()
+
+        do {
+            _ = try await service.importFiles([fixture.source], in: attempt)
+            XCTFail("POSIX disk-full failure was hidden")
+        } catch {
+            XCTAssertEqual(error as? MobileImportError, .storage)
+        }
+        try await service.discard(attempt)
     }
 
     func testPhotoCallbackReturnsOnlyOwnedBytesAndRejectsOldOperationDuringCancellation() async throws {
@@ -314,6 +331,12 @@ final class MobileImportAdapterTests: XCTestCase {
         try await service.discard(attempt)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
     }
+}
+
+private struct FailingImportStager: MobileImportStaging {
+    let error: any Error & Sendable
+    func stage(_ source: URL, coordinated: Bool) async throws -> URL { throw error }
+    func discard(_ url: URL) async throws {}
 }
 
 private actor RetryImportFactory {
