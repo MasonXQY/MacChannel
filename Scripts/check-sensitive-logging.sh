@@ -5,11 +5,12 @@ if [[ $# -eq 0 ]]; then
   repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   source_files=()
   while IFS= read -r source_file; do source_files+=("${source_file}"); done < <(
-    find "$repository_root/App" "$repository_root/Sources" \
+    find "$repository_root/App" "$repository_root/Sources" "$repository_root/iPhone" \
       "$repository_root/Services/rendezvous" "$repository_root/Scripts" \
       "$repository_root/Tools/PrivacyEvidenceVerifier" \
       "$repository_root/Tools/AuditOwnerPreflight" -type f \
       \( -name '*.swift' -o -name '*.go' -o -name '*.sh' \) \
+      ! -path "$repository_root/iPhone/Tests/*" \
       ! -name 'audit-privacy.sh' ! -name 'audit-app-store-privacy.sh' \
       ! -name 'check-sensitive-logging.sh' -print
   )

@@ -3,11 +3,15 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mutation_path=""
+mutation_directory=""
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/dropmesh-sensitive-logging-contract.XXXXXX")"
 
 cleanup() {
     if [[ -n "$mutation_path" ]]; then
         rm -f "$mutation_path"
+    fi
+    if [[ -n "$mutation_directory" ]]; then
+        rmdir "$mutation_directory"
     fi
     case "$test_root" in
         "${TMPDIR:-/tmp}"/dropmesh-sensitive-logging-contract.*) rm -rf "$test_root" ;;
@@ -124,5 +128,44 @@ for mutation_root in App Services/rendezvous Scripts Tools/PrivacyEvidenceVerifi
     rm -f "$mutation_path"
     mutation_path=""
 done
+
+# Native iPhone app, extension, and shared sources are production code. A nearby
+# production directory containing "Tests" must remain covered, while only the
+# exact iPhone/Tests subtree is excluded from the no-argument production scan.
+for mutation_root in iPhone/App iPhone/ShareExtension iPhone/Shared; do
+    temporary_path="$(mktemp "$repository_root/$mutation_root/SensitiveLoggingMutation.XXXXXX")"
+    mutation_path="$temporary_path.swift"
+    mv "$temporary_path" "$mutation_path"
+    printf '%s\n' $'func sensitiveLoggingMutation(path: String) {\n    print("path=\\(path)")\n}' > "$mutation_path"
+    if bash "$repository_root/Scripts/check-sensitive-logging.sh" >/dev/null 2>&1; then
+        echo "sensitive logging scan accepted a $mutation_root mutation" >&2
+        exit 1
+    fi
+    rm -f "$mutation_path"
+    mutation_path=""
+done
+
+mutation_directory="$(mktemp -d "$repository_root/iPhone/TestsNearbyProduction.XXXXXX")"
+mutation_path="$mutation_directory/SensitiveLoggingMutation.swift"
+printf '%s\n' $'func sensitiveLoggingMutation(path: String) {\n    print("path=\\(path)")\n}' > "$mutation_path"
+if bash "$repository_root/Scripts/check-sensitive-logging.sh" >/dev/null 2>&1; then
+    echo "sensitive logging scan excluded a production path merely because its name contains Tests" >&2
+    exit 1
+fi
+rm -f "$mutation_path"
+mutation_path=""
+rmdir "$mutation_directory"
+mutation_directory=""
+
+temporary_path="$(mktemp "$repository_root/iPhone/Tests/SensitiveLoggingFixture.XXXXXX")"
+mutation_path="$temporary_path.swift"
+mv "$temporary_path" "$mutation_path"
+printf '%s\n' $'func sensitiveLoggingFixture(path: String) {\n    print("path=\\(path)")\n}' > "$mutation_path"
+if ! bash "$repository_root/Scripts/check-sensitive-logging.sh" >/dev/null 2>&1; then
+    echo "sensitive logging scan included the exact iPhone/Tests fixture subtree" >&2
+    exit 1
+fi
+rm -f "$mutation_path"
+mutation_path=""
 
 echo "sensitive logging default-scan contract PASS"
