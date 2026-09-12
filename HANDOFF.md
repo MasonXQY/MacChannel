@@ -2,6 +2,19 @@
 
 ## Current iPhone work — 2026-09-12
 
+SOURCE ACCEPTED — 2026-09-13: final wholebranch correction14047d3..4952486
+independently Approved; all3Important+4actionableMinor closed, no new findings.
+Production5877e2e, final testhelper1015e99, evidence/report4952486. Root full997
+tests/5existing skips/0fail48.393s; native110unit13UI and finalhelper2standard+
+2maximumtype pass. Actual unsigned simulator/device builds, bothMac release
+compile0.31s/0.33s and static audits pass.8real captures retained/root4inspected.
+No sessions remain. CURRENT physical check: No devices found. No development
+team/profile configured; no signed iPhone installation or real interoperability
+acceptance. Next action needs unlocked connected/trusted iPhone then confirmed
+development signing team, and the physical runbook against unchanged Mac1.3.0.
+Keep this branch/worktree isolated; no Mac installation, merge, Store or Mac B
+operation. Below entries are historical progression, superseded by this cursor.
+
 FINAL REVIEW CURSOR: wholebranch c823400..07f4680 requires three integration
 corrections: stop revoked-peer outbound work, reclaim process-abandoned private
 imports, and actionable post-admission failures. One fresh iphone_final_correction

@@ -4,6 +4,18 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
 
 ## Verified this continuation
 
+- Final source gate accepted2026-09-13: independent wholebranch rereview approved
+  correction14047d3..4952486, closing all3Important+4Minor. Production5877e2e;
+  native110unit13UI full onb919937 plus2standard/2maximumtype onhelper1015e99.
+  Root full997tests/5existing skips/0fail48.393s; MacStore/Direct releasecompile
+  0.31s/0.33s. Actual unsigned simulator/device builds and static audits pass.
+  Eight real captures tracked, root inspected four. Exact intermediate failures
+  and proof revisions are retained in iphone-final-correction-report.md.
+  This supersedes earlier Needs fixes cursors below, NOT physical gates.
+  Current device enumeration againNo devices found; no signing team/profile,
+  signed installation or actual iPhone/Mac network/provider test completed.
+  Branch/worktree preserved; existing Mac installation untouched.
+
 - Wholebranch reviewc823400..07f4680 is Needs fixes despite passing component
   tests: revoked outbound lifetime, process-abandoned private staging and
   post-admission failure recovery. Fresh combined correction active at14047d3;
