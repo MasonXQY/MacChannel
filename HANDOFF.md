@@ -31,7 +31,11 @@ and report4c0021e pass92mobile tests, both iOSlibrary builds and root full975tes
 propagation; correction8c25fb3 is independently Approved,96mobile/36focused tests
 and both iOSlibrary builds pass. Root full979tests/5skips/0failures47.675s exit0
 on that exact source. Native composition/test-host/lifecycle/paired-list slice
-is active; picker/send, history/settings UI and Share are subsequent independently
+sourcec41a409/report9c8d609 passes26unit+3UI and2largest-typebilingualUI tests,
+bothunsignedshippingbuilds andscopedprivacychecks. Independent review is active.
+Trackedfinalscreenshots inspected byroot; source/logtimeline mismatch investigated
+without establishing a cache defect. AppIntentsmetadatawarning disclosed.
+Picker/send, history/settings UI and Share are subsequent independently
 reviewed slices. A source audit
 added a mandatory re-entry barrier for
 initial sends hidden from durable snapshots; see iphone-late-send-audit.md. Durable

@@ -47,6 +47,12 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   Correction36focused/96mobile tests and both iOSlibrary builds pass, logs checked.
   Root exact-source full979tests/5skips/0failures47.675seconds exit0;
   `.build/mobile-history-fixed-integrated-full.log`, no warning/error matches.
+- Native compositionc41a409/report9c8d609:26unit+3UIstandard tests and2bilingual
+  maximum-Dynamic-Type UI tests pass. Bothunsignedshippingappbuilds pass, with
+  disclosed AppIntentsmetadataextractionwarning; noSwiftcompilerwarnings.
+  Root inspected trackedfinalEN/ZHhome/removal/pairing plus sixdigitready at
+  AX-XXXL. Testsuseinertseparatehost, actualshippingassemblyexcludedfromhost;
+  screenshotsshowUI, notproductionconnectivity. Independentreviewactive.
 - Native transfer/picker/
   history UI and Share integration remain pending. Old runtime test
   fixture temporary-directory cleanup is a documented nonblocking hygiene debt,
