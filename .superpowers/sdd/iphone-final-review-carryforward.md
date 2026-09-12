@@ -5,6 +5,11 @@ Whole branch base c823400. Source-only development, not release acceptance.
 
 Accumulated Minor items requiring explicit final triage:
 
+- Logging5ebb85d: test-sensitive-logging-contract.sh139 native mutations call
+  scanner directly; add audit-privacy --static-only assertion for explicit
+  end-to-end coverage, like earlier mutants. Current audit invokes scanner;
+  independent review Approved. Final reviewer triage requested.
+
 - Share correction52f4878: MobileImportStagerTests15,36 rejection tests accept
   any error. Assert POSIXError EFBIG to exclude unrelated failures. Independent
   correction review Approved; add this precision check to final triage.
