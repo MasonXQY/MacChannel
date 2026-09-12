@@ -1,0 +1,598 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0335FC4356630E361F3436C1 /* PairingModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4835F265E8852B7C557B14C0 /* PairingModelTests.swift */; };
+		1D2AE99A4B8027E2DCA9A423 /* DropMeshUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF53E771EBFC31DE081D5B1C /* DropMeshUITests.swift */; };
+		29077D85A5871BA30317975A /* DropMeshApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A6F956BDE3FF2F5A32C7AF /* DropMeshApp.swift */; };
+		5C851F657A65CDCA44F7A895 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2DC0FE503504330567F461 /* PairingView.swift */; };
+		5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */; };
+		7C943D8B582B57DBD68514DA /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
+		7CEEB9426D37F5043AD379EE /* DropMeshMobileRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = B3BD8A034BDBD714D3424FD5 /* DropMeshMobileRuntime */; };
+		8A6FB7D790896BABEA8B96C2 /* DeviceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165A287505755A187903CEC1 /* DeviceListView.swift */; };
+		8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74B9233E95B118EE8765EB /* PairingModel.swift */; };
+		BDADDE4DC3C88D58AD500C9A /* MacChannelCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3A495EAD0B084B673ADD6A55 /* MacChannelCore */; };
+		EC24D8F917E06EBDBEFD0EFF /* PairingCodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */; };
+		EE4AD1D9A5A8B6EED812830C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		852596337E3AF9D5729CE736 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0327E6BC3DC825F3649CEC71 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CD2B911E499BE78DA53555C5;
+			remoteInfo = DropMesh;
+		};
+		CBB527DB83E1CB081FD9C686 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0327E6BC3DC825F3649CEC71 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CD2B911E499BE78DA53555C5;
+			remoteInfo = DropMesh;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		165A287505755A187903CEC1 /* DeviceListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceListView.swift; sourceTree = "<group>"; };
+		1A74B9233E95B118EE8765EB /* PairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModel.swift; sourceTree = "<group>"; };
+		326419CC42BCFCA581098E3F /* DropMeshTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DropMeshTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4835F265E8852B7C557B14C0 /* PairingModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModelTests.swift; sourceTree = "<group>"; };
+		485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingCodeTests.swift; sourceTree = "<group>"; };
+		503A0FD49848BCA492205AC0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		55CDD4C4BE61DB38367E7760 /* DropMesh.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DropMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		59A6F956BDE3FF2F5A32C7AF /* DropMeshApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshApp.swift; sourceTree = "<group>"; };
+		64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppModel.swift; sourceTree = "<group>"; };
+		71782A07642E85FEBFFB472C /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DropMeshUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA2DC0FE503504330567F461 /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
+		AF53E771EBFC31DE081D5B1C /* DropMeshUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshUITests.swift; sourceTree = "<group>"; };
+		C6C8F072646DFADC21B6346A /* dropmesh-iphone */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "dropmesh-iphone"; path = ..; sourceTree = SOURCE_ROOT; };
+		C9578B7C94839C1DC5BC5447 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		595CAFCB30D870F549704689 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7CEEB9426D37F5043AD379EE /* DropMeshMobileRuntime in Frameworks */,
+				BDADDE4DC3C88D58AD500C9A /* MacChannelCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		08F0CE34D8521074312AF658 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				55CDD4C4BE61DB38367E7760 /* DropMesh.app */,
+				326419CC42BCFCA581098E3F /* DropMeshTests.xctest */,
+				8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		22AB79292F21AED1DB7D179D /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				C6C8F072646DFADC21B6346A /* dropmesh-iphone */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		3DD42F23C6957BB51840B2A7 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				F9D100CE642014031FE52C2E /* Localizable.strings */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		51B61012B361350FCB5D284C /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				AF53E771EBFC31DE081D5B1C /* DropMeshUITests.swift */,
+			);
+			name = UI;
+			path = Tests/UI;
+			sourceTree = "<group>";
+		};
+		ADD6636E6EFA732086843E03 /* Unit */ = {
+			isa = PBXGroup;
+			children = (
+				485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */,
+				4835F265E8852B7C557B14C0 /* PairingModelTests.swift */,
+			);
+			name = Unit;
+			path = Tests/Unit;
+			sourceTree = "<group>";
+		};
+		CA2B64B2A88B96C0465F4017 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */,
+				165A287505755A187903CEC1 /* DeviceListView.swift */,
+				59A6F956BDE3FF2F5A32C7AF /* DropMeshApp.swift */,
+				503A0FD49848BCA492205AC0 /* Info.plist */,
+				64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */,
+				1A74B9233E95B118EE8765EB /* PairingModel.swift */,
+				AA2DC0FE503504330567F461 /* PairingView.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		F675473C02A42749F15BD941 = {
+			isa = PBXGroup;
+			children = (
+				CA2B64B2A88B96C0465F4017 /* App */,
+				22AB79292F21AED1DB7D179D /* Packages */,
+				3DD42F23C6957BB51840B2A7 /* Resources */,
+				51B61012B361350FCB5D284C /* UI */,
+				ADD6636E6EFA732086843E03 /* Unit */,
+				08F0CE34D8521074312AF658 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		092D9C8B76F6D4ABB7E0E4FF /* DropMeshUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 009F570B78319CA86D315964 /* Build configuration list for PBXNativeTarget "DropMeshUITests" */;
+			buildPhases = (
+				C3C9918CDC3C3068446930C8 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B7F99E5D52D55BC522855C5C /* PBXTargetDependency */,
+			);
+			name = DropMeshUITests;
+			packageProductDependencies = (
+			);
+			productName = DropMeshUITests;
+			productReference = 8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		9B2473DA890B2320509E5ABB /* DropMeshTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F623B6AF8AEAB3C53B3CD562 /* Build configuration list for PBXNativeTarget "DropMeshTests" */;
+			buildPhases = (
+				56D83AEBC4B68495EAEC39E0 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				48F8C2EED49CF901DD985916 /* PBXTargetDependency */,
+			);
+			name = DropMeshTests;
+			packageProductDependencies = (
+			);
+			productName = DropMeshTests;
+			productReference = 326419CC42BCFCA581098E3F /* DropMeshTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		CD2B911E499BE78DA53555C5 /* DropMesh */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 479DC133DDEABF80E1A0361D /* Build configuration list for PBXNativeTarget "DropMesh" */;
+			buildPhases = (
+				4FFD80D53DC7F77F6BF80D70 /* Sources */,
+				E892125DF8C9985CFDE8BB6E /* Resources */,
+				595CAFCB30D870F549704689 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DropMesh;
+			packageProductDependencies = (
+				B3BD8A034BDBD714D3424FD5 /* DropMeshMobileRuntime */,
+				3A495EAD0B084B673ADD6A55 /* MacChannelCore */,
+			);
+			productName = DropMesh;
+			productReference = 55CDD4C4BE61DB38367E7760 /* DropMesh.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0327E6BC3DC825F3649CEC71 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1640;
+				TargetAttributes = {
+					092D9C8B76F6D4ABB7E0E4FF = {
+						TestTargetID = CD2B911E499BE78DA53555C5;
+					};
+				};
+			};
+			buildConfigurationList = 60CC1D8D7EC96B62288E39B7 /* Build configuration list for PBXProject "DropMesh" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+				"zh-Hans",
+			);
+			mainGroup = F675473C02A42749F15BD941;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				89B0A55792AD477086A614F7 /* XCLocalSwiftPackageReference ".." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 08F0CE34D8521074312AF658 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CD2B911E499BE78DA53555C5 /* DropMesh */,
+				9B2473DA890B2320509E5ABB /* DropMeshTests */,
+				092D9C8B76F6D4ABB7E0E4FF /* DropMeshUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E892125DF8C9985CFDE8BB6E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EE4AD1D9A5A8B6EED812830C /* Assets.xcassets in Resources */,
+				7C943D8B582B57DBD68514DA /* Localizable.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		4FFD80D53DC7F77F6BF80D70 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8A6FB7D790896BABEA8B96C2 /* DeviceListView.swift in Sources */,
+				29077D85A5871BA30317975A /* DropMeshApp.swift in Sources */,
+				5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */,
+				8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */,
+				5C851F657A65CDCA44F7A895 /* PairingView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		56D83AEBC4B68495EAEC39E0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EC24D8F917E06EBDBEFD0EFF /* PairingCodeTests.swift in Sources */,
+				0335FC4356630E361F3436C1 /* PairingModelTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C3C9918CDC3C3068446930C8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1D2AE99A4B8027E2DCA9A423 /* DropMeshUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		48F8C2EED49CF901DD985916 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CD2B911E499BE78DA53555C5 /* DropMesh */;
+			targetProxy = CBB527DB83E1CB081FD9C686 /* PBXContainerItemProxy */;
+		};
+		B7F99E5D52D55BC522855C5C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CD2B911E499BE78DA53555C5 /* DropMesh */;
+			targetProxy = 852596337E3AF9D5729CE736 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		F9D100CE642014031FE52C2E /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				71782A07642E85FEBFFB472C /* en */,
+				C9578B7C94839C1DC5BC5447 /* zh-Hans */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		2EBF61AF8F261D9A907BF9E2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = DropMesh;
+			};
+			name = Debug;
+		};
+		47414EE382766746FA565025 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		4A529872F36E605CA3F768D9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DropMesh.app/DropMesh";
+			};
+			name = Release;
+		};
+		4BAF6F7E3D5593136971FBB6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		6E5EB46458DEED57B57F92D9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev;
+				PRODUCT_NAME = DropMesh;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A613080B75E8C32834E3A0FF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = DropMesh;
+			};
+			name = Release;
+		};
+		E968EE9A732E7CB584549B1C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DropMesh.app/DropMesh";
+			};
+			name = Debug;
+		};
+		F8446B2D166D7C014A92E09B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev;
+				PRODUCT_NAME = DropMesh;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		009F570B78319CA86D315964 /* Build configuration list for PBXNativeTarget "DropMeshUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2EBF61AF8F261D9A907BF9E2 /* Debug */,
+				A613080B75E8C32834E3A0FF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		479DC133DDEABF80E1A0361D /* Build configuration list for PBXNativeTarget "DropMesh" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6E5EB46458DEED57B57F92D9 /* Debug */,
+				F8446B2D166D7C014A92E09B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		60CC1D8D7EC96B62288E39B7 /* Build configuration list for PBXProject "DropMesh" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				47414EE382766746FA565025 /* Debug */,
+				4BAF6F7E3D5593136971FBB6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F623B6AF8AEAB3C53B3CD562 /* Build configuration list for PBXNativeTarget "DropMeshTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E968EE9A732E7CB584549B1C /* Debug */,
+				4A529872F36E605CA3F768D9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		89B0A55792AD477086A614F7 /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3A495EAD0B084B673ADD6A55 /* MacChannelCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MacChannelCore;
+		};
+		B3BD8A034BDBD714D3424FD5 /* DropMeshMobileRuntime */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DropMeshMobileRuntime;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 0327E6BC3DC825F3649CEC71 /* Project object */;
+}
