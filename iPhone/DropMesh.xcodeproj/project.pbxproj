@@ -14,6 +14,7 @@
 		5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */; };
 		7C943D8B582B57DBD68514DA /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
 		7CEEB9426D37F5043AD379EE /* DropMeshMobileRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = B3BD8A034BDBD714D3424FD5 /* DropMeshMobileRuntime */; };
+		884D176010840BF6A70953FB /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */; };
 		8A6FB7D790896BABEA8B96C2 /* DeviceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165A287505755A187903CEC1 /* DeviceListView.swift */; };
 		8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74B9233E95B118EE8765EB /* PairingModel.swift */; };
 		BDADDE4DC3C88D58AD500C9A /* MacChannelCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3A495EAD0B084B673ADD6A55 /* MacChannelCore */; };
@@ -44,11 +45,13 @@
 		326419CC42BCFCA581098E3F /* DropMeshTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DropMeshTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4835F265E8852B7C557B14C0 /* PairingModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModelTests.swift; sourceTree = "<group>"; };
 		485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingCodeTests.swift; sourceTree = "<group>"; };
+		4B3BFCAC3203F5BC65305D5F /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
 		503A0FD49848BCA492205AC0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		55CDD4C4BE61DB38367E7760 /* DropMesh.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DropMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		59A6F956BDE3FF2F5A32C7AF /* DropMeshApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshApp.swift; sourceTree = "<group>"; };
 		64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppModel.swift; sourceTree = "<group>"; };
 		71782A07642E85FEBFFB472C /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		763C3E398CE966AF9B4763BB /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DropMeshUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA2DC0FE503504330567F461 /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
@@ -91,6 +94,7 @@
 		3DD42F23C6957BB51840B2A7 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */,
 				F9D100CE642014031FE52C2E /* Localizable.strings */,
 			);
 			path = Resources;
@@ -246,6 +250,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				EE4AD1D9A5A8B6EED812830C /* Assets.xcassets in Resources */,
+				884D176010840BF6A70953FB /* InfoPlist.strings in Resources */,
 				7C943D8B582B57DBD68514DA /* Localizable.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -298,6 +303,15 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
+		6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				763C3E398CE966AF9B4763BB /* en */,
+				4B3BFCAC3203F5BC65305D5F /* zh-Hans */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
 		F9D100CE642014031FE52C2E /* Localizable.strings */ = {
 			isa = PBXVariantGroup;
 			children = (

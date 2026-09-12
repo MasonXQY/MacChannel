@@ -12,7 +12,7 @@
   <key>LSRequiresIPhoneOS</key><true/>
   <key>UIFileSharingEnabled</key><true/>
   <key>LSSupportsOpeningDocumentsInPlace</key><true/>
-  <key>NSLocalNetworkUsageDescription</key><string>DropMesh uses your local network only when you enable receiving or connect to a paired device.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Allow DropMesh to discover your paired Macs on the local network for direct file transfers.</string>
   <key>NSBonjourServices</key><array><string>_macchannel._tcp</string></array>
   <key>UILaunchScreen</key><dict/>
   <key>UISupportedInterfaceOrientations</key>
