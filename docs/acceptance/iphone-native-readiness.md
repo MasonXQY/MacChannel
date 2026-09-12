@@ -18,6 +18,24 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   InfoPlist.strings are present in the generated application resource phase;
   both strings files and the fallback Info.plist pass plutil validation. The
   system permission prompt itself has not yet been exercised on a device.
+- Foreground transfer owner33d8f1b and production-drain correction1178f05 are
+  independently reviewed; final correction approved. New awaited Core listener
+  drain preserves existing Mac nonjoining stop and protocol. Actual runtime /
+  production graph fixtures cover acceptance and late close before re-entry.
+- Integrated source1178f05: `swift test --disable-automatic-resolution` exits0,
+  945tests,5existing skips,0failures,51.680seconds. Log
+  `.build/mobile-runtime-integrated-full.log`. Previous exact-source failures
+  remain recorded in the stage-B report; test-only sync correction932c880 was
+  separately reviewed/approved, not hidden behind repeated reruns.
+- Same source: release products DropMeshAppStore and MacChannelApp compile with
+  supported cached resolution, exit0 (34.58s /1.69s). Logs
+  `.build/mobile-runtime-mac-store-build.log` and
+  `.build/mobile-runtime-mac-direct-build.log`; no warning/error matches.
+  No app bundle was installed, launched or replaced by these build checks.
+- Provider-safe utility-worker import adaptation is now in progress; native
+  transfer/picker/history and Share integration remain pending. Old runtime test
+  fixture temporary-directory cleanup is a documented nonblocking hygiene debt,
+  since scene stop does not mean outbound terminal persistence is quiescent.
 
 ## Required installed acceptance
 

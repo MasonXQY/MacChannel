@@ -17,11 +17,14 @@ library builds. Independent review approves the stage after socket ownership,
 draining state, late errors and retry-retirement fixes. Stage B source33d8f1b
 (reportfdd33a7) composes the actual transfer owner;58mobile tests and both iOS
 library builds pass. Independent review found production WebRTC stop is not a
-joined drain; a narrowly additive awaited listener drain is being implemented,
+joined drain; additive correction1178f05 now passes independent re-review,
 preserving existing Mac stop semantics and wire/security/server contracts.
 Exact-source full runs941tests/5skips each exposed an existing fixture timing
 failure; test-only fix932c880 passes50focused+2postcommit tests and independent
-review approves it. Full integrated regression remains pending. A source audit
+review approves it. Integrated1178f05 full regression945tests/5skips/0failures
+passes; both Mac release products compile without warning/error matches. No
+installation/replacement occurred. Provider-safe utility-worker imports are the
+active next task; native transfer/picker/history/Share remain pending. A source audit
 added a mandatory re-entry barrier for
 initial sends hidden from durable snapshots; see iphone-late-send-audit.md. Durable
 execution ledger: `.superpowers/sdd/progress.md`; scoped briefs/reports there.
