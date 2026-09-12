@@ -2,6 +2,18 @@
 
 ## Current iPhone work — 2026-09-12
 
+Mobile pairing lifecycle implementation verified. MobilePairingSession serializes actions, gates paired state on core
+confirmation plus successful persistence, supports retrying storage failure and
+confirmed-but-unsaved state, and preserves durable success after closing flow.
+Six new memory-transport lifecycle tests cover success, failure/retry, rejection,
+pending join cancellation, completed-flow cancellation and interrupted-save recovery.
+Both final-source iOS library builds pass. Full suite first run: 894 tests,
+5 skipped, 1 failure in existing Bonjour directory timing test; isolated rerun
+passes. Complete rerun: 894 tests, 5 skipped, 0 failures, exit 0 (52.316s).
+Retain initial intermittent failure in reporting; no Discovery changes were made.
+See `docs/acceptance/mobile-pairing-lifecycle.md` for logs and important limits:
+no native UI/real pairing; cancel is not a hosted-code revocation API yet.
+
 Mobile runtime foundation added as a separate DropMeshMobileRuntime library:
 private state/staging vs Documents/DropMesh; device-only mobile keychain policy;
 stable identity/trust bootstrap with fail-closed corruption; constructor for the

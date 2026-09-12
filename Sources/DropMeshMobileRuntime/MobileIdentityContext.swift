@@ -34,6 +34,13 @@ public struct MobileIdentityContext<Secrets: SecretStore & Sendable>: Sendable {
         try await snapshots.persistLatest(from: repository)
     }
 
+    public func makePairingSession(
+        displayName: String, transport: any PairingTransport
+    ) throws -> MobilePairingSession {
+        let coordinator = try makePairingCoordinator(displayName: displayName, transport: transport)
+        return MobilePairingSession(coordinator: coordinator, persistTrust: { try await self.persistTrust() })
+    }
+
     public func makePairingCoordinator(
         displayName: String, transport: any PairingTransport
     ) throws -> PairingCoordinator {
