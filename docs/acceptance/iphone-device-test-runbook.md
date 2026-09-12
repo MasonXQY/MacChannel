@@ -36,14 +36,18 @@ the unrelated iOS app in App Store Connect.
    Mac approval and matching durable trust after both apps relaunch. Also reject
    a separate request and verify it never becomes a trusted send target.
 3. While iPhone remains foreground, send a small text fixture, photo and large
-   binary from Mac to iPhone. Verify completed-only visibility in Files under
-   DropMesh and history; compare exact output hashes through an authorized
+   binary from Mac to iPhone. Verify completed-only visibility in the actual
+   Documents/DropMesh receiving folder. The Files container entry can also be
+   named DropMesh, so record both container and inner folder labels rather than
+   omitting the inner folder. Compare exact output hashes through an authorized
    device-container export or explicit return transfer of the received file.
 4. Send the same fixture classes from iPhone system Files/Photos pickers to Mac.
    Check recipient choice, progress, actual route, completion and hashes.
 5. Repeat a filename: confirm collision-safe publication and unchanged first
    output. Delete/move a received fixture in Files: history remains, actions
-   report unavailable and never open a replacement or unrelated file.
+   report unavailable and never open a replacement or unrelated file. Unsupported
+   Quick Look formats keep successful history and offer truthful Files guidance;
+   no generic preview failure is presented as a failed transfer.
 6. Interrupt a transfer by backgrounding iPhone. Confirm no false completion,
    no automatic resend of a cancelled item, and safe explicit retry on return.
 7. Exercise disconnected/reconnected service, denied local-network permission,
