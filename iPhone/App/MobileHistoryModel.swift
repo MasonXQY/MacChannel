@@ -57,6 +57,7 @@ final class MobileHistoryModel {
     private var actionID = UUID()
     private var closed = false
     private var completed: [TransferSnapshot] = []
+    private var receivedCompletionIDs: [TransferID] = []
     @ObservationIgnored private var completionRefresh: Task<Void, Never>?
 
     init(session: any MobileAppSession,
@@ -69,8 +70,10 @@ final class MobileHistoryModel {
         guard !closed else { return }
         availabilityWarning = snapshot.historyAvailabilityFailure != nil
         let next = snapshot.transfers.filter { $0.phase == .completed }
-        guard next != completed else { return }
+        let receivedChanged = snapshot.receivedCompletionIDs != receivedCompletionIDs
+        guard next != completed || receivedChanged else { return }
         completed = next
+        receivedCompletionIDs = snapshot.receivedCompletionIDs
         completionRefresh?.cancel()
         completionRefresh = Task { [weak self] in await self?.refresh() }
     }

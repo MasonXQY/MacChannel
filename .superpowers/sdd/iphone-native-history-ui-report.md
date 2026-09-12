@@ -272,3 +272,82 @@ once. History error explanation and retry action are visible together. This is
 inert simulator evidence, not physical-device, production-install, transfer
 interoperability, signing, or release acceptance. Independent review remains the
 coordinator's next gate.
+
+## Received-completion refresh correction — 2026-09-12
+
+Base source `26fea95` omitted `MobileForegroundRuntime.currentSnapshot().received`
+from `MobileAppSnapshot`, although the runtime's genuine inbound completion path
+indexes durable history, appends to its bounded 200-result signal and publishes
+without necessarily changing coordinator `transfers`. The production app snapshot
+now projects only those received transfer IDs. `MobileHistoryModel` treats the
+ordered ID window as an invalidation key alongside outbound completed transfers,
+while continuing to load the retained runtime's durable history API. The session
+array is not used as history storage. Availability diagnostics, stale-read
+suppression, close/cancellation and foreground refresh behavior are unchanged.
+
+Owned changes: `iPhone/App/MobileAppSession.swift`,
+`iPhone/App/ProductionMobileAppDependencies.swift`,
+`iPhone/App/MobileHistoryModel.swift`, `iPhone/Tests/TestHost/InertMobileSession.swift`,
+`iPhone/Tests/Unit/MobileHistoryModelTests.swift`, and this report. There are no view,
+library/Core/Mac/protocol/service/key/signing/Store/installed-app changes. Existing
+screenshots remain unchanged-view evidence; no screenshot campaign was repeated.
+
+### TDD evidence
+
+RED and GREEN used:
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests -destination 'platform=iOS Simulator,id=ACEA4034-2629-4A24-A7C8-C146BD8B0688' -derivedDataPath .build/native-composition-final-cache -clonedSourcePackagesDirPath .build/iphone-simulator/SourcePackages -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO test -only-testing:DropMeshTests/MobileHistoryModelTests
+```
+
+`.build/native-history-refresh-red.log`: expected RED, Xcode exit 65; compilation
+failed because `MobileAppSnapshot` had no `receivedCompletionIDs`. The shell wrapper
+then attempted to assign zsh's read-only `status` variable, but the complete Xcode
+failure and result path remain in the log. `.build/native-history-refresh-green.log`:
+exit 0, **11 tests / 0 failures** in 0.259 seconds. Three new regressions prove an
+inbound ID change refreshes with transfers unchanged, an unchanged signal does not
+reload, and a rolling 200-ID window refreshes at the same count. Existing stale-read,
+close/lifecycle, outbound completion and diagnostic coverage remains green.
+
+The inert test host excludes `ProductionMobileAppDependencies`, so its simple
+`current.received.map(\.transferID)` forwarding is compiled by both actual shipping
+builds and is reviewable source, but is not invoked directly by the unit fixture.
+
+### Final verification
+
+Full native, run once at final source:
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests -destination 'platform=iOS Simulator,id=ACEA4034-2629-4A24-A7C8-C146BD8B0688' -derivedDataPath .build/native-composition-final-cache -clonedSourcePackagesDirPath .build/iphone-simulator/SourcePackages -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO test -resultBundlePath .build/native-history-refresh-full.xcresult
+```
+
+`.build/native-history-refresh-full.log` and `.build/native-history-refresh-full.xcresult`:
+exit 0, **87 unit + 9 UI tests / 0 failures**, `TEST SUCCEEDED`; units 1.253s,
+UI 250.880s. No old or zero-test inventory was observed.
+
+Actual shipping builds, neither launched nor installed:
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMesh -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/iphone-simulator -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMesh -destination 'generic/platform=iOS' -derivedDataPath .build/iphone-device -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO build
+```
+
+`.build/native-history-refresh-shipping-simulator.log` and
+`.build/native-history-refresh-shipping-device.log`: both exit 0, `BUILD SUCCEEDED`.
+Only the already disclosed AppIntents metadata-extraction warning appears.
+
+Scoped commands, captured in `.build/native-history-refresh-scoped-checks.log`:
+
+```sh
+bash Scripts/check-sensitive-logging.sh iPhone/App/*.swift
+rg -n '(UIPasteboard|NSPasteboard)' iPhone/App
+bash Scripts/audit-privacy.sh --static-only
+bash Scripts/test-app-store-source-contract.sh
+git diff --check
+```
+
+Logging, static privacy, Store source contract and whitespace checks exit 0/PASS;
+pasteboard inventory has no matches and exits 1 as expected. No production network,
+physical device, shipping app, or installed app was run. Physical inbound/Home
+refresh, Files/preview/share, unchanged-Mac interoperability, signing, installation
+and release acceptance remain outside this correction and are not claimed.

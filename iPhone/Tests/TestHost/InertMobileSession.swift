@@ -29,6 +29,7 @@ actor InertMobileSession: MobileAppSession {
     private(set) var revokeCount = 0
     private(set) var persistCount = 0
     private(set) var refreshCount = 0
+    private(set) var historyReadCount = 0
     var observerCount: Int { observers.count }
 
     init() {
@@ -95,6 +96,7 @@ actor InertMobileSession: MobileAppSession {
     func cancel(_ id: TransferID) -> TransferCancellationResult { cancelResult }
     func setCancelResult(_ result: TransferCancellationResult) { cancelResult = result }
     func history(limit: Int) async throws -> [MobileHistoryEntry] {
+        historyReadCount += 1
         let rows = historyRows
         await beforeHistory()
         if historyFailed { throw CocoaError(.fileReadUnknown) }
@@ -114,6 +116,7 @@ actor InertMobileSession: MobileAppSession {
         value.localDiscoveryEnabled = enabled; publish()
     }
     func setTransfers(_ transfers: [TransferSnapshot]) { value.transfers = transfers; publish() }
+    func setReceivedCompletionIDs(_ ids: [TransferID]) { value.receivedCompletionIDs = ids; publish() }
     func setTrustedIDs(_ ids: Set<DeviceID>) { value.trustedIDs = ids; publish() }
     func setPresence(_ state: MobileRuntimeState, peers: [DeviceSummary]) {
         value.state = state; value.reachable = peers; publish()

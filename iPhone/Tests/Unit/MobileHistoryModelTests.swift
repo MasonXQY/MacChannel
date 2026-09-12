@@ -5,6 +5,55 @@ import DropMeshMobileRuntime
 
 @MainActor
 final class MobileHistoryModelTests: XCTestCase {
+    func testInboundCompletionRefreshesHistoryWhenTransfersAreUnchanged() async {
+        let session = InertMobileSession()
+        let model = MobileHistoryModel(session: session)
+        let row = historyRow(named: "Received.txt", peer: session.peer.id)
+        await session.setHistory([row])
+
+        var snapshot = await session.snapshot()
+        model.update(snapshot)
+        snapshot.receivedCompletionIDs = [row.id]
+        model.update(snapshot)
+        await waitForHistoryReads(1, session: session)
+
+        XCTAssertEqual(model.entries.map(\.id), [row.id])
+        let reads = await session.historyReadCount
+        XCTAssertEqual(reads, 1)
+    }
+
+    func testUnchangedInboundCompletionSignalDoesNotReloadHistory() async {
+        let session = InertMobileSession()
+        let model = MobileHistoryModel(session: session)
+        var snapshot = await session.snapshot()
+        snapshot.receivedCompletionIDs = [TransferID(rawValue: UUID())]
+
+        model.update(snapshot)
+        await waitForHistoryReads(1, session: session)
+        model.update(snapshot)
+        try? await Task.sleep(for: .milliseconds(100))
+
+        let reads = await session.historyReadCount
+        XCTAssertEqual(reads, 1)
+    }
+
+    func testRollingInboundCompletionIDsRefreshWithSameCount() async {
+        let session = InertMobileSession()
+        let model = MobileHistoryModel(session: session)
+        var snapshot = await session.snapshot()
+        snapshot.receivedCompletionIDs = (0..<200).map { _ in TransferID(rawValue: UUID()) }
+        model.update(snapshot)
+        await waitForHistoryReads(1, session: session)
+
+        snapshot.receivedCompletionIDs.removeFirst()
+        snapshot.receivedCompletionIDs.append(TransferID(rawValue: UUID()))
+        model.update(snapshot)
+        await waitForHistoryReads(2, session: session)
+
+        let reads = await session.historyReadCount
+        XCTAssertEqual(reads, 2)
+    }
+
     func testOlderSnapshotCannotRevertSuccessfullySavedDiscoveryChoice() async {
         let session = InertMobileSession()
         let model = MobileSettingsModel(session: session)
@@ -136,6 +185,20 @@ final class MobileHistoryModelTests: XCTestCase {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         XCTAssertEqual(MobileSettingsModel.versionDescription(info: ["CFBundleShortVersionString": "7.2", "CFBundleVersion": "19"]), "7.2 (19)")
+    }
+
+    private func historyRow(named name: String, peer: DeviceID) -> MobileHistoryEntry {
+        MobileHistoryEntry(id: TransferID(rawValue: UUID()), peer: peer,
+            displayName: name, aggregateSize: 3, completedBytes: 3,
+            updatedAt: Date(), route: .lan, phase: .completed,
+            direction: .inbound, isAvailable: true)
+    }
+
+    private func waitForHistoryReads(_ count: Int, session: InertMobileSession) async {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await session.historyReadCount < count, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
     }
 }
 

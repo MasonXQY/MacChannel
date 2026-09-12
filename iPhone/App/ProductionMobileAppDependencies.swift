@@ -41,6 +41,7 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         return MobileAppSnapshot(state: current.state, localID: context.identity.id,
             trustedIDs: trustedIDs, reachable: current.devices,
             names: names.values, failure: current.failure, transfers: current.transfers,
+            receivedCompletionIDs: current.received.map(\.transferID),
             localNetworkAvailable: current.localNetworkAvailable, localDiscoveryEnabled: discoveryEnabled,
             historyAvailabilityFailure: current.historyAvailabilityFailure)
     }

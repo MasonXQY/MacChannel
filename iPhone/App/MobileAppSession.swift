@@ -10,6 +10,7 @@ struct MobileAppSnapshot: Sendable {
     var names: [DeviceID: String] = [:]
     var failure: MobileRuntimeFailure?
     var transfers: [TransferSnapshot] = []
+    var receivedCompletionIDs: [TransferID] = []
     var localNetworkAvailable = false
     var localDiscoveryEnabled = false
     var historyAvailabilityFailure: MobileHistoryAvailabilityFailure?
