@@ -22,6 +22,7 @@ final class MobileAppModel {
     private(set) var send: MobileSendModel?
     private(set) var history: MobileHistoryModel?
     private(set) var settings: MobileSettingsModel?
+    let pendingShares: MobilePendingShareModel
     private let loadSession: @Sendable () async throws -> any MobileAppSession
     private var session: (any MobileAppSession)?
     private var desiredForeground: Bool?
@@ -37,7 +38,9 @@ final class MobileAppModel {
     private var refreshPending = false
     private var closed = false
 
-    init(loadSession: @escaping @Sendable () async throws -> any MobileAppSession) {
+    init(pendingShares: MobilePendingShareModel? = nil,
+         loadSession: @escaping @Sendable () async throws -> any MobileAppSession) {
+        self.pendingShares = pendingShares ?? MobilePendingShareModel()
         self.loadSession = loadSession
     }
     deinit { observationTask?.cancel() }
@@ -124,7 +127,10 @@ final class MobileAppModel {
                 _ = await (network, pair, importing)
             }
             await self?.refreshDevices()
-            if foreground, self?.desiredForeground == true { await self?.history?.refresh() }
+            if foreground, self?.desiredForeground == true {
+                await self?.history?.refresh()
+                await self?.pendingShares.refresh()
+            }
             self?.lifecycleTasks[id] = nil
         }
     }

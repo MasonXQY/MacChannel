@@ -121,3 +121,17 @@
 "settings.about" = "About";
 "settings.version" = "Version";
 "settings.language" = "DropMesh follows your system language: English or Simplified Chinese.";
+"share.pending.title" = "Shared with DropMesh";
+"share.pending.explanation" = "These temporary copies have not been sent. Import a batch, then choose a Mac and confirm Send.";
+"share.pending.prepare" = "Import Shared Files";
+"share.pending.busy" = "Finish or cancel your current selection before importing shared files.";
+"share.saving" = "Saving temporary copies…";
+"share.saved" = "Saved to DropMesh. Open DropMesh to choose a Mac and send.";
+"share.retention" = "Open DropMesh within 24 hours. Temporary shared copies expire after 24 hours and are removed the next time DropMesh checks for shared files.";
+"share.error.storage" = "Shared storage is unavailable. Unlock your iPhone and retry. If it still fails, this build needs matching App Group provisioning for DropMesh and its Share extension.";
+"share.error.invalid" = "This shared batch could not be validated. Share the original files again. Invalid temporary copies are not imported.";
+"share.error.unsupported" = "Share 1–10 regular files, photos or videos. Each file must be at most 2 GB and the batch at most 4 GB. Open DropMesh to clear pending batches if storage is full.";
+"share.error.provider" = "The source app could not provide these files, or the copies could not be saved. Open the original files, then share them again.";
+"share.error.disk" = "There is not enough storage for these copies. Free space on your iPhone and share again.";
+"share.error.cancelled" = "Sharing was cancelled. No files were sent.";
+"share.error.cleanup" = "Temporary copies could not be removed. Retry cleanup before closing. No files were sent.";

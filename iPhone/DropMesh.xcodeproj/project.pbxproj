@@ -12,7 +12,9 @@
 		0310B305393152A47D09118A /* MobileReceivedFileSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC7D0D94659BCFA052A34C8 /* MobileReceivedFileSheet.swift */; };
 		0335FC4356630E361F3436C1 /* PairingModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4835F265E8852B7C557B14C0 /* PairingModelTests.swift */; };
 		034A825E6F7B335A1A90A15A /* MobileFilesPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF5EB2E29CE5CCD75C98A075 /* MobileFilesPicker.swift */; };
+		064EE1E13581F9321F072AF8 /* MobileImportCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21396744162A9B1359A132B3 /* MobileImportCopy.swift */; };
 		07C5EB01BA5D18C259B69023 /* MobileSendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A176CDE10132373A6831DDA8 /* MobileSendView.swift */; };
+		0A441754889E48E7902588CF /* ShareProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75DB9C45A88D981FFD1C4C7C /* ShareProviderTests.swift */; };
 		0F85B26793D704C63FCB53B7 /* MobileSettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F2DBD51975EE26E978DE0DA /* MobileSettingsModel.swift */; };
 		1003A5903020F4AF0358974A /* MobileHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F93CAF1FA68389C9C15291E /* MobileHistoryView.swift */; };
 		10CD1E3054124B4C7C164539 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */; };
@@ -26,17 +28,26 @@
 		2D2460AEB748F70ECBFE33A1 /* MobileAppSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */; };
 		2D9A59451805F8B4F98357BF /* MobilePeerNames.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5DD56ED8B7DBDA06D69A08 /* MobilePeerNames.swift */; };
 		349B5CEB500F590100808B4E /* MobileReceivedFileSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC7D0D94659BCFA052A34C8 /* MobileReceivedFileSheet.swift */; };
+		366650C082C138DC2524C00F /* ShareBatchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 177EFC60BD3875CCAFD371C6 /* ShareBatchStore.swift */; };
+		398B857D120C58723080AC84 /* ShareExtensionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6588E0AF5D452C26E84B5289 /* ShareExtensionView.swift */; };
 		3CE0239CCB871945A20F156F /* MobileAppSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */; };
+		40A8B9487608275D600FC698 /* ShareImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ECB08C826DE1CB5C3AE54CD /* ShareImportService.swift */; };
 		467034C3052FC87F1DF73E87 /* MobileImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA2BEEF139C10D33AB97987F /* MobileImportService.swift */; };
+		4D9D5818597FB0336E97C334 /* ShareBatchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 177EFC60BD3875CCAFD371C6 /* ShareBatchStore.swift */; };
+		5195A69AC3ECC23D5AF2ABC5 /* MobilePendingShareModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C32534C8AAB5BFD7C9134D2C /* MobilePendingShareModel.swift */; };
 		528D4E5F9CA3B4C09CC17B7E /* MobileSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E77E10F0B52F6FFCB6F5B868 /* MobileSettingsView.swift */; };
 		57CA24697E5F67EF931C78F6 /* MobilePhotoImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B48831F8E46CF32BB150447 /* MobilePhotoImport.swift */; };
+		599780BD41462029129E4B37 /* ShareImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ECB08C826DE1CB5C3AE54CD /* ShareImportService.swift */; };
 		5C851F657A65CDCA44F7A895 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2DC0FE503504330567F461 /* PairingView.swift */; };
 		5E5886A80F3EFC98E2A2D19B /* MobileTransferView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98475B2C453B6D6E2E8AA936 /* MobileTransferView.swift */; };
 		5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */; };
 		5F4782FB020D4BEF50EC5451 /* MobilePhotoImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B48831F8E46CF32BB150447 /* MobilePhotoImport.swift */; };
+		615E0DCDE5E1E58A97AB552D /* MobilePendingShareView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD6613D163A76DA809A74493 /* MobilePendingShareView.swift */; };
 		63AE2CED22100309C0FD5D12 /* MobileSettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F2DBD51975EE26E978DE0DA /* MobileSettingsModel.swift */; };
 		6934FC13A7ADC30A78A71A83 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2DC0FE503504330567F461 /* PairingView.swift */; };
 		6B40EA93CB6C41D32BD39B1D /* MobileHistoryModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 036FD6FFF32E6D7FB5244D36 /* MobileHistoryModelTests.swift */; };
+		6B43605DB5986FE683842896 /* ShareBatchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 177EFC60BD3875CCAFD371C6 /* ShareBatchStore.swift */; };
+		7118DE7176B359F9C9644C97 /* MobileImportStager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1C9A9C597EFA4AE680213A /* MobileImportStager.swift */; };
 		72F00130732B48EBEC352C02 /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74B9233E95B118EE8765EB /* PairingModel.swift */; };
 		7AD03419886B61D54E5378B5 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */; };
 		7C943D8B582B57DBD68514DA /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
@@ -47,17 +58,26 @@
 		8A6FB7D790896BABEA8B96C2 /* DeviceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165A287505755A187903CEC1 /* DeviceListView.swift */; };
 		8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74B9233E95B118EE8765EB /* PairingModel.swift */; };
 		8D6244563BE06FF4E18561A8 /* MobileSendEvidenceHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C901B8A5C15A0EFA153DE2C /* MobileSendEvidenceHost.swift */; };
+		8D914A7818B0FB44002EBDA3 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60785A43A651A3326F9DC492 /* ShareViewController.swift */; };
 		9CC93E9D47C0A712A5572A6B /* MobileHistoryModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CCAE888DD791A431AF89651 /* MobileHistoryModel.swift */; };
 		9F9B7FECB35F0439804B47F1 /* MobileFilesPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF5EB2E29CE5CCD75C98A075 /* MobileFilesPicker.swift */; };
+		A240DB66D7BFF203149DC14E /* ShareBatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 488E0A6D02CEB382A255C8C0 /* ShareBatchTests.swift */; };
+		A2550E3277CAE24AFFAC965B /* MobileShareEvidenceHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF61613CBA096998676453B5 /* MobileShareEvidenceHost.swift */; };
 		A99AE515B936217BC92BFA70 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
+		A9C206B3ABD63E3255AD473A /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60785A43A651A3326F9DC492 /* ShareViewController.swift */; };
 		AC375FCE6831106D64B424D7 /* MobileTransferView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98475B2C453B6D6E2E8AA936 /* MobileTransferView.swift */; };
 		B0DD14C71CC073458845F1FD /* MobileSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E77E10F0B52F6FFCB6F5B868 /* MobileSettingsView.swift */; };
+		B71BA73C112F4FC174AF93A9 /* MobilePendingShareModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C32534C8AAB5BFD7C9134D2C /* MobilePendingShareModel.swift */; };
+		B9F5EE18813D1B02F19CF2E0 /* ShareExtensionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6588E0AF5D452C26E84B5289 /* ShareExtensionView.swift */; };
 		BA8B4AA27E3147C730829FAE /* DeviceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165A287505755A187903CEC1 /* DeviceListView.swift */; };
 		BC1FA08C2313214F2BEF951F /* MobileDurableTrust.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A86AE9D8953225A3B12E9DF /* MobileDurableTrust.swift */; };
+		BD8144BCA1F7E26A5F324480 /* DropMeshShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 8E80F31E38643E7520459173 /* DropMeshShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		BDADDE4DC3C88D58AD500C9A /* MacChannelCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3A495EAD0B084B673ADD6A55 /* MacChannelCore */; };
 		C604DED27AC8134E9ABF1BBA /* MobileSendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A176CDE10132373A6831DDA8 /* MobileSendView.swift */; };
 		C72A722428277689A692EDFD /* MobileDurableTrust.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A86AE9D8953225A3B12E9DF /* MobileDurableTrust.swift */; };
+		CD6DCB91069B4C382895E5CE /* MobilePendingShareTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 153086CD801A8EACF3D4EFAE /* MobilePendingShareTests.swift */; };
 		CFAEEAE1A060A1F3F7C7B176 /* MobileAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1CE3FC3CBFF98252640663E /* MobileAppModelTests.swift */; };
+		CFC41ED23039C434E069051B /* MobilePendingShareView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD6613D163A76DA809A74493 /* MobilePendingShareView.swift */; };
 		D243FE81BD8B21AC9191BC4D /* MobileHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F93CAF1FA68389C9C15291E /* MobileHistoryView.swift */; };
 		D28D21EB6A38C52077D01F77 /* MacChannelCore in Frameworks */ = {isa = PBXBuildFile; productRef = F59CA89E2A0504EFF940B405 /* MacChannelCore */; };
 		D2B45C770C12B8ED96E26B1D /* MobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */; };
@@ -77,6 +97,13 @@
 			remoteGlobalIDString = 81E4CCD92D9C10921DC8697C;
 			remoteInfo = DropMeshTestHost;
 		};
+		5F7E10CCB436D9BC01F06FFB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0327E6BC3DC825F3649CEC71 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9FFDBECC17B77666756D7A53;
+			remoteInfo = DropMeshShare;
+		};
 		95B826B1518A3AF606A42C65 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 0327E6BC3DC825F3649CEC71 /* Project object */;
@@ -86,33 +113,61 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		CE9208FA75E62077581A8938 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				BD8144BCA1F7E26A5F324480 /* DropMeshShare.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		005D821FDE939BCC0EB4B8C7 /* DropMeshTestHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshTestHostApp.swift; sourceTree = "<group>"; };
 		036FD6FFF32E6D7FB5244D36 /* MobileHistoryModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileHistoryModelTests.swift; sourceTree = "<group>"; };
 		074547827062A225FCBBFA7D /* MobileSendModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSendModel.swift; sourceTree = "<group>"; };
 		0C901B8A5C15A0EFA153DE2C /* MobileSendEvidenceHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSendEvidenceHost.swift; sourceTree = "<group>"; };
 		0D830D4E4878EAB29F83D454 /* MobileDurableTrustTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileDurableTrustTests.swift; sourceTree = "<group>"; };
+		1435B53B69422C276CDB1EAF /* en.lproj */ = {isa = PBXFileReference; path = en.lproj; sourceTree = "<group>"; };
+		153086CD801A8EACF3D4EFAE /* MobilePendingShareTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePendingShareTests.swift; sourceTree = "<group>"; };
 		165A287505755A187903CEC1 /* DeviceListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceListView.swift; sourceTree = "<group>"; };
 		176E158047FFCA24839DF4DD /* MobileImportAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileImportAdapterTests.swift; sourceTree = "<group>"; };
+		177EFC60BD3875CCAFD371C6 /* ShareBatchStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareBatchStore.swift; sourceTree = "<group>"; };
 		17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppSession.swift; sourceTree = "<group>"; };
 		1A74B9233E95B118EE8765EB /* PairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModel.swift; sourceTree = "<group>"; };
+		1ECB08C826DE1CB5C3AE54CD /* ShareImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareImportService.swift; sourceTree = "<group>"; };
+		21396744162A9B1359A132B3 /* MobileImportCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileImportCopy.swift; sourceTree = "<group>"; };
 		2F2DBD51975EE26E978DE0DA /* MobileSettingsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSettingsModel.swift; sourceTree = "<group>"; };
 		326419CC42BCFCA581098E3F /* DropMeshTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DropMeshTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3CCAE888DD791A431AF89651 /* MobileHistoryModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileHistoryModel.swift; sourceTree = "<group>"; };
 		4835F265E8852B7C557B14C0 /* PairingModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModelTests.swift; sourceTree = "<group>"; };
 		485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingCodeTests.swift; sourceTree = "<group>"; };
+		488E0A6D02CEB382A255C8C0 /* ShareBatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareBatchTests.swift; sourceTree = "<group>"; };
 		4B3BFCAC3203F5BC65305D5F /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		4C12793FD603DAC8E20FE0B1 /* zh-Hans.lproj */ = {isa = PBXFileReference; path = "zh-Hans.lproj"; sourceTree = "<group>"; };
 		4F93CAF1FA68389C9C15291E /* MobileHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileHistoryView.swift; sourceTree = "<group>"; };
 		503A0FD49848BCA492205AC0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		55CDD4C4BE61DB38367E7760 /* DropMesh.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DropMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		59A6F956BDE3FF2F5A32C7AF /* DropMeshApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshApp.swift; sourceTree = "<group>"; };
 		5A86AE9D8953225A3B12E9DF /* MobileDurableTrust.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileDurableTrust.swift; sourceTree = "<group>"; };
+		60785A43A651A3326F9DC492 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppModel.swift; sourceTree = "<group>"; };
+		6588E0AF5D452C26E84B5289 /* ShareExtensionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareExtensionView.swift; sourceTree = "<group>"; };
+		6F8AF9D02536DFDD70A678AC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		71782A07642E85FEBFFB472C /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		75DB9C45A88D981FFD1C4C7C /* ShareProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareProviderTests.swift; sourceTree = "<group>"; };
 		763C3E398CE966AF9B4763BB /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		7C8C33D048354ED15BD75046 /* DropMeshDevelopment.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = DropMeshDevelopment.entitlements; sourceTree = "<group>"; };
 		8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DropMeshUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8B97DB2A3F22D9602B503EAF /* ProductionMobileAppDependencies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductionMobileAppDependencies.swift; sourceTree = "<group>"; };
+		8C1C9A9C597EFA4AE680213A /* MobileImportStager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileImportStager.swift; sourceTree = "<group>"; };
+		8E80F31E38643E7520459173 /* DropMeshShare.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = DropMeshShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		98475B2C453B6D6E2E8AA936 /* MobileTransferView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileTransferView.swift; sourceTree = "<group>"; };
 		9B48831F8E46CF32BB150447 /* MobilePhotoImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePhotoImport.swift; sourceTree = "<group>"; };
 		9E3E1B0829229AE158713DE8 /* InertMobileSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InertMobileSession.swift; sourceTree = "<group>"; };
@@ -120,6 +175,8 @@
 		AA2DC0FE503504330567F461 /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
 		ACC7D0D94659BCFA052A34C8 /* MobileReceivedFileSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileReceivedFileSheet.swift; sourceTree = "<group>"; };
 		AF53E771EBFC31DE081D5B1C /* DropMeshUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshUITests.swift; sourceTree = "<group>"; };
+		BD6613D163A76DA809A74493 /* MobilePendingShareView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePendingShareView.swift; sourceTree = "<group>"; };
+		C32534C8AAB5BFD7C9134D2C /* MobilePendingShareModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePendingShareModel.swift; sourceTree = "<group>"; };
 		C6C8F072646DFADC21B6346A /* dropmesh-iphone */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "dropmesh-iphone"; path = ..; sourceTree = SOURCE_ROOT; };
 		C7C3622D0AB272D8348A6123 /* MobilePeerNamesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePeerNamesTests.swift; sourceTree = "<group>"; };
 		C9578B7C94839C1DC5BC5447 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
@@ -130,6 +187,7 @@
 		EFDB0E813C60BF2268A4F4BD /* MobileSendModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSendModelTests.swift; sourceTree = "<group>"; };
 		FA2BEEF139C10D33AB97987F /* MobileImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileImportService.swift; sourceTree = "<group>"; };
 		FF5EB2E29CE5CCD75C98A075 /* MobileFilesPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileFilesPicker.swift; sourceTree = "<group>"; };
+		FF61613CBA096998676453B5 /* MobileShareEvidenceHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileShareEvidenceHost.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -158,6 +216,7 @@
 			isa = PBXGroup;
 			children = (
 				55CDD4C4BE61DB38367E7760 /* DropMesh.app */,
+				8E80F31E38643E7520459173 /* DropMeshShare.appex */,
 				E5A4513677CE21FBE91E019D /* DropMeshTestHost.app */,
 				326419CC42BCFCA581098E3F /* DropMeshTests.xctest */,
 				8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */,
@@ -176,10 +235,21 @@
 		3DD42F23C6957BB51840B2A7 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				1435B53B69422C276CDB1EAF /* en.lproj */,
+				4C12793FD603DAC8E20FE0B1 /* zh-Hans.lproj */,
 				6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */,
 				F9D100CE642014031FE52C2E /* Localizable.strings */,
 			);
 			path = Resources;
+			sourceTree = "<group>";
+		};
+		48981268FC2C3BDE08F36EE3 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				7C8C33D048354ED15BD75046 /* DropMeshDevelopment.entitlements */,
+				177EFC60BD3875CCAFD371C6 /* ShareBatchStore.swift */,
+			);
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		51B61012B361350FCB5D284C /* UI */ = {
@@ -197,9 +267,20 @@
 				005D821FDE939BCC0EB4B8C7 /* DropMeshTestHostApp.swift */,
 				9E3E1B0829229AE158713DE8 /* InertMobileSession.swift */,
 				0C901B8A5C15A0EFA153DE2C /* MobileSendEvidenceHost.swift */,
+				FF61613CBA096998676453B5 /* MobileShareEvidenceHost.swift */,
 			);
 			name = TestHost;
 			path = Tests/TestHost;
+			sourceTree = "<group>";
+		};
+		924933B46A0F740A84C389D3 /* DropMeshMobileRuntime */ = {
+			isa = PBXGroup;
+			children = (
+				21396744162A9B1359A132B3 /* MobileImportCopy.swift */,
+				8C1C9A9C597EFA4AE680213A /* MobileImportStager.swift */,
+			);
+			name = DropMeshMobileRuntime;
+			path = ../Sources/DropMeshMobileRuntime;
 			sourceTree = "<group>";
 		};
 		ADD6636E6EFA732086843E03 /* Unit */ = {
@@ -210,12 +291,26 @@
 				036FD6FFF32E6D7FB5244D36 /* MobileHistoryModelTests.swift */,
 				176E158047FFCA24839DF4DD /* MobileImportAdapterTests.swift */,
 				C7C3622D0AB272D8348A6123 /* MobilePeerNamesTests.swift */,
+				153086CD801A8EACF3D4EFAE /* MobilePendingShareTests.swift */,
 				EFDB0E813C60BF2268A4F4BD /* MobileSendModelTests.swift */,
 				485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */,
 				4835F265E8852B7C557B14C0 /* PairingModelTests.swift */,
+				488E0A6D02CEB382A255C8C0 /* ShareBatchTests.swift */,
+				75DB9C45A88D981FFD1C4C7C /* ShareProviderTests.swift */,
 			);
 			name = Unit;
 			path = Tests/Unit;
+			sourceTree = "<group>";
+		};
+		BBF45F0E8177DF0984CE399F /* ShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				6F8AF9D02536DFDD70A678AC /* Info.plist */,
+				6588E0AF5D452C26E84B5289 /* ShareExtensionView.swift */,
+				1ECB08C826DE1CB5C3AE54CD /* ShareImportService.swift */,
+				60785A43A651A3326F9DC492 /* ShareViewController.swift */,
+			);
+			path = ShareExtension;
 			sourceTree = "<group>";
 		};
 		CA2B64B2A88B96C0465F4017 /* App */ = {
@@ -233,6 +328,8 @@
 				4F93CAF1FA68389C9C15291E /* MobileHistoryView.swift */,
 				FA2BEEF139C10D33AB97987F /* MobileImportService.swift */,
 				DA5DD56ED8B7DBDA06D69A08 /* MobilePeerNames.swift */,
+				C32534C8AAB5BFD7C9134D2C /* MobilePendingShareModel.swift */,
+				BD6613D163A76DA809A74493 /* MobilePendingShareView.swift */,
 				9B48831F8E46CF32BB150447 /* MobilePhotoImport.swift */,
 				ACC7D0D94659BCFA052A34C8 /* MobileReceivedFileSheet.swift */,
 				074547827062A225FCBBFA7D /* MobileSendModel.swift */,
@@ -251,8 +348,11 @@
 			isa = PBXGroup;
 			children = (
 				CA2B64B2A88B96C0465F4017 /* App */,
+				924933B46A0F740A84C389D3 /* DropMeshMobileRuntime */,
 				22AB79292F21AED1DB7D179D /* Packages */,
 				3DD42F23C6957BB51840B2A7 /* Resources */,
+				48981268FC2C3BDE08F36EE3 /* Shared */,
+				BBF45F0E8177DF0984CE399F /* ShareExtension */,
 				91C20C72D0C622D77ED59725 /* TestHost */,
 				51B61012B361350FCB5D284C /* UI */,
 				ADD6636E6EFA732086843E03 /* Unit */,
@@ -320,6 +420,23 @@
 			productReference = 326419CC42BCFCA581098E3F /* DropMeshTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		9FFDBECC17B77666756D7A53 /* DropMeshShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CE60C3ABA2CFB34978ED9788 /* Build configuration list for PBXNativeTarget "DropMeshShare" */;
+			buildPhases = (
+				A2E0D31CCBF43284F14C0C04 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DropMeshShare;
+			packageProductDependencies = (
+			);
+			productName = DropMeshShare;
+			productReference = 8E80F31E38643E7520459173 /* DropMeshShare.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		CD2B911E499BE78DA53555C5 /* DropMesh */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 479DC133DDEABF80E1A0361D /* Build configuration list for PBXNativeTarget "DropMesh" */;
@@ -327,10 +444,12 @@
 				4FFD80D53DC7F77F6BF80D70 /* Sources */,
 				E892125DF8C9985CFDE8BB6E /* Resources */,
 				595CAFCB30D870F549704689 /* Frameworks */,
+				CE9208FA75E62077581A8938 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				BCD1AD9AE8CDA4B81AC88BB6 /* PBXTargetDependency */,
 			);
 			name = DropMesh;
 			packageProductDependencies = (
@@ -374,6 +493,7 @@
 			projectRoot = "";
 			targets = (
 				CD2B911E499BE78DA53555C5 /* DropMesh */,
+				9FFDBECC17B77666756D7A53 /* DropMeshShare */,
 				81E4CCD92D9C10921DC8697C /* DropMeshTestHost */,
 				9B2473DA890B2320509E5ABB /* DropMeshTests */,
 				092D9C8B76F6D4ABB7E0E4FF /* DropMeshUITests */,
@@ -419,6 +539,8 @@
 				1003A5903020F4AF0358974A /* MobileHistoryView.swift in Sources */,
 				1D3A08FAA40B041DC3A7B590 /* MobileImportService.swift in Sources */,
 				2D9A59451805F8B4F98357BF /* MobilePeerNames.swift in Sources */,
+				B71BA73C112F4FC174AF93A9 /* MobilePendingShareModel.swift in Sources */,
+				615E0DCDE5E1E58A97AB552D /* MobilePendingShareView.swift in Sources */,
 				57CA24697E5F67EF931C78F6 /* MobilePhotoImport.swift in Sources */,
 				349B5CEB500F590100808B4E /* MobileReceivedFileSheet.swift in Sources */,
 				F9019334792EA1546821E89B /* MobileSendModel.swift in Sources */,
@@ -429,6 +551,7 @@
 				8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */,
 				5C851F657A65CDCA44F7A895 /* PairingView.swift in Sources */,
 				29743D11F6701F1B3219095F /* ProductionMobileAppDependencies.swift in Sources */,
+				6B43605DB5986FE683842896 /* ShareBatchStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -441,9 +564,12 @@
 				6B40EA93CB6C41D32BD39B1D /* MobileHistoryModelTests.swift in Sources */,
 				12CDAFE347F5CE03D7538CB1 /* MobileImportAdapterTests.swift in Sources */,
 				7D0F56ABB61C94B99E847425 /* MobilePeerNamesTests.swift in Sources */,
+				CD6DCB91069B4C382895E5CE /* MobilePendingShareTests.swift in Sources */,
 				01C56A94E7CC9DBB515C661E /* MobileSendModelTests.swift in Sources */,
 				EC24D8F917E06EBDBEFD0EFF /* PairingCodeTests.swift in Sources */,
 				0335FC4356630E361F3436C1 /* PairingModelTests.swift in Sources */,
+				A240DB66D7BFF203149DC14E /* ShareBatchTests.swift in Sources */,
+				0A441754889E48E7902588CF /* ShareProviderTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -462,6 +588,8 @@
 				D243FE81BD8B21AC9191BC4D /* MobileHistoryView.swift in Sources */,
 				467034C3052FC87F1DF73E87 /* MobileImportService.swift in Sources */,
 				2B6817DBDBF40137D3623253 /* MobilePeerNames.swift in Sources */,
+				5195A69AC3ECC23D5AF2ABC5 /* MobilePendingShareModel.swift in Sources */,
+				CFC41ED23039C434E069051B /* MobilePendingShareView.swift in Sources */,
 				5F4782FB020D4BEF50EC5451 /* MobilePhotoImport.swift in Sources */,
 				0310B305393152A47D09118A /* MobileReceivedFileSheet.swift in Sources */,
 				8D6244563BE06FF4E18561A8 /* MobileSendEvidenceHost.swift in Sources */,
@@ -469,9 +597,27 @@
 				C604DED27AC8134E9ABF1BBA /* MobileSendView.swift in Sources */,
 				63AE2CED22100309C0FD5D12 /* MobileSettingsModel.swift in Sources */,
 				B0DD14C71CC073458845F1FD /* MobileSettingsView.swift in Sources */,
+				A2550E3277CAE24AFFAC965B /* MobileShareEvidenceHost.swift in Sources */,
 				AC375FCE6831106D64B424D7 /* MobileTransferView.swift in Sources */,
 				72F00130732B48EBEC352C02 /* PairingModel.swift in Sources */,
 				6934FC13A7ADC30A78A71A83 /* PairingView.swift in Sources */,
+				366650C082C138DC2524C00F /* ShareBatchStore.swift in Sources */,
+				B9F5EE18813D1B02F19CF2E0 /* ShareExtensionView.swift in Sources */,
+				599780BD41462029129E4B37 /* ShareImportService.swift in Sources */,
+				A9C206B3ABD63E3255AD473A /* ShareViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A2E0D31CCBF43284F14C0C04 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				064EE1E13581F9321F072AF8 /* MobileImportCopy.swift in Sources */,
+				7118DE7176B359F9C9644C97 /* MobileImportStager.swift in Sources */,
+				4D9D5818597FB0336E97C334 /* ShareBatchStore.swift in Sources */,
+				398B857D120C58723080AC84 /* ShareExtensionView.swift in Sources */,
+				40A8B9487608275D600FC698 /* ShareImportService.swift in Sources */,
+				8D914A7818B0FB44002EBDA3 /* ShareViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -495,6 +641,11 @@
 			isa = PBXTargetDependency;
 			target = 81E4CCD92D9C10921DC8697C /* DropMeshTestHost */;
 			targetProxy = 054B52574E62CA78DBAE8AA3 /* PBXContainerItemProxy */;
+		};
+		BCD1AD9AE8CDA4B81AC88BB6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 9FFDBECC17B77666756D7A53 /* DropMeshShare */;
+			targetProxy = 5F7E10CCB436D9BC01F06FFB /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -715,10 +866,32 @@
 			};
 			name = Debug;
 		};
+		5AB26F8989F7D98757DD9AFB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Shared/DropMeshDevelopment.entitlements;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.share;
+				PRODUCT_NAME = DropMeshShare;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) SHARE_EXTENSION";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		6E5EB46458DEED57B57F92D9 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Shared/DropMeshDevelopment.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
@@ -767,10 +940,32 @@
 			};
 			name = Debug;
 		};
+		F22B57FAB13DCAEC884E7724 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Shared/DropMeshDevelopment.entitlements;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.share;
+				PRODUCT_NAME = DropMeshShare;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) SHARE_EXTENSION";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 		F8446B2D166D7C014A92E09B /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Shared/DropMeshDevelopment.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
@@ -811,6 +1006,15 @@
 			buildConfigurations = (
 				47414EE382766746FA565025 /* Debug */,
 				4BAF6F7E3D5593136971FBB6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CE60C3ABA2CFB34978ED9788 /* Build configuration list for PBXNativeTarget "DropMeshShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F22B57FAB13DCAEC884E7724 /* Debug */,
+				5AB26F8989F7D98757DD9AFB /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

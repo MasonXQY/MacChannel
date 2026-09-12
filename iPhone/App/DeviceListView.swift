@@ -34,7 +34,10 @@ struct DeviceListView: View {
                 model.dismissPairingIfAllowed()
             }
         }
-        .sheet(isPresented: $showingSend, onDismiss: { model.send?.requestCancellation() }) {
+        .sheet(isPresented: $showingSend, onDismiss: {
+            model.send?.requestCancellation()
+            Task { await model.send?.cancelAndWait(); await model.pendingShares.refresh() }
+        }) {
             if let sender = model.send { MobileSendView(model: sender, devices: model.pairedDevices) }
         }
         .sheet(item: Binding(get: { model.history?.presentation },
@@ -91,6 +94,9 @@ struct DeviceListView: View {
             if let history = model.history {
                 MobileHistorySection(model: history, latestOnly: true)
             }
+            if let sender = model.send {
+                MobilePendingShareView(model: model.pendingShares, sender: sender) { showingSend = true }
+            }
 
             Section("devices.title") {
                 if model.pairedDevices.isEmpty {
@@ -140,7 +146,10 @@ struct DeviceListView: View {
                 }
             }
         }
-        .refreshable { await model.refreshDevices(); await model.history?.refresh() }
+        .refreshable {
+            await model.refreshDevices(); await model.history?.refresh()
+            await model.pendingShares.refresh()
+        }
     }
 
     private var serviceLabel: LocalizedStringKey {

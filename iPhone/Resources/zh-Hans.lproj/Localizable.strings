@@ -121,3 +121,17 @@
 "settings.about" = "关于";
 "settings.version" = "版本";
 "settings.language" = "DropMesh 跟随系统语言，支持英语和简体中文。";
+"share.pending.title" = "分享到 DropMesh 的文件";
+"share.pending.explanation" = "这些临时副本尚未发送。请先导入一批文件，再选择 Mac 并确认发送。";
+"share.pending.prepare" = "导入分享的文件";
+"share.pending.busy" = "请先完成或取消当前选择，再导入分享的文件。";
+"share.saving" = "正在保存临时副本…";
+"share.saved" = "已保存到 DropMesh。请打开 DropMesh，选择 Mac 后发送。";
+"share.retention" = "请在 24 小时内打开 DropMesh。分享的临时副本会在 24 小时后过期，并在 DropMesh 下次检查分享文件时移除。";
+"share.error.storage" = "共享存储不可用。请解锁 iPhone 后重试。若仍失败，此构建需要为 DropMesh 和分享扩展配置匹配的 App Group 描述文件。";
+"share.error.invalid" = "无法验证这批分享文件。请重新分享原始文件。无效的临时副本不会导入。";
+"share.error.unsupported" = "请选择 1–10 个普通文件、照片或视频。单个文件最大 2 GB，每批总计最大 4 GB。若待处理批次已满，请打开 DropMesh 处理。";
+"share.error.provider" = "来源应用无法提供这些文件，或无法保存副本。请打开原始文件后重新分享。";
+"share.error.disk" = "存储空间不足，无法保存副本。请释放 iPhone 空间后重新分享。";
+"share.error.cancelled" = "分享已取消，未发送任何文件。";
+"share.error.cleanup" = "无法移除临时副本。请重试清理后再关闭。未发送任何文件。";

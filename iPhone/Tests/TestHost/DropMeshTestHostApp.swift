@@ -8,7 +8,11 @@ struct DropMeshTestHostApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if ProcessInfo.processInfo.arguments.contains("-send-evidence") {
+            if ProcessInfo.processInfo.arguments.contains("-share-evidence") {
+                MobileShareEvidenceHost(extensionOnly: false)
+            } else if ProcessInfo.processInfo.arguments.contains("-share-extension-evidence") {
+                MobileShareEvidenceHost(extensionOnly: true)
+            } else if ProcessInfo.processInfo.arguments.contains("-send-evidence") {
                 MobileSendEvidenceHost()
             } else {
                 DeviceListView(model: model)

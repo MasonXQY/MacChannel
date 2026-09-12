@@ -2,6 +2,38 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
+    func testEnglishSharedBatch() { runShared(language: "en", locale: "en_US", prefix: "English") }
+    func testChineseSharedBatch() { runShared(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
+    private func runShared(language: String, locale: String, prefix: String) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-share-evidence"]
+        app.launch()
+        let pending = app.buttons["share-prepare-button"].firstMatch
+        reveal(pending, in: app)
+        guard pending.waitForExistence(timeout: 5) else { XCTFail("Pending share is absent"); return }
+        attach(app.screenshot(), named: "\(prefix)-Pending-Share")
+        pending.tap()
+        let confirm = app.buttons["send-confirm-button"]
+        reveal(confirm, in: app)
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        XCTAssertFalse(confirm.isEnabled)
+        attach(app.screenshot(), named: "\(prefix)-Share-Choose-Recipient")
+        let recipient = app.buttons["send-recipient-11111111-1111-1111-1111-111111111111"]
+        revealAbove(recipient, in: app); recipient.tap()
+        reveal(confirm, in: app)
+        XCTAssertTrue(confirm.isEnabled)
+        attach(app.screenshot(), named: "\(prefix)-Share-Explicit-Send")
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "-share-evidence" }
+        app.launchArguments += ["-share-extension-evidence"]
+        app.launch()
+        let saved = app.staticTexts["share-saved-message"]
+        XCTAssertTrue(saved.waitForExistence(timeout: 5))
+        XCTAssertEqual(saved.label, language == "en"
+            ? "Saved to DropMesh. Open DropMesh to choose a Mac and send."
+            : "已保存到 DropMesh。请打开 DropMesh，选择 Mac 后发送。")
+        attach(app.screenshot(), named: "\(prefix)-Share-Manual-Open")
+    }
     func testEnglishHistoryAndSettings() { runHistory(language: "en", locale: "en_US", prefix: "English") }
     func testChineseHistoryAndSettings() { runHistory(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
 

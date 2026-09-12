@@ -29,6 +29,8 @@ final class MobileSendModel {
     private var generation: UUID?
     private var cancelled = false
     private var attempt: UUID?
+    private var sharedBatch: ShareBatch?
+    private var sharedImported = false
     private var photoLoad: (@MainActor (UUID) async throws -> MobileImportedFile)?
     private var work: Task<Void, Never>?
     private var borrower: Task<TransferID, Error>?
@@ -107,6 +109,31 @@ final class MobileSendModel {
                 if !cancelled { failureKey = importKey(error); phase = .idle }
             }
         }
+    }
+    /// Acknowledgement means private import only. Recipient selection remains
+    /// empty, and runtime.send is still reached solely by the explicit Send action.
+    func importSharedBatch(_ batch: ShareBatch) -> Bool {
+        guard canSelect else { return false }
+        _ = reserve()
+        sharedBatch = batch; sharedImported = false; phase = .preparing
+        work = Task { [self] in
+            do {
+                let admitted = try await service.begin()
+                attempt = admitted
+                guard !cancelled else { return }
+                let sources = try await batch.files()
+                let imported = try await service.importFiles(sources, in: admitted)
+                guard !cancelled else { return }
+                sharedImported = true
+                try await batch.acknowledge()
+                sharedBatch = nil
+                if !cancelled { files = imported; phase = .ready }
+            } catch {
+                if !cancelled { failureKey = importKey(error) }
+                await cleanOwned()
+            }
+        }
+        return true
     }
     func filesChanged(_ id: UUID) {
         guard generation == id, phase == .selecting, let picker = filesPicker else { return }
@@ -244,15 +271,21 @@ final class MobileSendModel {
         if let cleanup { task = cleanup }
         else {
             let picker = filesPicker; let id = attempt; let service = service
+            let batch = sharedBatch; let imported = sharedImported
             task = Task {
                 if let picker { try await picker.cancelAndWait() }
                 else if let id { try await service.discard(id) }
+                if let batch {
+                    if imported { try await batch.acknowledge() }
+                    else { await batch.release() }
+                }
             }
             cleanup = task
         }
         do {
             try await task.value
             files = []; filesPicker = nil; attempt = nil
+            sharedBatch = nil; sharedImported = false
             generation = nil; selectedRecipient = nil; phase = .idle
         } catch { phase = .cleanupFailed }
         cleanup = nil

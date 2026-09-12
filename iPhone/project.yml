@@ -17,8 +17,11 @@ targets:
     platform: iOS
     sources:
       - path: App
+      - path: Shared
       - path: Resources
     dependencies:
+      - target: DropMeshShare
+        embed: true
       - package: DropMeshPackage
         product: DropMeshMobileRuntime
       - package: DropMeshPackage
@@ -30,6 +33,27 @@ targets:
         INFOPLIST_FILE: App/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Shared/DropMeshDevelopment.entitlements
+  DropMeshShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+      - path: Shared
+      - path: Resources/en.lproj
+      - path: Resources/zh-Hans.lproj
+      - path: ../Sources/DropMeshMobileRuntime/MobileImportStager.swift
+      - path: ../Sources/DropMeshMobileRuntime/MobileImportCopy.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev.share
+        PRODUCT_NAME: DropMeshShare
+        INFOPLIST_FILE: ShareExtension/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Shared/DropMeshDevelopment.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SHARE_EXTENSION
+        SKIP_INSTALL: YES
   DropMeshTestHost:
     type: application
     platform: iOS
@@ -40,6 +64,10 @@ targets:
           - ProductionMobileAppDependencies.swift
       - path: Resources
       - path: Tests/TestHost
+      - path: Shared
+      - path: ShareExtension
+        excludes:
+          - Info.plist
     dependencies:
       - package: DropMeshPackage
         product: DropMeshMobileRuntime
