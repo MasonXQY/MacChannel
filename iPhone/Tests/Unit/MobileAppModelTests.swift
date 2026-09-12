@@ -6,6 +6,109 @@ import XCTest
 
 @MainActor
 final class MobileAppModelTests: XCTestCase {
+    func testInterruptedStartCannotOverwriteSuccessfulForeground() async throws {
+        let session = InertMobileSession()
+        let gate = BootstrapGate()
+        await session.setBeforeStart { await gate.wait(); throw MobileRuntimeError.interrupted }
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        try await gate.entered()
+        model.scenePhaseChanged(.background)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await session.stopCount == 0 && ContinuousClock.now < deadline { await Task.yield() }
+        expectEqual(await session.stopCount, 1)
+        await session.setBeforeStart {}
+        model.scenePhaseChanged(.active)
+        while await session.startCount < 2 && ContinuousClock.now < deadline { await Task.yield() }
+        expectEqual(await session.startCount, 2)
+        while model.serviceState != .online && ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertEqual(model.serviceState, .online)
+        await gate.release()
+        await model.waitForLifecycle()
+        XCTAssertNil(model.serviceFailure)
+        XCTAssertEqual(model.serviceState, .online)
+        await model.close()
+    }
+
+    func testBackgroundInterruptionFinishesBeforeSuccessfulForegroundWithoutFalseError() async throws {
+        let session = InertMobileSession()
+        let gate = BootstrapGate()
+        await session.setBeforeStart { await gate.wait(); throw MobileRuntimeError.interrupted }
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        try await gate.entered()
+        model.scenePhaseChanged(.background)
+        await gate.release()
+        await model.waitForLifecycle()
+        XCTAssertNil(model.serviceFailure)
+        await session.setBeforeStart {}
+        model.scenePhaseChanged(.active)
+        await model.waitForLifecycle()
+        XCTAssertNil(model.serviceFailure)
+        XCTAssertEqual(model.serviceState, .online)
+        await model.close()
+    }
+
+    func testSupersededFailedStartCannotOverwriteSuccessfulForeground() async throws {
+        let session = InertMobileSession()
+        let gate = BootstrapGate()
+        await session.setBeforeStart { await gate.wait(); throw MobileRuntimeError.notReady }
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        try await gate.entered()
+        model.scenePhaseChanged(.background)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await session.stopCount == 0 && ContinuousClock.now < deadline { await Task.yield() }
+        expectEqual(await session.stopCount, 1)
+        await session.setBeforeStart {}
+        model.scenePhaseChanged(.active)
+        while model.serviceState != .online && ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertEqual(model.serviceState, .online)
+        await gate.release()
+        await model.waitForLifecycle()
+        XCTAssertNil(model.serviceFailure)
+        await model.close()
+    }
+
+    func testSuccessfulForegroundClearsRecoveredStartFailure() async {
+        let session = InertMobileSession()
+        await session.setBeforeStart { throw MobileRuntimeError.notReady }
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+        XCTAssertEqual(model.serviceFailure, .network)
+        model.scenePhaseChanged(.background)
+        await model.waitForLifecycle()
+        await session.setBeforeStart {}
+        model.scenePhaseChanged(.active)
+        await model.waitForLifecycle()
+        XCTAssertNil(model.serviceFailure)
+        await model.close()
+    }
+
+    func testSuccessfulForegroundPreservesExplicitTrustRefreshFailure() async {
+        let session = InertMobileSession()
+        await session.setRefreshFailure(true)
+        await session.setPairingAttempt(AlreadyPairedAttempt(peer: session.peer))
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+        model.presentPairing()
+        let pairing = model.pairing!
+        pairing.code = "123456"
+        pairing.submit()
+        let deadline = ContinuousClock.now + .seconds(3)
+        while pairing.isBusy && ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertFalse(pairing.isBusy)
+        XCTAssertEqual(model.serviceFailure, .network)
+        model.scenePhaseChanged(.background)
+        await model.waitForLifecycle()
+        model.scenePhaseChanged(.active)
+        await model.waitForLifecycle()
+        XCTAssertEqual(model.serviceFailure, .network)
+        await model.close()
+    }
+
     func testRemovalOwnsCheckpointEvenWhenPresentationOwnerIsReleased() async throws {
         let session = InertMobileSession()
         let gate = BootstrapGate()
@@ -191,12 +294,21 @@ private actor AlreadyPairedAttempt: PairingAttempt {
 }
 
 actor BootstrapGate {
-    private var continuation: CheckedContinuation<Void, Never>?
-    func wait() async { await withCheckedContinuation { continuation = $0 } }
+    private var waiting = false
+    private var released = false
+    func wait() async {
+        waiting = true
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !released && !Task.isCancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        if !released && !Task.isCancelled { XCTFail("Fixture gate timed out") }
+        waiting = false
+    }
     func entered() async throws {
         let deadline = ContinuousClock.now + .seconds(3)
-        while continuation == nil && ContinuousClock.now < deadline { await Task.yield() }
-        if continuation == nil { throw CancellationError() }
+        while !waiting && !Task.isCancelled && ContinuousClock.now < deadline { await Task.yield() }
+        if !waiting { throw CancellationError() }
     }
-    func release() { continuation?.resume(); continuation = nil }
+    func release() { released = true }
 }

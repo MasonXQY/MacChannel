@@ -13,8 +13,9 @@ final class MobileAppModel {
     private(set) var bootstrapError: String?
     private(set) var pairedDevices: [DeviceSummary] = []
     private(set) var serviceState: MobileRuntimeState = .inactive
-    var serviceFailure: MobileRuntimeFailure? { explicitFailure ?? runtimeFailure }
+    var serviceFailure: MobileRuntimeFailure? { explicitFailure ?? lifecycleFailure ?? runtimeFailure }
     private var explicitFailure: MobileRuntimeFailure?
+    private var lifecycleFailure: MobileRuntimeFailure?
     private var runtimeFailure: MobileRuntimeFailure?
     private(set) var removalState: MobileRemovalState = .idle
     var pairing: PairingModel?
@@ -24,6 +25,7 @@ final class MobileAppModel {
     private var bootstrapTask: Task<Void, Never>?
     @ObservationIgnored nonisolated(unsafe) private var observationTask: Task<Void, Never>?
     private var lifecycleTasks: [UUID: Task<Void, Never>] = [:]
+    private var lifecycleRequest = UUID()
     private var removalTask: Task<Void, Never>?
     private var revokedIDs: Set<DeviceID> = []
     private var refreshTask: Task<Void, Never>?
@@ -78,6 +80,7 @@ final class MobileAppModel {
     private func reconcileScene() {
         guard !closed, let session, let foreground = desiredForeground else { return }
         let id = UUID()
+        lifecycleRequest = id
         let pairing = pairing
         lifecycleTasks[id] = Task { [weak self] in
             if foreground {
@@ -85,8 +88,20 @@ final class MobileAppModel {
                     self?.lifecycleTasks[id] = nil
                     return
                 }
-                do { try await session.startForeground() }
-                catch { self?.explicitFailure = .network }
+                do {
+                    try await session.startForeground()
+                    if self?.lifecycleRequest == id, self?.closed == false {
+                        self?.lifecycleFailure = nil
+                    }
+                } catch {
+                    // Background retires a runtime start. A late completion has no
+                    // authority over diagnostics belonging to the current scene.
+                    if self?.lifecycleRequest == id, self?.closed == false,
+                       self?.desiredForeground == true,
+                       (error as? MobileRuntimeError) != .interrupted {
+                        self?.lifecycleFailure = .network
+                    }
+                }
             } else {
                 async let network: Void = session.stopForeground()
                 async let pair: Void = pairing?.handleBackground() ?? ()
