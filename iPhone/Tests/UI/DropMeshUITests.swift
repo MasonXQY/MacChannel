@@ -26,6 +26,12 @@ final class DropMeshUITests: XCTestCase {
         reveal(retry, in: app)
         XCTAssertTrue(retry.waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-Cleanup-Error")
+        let cleanupText = app.staticTexts[language == "en"
+            ? "Temporary files could not be removed. Retry cleanup before choosing more files."
+            : "无法移除临时文件。请重试清理，再选择其他文件。"]
+        positionExplanation(cleanupText, in: app)
+        attach(app.screenshot(), named: "\(prefix)-Cleanup-Error-Text")
+        reveal(retry, in: app)
         retry.tap()
         revealAbove(app.buttons["send-files-button"], in: app)
         XCTAssertTrue(app.buttons["send-files-button"].isEnabled)
@@ -65,6 +71,8 @@ final class DropMeshUITests: XCTestCase {
         reveal(error, in: app)
         XCTAssertTrue(error.waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-Transfer-Action-Error")
+        positionExplanation(error, in: app)
+        attach(app.screenshot(), named: "\(prefix)-Transfer-Action-Error-Text")
     }
 
     func testEnglishHomeAndPairingEntrySmoke() {
@@ -144,6 +152,17 @@ final class DropMeshUITests: XCTestCase {
         for _ in 0..<5 {
             if element.exists && element.isHittable { return }
             app.swipeDown()
+        }
+    }
+
+    private func positionExplanation(_ element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<6 {
+            if !element.exists { app.swipeDown(); continue }
+            let delta = element.frame.minY - app.frame.height * 0.25
+            if abs(delta) < 40 { return }
+            let distance = max(-app.frame.height * 0.35, min(delta, app.frame.height * 0.35))
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -distance)))
         }
     }
 
