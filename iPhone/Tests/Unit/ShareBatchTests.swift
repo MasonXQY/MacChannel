@@ -5,6 +5,119 @@ import XCTest
 @testable import DropMeshTestHost
 
 final class ShareBatchTests: XCTestCase {
+    func testFailedInitializationReleasesCapacityAndCatalog() async throws {
+        let fixture = try ShareFixture(); defer { fixture.remove() }
+        let store = ShareBatchStore(root: fixture.root, didCreateDirectory: { throw SharePayloadError.unavailable })
+        do { _ = try await store.begin(); XCTFail("expected initialization failure") } catch {}
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path), [])
+        let batch = try await ShareBatchStore(root: fixture.root).begin()
+        try await batch.discard()
+    }
+
+    func testActualBeginAndDiscardHoldCatalogAcrossLocklessWindows() async throws {
+        let fixture = try ShareFixture(); defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: false)
+        let probe = try ShareFS.directory(fixture.root.path); defer { close(probe) }
+        let created = expectation(description: "actual creation window")
+        let removed = expectation(description: "actual deletion window")
+        let store = ShareBatchStore(root: fixture.root, didCreateDirectory: {
+            let result = flock(probe, LOCK_EX | LOCK_NB)
+            XCTAssertEqual(result, -1)
+            XCTAssertEqual(errno, EWOULDBLOCK)
+            if result == 0 { flock(probe, LOCK_UN) }
+            created.fulfill()
+        }, willRemoveDirectory: {
+            let result = flock(probe, LOCK_EX | LOCK_NB)
+            XCTAssertEqual(result, -1)
+            XCTAssertEqual(errno, EWOULDBLOCK)
+            if result == 0 { flock(probe, LOCK_UN) }
+            removed.fulfill()
+        })
+        let batch = try await store.begin()
+        // The catalog is free throughout the provider-owned batch lifetime.
+        XCTAssertEqual(flock(probe, LOCK_EX | LOCK_NB), 0)
+        XCTAssertEqual(flock(probe, LOCK_UN), 0)
+        try await batch.discard()
+        await fulfillment(of: [created, removed], timeout: 1)
+    }
+    func testConcurrentCreatorsRespectTwentyBatchCapacity() async throws {
+        let fixture = try ShareFixture(); defer { fixture.remove() }
+        let batches = await withTaskGroup(of: ShareBatch?.self) { group in
+            for _ in 0..<40 {
+                group.addTask { try? await ShareBatchStore(root: fixture.root).begin() }
+            }
+            var batches: [ShareBatch] = []
+            for await batch in group { if let batch { batches.append(batch) } }
+            return batches
+        }
+        XCTAssertEqual(batches.count, ShareBatchStore.maximumBatches)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path).count, 20)
+        for batch in batches { try await batch.discard() }
+    }
+
+    func testCatalogExcludesCleanupDuringLocklessCreationAndDeletion() async throws {
+        let fixture = try ShareFixture(); defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: false)
+        let rootFD = try ShareFS.directory(fixture.root.path); defer { close(rootFD) }
+        let competingFD = try ShareFS.directory(fixture.root.path); defer { close(competingFD) }
+        // Exact interrupted windows, synchronized by the same kernel primitive
+        // used by begin/discard. No elapsed-time assumptions or sleeping tasks.
+        let id = UUID()
+        try ShareFS.withCatalog(rootFD) {
+            XCTAssertEqual(mkdirat(rootFD, id.uuidString, 0o700), 0)
+            XCTAssertEqual(flock(competingFD, LOCK_EX | LOCK_NB), -1)
+            XCTAssertEqual(errno, EWOULDBLOCK)
+            let batch = try ShareBatch(root: fixture.root, rootFD: rootFD, id: id, creating: true)
+            withExtendedLifetime(batch) {}
+        }
+        let child = try ShareFS.directory(id.uuidString, parent: rootFD); defer { close(child) }
+        try ShareFS.withCatalog(rootFD) {
+            XCTAssertEqual(unlinkat(child, ".lock", 0), 0)
+            XCTAssertEqual(flock(competingFD, LOCK_EX | LOCK_NB), -1)
+            XCTAssertEqual(errno, EWOULDBLOCK)
+            // Process interruption here releases the catalog without rmdir.
+        }
+        try await ShareBatchStore(root: fixture.root).cleanup(now: Date().addingTimeInterval(48 * 3600))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path), [])
+    }
+
+    func testLocklessAcknowledgedBatchCannotReplayAndMalformedPayloadIsPreserved() async throws {
+        let fixture = try ShareFixture(); defer { fixture.remove() }
+        let store = ShareBatchStore(root: fixture.root)
+        let batch = try await store.begin()
+        try await batch.append(fixture.source, contentType: "public.data")
+        try await batch.publish(); await batch.release()
+        let directory = fixture.root.appendingPathComponent(batch.id.uuidString)
+        try FileManager.default.moveItem(at: directory.appendingPathComponent(".ready"), to: directory.appendingPathComponent(".acked"))
+        try FileManager.default.removeItem(at: directory.appendingPathComponent(".lock"))
+        let pending = try await store.pending()
+        XCTAssertTrue(pending.isEmpty)
+        try await store.cleanup(now: Date().addingTimeInterval(48 * 3600))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        let malformed = fixture.root.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: malformed, withIntermediateDirectories: false)
+        let link = malformed.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: fixture.base)
+        do { try await store.cleanup(now: Date().addingTimeInterval(48 * 3600)); XCTFail("accepted malformed lockless payload") }
+        catch {}
+        XCTAssertTrue(FileManager.default.fileExists(atPath: link.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.source), Data("payload".utf8))
+    }
+    func testStaleLocklessCreationAndDeletionStatesRecoverCapacity() async throws {
+        let fixture = try ShareFixture(); defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: false)
+        for _ in 0..<ShareBatchStore.maximumBatches {
+            let abandoned = fixture.root.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: abandoned, withIntermediateDirectories: false)
+        }
+        let store = ShareBatchStore(root: fixture.root)
+        try await store.cleanup()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path).count, 20)
+        try await store.cleanup(now: Date().addingTimeInterval(48 * 3600))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path), [])
+        let batch = try await store.begin()
+        try await batch.discard()
+    }
     func testProtectionSetterFailureCannotBeReportedAsSuccess() {
         XCTAssertThrowsError(try ShareFS.protect(-1))
     }

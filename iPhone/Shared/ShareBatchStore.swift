@@ -29,8 +29,16 @@ actor ShareBatchStore {
     static let maximumBatchBytes: Int64 = 4 * 1024 * 1024 * 1024
     static let retention: TimeInterval = 24 * 3600
     private let root: URL
+    // Per-instance deterministic interruption seams; never global mutable hooks.
+    private let didCreateDirectory: (@Sendable () throws -> Void)?
+    private let willRemoveDirectory: (@Sendable () -> Void)?
 
-    init(root: URL) { self.root = root.standardizedFileURL }
+    init(root: URL, didCreateDirectory: (@Sendable () throws -> Void)? = nil,
+         willRemoveDirectory: (@Sendable () -> Void)? = nil) {
+        self.root = root.standardizedFileURL
+        self.didCreateDirectory = didCreateDirectory
+        self.willRemoveDirectory = willRemoveDirectory
+    }
 
     static func applicationGroup() throws -> ShareBatchStore {
         guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)
@@ -54,27 +62,39 @@ actor ShareBatchStore {
 
     func begin() throws -> ShareBatch {
         let fd = try openRoot(); defer { close(fd) }
-        guard try ShareFS.names(fd).count < Self.maximumBatches else { throw SharePayloadError.limit }
-        let id = UUID()
-        guard mkdirat(fd, id.uuidString, 0o700) == 0 else { throw ShareFS.error() }
-        return try ShareBatch(root: root, rootFD: fd, id: id, creating: true)
+        return try ShareFS.withCatalog(fd) {
+            guard try ShareFS.names(fd).count < Self.maximumBatches else { throw SharePayloadError.limit }
+            let id = UUID()
+            guard mkdirat(fd, id.uuidString, 0o700) == 0 else { throw ShareFS.error() }
+            do {
+                try didCreateDirectory?()
+                return try ShareBatch(root: root, rootFD: fd, id: id, creating: true,
+                                      willRemoveDirectory: willRemoveDirectory)
+            }
+            catch {
+                // Initialization removes its own newly created lock on failure;
+                // rmdir can remove only our still-empty directory.
+                guard unlinkat(fd, id.uuidString, AT_REMOVEDIR) == 0 else { throw SharePayloadError.cleanup }
+                throw error
+            }
+        }
     }
 
     func pending() throws -> [UUID] {
         let fd = try openRoot(); defer { close(fd) }
-        return try ShareFS.names(fd).prefix(Self.maximumBatches).compactMap { name in
+        return try ShareFS.withCatalog(fd) { try ShareFS.names(fd).prefix(Self.maximumBatches).compactMap { name in
             guard let id = UUID(uuidString: name), id.uuidString == name,
                   let batch = try? ShareBatch(root: root, rootFD: fd, id: id, creating: false)
             else { return nil }
             // A live writer/claimant is omitted, never consumed twice.
             return batch.hasReady ? id : nil
-        }.sorted { $0.uuidString < $1.uuidString }
+        }.sorted { $0.uuidString < $1.uuidString } }
     }
 
     func claim(_ id: UUID) async throws -> ShareBatch? {
         let fd = try openRoot(); defer { close(fd) }
         let batch: ShareBatch
-        do { batch = try ShareBatch(root: root, rootFD: fd, id: id, creating: false) }
+        do { batch = try ShareFS.withCatalog(fd) { try ShareBatch(root: root, rootFD: fd, id: id, creating: false) } }
         catch SharePayloadError.busy { return nil }
         guard batch.hasReady else { return nil }
         _ = try await batch.files() // fresh bounded manifest and every file validation
@@ -85,13 +105,23 @@ actor ShareBatchStore {
     /// provider awaits; kernel release after process death makes old work reclaimable.
     func cleanup(now: Date = Date()) async throws {
         let fd = try openRoot(); defer { close(fd) }
-        for name in try ShareFS.names(fd).prefix(Self.maximumBatches) {
-            guard let id = UUID(uuidString: name), id.uuidString == name,
-                  let batch = try? ShareBatch(root: root, rootFD: fd, id: id, creating: false)
-            else { continue }
-            if now.timeIntervalSince(batch.modified) > Self.retention {
-                try await batch.discard()
+        let names = try ShareFS.withCatalog(fd) { Array(try ShareFS.names(fd).prefix(Self.maximumBatches)) }
+        for name in names {
+            guard let id = UUID(uuidString: name), id.uuidString == name else { continue }
+            let batch: ShareBatch? = try ShareFS.withCatalog(fd) {
+                guard let child = try? ShareFS.directory(name, parent: fd) else { return nil }
+                defer { close(child) }
+                var info = stat()
+                guard fstat(child, &info) == 0 else { throw ShareFS.error() }
+                guard now.timeIntervalSince1970 - TimeInterval(info.st_mtimespec.tv_sec) > Self.retention else { return nil }
+                var lockInfo = stat()
+                let missing = fstatat(child, ".lock", &lockInfo, AT_SYMLINK_NOFOLLOW) != 0
+                if missing, errno != ENOENT { throw ShareFS.error() }
+                // Catalog ownership excludes live mkdir/lock and unlink/rmdir
+                // windows. Recover only expired UUID directories, never a link.
+                return try? ShareBatch(root: root, rootFD: fd, id: id, creating: missing)
             }
+            if let batch { try await batch.discard() }
         }
     }
 }
@@ -111,8 +141,10 @@ actor ShareBatch {
     private var published: Bool
     private var released = false
     private var retired = false
+    private let willRemoveDirectory: (@Sendable () -> Void)?
 
-    init(root: URL, rootFD: Int32, id: UUID, creating: Bool) throws {
+    init(root: URL, rootFD: Int32, id: UUID, creating: Bool,
+         willRemoveDirectory: (@Sendable () -> Void)? = nil) throws {
         let fd = try ShareFS.directory(id.uuidString, parent: rootFD)
         let lock = openat(fd, ".lock", O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (creating ? O_CREAT | O_EXCL : 0), 0o600)
         guard lock >= 0 else { close(fd); throw ShareFS.error() }
@@ -120,10 +152,18 @@ actor ShareBatch {
             _ = try ShareFS.regular(lock)
             guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { throw SharePayloadError.busy }
             try ShareFS.protect(fd); try ShareFS.protect(lock)
-        } catch { close(lock); close(fd); throw error }
+        } catch {
+            if creating { _ = unlinkat(fd, ".lock", 0) }
+            close(lock); close(fd); throw error
+        }
         self.rootFD = dup(rootFD)
-        guard self.rootFD >= 0 else { close(lock); close(fd); throw ShareFS.error() }
+        guard self.rootFD >= 0 else {
+            let error = ShareFS.error()
+            if creating { _ = unlinkat(fd, ".lock", 0) }
+            close(lock); close(fd); throw error
+        }
         self.id = id; directoryFD = fd; lockFD = lock
+        self.willRemoveDirectory = willRemoveDirectory
         directory = root.appendingPathComponent(id.uuidString, isDirectory: true)
         stager = MobileImportStager(directory: directory)
         var info = stat(); fstat(fd, &info)
@@ -147,7 +187,11 @@ actor ShareBatch {
         guard size >= 0, size <= ShareBatchStore.maximumFileBytes,
               items.reduce(Int64(0), { $0 + $1.size }) + size <= ShareBatchStore.maximumBatchBytes
         else { throw SharePayloadError.limit }
-        let copied = try await stager.stage(file: source)
+        let allowance = min(ShareBatchStore.maximumFileBytes,
+            ShareBatchStore.maximumBatchBytes - items.reduce(Int64(0), { $0 + $1.size }))
+        let copied: URL
+        do { copied = try await stager.stage(file: source, maximumBytes: allowance) }
+        catch let error as POSIXError where error.code == .EFBIG { throw SharePayloadError.limit }
         do {
             let item = ShareManifest.Item(directory: copied.deletingLastPathComponent().lastPathComponent,
                 name: copied.lastPathComponent, contentType: contentType, size: size)
@@ -226,6 +270,10 @@ actor ShareBatch {
 
     func discard() throws {
         guard !released else { return }
+        try ShareFS.withCatalog(rootFD) { try discardUnderCatalog() }
+    }
+
+    private func discardUnderCatalog() throws {
         // Validate the complete bounded inventory before unlinking anything. Never
         // recursively remove a path, follow a link, or touch another batch.
         let names = try ShareFS.names(directoryFD)
@@ -254,6 +302,7 @@ actor ShareBatch {
         for name in [".ready", ".acked", ".manifest", ".lock"] {
             if unlinkat(directoryFD, name, 0) != 0, errno != ENOENT { throw ShareFS.error() }
         }
+        willRemoveDirectory?()
         guard unlinkat(rootFD, id.uuidString, AT_REMOVEDIR) == 0 else { throw ShareFS.error() }
         retired = true
         release()
@@ -263,6 +312,15 @@ actor ShareBatch {
 }
 
 enum ShareFS {
+    /// Independent root opens share a kernel lock across stores/processes. This
+    /// closure is synchronous: no provider/import await can retain the catalog.
+    static func withCatalog<T>(_ fd: Int32, _ body: () throws -> T) throws -> T {
+        while flock(fd, LOCK_EX) != 0 {
+            if errno != EINTR { throw error() }
+        }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
+    }
     static func error() -> POSIXError { POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     static func directory(_ name: String, parent: Int32 = AT_FDCWD) throws -> Int32 {
         let fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)

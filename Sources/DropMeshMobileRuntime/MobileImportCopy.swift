@@ -23,7 +23,7 @@ final class MobileImportCopy: @unchecked Sendable {
         if rootDescriptor >= 0 { close(rootDescriptor) }
     }
 
-    func stage(file source: URL, cancellation: MobileImportCancellation) throws -> URL {
+    func stage(file source: URL, cancellation: MobileImportCancellation, maximumBytes: Int64? = nil) throws -> URL {
         lock.lock()
         defer { lock.unlock() }
         try cancellation.check()
@@ -41,6 +41,10 @@ final class MobileImportCopy: @unchecked Sendable {
         guard (sourceInfo.st_mode & S_IFMT) == S_IFREG else {
             throw CocoaError(.fileReadUnsupportedScheme)
         }
+        if let maximumBytes {
+            guard maximumBytes >= 0, sourceInfo.st_size >= 0, sourceInfo.st_size <= maximumBytes
+            else { throw POSIXError(.EFBIG) }
+        }
 
         try cancellation.check()
         let importName = UUID().uuidString
@@ -56,7 +60,8 @@ final class MobileImportCopy: @unchecked Sendable {
         let partialName = ".\(UUID().uuidString).partial"
         do {
             guard fchmod(importDescriptor, 0o700) == 0 else { throw currentPOSIXError() }
-            try copy(sourceDescriptor: sourceDescriptor, to: partialName, in: importDescriptor, cancellation: cancellation)
+            try copy(sourceDescriptor: sourceDescriptor, to: partialName, in: importDescriptor,
+                     cancellation: cancellation, maximumBytes: maximumBytes)
             try cancellation.check()
             guard renameat(importDescriptor, partialName, importDescriptor, destinationName) == 0 else {
                 throw currentPOSIXError()
@@ -112,7 +117,7 @@ final class MobileImportCopy: @unchecked Sendable {
     }
 
     private func copy(sourceDescriptor: Int32, to destinationName: String, in importDescriptor: Int32,
-                      cancellation: MobileImportCancellation) throws {
+                      cancellation: MobileImportCancellation, maximumBytes: Int64?) throws {
         let destinationDescriptor = openat(
             importDescriptor,
             destinationName,
@@ -126,6 +131,7 @@ final class MobileImportCopy: @unchecked Sendable {
 
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         var copiedFirstChunk = false
+        var remaining = maximumBytes
         while true {
             try cancellation.check()
             let count = read(sourceDescriptor, &buffer, buffer.count)
@@ -133,6 +139,12 @@ final class MobileImportCopy: @unchecked Sendable {
             guard count > 0 else {
                 if errno == EINTR { continue }
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            // Enforce on the opened source, before any excess byte is written.
+            // A final read at the exact boundary distinguishes EOF from growth.
+            if let allowance = remaining {
+                guard Int64(count) <= allowance else { throw POSIXError(.EFBIG) }
+                remaining = allowance - Int64(count)
             }
             var written = 0
             while written < count {

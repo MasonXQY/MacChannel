@@ -19,6 +19,7 @@
 		1003A5903020F4AF0358974A /* MobileHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F93CAF1FA68389C9C15291E /* MobileHistoryView.swift */; };
 		10CD1E3054124B4C7C164539 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */; };
 		12CDAFE347F5CE03D7538CB1 /* MobileImportAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 176E158047FFCA24839DF4DD /* MobileImportAdapterTests.swift */; };
+		14ADFE252F70643EACB5B58A /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
 		1D2AE99A4B8027E2DCA9A423 /* DropMeshUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF53E771EBFC31DE081D5B1C /* DropMeshUITests.swift */; };
 		1D3A08FAA40B041DC3A7B590 /* MobileImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA2BEEF139C10D33AB97987F /* MobileImportService.swift */; };
 		249115AE81C5ED79D88E368B /* MobileSendModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 074547827062A225FCBBFA7D /* MobileSendModel.swift */; };
@@ -33,6 +34,7 @@
 		3CE0239CCB871945A20F156F /* MobileAppSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */; };
 		40A8B9487608275D600FC698 /* ShareImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ECB08C826DE1CB5C3AE54CD /* ShareImportService.swift */; };
 		467034C3052FC87F1DF73E87 /* MobileImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA2BEEF139C10D33AB97987F /* MobileImportService.swift */; };
+		4C8AAA30EFD15F822E737779 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */; };
 		4D9D5818597FB0336E97C334 /* ShareBatchStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 177EFC60BD3875CCAFD371C6 /* ShareBatchStore.swift */; };
 		5195A69AC3ECC23D5AF2ABC5 /* MobilePendingShareModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C32534C8AAB5BFD7C9134D2C /* MobilePendingShareModel.swift */; };
 		528D4E5F9CA3B4C09CC17B7E /* MobileSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E77E10F0B52F6FFCB6F5B868 /* MobileSettingsView.swift */; };
@@ -133,7 +135,6 @@
 		074547827062A225FCBBFA7D /* MobileSendModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSendModel.swift; sourceTree = "<group>"; };
 		0C901B8A5C15A0EFA153DE2C /* MobileSendEvidenceHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSendEvidenceHost.swift; sourceTree = "<group>"; };
 		0D830D4E4878EAB29F83D454 /* MobileDurableTrustTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileDurableTrustTests.swift; sourceTree = "<group>"; };
-		1435B53B69422C276CDB1EAF /* en.lproj */ = {isa = PBXFileReference; path = en.lproj; sourceTree = "<group>"; };
 		153086CD801A8EACF3D4EFAE /* MobilePendingShareTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePendingShareTests.swift; sourceTree = "<group>"; };
 		165A287505755A187903CEC1 /* DeviceListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceListView.swift; sourceTree = "<group>"; };
 		176E158047FFCA24839DF4DD /* MobileImportAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileImportAdapterTests.swift; sourceTree = "<group>"; };
@@ -149,7 +150,6 @@
 		485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingCodeTests.swift; sourceTree = "<group>"; };
 		488E0A6D02CEB382A255C8C0 /* ShareBatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareBatchTests.swift; sourceTree = "<group>"; };
 		4B3BFCAC3203F5BC65305D5F /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
-		4C12793FD603DAC8E20FE0B1 /* zh-Hans.lproj */ = {isa = PBXFileReference; path = "zh-Hans.lproj"; sourceTree = "<group>"; };
 		4F93CAF1FA68389C9C15291E /* MobileHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileHistoryView.swift; sourceTree = "<group>"; };
 		503A0FD49848BCA492205AC0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		55CDD4C4BE61DB38367E7760 /* DropMesh.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DropMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -235,8 +235,6 @@
 		3DD42F23C6957BB51840B2A7 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				1435B53B69422C276CDB1EAF /* en.lproj */,
-				4C12793FD603DAC8E20FE0B1 /* zh-Hans.lproj */,
 				6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */,
 				F9D100CE642014031FE52C2E /* Localizable.strings */,
 			);
@@ -425,6 +423,7 @@
 			buildConfigurationList = CE60C3ABA2CFB34978ED9788 /* Build configuration list for PBXNativeTarget "DropMeshShare" */;
 			buildPhases = (
 				A2E0D31CCBF43284F14C0C04 /* Sources */,
+				4904C341A4DF41710B6D136E /* Resources */,
 			);
 			buildRules = (
 			);
@@ -502,6 +501,15 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		4904C341A4DF41710B6D136E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4C8AAA30EFD15F822E737779 /* InfoPlist.strings in Resources */,
+				14ADFE252F70643EACB5B58A /* Localizable.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		D92CB21F7F3EECA51BDC2B15 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;

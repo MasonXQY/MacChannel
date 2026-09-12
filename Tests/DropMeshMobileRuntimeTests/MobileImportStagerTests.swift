@@ -3,6 +3,52 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileImportStagerTests: XCTestCase {
+    func testBoundedCopyAcceptsExactBoundaryAndRejectsExcessWithoutResidue() async throws {
+        let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.source.appendingPathComponent("bounded.bin")
+        try Data(repeating: 1, count: 17).write(to: source)
+        let stager = MobileImportStager(directory: fixture.staging)
+        let exact = try await stager.stage(file: source, maximumBytes: 17)
+        XCTAssertEqual(try Data(contentsOf: exact).count, 17)
+        try await stager.discard(exact)
+        await XCTAssertThrowsErrorAsync { _ = try await stager.stage(file: source, maximumBytes: 16) }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+        try Data().write(to: source)
+        let empty = try await stager.stage(file: source, maximumBytes: 0)
+        XCTAssertEqual(try Data(contentsOf: empty).count, 0)
+        try await stager.discard(empty)
+        await XCTAssertThrowsErrorAsync { _ = try await stager.stage(file: source, maximumBytes: -1) }
+    }
+
+    func testBoundedCopyRejectsGrowthOnPinnedDescriptorBeforeExcessWrite() async throws {
+        let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.source.appendingPathComponent("growing.bin")
+        try Data(repeating: 1, count: 64 * 1024).write(to: source)
+        let stager = MobileImportStager(directory: fixture.staging) {
+            do {
+                let writer = try FileHandle(forWritingTo: source)
+                try writer.seekToEnd(); try writer.write(contentsOf: Data([2])); try writer.close()
+            } catch { XCTFail("fixture growth failed: \(error)") }
+        }
+        await XCTAssertThrowsErrorAsync { _ = try await stager.stage(file: source, maximumBytes: 64 * 1024) }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+        XCTAssertEqual(try Data(contentsOf: source).count, 64 * 1024 + 1)
+    }
+
+    func testBoundedCopyKeepsPinnedSourceWhenPathIsReplaced() async throws {
+        let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.source.appendingPathComponent("replaced.bin")
+        let original = Data(repeating: 3, count: 128 * 1024)
+        try original.write(to: source)
+        let stager = MobileImportStager(directory: fixture.staging) {
+            do { try Data(repeating: 4, count: 192 * 1024).write(to: source, options: .atomic) }
+            catch { XCTFail("fixture replacement failed: \(error)") }
+        }
+        let staged = try await stager.stage(file: source, maximumBytes: Int64(original.count))
+        XCTAssertEqual(try Data(contentsOf: staged), original)
+        XCTAssertEqual(try Data(contentsOf: source).count, 192 * 1024)
+        try await stager.discard(staged)
+    }
     private func fixture() throws -> (root: URL, staging: URL, source: URL) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MobileImportStagerTests-\(UUID().uuidString)", isDirectory: true)

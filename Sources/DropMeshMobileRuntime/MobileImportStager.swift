@@ -33,11 +33,17 @@ public actor MobileImportStager {
     }
 
     public func stage(file source: URL) async throws -> URL {
+        try await stage(file: source, maximumBytes: nil)
+    }
+
+    /// Optional byte ceiling enforced on the pinned source while streaming.
+    /// Nil preserves the original unbounded import policy.
+    public func stage(file source: URL, maximumBytes: Int64?) async throws -> URL {
         let cancellation = MobileImportCancellation()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 queue.addOperation { [copy] in
-                    continuation.resume(with: Result { try copy.stage(file: source, cancellation: cancellation) })
+                    continuation.resume(with: Result { try copy.stage(file: source, cancellation: cancellation, maximumBytes: maximumBytes) })
                 }
             }
         } onCancel: { cancellation.cancel() }
