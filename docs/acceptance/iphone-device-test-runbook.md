@@ -37,7 +37,10 @@ the unrelated iOS app in App Store Connect.
    a separate request and verify it never becomes a trusted send target.
 3. While iPhone remains foreground, send a small text fixture, photo and large
    binary from Mac to iPhone. Verify completed-only visibility in the actual
-   Documents/DropMesh receiving folder. The Files container entry can also be
+   Documents/DropMesh receiving folder. Leave Home visible during completion and
+   verify the received item appears without pull-to-refresh or History navigation;
+   this is the physical acceptance for the incoming snapshot invalidation path.
+   The Files container entry can also be
    named DropMesh, so record both container and inner folder labels rather than
    omitting the inner folder. Compare exact output hashes through an authorized
    device-container export or explicit return transfer of the received file.
