@@ -2,6 +2,14 @@
 
 ## Current iPhone work — 2026-09-12
 
+Latest cursor: history refresh correction8a7ae7d independently accepted;
+87nativeunit+9UI and both unsigned app builds/scoped audits pass. Sole active
+implementer iphone_share_target starts at a7712c6 with the payload-only,
+manual-open Share brief. No physical iPhone detected. Remaining source gates:
+Share review, default logging inventory, integrated and whole-branch review;
+then actual connected-device signing and unchanged-Mac interoperability.
+No Mac installation, production, Store or Mac B action occurred.
+
 Continuous subagent-driven integration is now authorized. Current code milestone
 0efdcde adds private bounded file import staging; independent review initially
 found a destructive symlink-containment bug and blocking FIFO handling, both
