@@ -334,3 +334,150 @@ and test sessions were drained before handoff. No installed/physical iPhone,
 Mac interoperability, real production pairing, actual keychain, signing, Store,
 protocol, or server verification is claimed. Full SwiftPM/Mac regression remains
 the coordinator's responsibility.
+
+## Durable presentation correction completed — 2026-09-12
+
+Source `60df447b597c1d90a1e15277ff8f5be101368ef3`, combined with lifecycle source
+`162e1a1`. This section supersedes the earlier durability blocker. The coordinator
+explicitly authorized a narrowly additive saved-state acknowledgement in the
+existing Core snapshot store and mobile identity context, plus covering tests.
+No wire/security protocol, file schema, key policy or cryptography changed.
+
+### Exact checkpoint and current-membership gate
+
+`AuthenticatedTrustState` carries the exact signed snapshot and authentication
+records already written in one existing payload. The original Void save methods
+forward through the same write implementation. The additive method returns nil
+for no signed snapshot, and creates/publishes its receipt only after file write,
+permissions and generation-anchor storage all succeed. The existing retained
+store exposes its current receipt and a bounded update stream; authenticated
+load establishes the startup baseline. MobileIdentityContext forwards these
+surfaces without constructing a second store, identity or database.
+
+Actor reentrancy was assessed explicitly: repository capture crosses an await,
+so an older capture can resume after a newer checkpoint. A small shared guard
+returns the already saved newer state instead of rewriting an older generation.
+Conflicting signatures at equal generation fail closed. Equal-generation normal
+checkpoints still execute the original writes and failure handling; an initial
+optimization skipping them was caught by a behavioral regression and removed.
+Thus no receipt asserts that a newer repository read was saved, and stale
+completion cannot roll the checkpoint/anchor backward within this retained store.
+This is not a new cross-process storage transaction protocol.
+
+`MobileDurableTrust` is a 40-line fixture-free presentation helper compiled into
+shipping and inert host. It reads the current store, authentication records,
+then current store again, accepting a coherent generation only. At most three
+attempts are made; cancellation or sustained mutation yields no eligible IDs.
+It intersects durable membership with current membership, preserving immediate
+revocation. For newer in-memory generations it additionally requires identical
+peer-related signed proofs, preventing old saved eligibility from admitting a
+fresh pairing of a removed ID. An unrelated unsaved new peer is excluded while
+an unchanged peer with saved proofs stays visible. It never accumulates a set
+of forever-admitted IDs or consumes callback order as storage evidence.
+
+Matching generation admits the authenticated startup baseline, including legacy
+payloads without auxiliary proofs. During a later unsaved mutation, such legacy
+peers are conservatively hidden until the next successful checkpoint because
+there is no per-peer proof of unchanged membership. This deliberate limitation
+has a real legacy-file regression and does not reset or rewrite trust merely to
+populate presentation metadata.
+
+Production composition adds the durable update subscription alongside runtime
+and repository subscriptions, all owned/joined by existing observation cleanup.
+Snapshots use the helper rather than raw membership. Shipping assembly remains
+excluded from the inert host; real native tests separately use synthetic secrets,
+temporary files, real repositories/coordinators, memory pairing transport and
+actual authenticated persistence. Views, resources and layout are unchanged.
+
+### RED/GREEN and final verification
+
+All names below are under `.build/`; native commands use the common Xcode 16.4
+command/destination/cache arguments from the preceding correction section.
+Native `.xcresult` basenames also identify the matching redirected `.log`.
+
+- `native-composition-durability-api-red.log`: `swift test --disable-automatic-resolution --filter TrustPersistenceReceiptTests`, exit 1 for missing
+  `persistLatestState`/`persistedState` APIs. `-context-red.log` used filter
+  `MobileIdentityContextTests` and failed for the missing forwarding APIs.
+  These are API REDs, not behavioral REDs. Intermediate compile corrections
+  (`-api-green.log`, `-core-mobile-green.log`) fixed a missing optional return
+  and the test's missing `@testable` import. `-api-green-02.log` failed one
+  fixture count assertion because real trust keys include the owner; corrected
+  to count peers plus owner. None of these failed logs is called GREEN.
+- `native-composition-durability-core-mobile-green-02.log`: filter
+  `'TrustPersistenceReceiptTests|MobileIdentityContextTests'`, exit 0, 10 tests.
+- `native-composition-durability-helper-api-red.xcresult`: native gate class
+  filter, exit 65 because the new helper type was absent.
+- **Behavioral RED** `native-composition-durability-behavior-red.xcresult`:
+  `-only-testing:DropMeshTests/MobileDurableTrustTests`, exit 65, 3 tests and
+  **7 expected assertion failures** using the extracted raw-membership behavior.
+  Real bilateral publication admitted the row and eligibility during the held
+  save (2 failures) and actual generation-anchor failure (2); a real old receipt
+  admitted a removed/re-paired ID and its unsaved row (2); an unrelated unsaved
+  authorization was admitted (1). These tests did not preconfigure desired
+  trusted snapshots. Successful retry used the actual authenticated store.
+- `native-composition-durability-behavior-green.xcresult`: gate and model class
+  filters, exit 0, 18 tests passing after the helper correction.
+- **Behavioral RED** `native-composition-durability-repeat-red.log`:
+  `swift test --disable-automatic-resolution --filter TrustPersistenceReceiptTests.testRepeatedCheckpointRetainsExistingWriteAndFailureSemantics`,
+  exit 1, one expected failure: the original Void caller skipped a requested
+  repeated checkpoint and failed to surface an injected anchor error. Removing
+  only the equal-generation early return restored existing write semantics.
+- Final package-focused GREEN:
+  `swift test --disable-automatic-resolution --filter 'TrustPersistenceReceiptTests|MobileIdentityContextTests|IdentityTests|MobilePairingSessionTests'`,
+  log `native-composition-durability-package-focused.log`, exit 0,
+  **51 tests, zero failures**, 0.871 seconds, no warning/error matches.
+  Includes no-snapshot, failed-anchor/no-receipt, exact receipt/reload, older
+  capture/no rollback, concurrent mutation/saves, and original identity/pairing
+  compatibility tests.
+- Final native focused GREEN: gate/model class filters and result basename
+  `native-composition-durability-focused-final`, exit 0, **19 tests**, including
+  the added authenticated legacy baseline regression.
+- Complete native suite (no class filter), result basename
+  `native-composition-durability-complete`: exit 0, **35 unit tests + 3 UI tests**,
+  zero failures/skips. Unit 0.959 seconds, UI 34.834 seconds. All original
+  26 unit + 3 UI tests and the five lifecycle regressions remain.
+- Maximum Dynamic Type: same two bilingual UI class/method filters as the
+  preceding section, result basename `native-composition-durability-large`;
+  exit 0, **2 UI tests**, zero failures. Original `large` was read before setting
+  `accessibility-extra-extra-extra-large`, then restored to `large` and read back.
+- Both original unsigned shipping build commands rerun, logs
+  `native-composition-durability-shipping-simulator.log` and `-shipping-device.log`:
+  exit 0, BUILD SUCCEEDED. Known AppIntents metadata-extraction warnings remain;
+  no Swift compiler warning/error matches. No warning suppression was added.
+- Scoped `bash Scripts/check-sensitive-logging.sh iPhone/App/*.swift` and
+  `bash Scripts/audit-privacy.sh --static-only`: `-logging.log` and `-privacy.log`
+  both PASS. Direct native production pasteboard inventory
+  `rg -n '(UIPasteboard|NSPasteboard)' iPhone/App` is empty; exact empty output is
+  `native-composition-durability-native-pasteboard-inventory.log`.
+  Coordinator's final full run also executes and passes the full production
+  pasteboard source inventory test, including native sources (1.236 seconds).
+
+Source was frozen before final verification, with no subsequent source changes.
+Coordinator full SwiftPM log `native-durability-integrated-full.log` confirms
+**985 tests, 5 existing skips, zero failures**, exit 0, 51.581 seconds and no
+warning/error matches. Coordinator reports both Mac release builds passed on
+the same frozen source: Store 32.24 seconds, Direct 1.45 seconds, both exit 0,
+no warning/error matches; logs `native-durability-mac-store-build.log` and
+`native-durability-mac-direct-build.log`. These are source/build results, not
+installed Mac interoperability or production acceptance.
+
+### Scope and self-review
+
+Generated membership inventory `native-composition-durability-target-membership.log`
+was read from the actual PBX source phases: only the helper is added to shipping
+and host; the new integration test belongs only to DropMeshTests. No project.yml,
+scheme, resource or production entrypoint fixture changes were needed. Modified
+files are the Core snapshot store, mobile identity context, their two covering
+test files, native session comment/production composition/new helper/new test,
+generated project, and this report. Lifecycle files are in the prior source
+commit. `git diff --check` passes; only owned paths were committed.
+
+Self-review covered receipt creation after all existing save boundaries,
+concurrent capture ordering, preservation of repeated Void writes, stable
+cross-actor proof reads, immediate local removal, stale re-pair receipt rejection,
+legacy fallback, subscription cancellation and test-host exclusion. No known
+source defect remains; independent combined review is still the next gate.
+No new visual captures were exported or inspected. Previously tracked captures
+remain unchanged-layout evidence. All implementer test/build sessions drained;
+no caches purged, actual keychain accessed, installed app replaced, physical
+iPhone/real network pairing performed, or signing/Store/server/protocol changed.
