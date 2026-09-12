@@ -54,7 +54,20 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   AX-XXXL. Testsuseinertseparatehost, actualshippingassemblyexcludedfromhost;
   screenshotsshowUI, notproductionconnectivity. Independent review Needs fixes:
   durable-new-peer presentation and expected-interruption diagnostics. Bounded
-  correction active; prior passing UI tests do not close those findings.
+  correction162e1a1/60df447 (report67ae2e8) is now implemented; independent
+  combined re-review is pending. Prior passing UI tests did not close findings.
+- Exact correction source:35nativeunit+3UI and2maximum-type bilingualUI tests
+  pass;51Core/mobile focused tests cover exact saved-state acknowledgement,
+  failed checkpoints and pairing admission. Real pairing with held/failed
+  persistence reproduced7behavioral assertion failures before the gate fix.
+  Root full985tests/5existing skips/0failures51.581seconds exits0, log
+  `.build/native-durability-integrated-full.log`, no warning/error matches.
+  Mac release Store32.24s/Direct1.45s builds exit0, no warning/error matches,
+  `.build/native-durability-mac-store-build.log` and `-direct-build.log`.
+  Both unsigned actual iPhone app builds pass; AppIntentswarning remains
+  disclosed. No views/resources changed; prior captures are unchanged-layout
+  evidence, not new screenshots. Legacy trust without per-peer proofs remains
+  conservatively hidden during newer unsaved mutations until a checkpoint.
 - Native transfer/picker/
   history UI and Share integration remain pending. Old runtime test
   fixture temporary-directory cleanup is a documented nonblocking hygiene debt,
