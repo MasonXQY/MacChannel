@@ -55,7 +55,10 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   screenshotsshowUI, notproductionconnectivity. Independent review Needs fixes:
   durable-new-peer presentation and expected-interruption diagnostics. Bounded
   correction162e1a1/60df447 (report67ae2e8) is now implemented; independent
-  combined re-review is pending. Prior passing UI tests did not close findings.
+  combined re-review accepted durable admission but found one retry diagnostic
+  gap. Focused fix8de36d2 is independently compliant/Approved with no remaining
+  Critical/Important.41nativeunit+3UI, bothunsignedshippingbuilds/scopedprivacy
+  pass and rootcheckedlogs. Prior passing tests did not replace independent review.
 - Exact correction source:35nativeunit+3UI and2maximum-type bilingualUI tests
   pass;51Core/mobile focused tests cover exact saved-state acknowledgement,
   failed checkpoints and pairing admission. Real pairing with held/failed
@@ -68,8 +71,8 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   disclosed. No views/resources changed; prior captures are unchanged-layout
   evidence, not new screenshots. Legacy trust without per-peer proofs remains
   conservatively hidden during newer unsaved mutations until a checkpoint.
-- Native transfer/picker/
-  history UI and Share integration remain pending. Old runtime test
+- Native transfer/picker slice is now active atbase8de36d2;
+  history/settings UI and Share integration remain pending. Old runtime test
   fixture temporary-directory cleanup is a documented nonblocking hygiene debt,
   since scene stop does not mean outbound terminal persistence is quiescent.
 

@@ -43,9 +43,14 @@ mobile context is implemented60df447/report67ae2e8, preserving old callers,
 persisted schema, wire protocol and Mac behavior.35nativeunit+3UI+2largest-typeUI
 and51focused package tests pass. Root full985tests/5existing skips/0failures
 51.581s exits0; Mac Store32.24s/Direct1.45s release builds both exit0 with no
-warning/error matches. Independent combined re-review is active. No build/test
-session remains running. Send preflight confirms actual publicsend-return is
-the import-copy release boundary; Photos must explicitly cancel/join its copy.
+warning/error matches. Combined review accepted the durability gate but found
+an in-foreground retry recovery diagnostic gap; focused fix8de36d2 is now
+independently Approved,41nativeunit+3UI and bothunsignedshippingbuilds/scoped
+audits pass. No Critical/Important remains in composition. Fresh agent
+iphone_native_send is active atbase8de36d2, scoped native Files/Photos/send
+integration per iphone-native-send-brief.md. Send preflight confirms actual
+publicsend-return is the import-copy release boundary; Photos must explicitly
+cancel/join its copy. Root has no active build/test session.
 Trackedfinalscreenshots inspected byroot; source/logtimeline mismatch investigated
 without establishing a cache defect. AppIntentsmetadatawarning disclosed.
 Picker/send, history/settings UI and Share are subsequent independently
