@@ -4,6 +4,15 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
 
 ## Verified this continuation
 
+- Share production96e35d0/reportf57aa0a:103nativeunit+11UI,16focused and bilingual
+  AX flows pass; both unsigned embedded-extension builds pass. Root inspected6
+  of18retainedcaptures, actual link output and reported logs. Independent review
+  nevertheless found missing actual extension localization and two storage
+  boundary defects. Fresh bounded correction is active; not accepted for use.
+  Root full package on pre-correction source:985tests,5existing skips,0failures,
+  48.194s exit0 (.build/iphone-share-integrated-full.log). Mac release Store/Direct
+  builds pass0.31s/0.80s, logs iphone-share-mac-{store,direct}-build.log; no install.
+
 - Native history/settings production5f8e50d and evidence/reportf79d749:84unit+
   9UI pass; final EN/ZHmaximumtype flows pass, with32retainedscreenshots. Both
   actual app builds pass(signingdisabled); deviceunsigned, simulatornormal
