@@ -4,6 +4,18 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileForegroundRuntimeTests: XCTestCase {
+    func testCorruptIndexAtConstructionReportsAvailabilityWithoutBlockingStartup() async throws {
+        let fixture = try await RuntimeFixture.make(corruptIndex: true)
+        let initial = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(initial.historyAvailabilityFailure, .receivedOutputIndexUnavailable)
+        try await fixture.runtime.startForeground()
+        let online = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(online.state, .online)
+        XCTAssertNil(online.failure)
+        let history = try await fixture.runtime.history()
+        XCTAssertTrue(history.isEmpty)
+        await fixture.runtime.stopForeground()
+    }
     func testHiddenSendHoldsReentryThroughResultAccounting() async throws {
         let fixture = try await RuntimeFixture.make()
         let runtime = fixture.runtime
@@ -144,21 +156,68 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         let source = await fixture.networks.lastSource
         let manifest = try TransferManifest.build(from: fixture.file)
         let pair = RuntimeChannel.pair()
+        let stream = await fixture.runtime.snapshots()
+        let firstCompletion = Task {
+            for await snapshot in stream where !snapshot.received.isEmpty {
+                // Synchronous filesystem observation at the first delivered completion.
+                return FileManager.default.fileExists(atPath: fixture.layout.receivedOutputIndexFile.path)
+            }
+            return false
+        }
         let sender = Task { try await SendSession(manifest).run(on: pair.0) }
         try await source.offer(IncomingTransferConnection(source: peer.id, transferID: manifest.id, channel: pair.1))
         _ = try await sender.value
+        let alreadyRecorded = await firstCompletion.value
+        XCTAssertTrue(alreadyRecorded)
         try await eventually { await fixture.runtime.currentSnapshot().received.count == 1 }
         let snapshot = await fixture.runtime.currentSnapshot()
         let result = try XCTUnwrap(snapshot.received.first)
         XCTAssertEqual(result.transferID, manifest.id)
         XCTAssertEqual(result.receivedURLs.first?.deletingLastPathComponent(), fixture.layout.receiveDirectory)
         XCTAssertEqual(try Data(contentsOf: XCTUnwrap(result.receivedURLs.first)), Data("fixture".utf8))
+        let history = try await fixture.runtime.history()
+        XCTAssertEqual(history.first?.id, result.transferID)
+        XCTAssertEqual(history.first?.availableURL, result.receivedURLs.first)
+        let reopenedIndex = MobileReceivedOutputIndex(url: fixture.layout.receivedOutputIndexFile,
+            receiveDirectory: fixture.layout.receiveDirectory, database: fixture.persistence.database)
+        let durableURL = await reopenedIndex.availableURL(for: result.transferID)
+        XCTAssertEqual(durableURL, result.receivedURLs.first)
         let badPair = RuntimeChannel.pair()
         try await source.offer(IncomingTransferConnection(source: peer.id, transferID: TransferID(rawValue: UUID()), channel: badPair.1))
         await badPair.0.close()
         try await eventually { await fixture.runtime.currentSnapshot().failure == .receive }
         let failed = await fixture.runtime.currentSnapshot()
         XCTAssertEqual(failed.received.count, 1)
+        await fixture.runtime.stopForeground()
+    }
+
+    func testCorruptIndexDoesNotBlockNetworkOrSuccessfulReceiveSnapshot() async throws {
+        let fixture = try await RuntimeFixture.make()
+        // The owner already exists: force its first index publication to fail.
+        try FileManager.default.createDirectory(at: fixture.layout.receivedOutputIndexFile, withIntermediateDirectories: false)
+        let peer = try DeviceIdentity.loadOrCreate(keychain: RuntimeSecrets(), policy: MobileIdentityPolicy.policy)
+        _ = try await fixture.repository.issueAuthorization(subject: peer.id, subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        try await fixture.runtime.startForeground()
+        let source = await fixture.networks.lastSource
+        let manifest = try TransferManifest.build(from: fixture.file)
+        let pair = RuntimeChannel.pair()
+        let sender = Task { try await SendSession(manifest).run(on: pair.0) }
+        try await source.offer(IncomingTransferConnection(source: peer.id, transferID: manifest.id, channel: pair.1))
+        _ = try await sender.value
+        try await eventually { await fixture.runtime.currentSnapshot().received.count == 1 }
+        let snapshot = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(snapshot.state, .online)
+        XCTAssertNil(snapshot.failure)
+        XCTAssertEqual(snapshot.historyAvailabilityFailure, .receivedOutputIndexUnavailable)
+        let history = try await fixture.runtime.history()
+        XCTAssertEqual(history.first?.phase, .completed)
+        XCTAssertNil(history.first?.availableURL)
+        await fixture.runtime.stopForeground()
+        try await fixture.runtime.startForeground()
+        let restores = await fixture.probe.restores
+        XCTAssertEqual(restores, 1)
+        let persisted = try await fixture.runtime.history()
+        XCTAssertEqual(persisted.first?.phase, .completed)
         await fixture.runtime.stopForeground()
     }
 
@@ -476,10 +535,11 @@ private struct RuntimeFixture {
     let repository: TrustRepository
     let layout: MobileStorageLayout
     let trustPersistence: RuntimeTrustPersistence
-    static func make() async throws -> Self {
+    static func make(corruptIndex: Bool = false) async throws -> Self {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mobile-runtime-\(UUID())")
         let layout = MobileStorageLayout(applicationSupport: root.appendingPathComponent("Support"), documents: root.appendingPathComponent("Documents"))
         let context = try await MobileIdentityContext.load(layout: layout, secrets: RuntimeSecrets())
+        if corruptIndex { try Data("invalid".utf8).write(to: layout.receivedOutputIndexFile) }
         let database = try TransferDatabase(url: layout.stateDirectory.appendingPathComponent("transfers.sqlite3"))
         let persistence = RuntimePersistence(database)
         let accounting = RuntimeAccounting()

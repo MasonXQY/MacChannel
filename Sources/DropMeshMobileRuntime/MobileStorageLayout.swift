@@ -6,6 +6,8 @@ public struct MobileStorageLayout: Sendable {
     public let receiveDirectory: URL
     public var stagingDirectory: URL { stateDirectory.appendingPathComponent("staging", isDirectory: true) }
     public var trustFile: URL { stateDirectory.appendingPathComponent("trust.json") }
+    public var transferDatabaseFile: URL { stateDirectory.appendingPathComponent("transfers.sqlite3") }
+    public var receivedOutputIndexFile: URL { stateDirectory.appendingPathComponent("received-outputs-v1.json") }
 
     public init(applicationSupport: URL, documents: URL) {
         stateDirectory = applicationSupport.standardizedFileURL.appendingPathComponent("DropMesh", isDirectory: true)

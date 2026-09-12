@@ -23,6 +23,7 @@ public struct MobileRuntimeSnapshot: Sendable {
     public let received: [TransferReceiveResult]
     public let localNetworkAvailable: Bool
     public let failure: MobileRuntimeFailure?
+    public let historyAvailabilityFailure: MobileHistoryAvailabilityFailure?
 }
 
 /// Retain exactly one owner after identity bootstrap for the application process.
@@ -45,6 +46,8 @@ public actor MobileForegroundRuntime {
     private let layout: MobileStorageLayout
     // Neither database nor coordinator is replaced or closed at scene changes.
     private let database: TransferDatabase
+    private let transferHistory: MobileTransferHistory
+    private var historyAvailabilityFailure: MobileHistoryAvailabilityFailure?
     private let persistence: any TransferSnapshotPersistence
     private let persistTrust: @Sendable () async throws -> Void
     private let makeNetwork: NetworkFactory
@@ -83,8 +86,12 @@ public actor MobileForegroundRuntime {
         identity = context.identity
         repository = context.repository
         layout = context.layout
-        do { database = try TransferDatabase(url: context.layout.stateDirectory.appendingPathComponent("transfers.sqlite3")) }
+        do { database = try TransferDatabase(url: context.layout.transferDatabaseFile) }
         catch { throw MobileRuntimeFailure.storage }
+        let outputs = MobileReceivedOutputIndex(url: context.layout.receivedOutputIndexFile,
+            receiveDirectory: context.layout.receiveDirectory, database: database)
+        transferHistory = MobileTransferHistory(database: database, outputs: outputs)
+        historyAvailabilityFailure = outputs.initialAvailabilityFailure
         persistence = database
         persistTrust = { try await context.persistTrust() }
         let identity = context.identity
@@ -105,13 +112,29 @@ public actor MobileForegroundRuntime {
          beforeSendAccounting: @escaping @Sendable () async -> Void = { }) {
         self.identity = identity; self.repository = repository; self.layout = layout
         self.database = database; self.persistence = persistence; self.persistTrust = persistTrust
+        let outputs = MobileReceivedOutputIndex(url: layout.receivedOutputIndexFile,
+            receiveDirectory: layout.receiveDirectory, database: database)
+        transferHistory = MobileTransferHistory(database: database, outputs: outputs)
+        historyAvailabilityFailure = outputs.initialAvailabilityFailure
         self.makeNetwork = makeNetwork; self.onRestored = onRestored
         self.beforeSendAccounting = beforeSendAccounting
     }
 
     public func currentSnapshot() -> MobileRuntimeSnapshot {
         MobileRuntimeSnapshot(state: state, foregroundRequested: desiredForeground, devices: devices, transfers: transfers,
-            received: received, localNetworkAvailable: localAvailable, failure: failure)
+            received: received, localNetworkAvailable: localAvailable, failure: failure,
+            historyAvailabilityFailure: historyAvailabilityFailure)
+    }
+
+    public func history(limit: Int = 100) async throws -> [MobileTransferHistoryItem] {
+        let items = try await transferHistory.items(limit: limit)
+        historyAvailabilityFailure = await transferHistory.availabilityFailure
+        return items
+    }
+
+    /// Resolve immediately before presenting an open/share action.
+    public func availableReceivedURL(for transferID: TransferID) async -> URL? {
+        await transferHistory.availableURL(for: transferID)
     }
 
     deinit {
@@ -425,9 +448,14 @@ public actor MobileForegroundRuntime {
         guard desiredForeground, discoveryEnabled, graphEpoch == generation, epoch == generation else { return }
         localAvailable = value; publish()
     }
-    private func receiveFinished(_ result: TransferReceiveResult?, generation: UInt64) {
+    private func receiveFinished(_ result: TransferReceiveResult?, generation: UInt64) async {
         // A genuine publication which won the stop race is still a real completion.
-        guard graphEpoch == generation, let result else { return }
+        guard graphEpoch == generation, let result, !result.receivedURLs.isEmpty else { return }
+        // IncomingTransferListener retains its runner through this awaited call;
+        // stop/re-entry therefore cannot retire this graph before indexing ends.
+        await transferHistory.recordCompletedReceive(result)
+        historyAvailabilityFailure = await transferHistory.availabilityFailure
+        guard graphEpoch == generation else { return }
         received.append(result)
         if received.count > 200 { received.removeFirst(received.count - 200) }
         publish()
