@@ -34,7 +34,13 @@ on that exact source. Native composition/test-host/lifecycle/paired-list slice
 sourcec41a409/report9c8d609 passes26unit+3UI and2largest-typebilingualUI tests,
 bothunsignedshippingbuilds andscopedprivacychecks. Independent review found
 newpeerpresentation before pairing persistence and sticky expected-interruption
-errors; boundednativecorrection is active, review Needs fixes.
+errors; lifecycle correction162e1a1/report568cd31 passes31nativeunit+3UI,
+2largest-typeUI, bothunsignedshippingbuilds and scoped audits. The durability
+correction remains active: root verified that the old Void persistence API can
+return without writing and the repository generation is not disk confirmation.
+A narrowly additive exact saved-state acknowledgement in the snapshot store and
+mobile context is authorized, preserving old callers, persisted schema, wire
+protocol and Mac behavior. Independent combined re-review is still required.
 Trackedfinalscreenshots inspected byroot; source/logtimeline mismatch investigated
 without establishing a cache defect. AppIntentsmetadatawarning disclosed.
 Picker/send, history/settings UI and Share are subsequent independently
