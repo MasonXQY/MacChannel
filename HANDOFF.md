@@ -46,9 +46,12 @@ and51focused package tests pass. Root full985tests/5existing skips/0failures
 warning/error matches. Combined review accepted the durability gate but found
 an in-foreground retry recovery diagnostic gap; focused fix8de36d2 is now
 independently Approved,41nativeunit+3UI and bothunsignedshippingbuilds/scoped
-audits pass. No Critical/Important remains in composition. Fresh agent
-iphone_native_send is active atbase8de36d2, scoped native Files/Photos/send
-integration per iphone-native-send-brief.md. Send preflight confirms actual
+audits pass. No Critical/Important remains in composition. Native Files/Photos
+adapter sourcea0c1251 plusPOSIXerrorfixf76b037/reporte89f6a9a is independently
+Approved;61nativeunit+3UI,20focused,bothunsignedshippingbuilds/scoped audits pass.
+This is adapter ownership, not yet send UI. Bounded Photos presentation preflight
+is running; next fresh send/lifecycle/UI slice uses iphone-native-send-brief.md.
+Send preflight confirms actual
 publicsend-return is the import-copy release boundary; Photos must explicitly
 cancel/join its copy. Root has no active build/test session.
 Trackedfinalscreenshots inspected byroot; source/logtimeline mismatch investigated

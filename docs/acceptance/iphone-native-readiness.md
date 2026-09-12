@@ -71,7 +71,12 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   disclosed. No views/resources changed; prior captures are unchanged-layout
   evidence, not new screenshots. Legacy trust without per-peer proofs remains
   conservatively hidden during newer unsaved mutations until a checkpoint.
-- Native transfer/picker slice is now active atbase8de36d2;
+- Native Files/Photos adaptera0c1251 plusPOSIXfixf76b037/report89f6a9a is
+  independently compliant/Approved.61unit+3UI,20focused,bothunsignedshipping
+  builds/scopedaudits pass; rootcheckedlogs. Actual-type ENOSPC behavioralRED
+  reproduced incorrect provider guidance before fix; source-access categories
+  preserved. Provider tests combine controlled delivery with real local copies,
+  not actual Photos/iCloud. Files/Photos send UI integration is next;
   history/settings UI and Share integration remain pending. Old runtime test
   fixture temporary-directory cleanup is a documented nonblocking hygiene debt,
   since scene stop does not mean outbound terminal persistence is quiescent.
