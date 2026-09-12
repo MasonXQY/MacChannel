@@ -1,9 +1,31 @@
 import Foundation
 import XCTest
-import MacChannelCore
+@testable import MacChannelCore
 @testable import DropMeshMobileRuntime
 
 final class MobileIdentityContextTests: XCTestCase {
+    func testPersistedStateForwardsReceiptAndAuthenticatedReloadBaseline() async throws {
+        let (root, layout) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let secrets = FixtureSecrets()
+        let context = try await MobileIdentityContext.load(layout: layout, secrets: secrets)
+        let initial = await context.persistedTrustState()
+        XCTAssertNil(initial)
+        let peer = try DeviceIdentity.ephemeral()
+        _ = try await context.repository.issueAuthorization(subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        let unsaved = await context.persistedTrustState()
+        XCTAssertNil(unsaved)
+        let saved = try await context.persistTrustState()
+        XCTAssertNotNil(saved)
+        let reloaded = try await MobileIdentityContext.load(layout: layout, secrets: secrets)
+        let baseline = await reloaded.persistedTrustState()
+        XCTAssertEqual(baseline?.snapshot.signature, saved?.snapshot.signature)
+        var updates = await context.persistedTrustUpdates().makeAsyncIterator()
+        let observed = await updates.next()
+        XCTAssertEqual(observed??.snapshot.signature, saved?.snapshot.signature)
+    }
+
     private func fixture() throws -> (URL, MobileStorageLayout) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let layout = MobileStorageLayout(

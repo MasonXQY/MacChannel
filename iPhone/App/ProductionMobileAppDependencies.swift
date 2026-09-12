@@ -8,6 +8,7 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     private let context: MobileIdentityContext<KeychainStore>
     private let runtime: MobileForegroundRuntime
     private var names: MobilePeerNames
+    private let durableTrust: MobileDurableTrust
 
     static func load() async throws -> ProductionMobileAppDependencies {
         let manager = FileManager.default
@@ -22,19 +23,22 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     }
     private init(context: MobileIdentityContext<KeychainStore>) throws {
         self.context = context
+        durableTrust = MobileDurableTrust(repository: context.repository,
+            persistedState: { await context.persistedTrustState() })
         runtime = try MobileForegroundRuntime(context: context)
         names = MobilePeerNames(url: context.layout.stateDirectory.appendingPathComponent("peer-display-names.json"))
     }
     func snapshot() async -> MobileAppSnapshot {
         let current = await runtime.currentSnapshot()
-        let trust = await context.repository.currentTrustStore()
+        let trustedIDs = await durableTrust.trustedIDs()
         return MobileAppSnapshot(state: current.state, localID: context.identity.id,
-            trustedIDs: trust.trustedDeviceIDs, reachable: current.devices,
+            trustedIDs: trustedIDs, reachable: current.devices,
             names: names.values, failure: current.failure)
     }
     func observe(_ changed: @escaping @Sendable () async -> Void) async {
         let runtime = runtime
         let repository = context.repository
+        let context = context
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
                 for await _ in await runtime.snapshots() {
@@ -44,6 +48,12 @@ actor ProductionMobileAppDependencies: MobileAppSession {
             }
             group.addTask {
                 for await _ in await repository.updates() {
+                    guard !Task.isCancelled else { break }
+                    await changed()
+                }
+            }
+            group.addTask {
+                for await _ in await context.persistedTrustUpdates() {
                     guard !Task.isCancelled else { break }
                     await changed()
                 }

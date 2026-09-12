@@ -25,12 +25,15 @@
 		7C943D8B582B57DBD68514DA /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
 		7CEEB9426D37F5043AD379EE /* DropMeshMobileRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = B3BD8A034BDBD714D3424FD5 /* DropMeshMobileRuntime */; };
 		7D0F56ABB61C94B99E847425 /* MobilePeerNamesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7C3622D0AB272D8348A6123 /* MobilePeerNamesTests.swift */; };
+		814B96CE1865C30E735D2BBB /* MobileDurableTrustTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D830D4E4878EAB29F83D454 /* MobileDurableTrustTests.swift */; };
 		884D176010840BF6A70953FB /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */; };
 		8A6FB7D790896BABEA8B96C2 /* DeviceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165A287505755A187903CEC1 /* DeviceListView.swift */; };
 		8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74B9233E95B118EE8765EB /* PairingModel.swift */; };
 		A99AE515B936217BC92BFA70 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
 		BA8B4AA27E3147C730829FAE /* DeviceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165A287505755A187903CEC1 /* DeviceListView.swift */; };
+		BC1FA08C2313214F2BEF951F /* MobileDurableTrust.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A86AE9D8953225A3B12E9DF /* MobileDurableTrust.swift */; };
 		BDADDE4DC3C88D58AD500C9A /* MacChannelCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3A495EAD0B084B673ADD6A55 /* MacChannelCore */; };
+		C72A722428277689A692EDFD /* MobileDurableTrust.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A86AE9D8953225A3B12E9DF /* MobileDurableTrust.swift */; };
 		CFAEEAE1A060A1F3F7C7B176 /* MobileAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1CE3FC3CBFF98252640663E /* MobileAppModelTests.swift */; };
 		D28D21EB6A38C52077D01F77 /* MacChannelCore in Frameworks */ = {isa = PBXBuildFile; productRef = F59CA89E2A0504EFF940B405 /* MacChannelCore */; };
 		D2B45C770C12B8ED96E26B1D /* MobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */; };
@@ -59,6 +62,7 @@
 
 /* Begin PBXFileReference section */
 		005D821FDE939BCC0EB4B8C7 /* DropMeshTestHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshTestHostApp.swift; sourceTree = "<group>"; };
+		0D830D4E4878EAB29F83D454 /* MobileDurableTrustTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileDurableTrustTests.swift; sourceTree = "<group>"; };
 		165A287505755A187903CEC1 /* DeviceListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceListView.swift; sourceTree = "<group>"; };
 		17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppSession.swift; sourceTree = "<group>"; };
 		1A74B9233E95B118EE8765EB /* PairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModel.swift; sourceTree = "<group>"; };
@@ -69,6 +73,7 @@
 		503A0FD49848BCA492205AC0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		55CDD4C4BE61DB38367E7760 /* DropMesh.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DropMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		59A6F956BDE3FF2F5A32C7AF /* DropMeshApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshApp.swift; sourceTree = "<group>"; };
+		5A86AE9D8953225A3B12E9DF /* MobileDurableTrust.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileDurableTrust.swift; sourceTree = "<group>"; };
 		64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppModel.swift; sourceTree = "<group>"; };
 		71782A07642E85FEBFFB472C /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		763C3E398CE966AF9B4763BB /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -159,6 +164,7 @@
 			isa = PBXGroup;
 			children = (
 				D1CE3FC3CBFF98252640663E /* MobileAppModelTests.swift */,
+				0D830D4E4878EAB29F83D454 /* MobileDurableTrustTests.swift */,
 				C7C3622D0AB272D8348A6123 /* MobilePeerNamesTests.swift */,
 				485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */,
 				4835F265E8852B7C557B14C0 /* PairingModelTests.swift */,
@@ -176,6 +182,7 @@
 				503A0FD49848BCA492205AC0 /* Info.plist */,
 				64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */,
 				17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */,
+				5A86AE9D8953225A3B12E9DF /* MobileDurableTrust.swift */,
 				DA5DD56ED8B7DBDA06D69A08 /* MobilePeerNames.swift */,
 				1A74B9233E95B118EE8765EB /* PairingModel.swift */,
 				AA2DC0FE503504330567F461 /* PairingView.swift */,
@@ -350,6 +357,7 @@
 				29077D85A5871BA30317975A /* DropMeshApp.swift in Sources */,
 				5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */,
 				2D2460AEB748F70ECBFE33A1 /* MobileAppSession.swift in Sources */,
+				BC1FA08C2313214F2BEF951F /* MobileDurableTrust.swift in Sources */,
 				2D9A59451805F8B4F98357BF /* MobilePeerNames.swift in Sources */,
 				8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */,
 				5C851F657A65CDCA44F7A895 /* PairingView.swift in Sources */,
@@ -362,6 +370,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CFAEEAE1A060A1F3F7C7B176 /* MobileAppModelTests.swift in Sources */,
+				814B96CE1865C30E735D2BBB /* MobileDurableTrustTests.swift in Sources */,
 				7D0F56ABB61C94B99E847425 /* MobilePeerNamesTests.swift in Sources */,
 				EC24D8F917E06EBDBEFD0EFF /* PairingCodeTests.swift in Sources */,
 				0335FC4356630E361F3436C1 /* PairingModelTests.swift in Sources */,
@@ -377,6 +386,7 @@
 				00932389C62792458B54AFA6 /* InertMobileSession.swift in Sources */,
 				D2B45C770C12B8ED96E26B1D /* MobileAppModel.swift in Sources */,
 				3CE0239CCB871945A20F156F /* MobileAppSession.swift in Sources */,
+				C72A722428277689A692EDFD /* MobileDurableTrust.swift in Sources */,
 				2B6817DBDBF40137D3623253 /* MobilePeerNames.swift in Sources */,
 				72F00130732B48EBEC352C02 /* PairingModel.swift in Sources */,
 				6934FC13A7ADC30A78A71A83 /* PairingView.swift in Sources */,

@@ -13,7 +13,7 @@ struct MobileAppSnapshot: Sendable {
 
 protocol MobileAppSession: Sendable {
     func snapshot() async -> MobileAppSnapshot
-    /// Returns only after both upstream subscriptions have stopped.
+    /// Returns only after all upstream subscriptions have stopped.
     func observe(_ changed: @escaping @Sendable () async -> Void) async
     func startForeground() async throws
     func stopForeground() async

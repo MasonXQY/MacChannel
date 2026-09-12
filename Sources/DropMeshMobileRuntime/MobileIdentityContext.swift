@@ -31,7 +31,19 @@ public struct MobileIdentityContext<Secrets: SecretStore & Sendable>: Sendable {
     }
 
     public func persistTrust() async throws {
-        try await snapshots.persistLatest(from: repository)
+        _ = try await persistTrustState()
+    }
+
+    public func persistTrustState() async throws -> AuthenticatedTrustState? {
+        try await snapshots.persistLatestState(from: repository)
+    }
+
+    public func persistedTrustState() async -> AuthenticatedTrustState? {
+        await snapshots.persistedState()
+    }
+
+    public func persistedTrustUpdates() async -> AsyncStream<AuthenticatedTrustState?> {
+        await snapshots.persistedUpdates()
     }
 
     public func makePairingSession(
