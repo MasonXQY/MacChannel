@@ -1,0 +1,220 @@
+# Native composition, lifecycle and paired devices
+
+2026-09-12. Bounded slice: `iphone-native-composition-brief.md`.
+Worktree: `/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone`.
+Dispatch library base `8c25fb3`; root documentation changes through `1e1ffeb`
+are unrelated. Verified source commit:
+`c41a409500433cba76d938ccf2724045d200527f`.
+This report does not claim the deferred send/history/Share flows.
+
+## Implementation
+
+- Shipping `DropMeshApp` injects `ProductionMobileAppDependencies`. That actor
+  assembles one mobile identity context and foreground runtime on the generic
+  executor, away from MainActor. Its initializer does not start networking.
+  The existing production pairing attempt adapter moved out of shared model
+  source without changing the pairing session protocol or behavior.
+- Shared `MobileAppSession` projects only current home data and the required
+  lifecycle/trust/pairing operations. It does not add library constructors,
+  alternate databases, general dependency machinery or future transfer APIs.
+  One retained model observation task joins both runtime and trust subscriptions.
+  Refresh requests coalesce under one task and await its latest snapshot, so an
+  explicit refresh cannot return while a newer observer refresh is unfinished.
+- Initial scene state is stored before bootstrap awaits. Scene callbacks record
+  desired foreground state synchronously. Background-before-bootstrap never
+  starts networking; inactive does not stop an active runtime. Retained lifecycle
+  tasks start network stop and pairing cleanup concurrently and await both.
+  `close()` joins owned bootstrap, lifecycle, removal, refresh and observation
+  work; observation cancellation also occurs when the model is released.
+- Current repository IDs are the paired-list authority. Runtime reachable peers
+  supply availability only; absent peers stay visible/offline and self is excluded.
+  Eligibility additionally requires current foreground request and online service.
+  Names from presence never authorize peers. Confirmed names are saved separately
+  after durable pairing, in a bounded private metadata file with mode 0600.
+  Missing, invalid, oversized or unsavable metadata falls back to the localized
+  generic label plus short ID. It never resets or changes trust.
+- Durable pairing refreshes runtime trust. Explicit refresh failures survive
+  later healthy snapshots and never turn durable pairing into a failure.
+- Removal has native confirmation. Local eligibility closes synchronously;
+  repository revoke supplies the signed in-memory security change. The independent
+  persistence checkpoint and runtime trust refresh both run even when saving fails.
+  A visible save-failure state survives removal of the paired row, and retry only
+  persists, without issuing another revoke. The removal task retains the model
+  through the full checkpoint, including a held revoke and released presentation.
+  Successful saving releases the temporary local exclusion so a subsequent fresh
+  durable pairing of the same ID can be shown. No keys or received files are removed.
+- Native home uses actual service states, offline/online peer labels, pairing and
+  confirmed removal. English/Simplified Chinese follow system language. Dynamic
+  Type uses semantic fonts; at accessibility sizes the decorative device icon is
+  omitted to give long names full row width. Existing six-ASCII-digit pairing
+  validation, flexible field, save recovery and dismissal ownership remain.
+
+## Test isolation and source membership
+
+`DropMeshTestHost` has its own @main and inert session under `Tests/TestHost`.
+It compiles the same production views/models/name helper but excludes production
+@main and production assembly. It creates no identity, keychain, runtime,
+filesystem or network owners. Unit fixtures separately use temporary files and
+the existing synthetic/memory pairing tests.
+
+Shipping Sources: DeviceListView, DropMeshApp, MobileAppModel, MobileAppSession,
+MobilePeerNames, PairingModel, PairingView, ProductionMobileAppDependencies.
+Host Sources: the shared six files, DropMeshTestHostApp and InertMobileSession.
+The generated unit TEST_HOST is DropMeshTestHost.app/DropMeshTestHost; UI
+TEST_TARGET_NAME is DropMeshTestHost. Test scheme macro expansion selects that
+host. Shipping scheme builds only shipping app. No Tests files or fixture data
+are in the shipping source/resource phases. The unused `-ui-testing` argument
+was removed; AppleLanguages/AppleLocale remain system localization controls.
+Exact inventory: `.build/native-composition-target-membership.log`.
+
+## TDD and failed attempts
+
+- Missing-API RED: `native-composition-api-red.log`, build-for-testing failure
+  for absent injected model initializer/InertMobileSession. No app launched.
+- Initial 20 native unit tests passed: preserved 14 + first 6 lifecycle/removal
+  tests (`native-composition-unit-02.log`). Earlier compiler iterations involved
+  actor isolation in the new stub/deinit and are not behavioral RED evidence.
+- Behavioral RED `native-composition-refresh-red.log`: 8 model tests, one failure.
+  A failed explicit trust refresh disappeared on the next snapshot. Separate
+  explicit/runtime diagnostics fixes it.
+- Behavioral RED `native-composition-unit-green.log` (filename notwithstanding):
+  22 tests, three assertions failed in availability refresh because a newer
+  in-flight observer refresh caused the explicitly awaited refresh to return early.
+  Coalesced refresh ownership fixes it. This failed run is not a GREEN result.
+- Removal UI RED `native-composition-removal-ui-red.log`: missing removal control
+  before implementation. The final UI test checks confirmation, cancellation,
+  saved result and actual row disappearance.
+- Missing-helper RED `native-composition-names-red.log`: no MobilePeerNames type.
+  Two real-file tests now verify trusted-name save/reload, permissions and fallback.
+- Behavioral RED `native-composition-repair-red.log`: 25 tests, one failure.
+  A formerly removed ID stayed hidden after fresh durable trust. Releasing the
+  temporary exclusion after successful checkpoint fixes it.
+- Behavioral RED `native-composition-removal-owner-gated-red.log`: one test, two
+  failures. Releasing the presentation during a held revoke released the model
+  and skipped persistence (count 0). Strong task ownership fixes it. The preceding
+  ungated owner test passed because other startup work still retained the model;
+  only the gated run is claimed as the reproducer.
+- Largest Dynamic Type first failed because one swipe did not reach the pairing
+  row. After adding bounded native scrolling, English's 705-point instruction
+  row similarly required scrolling to reach the code field. Existing dismissal
+  and invalid-code assertions were retained. The final tests additionally enter
+  a sixth digit and assert enabled/hittable submit, without submitting a request.
+  Earlier logs/results `large`, `large-green`, `large-fresh` remain preserved;
+  `large-green` was a failed run despite its name. Some incremental logs appeared
+  to predate edited test steps; source membership/paths and installed/built hashes
+  were investigated and an isolated derived path was used. A stale-artifact cause
+  was not established. Final capture activity and Pairing-Ready attachments are
+  the evidence that the latest steps executed, not filenames or assumptions.
+
+All filenames above are under `.build/` with prefix `native-composition-` where
+not already written. Full logs and unique result bundles are retained locally.
+
+## Verification commands
+
+All commands use Xcode 16.4, iPhone 16 simulator
+`ACEA4034-2629-4A24-A7C8-C146BD8B0688`, iOS 18.6. No toolchain switch.
+Project generation: `xcodegen generate --spec iPhone/project.yml`.
+
+Final standard native command:
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests -destination 'platform=iOS Simulator,id=ACEA4034-2629-4A24-A7C8-C146BD8B0688' -derivedDataPath .build/native-composition-final-cache -clonedSourcePackagesDirPath .build/iphone-simulator/SourcePackages -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO test -resultBundlePath .build/native-composition-complete.xcresult
+```
+
+Final maximum Dynamic Type command:
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests -destination 'platform=iOS Simulator,id=ACEA4034-2629-4A24-A7C8-C146BD8B0688' -derivedDataPath .build/native-composition-final-cache -clonedSourcePackagesDirPath .build/iphone-simulator/SourcePackages -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO test -only-testing:DropMeshUITests/DropMeshUITests/testEnglishHomeAndPairingEntrySmoke -only-testing:DropMeshUITests/DropMeshUITests/testSimplifiedChineseHomeAndPairingEntrySmoke -resultBundlePath .build/native-composition-large-complete.xcresult
+```
+
+`xcrun simctl ui <UDID> content_size` initially returned `large`; it was set to
+`accessibility-extra-extra-extra-large` only for those tests, then restored to
+the exact original `large` value and read back.
+
+Shipping builds and scoped production checks:
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMesh -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/iphone-simulator -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMesh -destination 'generic/platform=iOS' -derivedDataPath .build/iphone-device -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO build
+swift test --disable-automatic-resolution --filter AppRuntimeTests.testSystemGeneralPasteboardReferenceIsConfinedToExplicitSendAdapter
+bash Scripts/check-sensitive-logging.sh iPhone/App/*.swift
+bash Scripts/audit-privacy.sh --static-only
+git diff --check
+```
+
+The explicit iPhone/App logging arguments matter: the default logging script
+omits this native root. The production pasteboard inventory includes iPhone/App.
+
+Earlier behavioral RED commands used the same project/scheme/destination and
+resolution/signing arguments, with derived path `.build/iphone-simulator` and
+no cloned-package argument. Exact test/action suffixes were:
+
+```text
+test -only-testing:DropMeshTests/MobileAppModelTests -resultBundlePath .build/native-composition-refresh-red.xcresult
+test -only-testing:DropMeshTests -resultBundlePath .build/native-composition-unit-green.xcresult
+test -only-testing:DropMeshUITests/DropMeshUITests/testDeviceRemovalRequiresConfirmation -resultBundlePath .build/native-composition-removal-ui-red.xcresult
+test -only-testing:DropMeshTests -resultBundlePath .build/native-composition-repair-red.xcresult
+```
+
+The final gated ownership RED used the final common derived/cache arguments
+and `test -only-testing:DropMeshTests/MobileAppModelTests/testRemovalOwnsCheckpointEvenWhenPresentationOwnerIsReleased -resultBundlePath .build/native-composition-removal-owner-gated-red.xcresult`.
+Missing-API/helper REDs used `build-for-testing` with the earlier common arguments.
+
+## Final results and retained visual evidence
+
+- `native-composition-complete.log/.xcresult`: exit 0, **26 unit tests + 3 UI
+  tests, zero failures, zero skips**. All 14 pre-existing unit and both bilingual
+  UI methods remain. Unit time 0.160 seconds; UI time 34.896 seconds.
+- `native-composition-large-complete.log/.xcresult`: exit 0, **2 bilingual UI
+  tests, zero failures**, 35.058 seconds. Both include the final Pairing-Ready
+  attachment and enabled/hittable six-digit submit assertions.
+- `native-composition-shipping-simulator-complete.log` and
+  `native-composition-shipping-device-complete.log`: exit 0, BUILD SUCCEEDED.
+  Xcode emits its benign AppIntents metadata-extraction warning because this
+  application does not depend on AppIntents. No Swift compiler warnings/errors
+  appear; this warning is not represented as pristine output.
+- `native-composition-pasteboard-complete.log`: exit 0, 1 production-inventory
+  test, zero failures in 1.247 seconds. Scoped sensitive logging and static
+  privacy logs with `-complete` suffix both report PASS. Whitespace check passes.
+
+Tracked screenshots live in `iPhone/Tests/Evidence/NativeComposition/standard`
+(10 PNGs) and `accessibility-xxxl` (8 PNGs). They are exported from the two exact
+final result bundles with `xcrun xcresulttool export attachments --path <bundle>
+--output-path <directory>`, then copied with readable attachment names. Manifests
+remain in `.build/native-composition-evidence/{standard-complete,large-complete}`.
+These evidence directories are not in any shipping source/resource phase.
+
+Inspected actual English/Chinese home/device/entry captures, confirmation and
+saved removal, and maximum-size Pairing-Ready captures. Long names wrap at full
+available width; six digits and enabled Join/加入 fit above the number keyboard
+after native scrolling. At maximum size, viewport edges may show portions of
+adjacent rows; text itself is not intrinsically clipped. Both keyboard and list
+scrolling are exercised, with no automatic pairing submission.
+
+SHA-256 of final standard, final largest-type, simulator build, device build,
+and gated-removal RED logs, respectively:
+
+```text
+1f1e9e7f2d0a698d2d7509b11bf436a0ff44d8490cfe28220a9665c7c9a1ab6c
+0d4703d37caaa698ca302f02f384b2fded1cabdadec1476385f9104aa19a9be3
+f07c43301303f530f26c8f06df07b22aca3b29d01b6f5d6e146cd757bf31cc14
+b0ae18abac3d3d53142a4a233fb5d7ffc7144a6409a91f6da6caefeb62e1fc7c
+8f5c06354a50bc28572cbd604fdd30d92c3aa2bbf09334e207c8703496da2724
+```
+
+Only owned iPhone App/Resources/Tests/project files and this report changed.
+All build/test processes completed before handoff. Self-review corrections
+covered coalesced observations, diagnostic retention, fresh re-pairing and
+strong removal checkpoint ownership. No unresolved source defect is known;
+independent review remains the next gate.
+
+## Limits and downstream work
+
+These are native source, inert-host UI/unit and unsigned build results. No
+production app launch/network, actual keychain identity, physical iPhone,
+unchanged Mac interoperability, installed app acceptance, signing, Store upload,
+production/server change or user-file deletion occurred. Root owns integrated
+SwiftPM/Mac regression and independent review. Files/Photos/send ownership,
+history/open/share/settings and the separate Share extension remain later slices.
+Largest Dynamic Type naturally requires native scrolling; no font-size clamp or
+assumption of background reception was added.
