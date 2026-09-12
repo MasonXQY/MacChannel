@@ -13,6 +13,11 @@ final class DropMeshUITests: XCTestCase {
         guard pending.waitForExistence(timeout: 5) else { XCTFail("Pending share is absent"); return }
         attach(app.screenshot(), named: "\(prefix)-Pending-Share")
         pending.tap()
+        let filename = app.staticTexts["Project notes — 项目交接.txt"]
+        reveal(filename, in: app)
+        XCTAssertTrue(filename.waitForExistence(timeout: 5))
+        positionExplanation(filename, in: app)
+        attach(app.screenshot(), named: "\(prefix)-Share-Selected-Filename")
         let confirm = app.buttons["send-confirm-button"]
         reveal(confirm, in: app)
         XCTAssertTrue(confirm.waitForExistence(timeout: 5))
