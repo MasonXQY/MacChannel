@@ -25,8 +25,11 @@ review approves it. Integrated1178f05 full regression945tests/5skips/0failures
 passes; both Mac release products compile without warning/error matches. No
 installation/replacement occurred. Provider-safe imports ec40ef9/reportab9b9f8
 are independently Approved,76mobile tests and both iOSlibrary builds pass;
-integrated959tests/5skips/0failures passes. Durable received history/index is
-the active next task; native transfer/picker/history UI/Share remain pending. A source audit
+integrated959tests/5skips/0failures passes. Durable history/index source9f5da75
+and report4c0021e pass92mobile tests, both iOSlibrary builds and root full975tests/
+5skips/0failures. Independent review found incomplete availability diagnostic
+propagation; scoped correction is active and review remains Needs fixes.
+Native transfer/picker/history UI/Share remain pending. A source audit
 added a mandatory re-entry barrier for
 initial sends hidden from durable snapshots; see iphone-late-send-audit.md. Durable
 execution ledger: `.superpowers/sdd/progress.md`; scoped briefs/reports there.

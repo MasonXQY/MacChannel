@@ -38,7 +38,13 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   Root integrated full atab9b9f8 exits0:959tests,5skips,0failures,47.171seconds,
   `.build/mobile-import-integrated-full.log`. Real local NSFileCoordinator is
   tested; physical Files/iCloud/Photos and owned Transferable wrappers are not.
-- Durable received history/index is now in progress; native transfer/picker/
+- Durable history/index source9f5da75/report4c0021e passes32focused/92mobile
+  tests and both cached iOSlibrary builds. Root full975tests/5existing skips/
+  0failures,47.298seconds,exit0, `.build/mobile-history-integrated-full.log`.
+  Independent review is Needs fixes: auxiliary availability errors are not
+  consistently recorded/published to runtime subscribers. Scoped correction
+  is active; a passing suite does not substitute for this review closure.
+- Native transfer/picker/
   history UI and Share integration remain pending. Old runtime test
   fixture temporary-directory cleanup is a documented nonblocking hygiene debt,
   since scene stop does not mean outbound terminal persistence is quiescent.
