@@ -19,6 +19,7 @@ final class MobileAppModel {
     private var runtimeFailure: MobileRuntimeFailure?
     private(set) var removalState: MobileRemovalState = .idle
     var pairing: PairingModel?
+    private(set) var send: MobileSendModel?
     private let loadSession: @Sendable () async throws -> any MobileAppSession
     private var session: (any MobileAppSession)?
     private var desiredForeground: Bool?
@@ -52,6 +53,8 @@ final class MobileAppModel {
                 guard let self else { return }
                 self.session = session
                 guard !self.closed else { await session.stopForeground(); return }
+                self.send = MobileSendModel(session: session)
+                self.send?.setForeground(self.desiredForeground == true)
                 self.observationTask = Task { [weak self] in
                     await session.observe { [weak self] in await self?.refreshDevices() }
                 }
@@ -80,6 +83,7 @@ final class MobileAppModel {
         case .inactive: return
         @unknown default: return
         }
+        send?.setForeground(desiredForeground == true)
         reconcileScene()
     }
     private func reconcileScene() {
@@ -87,6 +91,7 @@ final class MobileAppModel {
         let id = UUID()
         lifecycleRequest = id
         let pairing = pairing
+        let send = send
         lifecycleTasks[id] = Task { [weak self] in
             if foreground {
                 guard self?.desiredForeground == true else {
@@ -110,7 +115,8 @@ final class MobileAppModel {
             } else {
                 async let network: Void = session.stopForeground()
                 async let pair: Void = pairing?.handleBackground() ?? ()
-                _ = await (network, pair)
+                async let importing: Void = send?.cancelAndWait() ?? ()
+                _ = await (network, pair, importing)
             }
             await self?.refreshDevices()
             self?.lifecycleTasks[id] = nil
@@ -156,6 +162,9 @@ final class MobileAppModel {
         guard !closed else { return }
         serviceState = snapshot.state
         runtimeFailure = snapshot.failure
+        var sendSnapshot = snapshot
+        sendSnapshot.trustedIDs.subtract(revokedIDs)
+        send?.update(sendSnapshot, blockedIDs: revokedIDs)
         if retryRecoveryRequest != nil, retryCommandReturned,
            desiredForeground == true, snapshot.state == .online {
             lifecycleFailure = nil
@@ -194,6 +203,7 @@ final class MobileAppModel {
               pairedDevices.contains(where: { $0.id == id }), let session else { return }
         removalState = .removing
         revokedIDs.insert(id)
+        send?.revokeLocally(id)
         pairedDevices.removeAll { $0.id == id }
         removalTask = Task { [self] in
             do { try await session.revoke(id) }
@@ -235,17 +245,19 @@ final class MobileAppModel {
     func close() async {
         closed = true
         desiredForeground = false
+        send?.setForeground(false)
         retryRecoveryRequest = nil
         retryCommandReturned = false
         observationTask?.cancel()
         async let stop: Void = session?.stopForeground() ?? ()
         async let pair: Void = pairing?.handleBackground() ?? ()
+        async let importing: Void = send?.cancelAndWait() ?? ()
         await bootstrapTask?.value
         await waitForLifecycle()
         await removalTask?.value
         await observationTask?.value
         await refreshTask?.value
-        _ = await (stop, pair)
+        _ = await (stop, pair, importing)
         observationTask = nil
     }
 }

@@ -33,7 +33,7 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         let trustedIDs = await durableTrust.trustedIDs()
         return MobileAppSnapshot(state: current.state, localID: context.identity.id,
             trustedIDs: trustedIDs, reachable: current.devices,
-            names: names.values, failure: current.failure)
+            names: names.values, failure: current.failure, transfers: current.transfers)
     }
     func observe(_ changed: @escaping @Sendable () async -> Void) async {
         let runtime = runtime
@@ -65,6 +65,12 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     func stopForeground() async { await runtime.stopForeground() }
     func refreshTrust() async throws { try await runtime.refreshTrust() }
     func retryConnection() async { await runtime.retryConnection() }
+    func send(items: [URL], to device: DeviceID) async throws -> TransferID {
+        try await runtime.send(items: items, to: device)
+    }
+    func pause(_ id: TransferID) async throws { try await runtime.pause(id) }
+    func resume(_ id: TransferID) async throws { try await runtime.resume(id) }
+    func cancel(_ id: TransferID) async -> TransferCancellationResult { await runtime.cancel(id) }
     func revoke(_ id: DeviceID) async throws { try await context.repository.revoke(id) }
     func persistTrust() async throws { try await context.persistTrust() }
     func rememberConfirmedPeer(_ peer: DeviceSummary) async {

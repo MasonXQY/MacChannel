@@ -9,6 +9,7 @@ struct MobileAppSnapshot: Sendable {
     var reachable: [DeviceSummary] = []
     var names: [DeviceID: String] = [:]
     var failure: MobileRuntimeFailure?
+    var transfers: [TransferSnapshot] = []
 }
 
 protocol MobileAppSession: Sendable {
@@ -23,4 +24,8 @@ protocol MobileAppSession: Sendable {
     func rememberConfirmedPeer(_ peer: DeviceSummary) async
     func revoke(_ id: DeviceID) async throws
     func persistTrust() async throws
+    func send(items: [URL], to device: DeviceID) async throws -> TransferID
+    func pause(_ id: TransferID) async throws
+    func resume(_ id: TransferID) async throws
+    func cancel(_ id: TransferID) async -> TransferCancellationResult
 }

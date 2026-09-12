@@ -15,6 +15,9 @@ actor InertMobileSession: MobileAppSession {
     private var beforeStart: @Sendable () async throws -> Void = {}
     private var beforeRetry: @Sendable () async -> Void = {}
     private var retryState: MobileRuntimeState = .online
+    private var beforeSend: @Sendable () async -> Void = {}
+    private(set) var sendCount = 0
+    private var cancelResult: TransferCancellationResult = .tooLate
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var revokeCount = 0
@@ -71,6 +74,21 @@ actor InertMobileSession: MobileAppSession {
     func setBeforeRetry(_ operation: @escaping @Sendable () async -> Void) { beforeRetry = operation }
     func setRetryState(_ state: MobileRuntimeState) { retryState = state }
     func setNames(_ names: [DeviceID: String]) { value.names = names; publish() }
+    func setBeforeSend(_ operation: @escaping @Sendable () async -> Void) { beforeSend = operation }
+    func send(items: [URL], to device: DeviceID) async throws -> TransferID {
+        sendCount += 1
+        await beforeSend()
+        let id = TransferID(rawValue: UUID())
+        value.transfers.append(TransferSnapshot(id: id, peer: device, phase: .completed,
+            completedBytes: 11, totalBytes: 11, route: .lan))
+        publish()
+        return id
+    }
+    func pause(_ id: TransferID) {}
+    func resume(_ id: TransferID) {}
+    func cancel(_ id: TransferID) -> TransferCancellationResult { cancelResult }
+    func setCancelResult(_ result: TransferCancellationResult) { cancelResult = result }
+    func setTransfers(_ transfers: [TransferSnapshot]) { value.transfers = transfers; publish() }
     func setTrustedIDs(_ ids: Set<DeviceID>) { value.trustedIDs = ids; publish() }
     func setPresence(_ state: MobileRuntimeState, peers: [DeviceSummary]) {
         value.state = state; value.reachable = peers; publish()

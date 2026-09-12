@@ -4,6 +4,7 @@ import SwiftUI
 struct DeviceListView: View {
     @Bindable var model: MobileAppModel
     @State private var removalCandidate: DeviceSummary?
+    @State private var showingSend = false
 
     var body: some View {
         NavigationStack {
@@ -25,6 +26,9 @@ struct DeviceListView: View {
             PairingView(model: pairing) {
                 model.dismissPairingIfAllowed()
             }
+        }
+        .sheet(isPresented: $showingSend, onDismiss: { model.send?.requestCancellation() }) {
+            if let sender = model.send { MobileSendView(model: sender, devices: model.pairedDevices) }
         }
         .alert("devices.remove.title", isPresented: Binding(
             get: { removalCandidate != nil }, set: { if !$0 { removalCandidate = nil } }
@@ -111,6 +115,14 @@ struct DeviceListView: View {
                     Label("pairing.add", systemImage: "macbook.and.iphone")
                 }
                 .accessibilityIdentifier("pair-device-button")
+            }
+            if model.send != nil {
+                Section {
+                    Button { showingSend = true } label: {
+                        Label("send.title", systemImage: "arrow.up.doc")
+                    }
+                    .accessibilityIdentifier("send-open-button")
+                }
             }
         }
         .refreshable { await model.refreshDevices() }

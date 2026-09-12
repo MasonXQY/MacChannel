@@ -2,6 +2,69 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
+    func testEnglishSendAndProgress() { runSend(language: "en", locale: "en_US", prefix: "English") }
+    func testChineseSendAndProgress() { runSend(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
+    func testEnglishPreparedAndCleanupError() { runPrepared(language: "en", locale: "en_US", prefix: "English") }
+    func testChinesePreparedAndCleanupError() { runPrepared(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
+
+    private func runPrepared(language: String, locale: String, prefix: String) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-send-evidence"]
+        app.launch()
+        let recipient = app.buttons["send-recipient-11111111-1111-1111-1111-111111111111"]
+        XCTAssertTrue(app.buttons["send-files-button"].waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "\(prefix)-Selected-Files")
+        reveal(recipient, in: app)
+        XCTAssertTrue(recipient.waitForExistence(timeout: 3))
+        recipient.tap()
+        let confirm = app.buttons["send-confirm-button"]
+        reveal(confirm, in: app)
+        XCTAssertTrue(confirm.isEnabled)
+        attach(app.screenshot(), named: "\(prefix)-Choose-Recipient")
+        confirm.tap()
+        let retry = app.buttons["send-cleanup-retry"]
+        reveal(retry, in: app)
+        XCTAssertTrue(retry.waitForExistence(timeout: 3))
+        attach(app.screenshot(), named: "\(prefix)-Cleanup-Error")
+        retry.tap()
+        XCTAssertTrue(app.buttons["send-files-button"].isEnabled)
+        let completed = app.staticTexts["transfer-progress-label"]
+        reveal(completed, in: app)
+        XCTAssertTrue(completed.exists)
+        XCTAssertEqual(completed.label, language == "en" ? "Completed" : "已完成")
+        attach(app.screenshot(), named: "\(prefix)-Completed-After-Cleanup")
+    }
+
+    private func runSend(language: String, locale: String, prefix: String) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale]
+        app.launch()
+        let entry = app.buttons["send-open-button"]
+        reveal(entry, in: app)
+        XCTAssertTrue(entry.waitForExistence(timeout: 3))
+        entry.tap()
+        XCTAssertTrue(app.buttons["send-files-button"].waitForExistence(timeout: 3))
+        attach(app.screenshot(), named: "\(prefix)-Send")
+        app.buttons["send-photos-button"].tap()
+        XCTAssertTrue(app.buttons["photos-use-button"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["photos-use-button"].isEnabled)
+        attach(app.screenshot(), named: "\(prefix)-Photos-Browse")
+        app.buttons["photos-cancel-button"].tap()
+        XCTAssertTrue(app.buttons["send-files-button"].waitForExistence(timeout: 3))
+        let progress = app.staticTexts["transfer-progress-label"]
+        reveal(progress, in: app)
+        XCTAssertTrue(progress.exists)
+        XCTAssertEqual(progress.label, language == "en" ? "Paused" : "已暂停")
+        attach(app.screenshot(), named: "\(prefix)-Transfer-Progress")
+        let resume = app.buttons["transfer-resume-button"]
+        reveal(resume, in: app)
+        resume.tap()
+        let error = app.staticTexts["send-action-error"]
+        reveal(error, in: app)
+        XCTAssertTrue(error.waitForExistence(timeout: 3))
+        attach(app.screenshot(), named: "\(prefix)-Transfer-Action-Error")
+    }
+
     func testEnglishHomeAndPairingEntrySmoke() {
         runSmoke(language: "en", locale: "en_US", attachmentPrefix: "English")
     }
