@@ -30,13 +30,35 @@ targets:
         INFOPLIST_FILE: App/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
+  DropMeshTestHost:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - DropMeshApp.swift
+          - ProductionMobileAppDependencies.swift
+      - path: Resources
+      - path: Tests/TestHost
+    dependencies:
+      - package: DropMeshPackage
+        product: DropMeshMobileRuntime
+      - package: DropMeshPackage
+        product: MacChannelCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev.test-host
+        PRODUCT_NAME: DropMeshTestHost
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: DropMesh
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
   DropMeshTests:
     type: bundle.unit-test
     platform: iOS
     sources:
       - path: Tests/Unit
     dependencies:
-      - target: DropMesh
+      - target: DropMeshTestHost
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev.tests
@@ -47,7 +69,7 @@ targets:
     sources:
       - path: Tests/UI
     dependencies:
-      - target: DropMesh
+      - target: DropMeshTestHost
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev.uitests
@@ -57,9 +79,14 @@ schemes:
     build:
       targets:
         DropMesh: all
+  DropMeshTests:
+    build:
+      targets:
+        DropMeshTestHost: all
         DropMeshTests: [test]
         DropMeshUITests: [test]
     test:
+      macroExpansion: DropMeshTestHost
       targets:
         - DropMeshTests
         - DropMeshUITests

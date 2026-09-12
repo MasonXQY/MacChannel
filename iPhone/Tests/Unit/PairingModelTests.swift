@@ -1,7 +1,7 @@
 @testable import MacChannelCore
 import DropMeshMobileRuntime
 import XCTest
-@testable import DropMesh
+@testable import DropMeshTestHost
 
 @MainActor
 final class PairingModelTests: XCTestCase {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import DropMesh
+@testable import DropMeshTestHost
 
 final class PairingCodeTests: XCTestCase {
     func testValidationAcceptsExactlySixASCIIDigitsIncludingLeadingZero() {

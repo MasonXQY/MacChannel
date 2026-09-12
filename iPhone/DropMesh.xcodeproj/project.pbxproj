@@ -7,40 +7,60 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		00932389C62792458B54AFA6 /* InertMobileSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E3E1B0829229AE158713DE8 /* InertMobileSession.swift */; };
 		0335FC4356630E361F3436C1 /* PairingModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4835F265E8852B7C557B14C0 /* PairingModelTests.swift */; };
+		10CD1E3054124B4C7C164539 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */; };
 		1D2AE99A4B8027E2DCA9A423 /* DropMeshUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF53E771EBFC31DE081D5B1C /* DropMeshUITests.swift */; };
 		29077D85A5871BA30317975A /* DropMeshApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A6F956BDE3FF2F5A32C7AF /* DropMeshApp.swift */; };
+		29743D11F6701F1B3219095F /* ProductionMobileAppDependencies.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B97DB2A3F22D9602B503EAF /* ProductionMobileAppDependencies.swift */; };
+		2B6817DBDBF40137D3623253 /* MobilePeerNames.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5DD56ED8B7DBDA06D69A08 /* MobilePeerNames.swift */; };
+		2D2460AEB748F70ECBFE33A1 /* MobileAppSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */; };
+		2D9A59451805F8B4F98357BF /* MobilePeerNames.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5DD56ED8B7DBDA06D69A08 /* MobilePeerNames.swift */; };
+		3CE0239CCB871945A20F156F /* MobileAppSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */; };
 		5C851F657A65CDCA44F7A895 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2DC0FE503504330567F461 /* PairingView.swift */; };
 		5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */; };
+		6934FC13A7ADC30A78A71A83 /* PairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2DC0FE503504330567F461 /* PairingView.swift */; };
+		72F00130732B48EBEC352C02 /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74B9233E95B118EE8765EB /* PairingModel.swift */; };
+		7AD03419886B61D54E5378B5 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */; };
 		7C943D8B582B57DBD68514DA /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
 		7CEEB9426D37F5043AD379EE /* DropMeshMobileRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = B3BD8A034BDBD714D3424FD5 /* DropMeshMobileRuntime */; };
+		7D0F56ABB61C94B99E847425 /* MobilePeerNamesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7C3622D0AB272D8348A6123 /* MobilePeerNamesTests.swift */; };
 		884D176010840BF6A70953FB /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6C81C2CC9E826AF5DF8174F4 /* InfoPlist.strings */; };
 		8A6FB7D790896BABEA8B96C2 /* DeviceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165A287505755A187903CEC1 /* DeviceListView.swift */; };
 		8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A74B9233E95B118EE8765EB /* PairingModel.swift */; };
+		A99AE515B936217BC92BFA70 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = F9D100CE642014031FE52C2E /* Localizable.strings */; };
+		BA8B4AA27E3147C730829FAE /* DeviceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165A287505755A187903CEC1 /* DeviceListView.swift */; };
 		BDADDE4DC3C88D58AD500C9A /* MacChannelCore in Frameworks */ = {isa = PBXBuildFile; productRef = 3A495EAD0B084B673ADD6A55 /* MacChannelCore */; };
+		CFAEEAE1A060A1F3F7C7B176 /* MobileAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1CE3FC3CBFF98252640663E /* MobileAppModelTests.swift */; };
+		D28D21EB6A38C52077D01F77 /* MacChannelCore in Frameworks */ = {isa = PBXBuildFile; productRef = F59CA89E2A0504EFF940B405 /* MacChannelCore */; };
+		D2B45C770C12B8ED96E26B1D /* MobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */; };
+		D7450846CA06EE12D3E56A53 /* DropMeshMobileRuntime in Frameworks */ = {isa = PBXBuildFile; productRef = 5591B7CB1BBE8DB8DFA3C8DD /* DropMeshMobileRuntime */; };
+		E91A7369B215D14902F72A0E /* DropMeshTestHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 005D821FDE939BCC0EB4B8C7 /* DropMeshTestHostApp.swift */; };
 		EC24D8F917E06EBDBEFD0EFF /* PairingCodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */; };
 		EE4AD1D9A5A8B6EED812830C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		852596337E3AF9D5729CE736 /* PBXContainerItemProxy */ = {
+		054B52574E62CA78DBAE8AA3 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 0327E6BC3DC825F3649CEC71 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = CD2B911E499BE78DA53555C5;
-			remoteInfo = DropMesh;
+			remoteGlobalIDString = 81E4CCD92D9C10921DC8697C;
+			remoteInfo = DropMeshTestHost;
 		};
-		CBB527DB83E1CB081FD9C686 /* PBXContainerItemProxy */ = {
+		95B826B1518A3AF606A42C65 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 0327E6BC3DC825F3649CEC71 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = CD2B911E499BE78DA53555C5;
-			remoteInfo = DropMesh;
+			remoteGlobalIDString = 81E4CCD92D9C10921DC8697C;
+			remoteInfo = DropMeshTestHost;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		005D821FDE939BCC0EB4B8C7 /* DropMeshTestHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshTestHostApp.swift; sourceTree = "<group>"; };
 		165A287505755A187903CEC1 /* DeviceListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceListView.swift; sourceTree = "<group>"; };
+		17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppSession.swift; sourceTree = "<group>"; };
 		1A74B9233E95B118EE8765EB /* PairingModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModel.swift; sourceTree = "<group>"; };
 		326419CC42BCFCA581098E3F /* DropMeshTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DropMeshTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4835F265E8852B7C557B14C0 /* PairingModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingModelTests.swift; sourceTree = "<group>"; };
@@ -54,10 +74,16 @@
 		763C3E398CE966AF9B4763BB /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		76C5193DCAB8E7BCD06DADDB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DropMeshUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		8B97DB2A3F22D9602B503EAF /* ProductionMobileAppDependencies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductionMobileAppDependencies.swift; sourceTree = "<group>"; };
+		9E3E1B0829229AE158713DE8 /* InertMobileSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InertMobileSession.swift; sourceTree = "<group>"; };
 		AA2DC0FE503504330567F461 /* PairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingView.swift; sourceTree = "<group>"; };
 		AF53E771EBFC31DE081D5B1C /* DropMeshUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshUITests.swift; sourceTree = "<group>"; };
 		C6C8F072646DFADC21B6346A /* dropmesh-iphone */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "dropmesh-iphone"; path = ..; sourceTree = SOURCE_ROOT; };
+		C7C3622D0AB272D8348A6123 /* MobilePeerNamesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePeerNamesTests.swift; sourceTree = "<group>"; };
 		C9578B7C94839C1DC5BC5447 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		D1CE3FC3CBFF98252640663E /* MobileAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppModelTests.swift; sourceTree = "<group>"; };
+		DA5DD56ED8B7DBDA06D69A08 /* MobilePeerNames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePeerNames.swift; sourceTree = "<group>"; };
+		E5A4513677CE21FBE91E019D /* DropMeshTestHost.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DropMeshTestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -70,6 +96,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FB0960BDAEFFAF76E47DC039 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D7450846CA06EE12D3E56A53 /* DropMeshMobileRuntime in Frameworks */,
+				D28D21EB6A38C52077D01F77 /* MacChannelCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -77,6 +112,7 @@
 			isa = PBXGroup;
 			children = (
 				55CDD4C4BE61DB38367E7760 /* DropMesh.app */,
+				E5A4513677CE21FBE91E019D /* DropMeshTestHost.app */,
 				326419CC42BCFCA581098E3F /* DropMeshTests.xctest */,
 				8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */,
 			);
@@ -109,9 +145,21 @@
 			path = Tests/UI;
 			sourceTree = "<group>";
 		};
+		91C20C72D0C622D77ED59725 /* TestHost */ = {
+			isa = PBXGroup;
+			children = (
+				005D821FDE939BCC0EB4B8C7 /* DropMeshTestHostApp.swift */,
+				9E3E1B0829229AE158713DE8 /* InertMobileSession.swift */,
+			);
+			name = TestHost;
+			path = Tests/TestHost;
+			sourceTree = "<group>";
+		};
 		ADD6636E6EFA732086843E03 /* Unit */ = {
 			isa = PBXGroup;
 			children = (
+				D1CE3FC3CBFF98252640663E /* MobileAppModelTests.swift */,
+				C7C3622D0AB272D8348A6123 /* MobilePeerNamesTests.swift */,
 				485C5FC725AFCD7D539EEDFB /* PairingCodeTests.swift */,
 				4835F265E8852B7C557B14C0 /* PairingModelTests.swift */,
 			);
@@ -127,8 +175,11 @@
 				59A6F956BDE3FF2F5A32C7AF /* DropMeshApp.swift */,
 				503A0FD49848BCA492205AC0 /* Info.plist */,
 				64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */,
+				17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */,
+				DA5DD56ED8B7DBDA06D69A08 /* MobilePeerNames.swift */,
 				1A74B9233E95B118EE8765EB /* PairingModel.swift */,
 				AA2DC0FE503504330567F461 /* PairingView.swift */,
+				8B97DB2A3F22D9602B503EAF /* ProductionMobileAppDependencies.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -139,6 +190,7 @@
 				CA2B64B2A88B96C0465F4017 /* App */,
 				22AB79292F21AED1DB7D179D /* Packages */,
 				3DD42F23C6957BB51840B2A7 /* Resources */,
+				91C20C72D0C622D77ED59725 /* TestHost */,
 				51B61012B361350FCB5D284C /* UI */,
 				ADD6636E6EFA732086843E03 /* Unit */,
 				08F0CE34D8521074312AF658 /* Products */,
@@ -157,7 +209,7 @@
 			buildRules = (
 			);
 			dependencies = (
-				B7F99E5D52D55BC522855C5C /* PBXTargetDependency */,
+				72A4B9E34F4811F49FDD18FC /* PBXTargetDependency */,
 			);
 			name = DropMeshUITests;
 			packageProductDependencies = (
@@ -165,6 +217,27 @@
 			productName = DropMeshUITests;
 			productReference = 8B2611BDD7C6C04E32A29953 /* DropMeshUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		81E4CCD92D9C10921DC8697C /* DropMeshTestHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F1F779682BCB9AA200A437A5 /* Build configuration list for PBXNativeTarget "DropMeshTestHost" */;
+			buildPhases = (
+				5CD4D6E1D03AAEFCD9D9AF6D /* Sources */,
+				D92CB21F7F3EECA51BDC2B15 /* Resources */,
+				FB0960BDAEFFAF76E47DC039 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DropMeshTestHost;
+			packageProductDependencies = (
+				5591B7CB1BBE8DB8DFA3C8DD /* DropMeshMobileRuntime */,
+				F59CA89E2A0504EFF940B405 /* MacChannelCore */,
+			);
+			productName = DropMeshTestHost;
+			productReference = E5A4513677CE21FBE91E019D /* DropMeshTestHost.app */;
+			productType = "com.apple.product-type.application";
 		};
 		9B2473DA890B2320509E5ABB /* DropMeshTests */ = {
 			isa = PBXNativeTarget;
@@ -175,7 +248,7 @@
 			buildRules = (
 			);
 			dependencies = (
-				48F8C2EED49CF901DD985916 /* PBXTargetDependency */,
+				784A31CED3E677BDAC4B9D2E /* PBXTargetDependency */,
 			);
 			name = DropMeshTests;
 			packageProductDependencies = (
@@ -215,7 +288,7 @@
 				LastUpgradeCheck = 1640;
 				TargetAttributes = {
 					092D9C8B76F6D4ABB7E0E4FF = {
-						TestTargetID = CD2B911E499BE78DA53555C5;
+						TestTargetID = 81E4CCD92D9C10921DC8697C;
 					};
 				};
 			};
@@ -238,6 +311,7 @@
 			projectRoot = "";
 			targets = (
 				CD2B911E499BE78DA53555C5 /* DropMesh */,
+				81E4CCD92D9C10921DC8697C /* DropMeshTestHost */,
 				9B2473DA890B2320509E5ABB /* DropMeshTests */,
 				092D9C8B76F6D4ABB7E0E4FF /* DropMeshUITests */,
 			);
@@ -245,6 +319,16 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		D92CB21F7F3EECA51BDC2B15 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				10CD1E3054124B4C7C164539 /* Assets.xcassets in Resources */,
+				7AD03419886B61D54E5378B5 /* InfoPlist.strings in Resources */,
+				A99AE515B936217BC92BFA70 /* Localizable.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		E892125DF8C9985CFDE8BB6E /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -265,8 +349,11 @@
 				8A6FB7D790896BABEA8B96C2 /* DeviceListView.swift in Sources */,
 				29077D85A5871BA30317975A /* DropMeshApp.swift in Sources */,
 				5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */,
+				2D2460AEB748F70ECBFE33A1 /* MobileAppSession.swift in Sources */,
+				2D9A59451805F8B4F98357BF /* MobilePeerNames.swift in Sources */,
 				8ADBBD486232B0073F0F4434 /* PairingModel.swift in Sources */,
 				5C851F657A65CDCA44F7A895 /* PairingView.swift in Sources */,
+				29743D11F6701F1B3219095F /* ProductionMobileAppDependencies.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -274,8 +361,25 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CFAEEAE1A060A1F3F7C7B176 /* MobileAppModelTests.swift in Sources */,
+				7D0F56ABB61C94B99E847425 /* MobilePeerNamesTests.swift in Sources */,
 				EC24D8F917E06EBDBEFD0EFF /* PairingCodeTests.swift in Sources */,
 				0335FC4356630E361F3436C1 /* PairingModelTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5CD4D6E1D03AAEFCD9D9AF6D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BA8B4AA27E3147C730829FAE /* DeviceListView.swift in Sources */,
+				E91A7369B215D14902F72A0E /* DropMeshTestHostApp.swift in Sources */,
+				00932389C62792458B54AFA6 /* InertMobileSession.swift in Sources */,
+				D2B45C770C12B8ED96E26B1D /* MobileAppModel.swift in Sources */,
+				3CE0239CCB871945A20F156F /* MobileAppSession.swift in Sources */,
+				2B6817DBDBF40137D3623253 /* MobilePeerNames.swift in Sources */,
+				72F00130732B48EBEC352C02 /* PairingModel.swift in Sources */,
+				6934FC13A7ADC30A78A71A83 /* PairingView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -290,15 +394,15 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		48F8C2EED49CF901DD985916 /* PBXTargetDependency */ = {
+		72A4B9E34F4811F49FDD18FC /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = CD2B911E499BE78DA53555C5 /* DropMesh */;
-			targetProxy = CBB527DB83E1CB081FD9C686 /* PBXContainerItemProxy */;
+			target = 81E4CCD92D9C10921DC8697C /* DropMeshTestHost */;
+			targetProxy = 95B826B1518A3AF606A42C65 /* PBXContainerItemProxy */;
 		};
-		B7F99E5D52D55BC522855C5C /* PBXTargetDependency */ = {
+		784A31CED3E677BDAC4B9D2E /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = CD2B911E499BE78DA53555C5 /* DropMesh */;
-			targetProxy = 852596337E3AF9D5729CE736 /* PBXContainerItemProxy */;
+			target = 81E4CCD92D9C10921DC8697C /* DropMeshTestHost */;
+			targetProxy = 054B52574E62CA78DBAE8AA3 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -324,6 +428,26 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
+		14181997682B9497D2291BC5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DropMesh;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.zensystech.dropmesh.iphone.dev.test-host";
+				PRODUCT_NAME = DropMeshTestHost;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		2EBF61AF8F261D9A907BF9E2 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -337,7 +461,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.uitests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = DropMesh;
+				TEST_TARGET_NAME = DropMeshTestHost;
 			};
 			name = Debug;
 		};
@@ -418,7 +542,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DropMesh.app/DropMesh";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DropMeshTestHost.app/DropMeshTestHost";
 			};
 			name = Release;
 		};
@@ -479,6 +603,26 @@
 			};
 			name = Release;
 		};
+		4F984F03E17D3326A371F5DC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DropMesh;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.zensystech.dropmesh.iphone.dev.test-host";
+				PRODUCT_NAME = DropMeshTestHost;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 		6E5EB46458DEED57B57F92D9 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -510,7 +654,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.uitests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = DropMesh;
+				TEST_TARGET_NAME = DropMeshTestHost;
 			};
 			name = Release;
 		};
@@ -527,7 +671,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.zensystech.dropmesh.iphone.dev.tests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DropMesh.app/DropMesh";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DropMeshTestHost.app/DropMeshTestHost";
 			};
 			name = Debug;
 		};
@@ -579,6 +723,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		F1F779682BCB9AA200A437A5 /* Build configuration list for PBXNativeTarget "DropMeshTestHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4F984F03E17D3326A371F5DC /* Debug */,
+				14181997682B9497D2291BC5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		F623B6AF8AEAB3C53B3CD562 /* Build configuration list for PBXNativeTarget "DropMeshTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -602,9 +755,17 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = MacChannelCore;
 		};
+		5591B7CB1BBE8DB8DFA3C8DD /* DropMeshMobileRuntime */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DropMeshMobileRuntime;
+		};
 		B3BD8A034BDBD714D3424FD5 /* DropMeshMobileRuntime */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = DropMeshMobileRuntime;
+		};
+		F59CA89E2A0504EFF940B405 /* MacChannelCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MacChannelCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

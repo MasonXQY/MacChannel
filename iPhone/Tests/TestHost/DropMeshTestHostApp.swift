@@ -1,9 +1,9 @@
 import SwiftUI
 
 @main
-struct DropMeshApp: App {
+struct DropMeshTestHostApp: App {
     @Environment(\.scenePhase) private var scenePhase
-    @State private var model = MobileAppModel(loadSession: { try await ProductionMobileAppDependencies.load() })
+    @State private var model = MobileAppModel(loadSession: { InertMobileSession() })
 
     var body: some Scene {
         WindowGroup {

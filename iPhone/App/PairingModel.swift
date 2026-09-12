@@ -23,23 +23,6 @@ protocol PairingAttempt: Sendable {
     func stop() async
 }
 
-actor ProductionPairingAttempt: PairingAttempt {
-    private let session: MobilePairingSession
-    private let transport: RendezvousPairingTransport
-
-    init(session: MobilePairingSession, transport: RendezvousPairingTransport) {
-        self.session = session
-        self.transport = transport
-    }
-
-    func join(code: String) async throws -> PairingJoinResult { try await session.join(code: code) }
-    func awaitApproval() async throws -> DeviceSummary { try await session.awaitApproval() }
-    func currentState() async -> MobilePairingState { await session.currentState() }
-    func retrySaving() async throws -> DeviceSummary { try await session.retrySaving() }
-    func cancel() async throws { try await session.cancel() }
-    func stop() async { await transport.stop() }
-}
-
 enum PairingPhase: Equatable {
     case entry
     case joining

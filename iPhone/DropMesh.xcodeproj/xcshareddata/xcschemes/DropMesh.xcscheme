@@ -21,34 +21,6 @@
                ReferencedContainer = "container:DropMesh.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "NO"
-            buildForProfiling = "NO"
-            buildForArchiving = "NO"
-            buildForAnalyzing = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "9B2473DA890B2320509E5ABB"
-               BuildableName = "DropMeshTests.xctest"
-               BlueprintName = "DropMeshTests"
-               ReferencedContainer = "container:DropMesh.xcodeproj">
-            </BuildableReference>
-         </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "NO"
-            buildForProfiling = "NO"
-            buildForArchiving = "NO"
-            buildForAnalyzing = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "092D9C8B76F6D4ABB7E0E4FF"
-               BuildableName = "DropMeshUITests.xctest"
-               BlueprintName = "DropMeshUITests"
-               ReferencedContainer = "container:DropMesh.xcodeproj">
-            </BuildableReference>
-         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -67,31 +39,7 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "9B2473DA890B2320509E5ABB"
-               BuildableName = "DropMeshTests.xctest"
-               BlueprintName = "DropMeshTests"
-               ReferencedContainer = "container:DropMesh.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "092D9C8B76F6D4ABB7E0E4FF"
-               BuildableName = "DropMeshUITests.xctest"
-               BlueprintName = "DropMeshUITests"
-               ReferencedContainer = "container:DropMesh.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
       </Testables>
-      <CommandLineArguments>
-      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
