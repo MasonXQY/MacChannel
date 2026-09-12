@@ -52,7 +52,9 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   disclosed AppIntentsmetadataextractionwarning; noSwiftcompilerwarnings.
   Root inspected trackedfinalEN/ZHhome/removal/pairing plus sixdigitready at
   AX-XXXL. Testsuseinertseparatehost, actualshippingassemblyexcludedfromhost;
-  screenshotsshowUI, notproductionconnectivity. Independentreviewactive.
+  screenshotsshowUI, notproductionconnectivity. Independent review Needs fixes:
+  durable-new-peer presentation and expected-interruption diagnostics. Bounded
+  correction active; prior passing UI tests do not close those findings.
 - Native transfer/picker/
   history UI and Share integration remain pending. Old runtime test
   fixture temporary-directory cleanup is a documented nonblocking hygiene debt,

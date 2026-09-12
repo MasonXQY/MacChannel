@@ -32,7 +32,9 @@ propagation; correction8c25fb3 is independently Approved,96mobile/36focused test
 and both iOSlibrary builds pass. Root full979tests/5skips/0failures47.675s exit0
 on that exact source. Native composition/test-host/lifecycle/paired-list slice
 sourcec41a409/report9c8d609 passes26unit+3UI and2largest-typebilingualUI tests,
-bothunsignedshippingbuilds andscopedprivacychecks. Independent review is active.
+bothunsignedshippingbuilds andscopedprivacychecks. Independent review found
+newpeerpresentation before pairing persistence and sticky expected-interruption
+errors; boundednativecorrection is active, review Needs fixes.
 Trackedfinalscreenshots inspected byroot; source/logtimeline mismatch investigated
 without establishing a cache defect. AppIntentsmetadatawarning disclosed.
 Picker/send, history/settings UI and Share are subsequent independently
