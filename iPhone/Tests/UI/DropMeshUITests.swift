@@ -22,6 +22,8 @@ final class DropMeshUITests: XCTestCase {
         app.buttons["pair-device-button"].tap()
         let field = app.textFields["pairing-code-field"]
         XCTAssertTrue(field.waitForExistence(timeout: 3))
+        app.swipeDown()
+        XCTAssertTrue(field.waitForExistence(timeout: 1), "Pairing owner must resist interactive dismissal")
         XCTAssertFalse(app.buttons["pairing-submit-button"].isEnabled)
         field.tap()
         field.typeText("12345")

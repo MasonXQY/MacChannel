@@ -71,6 +71,11 @@ final class PairingModel: Identifiable {
         if case .saveFailed = phase { return true }
         return false
     }
+    var showsWaitingProgress: Bool {
+        guard errorMessage == nil else { return false }
+        if case .waitingForMac = phase { return true }
+        return false
+    }
 
     private let makeAttempt: AttemptFactory
     private let refreshDevices: DeviceRefresh
@@ -88,6 +93,7 @@ final class PairingModel: Identifiable {
 
     func submit() {
         guard canSubmit, let accepted = PairingCode(code) else { return }
+        mayDismiss = false
         isBusy = true
         errorMessage = nil
         phase = .joining
@@ -159,6 +165,7 @@ final class PairingModel: Identifiable {
                 activeAttempt = nil
                 mayDismiss = true
                 phase = .entry
+                errorMessage = nil
             } catch {
                 errorMessage = String(localized: "pairing.error.cleanup")
                 mayDismiss = false

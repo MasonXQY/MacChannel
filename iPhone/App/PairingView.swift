@@ -14,6 +14,13 @@ struct PairingView: View {
                         .foregroundStyle(.secondary)
                 }
                 pairingContent
+                if let error = model.errorMessage {
+                    Section {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("pairing-error")
+                    }
+                }
             }
             .navigationTitle("pairing.title")
             .navigationBarTitleDisplayMode(.inline)
@@ -49,7 +56,9 @@ struct PairingView: View {
                         .font(.body.monospaced())
                         .textSelection(.enabled)
                 }
-                ProgressView("pairing.waiting.body")
+                if model.showsWaitingProgress {
+                    ProgressView("pairing.waiting.body")
+                }
             }
         case let .saveFailed(peer):
             Section {
@@ -86,12 +95,6 @@ struct PairingView: View {
                 .focused($codeFocused)
                 .accessibilityLabel("pairing.code.accessibility")
                 .accessibilityIdentifier("pairing-code-field")
-
-            if let error = model.errorMessage {
-                Text(error)
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier("pairing-error")
-            }
 
             Button {
                 codeFocused = false

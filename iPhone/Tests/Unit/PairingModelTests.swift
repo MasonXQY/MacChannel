@@ -145,6 +145,62 @@ final class PairingModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .saveFailed(peer))
     }
 
+    func testNewSubmitAfterBackgroundCleanupImmediatelyBlocksDismissalThroughSaveRecovery() async {
+        let firstAttempt = ControlledPairingAttempt()
+        let secondAttempt = ControlledPairingAttempt(
+            finalState: .saveFailed(fixturePeer),
+            approvalError: TestFailure.expected
+        )
+        let factory = SequencedAttemptFactory(attempts: [firstAttempt, secondAttempt])
+        let model = PairingModel(makeAttempt: factory.make)
+        model.code = "123456"
+
+        model.submit()
+        await firstAttempt.waitUntilJoinStarts()
+        await model.handleBackground()
+        XCTAssertTrue(model.mayDismiss)
+
+        model.submit()
+        XCTAssertFalse(model.mayDismiss)
+        await secondAttempt.waitUntilJoinStarts()
+        XCTAssertFalse(model.mayDismiss)
+        await waitUntilIdle(model)
+
+        XCTAssertEqual(model.phase, .saveFailed(fixturePeer))
+        XCTAssertFalse(model.mayDismiss)
+    }
+
+    func testCleanupFailureWhileWaitingIsRecoverableAndRetryAllowsDismissal() async {
+        let attempt = ControlledPairingAttempt(
+            finalState: .active(.awaitingHostApproval(fixturePeer)),
+            suspendApproval: true,
+            cancelErrors: [TestFailure.expected]
+        )
+        let model = PairingModel(makeAttempt: AttemptFactory(attempt: attempt).make)
+        model.code = "123456"
+        model.submit()
+        await attempt.waitUntilApprovalStarts()
+        guard case .waitingForMac = model.phase else { return XCTFail("Expected waiting phase") }
+
+        await model.cancelAndClose()
+
+        XCTAssertEqual(model.errorMessage, String(localized: "pairing.error.cleanup"))
+        XCTAssertFalse(model.mayDismiss)
+        XCTAssertFalse(model.showsWaitingProgress)
+        XCTAssertEqual(
+            model.phase,
+            PairingPhase.waitingForMac(peer: fixturePeer, fingerprint: "fixture fingerprint")
+        )
+
+        await model.cancelAndClose()
+
+        XCTAssertNil(model.errorMessage)
+        XCTAssertTrue(model.mayDismiss)
+        XCTAssertEqual(model.phase, PairingPhase.entry)
+        let cancelCount = await attempt.cancelCount
+        XCTAssertEqual(cancelCount, 2)
+    }
+
     func testModelReachesSuccessThroughRealMemoryPairingSessionsAfterBothSidesPersist() async throws {
         let server = MemoryPairingServer()
         let hostIdentity = try DeviceIdentity.ephemeral()
@@ -222,6 +278,16 @@ private final class AttemptFactory {
 }
 
 @MainActor
+private final class SequencedAttemptFactory {
+    private var attempts: [ControlledPairingAttempt]
+    init(attempts: [ControlledPairingAttempt]) { self.attempts = attempts }
+    func make() async throws -> any PairingAttempt {
+        guard !attempts.isEmpty else { throw TestFailure.expected }
+        return attempts.removeFirst()
+    }
+}
+
+@MainActor
 private final class SuspendedAttemptFactory {
     let attempt: ControlledPairingAttempt
     private var started = false
@@ -271,10 +337,14 @@ private actor ControlledPairingAttempt: PairingAttempt {
     private let approvalError: Error?
     private let retryResult: DeviceSummary
     private let suspendRetry: Bool
+    private let suspendApproval: Bool
+    private var cancelErrors: [Error]
     private var joinContinuation: CheckedContinuation<Void, Error>?
     private var joinStarted = false
     private var retryStarted = false
     private var retryContinuation: CheckedContinuation<Void, Error>?
+    private var approvalContinuation: CheckedContinuation<Void, Error>?
+    private var approvalStarted = false
     private(set) var joinCount = 0
     private(set) var retryCount = 0
     private(set) var cancelCount = 0
@@ -288,7 +358,9 @@ private actor ControlledPairingAttempt: PairingAttempt {
         approvalResult: DeviceSummary = fixturePeer,
         approvalError: Error? = nil,
         retryResult: DeviceSummary = fixturePeer,
-        suspendRetry: Bool = false
+        suspendRetry: Bool = false,
+        suspendApproval: Bool = false,
+        cancelErrors: [Error] = []
     ) {
         self.recorder = recorder
         self.joinResult = joinResult
@@ -298,6 +370,8 @@ private actor ControlledPairingAttempt: PairingAttempt {
         self.approvalError = approvalError
         self.retryResult = retryResult
         self.suspendRetry = suspendRetry
+        self.suspendApproval = suspendApproval
+        self.cancelErrors = cancelErrors
     }
 
     func join(code: String) async throws -> PairingJoinResult {
@@ -325,8 +399,20 @@ private actor ControlledPairingAttempt: PairingAttempt {
     }
 
     func awaitApproval() async throws -> DeviceSummary {
+        approvalStarted = true
+        if suspendApproval {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { approvalContinuation = $0 }
+            } onCancel: {
+                Task { await self.endCancelledApproval() }
+            }
+        }
         if let approvalError { throw approvalError }
         return approvalResult
+    }
+    private func endCancelledApproval() {
+        approvalContinuation?.resume(throwing: CancellationError())
+        approvalContinuation = nil
     }
     func currentState() async -> MobilePairingState { finalState }
     func retrySaving() async throws -> DeviceSummary {
@@ -345,7 +431,11 @@ private actor ControlledPairingAttempt: PairingAttempt {
         retryContinuation?.resume(throwing: CancellationError())
         retryContinuation = nil
     }
-    func cancel() async throws { cancelCount += 1; await recorder?.append("session-cancel") }
+    func cancel() async throws {
+        cancelCount += 1
+        await recorder?.append("session-cancel")
+        if !cancelErrors.isEmpty { throw cancelErrors.removeFirst() }
+    }
     func stop() async { stopCount += 1; await recorder?.append("transport-stop") }
 
     func waitUntilJoinStarts() async {
@@ -353,5 +443,8 @@ private actor ControlledPairingAttempt: PairingAttempt {
     }
     func waitUntilRetryStarts() async {
         while !retryStarted { await Task.yield() }
+    }
+    func waitUntilApprovalStarts() async {
+        while !approvalStarted { await Task.yield() }
     }
 }

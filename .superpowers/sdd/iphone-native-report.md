@@ -177,3 +177,94 @@ matches `Distribution/AppStoreBrand/app-icon-1024.png`:
 - Display names are not trust authority. When no separately persisted trusted
   presentation name exists, the device list uses a localized paired-Mac label
   plus a short trusted device identifier and does not claim the peer is online.
+
+## Independent-review lifecycle fixes
+
+Status: **DONE_WITH_CONCERNS**
+
+Starting revision: `fead87f`
+
+The two independent-review findings are fixed in the native iPhone layer.
+Accepting a new submit now resets `mayDismiss` synchronously before creating or
+awaiting the new attempt, including reuse of the retained sheet after background
+cleanup. Confirmed-but-unsaved recovery continues to retain the attempt and keep
+dismissal blocked.
+
+Pairing errors now render in a shared Form section for every phase rather than
+only code entry. If cleanup fails while waiting for Mac approval, the retained
+peer and fingerprint remain visible, the misleading waiting spinner is removed,
+Close remains available for a cleanup retry, and dismissal remains blocked. A
+successful retry clears the cleanup error, releases the attempt, and permits
+dismissal. Cancellation and transport-stop ordering are unchanged.
+
+TDD RED evidence:
+
+- `/tmp/dropmesh-iphone-review-fixes-red.log`: 2 focused tests executed with 4
+  expected assertion failures. The retained model allowed dismissal immediately,
+  during the second JOIN, and in save recovery; the successful cleanup retry also
+  left the prior cleanup error visible.
+- `/tmp/dropmesh-iphone-review-spinner-red.log`: the cleanup regression failed to
+  compile because `PairingModel` did not yet expose the rendering condition that
+  suppresses waiting progress after an error.
+
+Fresh GREEN unit verification:
+
+```sh
+xcodebuild test -project DropMesh.xcodeproj -scheme DropMesh \
+  -only-testing:DropMeshTests \
+  -destination 'platform=iOS Simulator,id=ACEA4034-2629-4A24-A7C8-C146BD8B0688' \
+  -derivedDataPath /private/tmp/dropmesh-iphone-review-ui.SxnKdd \
+  -resultBundlePath /private/tmp/dropmesh-iphone-review-unit-final.xcresult \
+  -disableAutomaticPackageResolution -skipPackageUpdates \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+Result: exit 0, 14 tests, 0 failures. The two new model regressions cover
+background cleanup followed by a new JOIN through save recovery, and a failed
+cleanup while waiting followed by successful Close retry. The latter also
+asserts that waiting progress is suppressed during the actionable cleanup error.
+Log: `/tmp/dropmesh-iphone-unit-review-fixes-fresh.log`.
+
+Fresh bilingual real-UI verification:
+
+```sh
+xcodebuild test -project DropMesh.xcodeproj -scheme DropMesh \
+  -only-testing:DropMeshUITests \
+  -destination 'platform=iOS Simulator,id=ACEA4034-2629-4A24-A7C8-C146BD8B0688' \
+  -derivedDataPath /private/tmp/dropmesh-iphone-review-ui.SxnKdd \
+  -disableAutomaticPackageResolution -skipPackageUpdates
+```
+
+Result: exit 0, 2 tests, 0 failures. English and Simplified Chinese smoke tests
+now perform a real swipe-down gesture on the production pairing sheet and prove
+the pairing owner remains presented; existing code-field and submit-gating checks
+still pass. No production fixture, launch bypass, or network submit was added.
+Result bundle:
+`/private/tmp/dropmesh-iphone-review-ui.SxnKdd/Logs/Test/Test-DropMesh-2026.09.12_16-14-19-+0400.xcresult`.
+Four kept screenshots exported successfully to
+`/private/tmp/dropmesh-iphone-review-ui-attachments`.
+
+Earlier complete unit and UI runs both executed with zero test failures but Xcode
+failed to finish their reused result bundles with `mkstemp` / CASDB errors. They
+are retained in the logs only and are not claimed as artifact evidence. The
+fresh private DerivedData run above used a copy of the already-resolved
+SourcePackages cache, did not update packages, saved valid result bundles, and
+successfully exported all four UI attachments.
+
+Fresh unsigned generic iPhone build using the original resolved cache also
+succeeded (`** BUILD SUCCEEDED **`); log:
+`/tmp/dropmesh-iphone-device-review-fixes-final.log`.
+
+The cleanup-failure appearance cannot be driven through the production UI
+without a controllable failing attempt. This task deliberately did not add a
+launch fixture or network/mock bypass. Its shared accessible `pairing-error`
+rendering is covered by source inspection plus the controlled model-state
+regression; the real UI test covers the actual interactive-dismiss gesture.
+
+Changed files for this repair:
+
+- `.superpowers/sdd/iphone-native-report.md`
+- `iPhone/App/PairingModel.swift`
+- `iPhone/App/PairingView.swift`
+- `iPhone/Tests/Unit/PairingModelTests.swift`
+- `iPhone/Tests/UI/DropMeshUITests.swift`
