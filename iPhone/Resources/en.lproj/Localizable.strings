@@ -60,7 +60,7 @@
 "send.files" = "Choose Files";
 "send.photos" = "Choose Photos or Videos";
 "send.photos.use" = "Use Selected Item";
-"send.photos.title" = "Photos & Videos";
+"send.photos.title" = "Media";
 "send.selected" = "Selected Files";
 "send.selection.cancel" = "Clear Selection";
 "send.recipient" = "Choose a Paired Mac";

@@ -27,6 +27,7 @@ final class DropMeshUITests: XCTestCase {
         XCTAssertTrue(retry.waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-Cleanup-Error")
         retry.tap()
+        revealAbove(app.buttons["send-files-button"], in: app)
         XCTAssertTrue(app.buttons["send-files-button"].isEnabled)
         let completed = app.staticTexts["transfer-progress-label"]
         reveal(completed, in: app)
@@ -45,6 +46,7 @@ final class DropMeshUITests: XCTestCase {
         entry.tap()
         XCTAssertTrue(app.buttons["send-files-button"].waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-Send")
+        reveal(app.buttons["send-photos-button"], in: app)
         app.buttons["send-photos-button"].tap()
         XCTAssertTrue(app.buttons["photos-use-button"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.buttons["photos-use-button"].isEnabled)
@@ -135,6 +137,13 @@ final class DropMeshUITests: XCTestCase {
         for _ in 0..<5 {
             if element.exists && element.isHittable { return }
             app.swipeUp()
+        }
+    }
+
+    private func revealAbove(_ element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<5 {
+            if element.exists && element.isHittable { return }
+            app.swipeDown()
         }
     }
 
