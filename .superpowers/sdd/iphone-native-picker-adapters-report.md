@@ -199,3 +199,80 @@ No new send/progress UI or EN/ZH/max-type send screenshot is claimed. Existing
 views remain unchanged; rendered integration belongs to the next slice.
 Independent review is required before that integration. No Core API gap was
 found or bypassed.
+
+## POSIX storage-error correction after independent review
+
+2026-09-12. Review finding: `iphone-native-picker-adapters-review.md`.
+Accepted base `e303652`; implementation began at documentation-only descendant
+`845e685`. Frozen corrected source is
+`f76b0371dbbfc5b6cc6eef0907aa2094355c0f03`. Only
+`iPhone/App/MobileImportService.swift` and
+`iPhone/Tests/Unit/MobileImportAdapterTests.swift` changed in that source commit.
+
+The importer actually propagates `POSIXError` from destination creation, writes,
+fsync and finalization. The adapter mapper previously recognized only selected
+Cocoa write errors, so actual `ENOSPC` was mislabeled `.unavailable`. The minimal
+correction recognizes POSIX `ENOSPC` and `EDQUOT` as `.storage`; other POSIX
+errors still fall through to `.unavailable`. Existing localized categories and
+Cocoa behavior are unchanged, and cancellation is still recognized first. No
+raw error or path detail is exposed.
+
+### TDD evidence
+
+The focused command was the standard Xcode 16.4 cached command above, using the
+same simulator, derived data, cloned package cache and no package updates; result
+bundle and log basenames follow each item.
+
+- Behavioral RED, `native-picker-posix-red.xcresult` / `.log`: exit 65;
+  20 tests executed with one expected failure. The new service-path test injected
+  `POSIXError(.ENOSPC)` from a `MobileImportStaging` implementation without
+  filling a disk. It observed `.unavailable` instead of expected `.storage`.
+- First implementation attempt, `native-picker-posix-green.xcresult` / `.log`:
+  exit 65 at compilation because POSIX raw values are `Int32` while `NSError.code`
+  is `Int`. The comparison was corrected with an explicit integer conversion;
+  no test or expected behavior was weakened.
+- Focused GREEN, `native-picker-posix-green-02.xcresult` / `.log`: exit 0;
+  20 tests, zero failures/skips, 0.098 seconds (0.102 suite). The regression
+  exercises the relevant service import path. Direct assertions additionally
+  retain POSIX `EACCES -> .unavailable`, cancellation `-> .cancelled`, and the
+  existing Cocoa disk-full `-> .storage` distinction.
+
+Exact focused command (with each result basename substituted):
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests -destination 'platform=iOS Simulator,id=ACEA4034-2629-4A24-A7C8-C146BD8B0688' -derivedDataPath .build/native-composition-final-cache -clonedSourcePackagesDirPath .build/iphone-simulator/SourcePackages -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO test -only-testing:DropMeshTests/MobileImportAdapterTests -resultBundlePath .build/native-picker-posix-green-02.xcresult
+```
+
+### Frozen verification
+
+Source stayed frozen at `f76b037` throughout these final checks. No cache was
+purged and no concurrent build/test session was active.
+
+- Complete native test command was the focused command with the class filter
+  removed and result `native-picker-posix-complete.xcresult`; log
+  `native-picker-posix-complete.log`. Exit 0: **61 unit + 3 UI tests**, zero
+  failures/skips; unit 0.868 seconds, UI 34.772 seconds. This is the prior native
+  baseline plus the one new regression. Views were unchanged, so no new
+  screenshot or max-type run is claimed.
+- Unsigned simulator shipping build used the report's existing generic simulator
+  command; `native-picker-posix-shipping-simulator.log`, exit 0,
+  `BUILD SUCCEEDED`.
+- Unsigned device shipping build used the report's existing generic iOS command;
+  `native-picker-posix-shipping-device.log`, exit 0, `BUILD SUCCEEDED`.
+- `bash Scripts/check-sensitive-logging.sh iPhone/App/*.swift`:
+  `native-picker-posix-logging.log`, exit 0, PASS.
+- `bash Scripts/audit-privacy.sh --static-only`:
+  `native-picker-posix-privacy.log`, exit 0, static PASS.
+- `rg -n '(UIPasteboard|NSPasteboard)' iPhone/App` returned no matches (expected
+  exit 1), retained in empty `native-picker-posix-native-pasteboard-inventory.log`.
+- `git diff --check` passed; retained in `native-picker-posix-diff-check.log`.
+  Both builds retain only the previously disclosed AppIntents metadata extraction
+  warning; no warning was suppressed.
+
+Self-review found the mapper remains domain-and-code bounded: it does not turn
+POSIX source permission/access failures into storage guidance, does not change
+provider/cancellation ownership, and adds no UI, send, Core, protocol, identity,
+network, key, signing, Store or Mac behavior. Verification is simulator/unsigned
+build evidence only: no real provider, physical device, production, installation,
+signed-release or Store acceptance is claimed. Independent re-review remains the
+next gate.
