@@ -8,6 +8,16 @@
 
 **Tech Stack:** Swift 6, Swift Package Manager, Xcode, pinned WebRTC 150.0.0, existing XCTest tests.
 
+## Execution outcome — 2026-09-12
+
+Tasks 1–3 completed including the diagnostic-driven extension below. iOS device
+and simulator core builds pass; both Mac release products build; full Mac suite
+reports 883 tests, 5 skipped, 0 failures. Evidence is recorded in
+`docs/acceptance/iphone-core-portability.md`. No app installation, signing,
+physical-iPhone transfer, protocol change or merge to the release branch occurred.
+The checkbox steps below retain the original procedure for reproducibility;
+this outcome and the acceptance report describe actual completion and limits.
+
 ## Global Constraints
 
 - Preserve released Mac 1.3.0 interoperability, protocol and identity security.
@@ -110,6 +120,20 @@ import AppKit
 - [ ] Inspect the diff for unchanged URL validation and pasteboard semantics. Commit only the two source files and acceptance evidence after relevant checks pass; leave failures clearly uncommitted/incomplete if the gate is not met.
 
 ## Task 3: Device compilation and Mac regression gate
+
+### Diagnostic-driven Task 2 extension (2026-09-12)
+
+After conditional AppKit isolation, full simulator compilation fails in legacy
+TailscaleCommandClient at Process (unavailable on iOS) and DownloadDirectory's
+homeDirectoryForCurrentUser default. Restrict the existing debug-only legacy
+define to macOS using `.when(platforms: [.macOS], configuration: .debug)`.
+Preserve the Mac default home-directory expression in a public static computed
+property; use URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true) on iOS.
+Keep the current directory resolution rules unchanged: the iPhone runtime will
+explicitly supply its Documents/DropMesh receiving folder in its adapter.
+Add a Mac regression asserting the default path equals the prior expression.
+The failing full iOS build covers missing platform API availability; rerun it
+after these focused changes, plus the directory and drag/drop Mac tests.
 
 **Files:**
 - Update: `docs/acceptance/iphone-core-portability.md`, `HANDOFF.md`

@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "MacChannel",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "MacChannelCore", targets: ["MacChannelCore"]),
         .executable(name: "MacChannelApp", targets: ["MacChannelApp"]),
@@ -21,7 +21,7 @@ let package = Package(
                 .product(name: "WebRTC", package: "WebRTC"),
             ],
             swiftSettings: [
-                .define("MACCHANNEL_LEGACY_MESH", .when(configuration: .debug)),
+                .define("MACCHANNEL_LEGACY_MESH", .when(platforms: [.macOS], configuration: .debug)),
             ]
         ),
         .target(

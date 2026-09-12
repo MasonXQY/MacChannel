@@ -1,4 +1,35 @@
-# DropMesh App Store handoff
+# DropMesh iPhone companion handoff
+
+## Current iPhone work — 2026-09-12
+
+Portability implementation now compiles the entire MacChannelCore for both
+iOS simulator and unsigned iPhone device destinations. Fixed conditional AppKit
+availability, macOS-only legacy debug define and platform home-directory default.
+Mac focused regression: 11 tests pass. Mac Store and Direct release builds pass.
+Full Mac test suite completed: exit 0, 883 tests, 5 skipped, 0 failures. Skips
+do not establish internet/relay or real-device interoperability. Evidence/log paths:
+`docs/acceptance/iphone-core-portability.md`. No iPhone application target or
+physical-device transfer acceptance yet. Earlier platform-blocker notes below
+are historical and resolved by the installed iOS 18.6 runtime.
+
+Owner approved the companion design and inline portability-plan execution.
+Worktree `.worktrees/dropmesh-iphone`, branch `feature/dropmesh-iphone`, base
+`c823400`. Preserve Mac 1.3.0 compatibility; no protocol or production changes.
+Dependency resolution and Mac DropIntent baseline pass (9 tests). WebRTC iOS
+device/simulator slices exist. Full iOS baseline fails before compilation:
+Xcode 16.4 has no eligible iOS destination, reporting missing iOS 18.5 platform;
+only 17.5 runtime is installed. Single-file SDK probe separately confirms
+unconditional AppKit import fails on iOS. See
+`docs/acceptance/iphone-core-portability.md` for reproducible commands/limits.
+Owner approved platform download/installation on 2026-09-12. Started
+`xcodebuild -downloadPlatform iOS` using default Xcode 16.4; Apple selected
+iOS 18.6 Simulator (22G86), 8.86 GB. Exec session 36652 remains running;
+last observed progress 0.6% (49.6 MB). Disk has 242 GiB available.
+Do not start a duplicate download. Poll this process or inspect runtime inventory
+on continuation, then rerun destination/build checks after installation succeeds.
+Installation and resolution of the build blocker are NOT yet verified.
+No installation of the app, production/store changes or Mac B control.
+Historical Store notes below are inherited and not current publication status.
 
 Updated 2026-09-07, Asia/Dubai. Worktree: `/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-app-store`, branch `feature/dropmesh-app-store`. Starting revision for current work: `1d35361`.
 
