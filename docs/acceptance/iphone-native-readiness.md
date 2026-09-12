@@ -6,8 +6,11 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
 
 - Starting revision 14034d6; mobile baseline: 11 tests, 0 failures.
 - Runtime/API audit: existing authenticated core can be composed without importing AppKit. This is source evidence, not live compatibility proof.
-- Private import staging revision 6e94e73: implementer reports 5 focused / 16 mobile tests passing; independent review is in progress.
-- Full mobile-library simulator build at 6e94e73: BUILD SUCCEEDED, exit 0, `.build/iphone-import-simulator.log`.
+- Private import staging fixed revision 0efdcde: 8 focused / 19 mobile tests passing; independent review approved after containment/FIFO/cleanup corrections.
+- Final-source mobile library simulator and unsigned device builds: BUILD SUCCEEDED, exit 0, `.build/iphone-import-fixed-simulator.log` and `.build/iphone-import-fixed-device.log`.
+- Full existing test suite at 0efdcde: 902 tests, 5 skipped, 0 failures, exit 0, `.build/iphone-import-full-regression.log`. Its local transfer/throughput fixtures are not iPhone measurements or physical interoperability evidence.
+- Native development app at 2db0788: 12 unit tests, 2 bilingual simulator UI tests, unsigned simulator and device app builds pass. This includes a reproduced and fixed late-factory cancellation hang. Independent review is pending; this is not release acceptance.
+- Coordinator inspected four retained English/Chinese home/pairing screenshots in `.build/iphone-ui-evidence`: labels and code field are visible without clipping. Final-source production pasteboard inventory audit passes (`.build/iphone-source-audit.log`); native app sources are now included and test fixtures excluded explicitly.
 - `xcrun devicectl list devices`: No devices found. Physical acceptance has not started.
 
 ## Required installed acceptance

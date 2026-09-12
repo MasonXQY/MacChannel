@@ -2,6 +2,23 @@
 
 ## Current iPhone work — 2026-09-12
 
+Continuous subagent-driven integration is now authorized. Current code milestone
+0efdcde adds private bounded file import staging; independent review initially
+found a destructive symlink-containment bug and blocking FIFO handling, both
+fixed with directory-descriptor-relative operations and regression tests.
+Focused staging 8 tests / mobile 19 tests pass; full iOS simulator and unsigned
+device library builds pass on the fixed source. Native app implementation at
+2db0788 passes 12 unit and 2 bilingual UI tests plus unsigned simulator/device
+app builds. Root inspected four retained screenshots and the extended production
+pasteboard audit passes. Independent review is active; preliminary dismissal
+lifecycle findings require repair before native task acceptance. Durable
+execution ledger: `.superpowers/sdd/progress.md`; scoped briefs/reports there.
+Read-only runtime composition and pairing lifecycle audits are complete. No
+physical device detected by devicectl; user asked asynchronously to connect an
+iPhone. No installed Mac app, Mac B, production or store changes. Continue native
+application, foreground transfer runtime, picker/history and Share integration,
+then real-device gates; do not stop merely after each delegated task.
+
 Mobile pairing lifecycle implementation verified. MobilePairingSession serializes actions, gates paired state on core
 confirmation plus successful persistence, supports retrying storage failure and
 confirmed-but-unsaved state, and preserves durable success after closing flow.
