@@ -12,8 +12,9 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   testlog. Old-body/zero-test/tooling failures were not accepted as corrected
   evidence. Temp9F77226A simulator retired afterexport; originalpreserved/restored
   large. Independent reviewb12bb48..f79d749 found missing incoming-completion
-  invalidation on Home. A bounded correction with regression tests is active;
-  the history slice is not accepted until rereview. No physical/system-provider
+  invalidation on Home. Correction8a7ae7d is independently Approved,11focused
+  and87unit+9UI pass with bothunsignedshippingbuilds/scoped audits. Root verified
+  log results. Minor test synchronization retained for final review. No physical/system-provider
   or network-interoperability claim. Share extension remains subsequent work.
 
 - Native send UI source5804b21/2df84dd, screenshot-helper-onlyc853b8e and
