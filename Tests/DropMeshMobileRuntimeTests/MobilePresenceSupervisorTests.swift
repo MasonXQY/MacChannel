@@ -99,6 +99,24 @@ final class MobilePresenceSupervisorTests: XCTestCase {
         XCTAssertEqual(MobileRuntimeConfiguration.httpOrigin.absoluteString, "https://channel.zensys-tech.com")
     }
 
+    func testProductionSocketFactoryOwnsFreshEphemeralSessionPerAttempt() throws {
+        var sessions: [URLSession] = []
+        let first = MobileRuntimeConfiguration.makePresenceSocket { session in
+            sessions.append(session)
+            return ProductionOwnershipSocket()
+        }
+        let second = MobileRuntimeConfiguration.makePresenceSocket { session in
+            sessions.append(session)
+            return ProductionOwnershipSocket()
+        }
+        XCTAssertTrue(first is ProductionOwnershipSocket)
+        XCTAssertTrue(second is ProductionOwnershipSocket)
+        XCTAssertEqual(sessions.count, 2)
+        XCTAssertFalse(sessions[0] === sessions[1])
+        sessions[0].invalidateAndCancel()
+        XCTAssertFalse(sessions[0] === sessions[1], "Closing one attempt cannot invalidate a reused session")
+    }
+
     func testCancelledSocketCreationDoesNotScheduleReconnect() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let factory = SupervisorSocketFactory([])
@@ -120,6 +138,11 @@ final class MobilePresenceSupervisorTests: XCTestCase {
         try await eventually { await supervisor.state == .online }
         let retry = Task { await supervisor.retryConnection() }
         try await eventually { await first.closePending }
+        let stateWhileClosing = await supervisor.state
+        do {
+            try await supervisor.bridge.sendSignal(Data([1]), to: DeviceID(rawValue: UUID()))
+            XCTFail("Draining socket must reject outgoing signals")
+        } catch is CancellationError { }
         try await Task.sleep(for: .milliseconds(30))
         let countWhileClosing = await factory.count
         await first.releaseClose()
@@ -127,6 +150,7 @@ final class MobilePresenceSupervisorTests: XCTestCase {
         try await eventually { await factory.count == 2 }
         await supervisor.stop()
         XCTAssertEqual(countWhileClosing, 1, "No new session while an old stop can still mutate the directory")
+        XCTAssertEqual(stateWhileClosing, .reconnecting, "A draining attempt must never remain online")
     }
 
     func testSignalOverflowClosesAndDrainsForwarderBeforeReconnect() async throws {
@@ -216,6 +240,13 @@ final class MobilePresenceSupervisorTests: XCTestCase {
     }
 
     private func frame(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
+}
+
+private final class ProductionOwnershipSocket: PresenceWebSocket, @unchecked Sendable {
+    func send(_ data: Data) throws { }
+    func ping() throws { }
+    func receive() async throws -> Data { throw CancellationError() }
+    func close() async { }
 }
 
 private actor SupervisorStateRecorder {

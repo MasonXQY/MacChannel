@@ -20,24 +20,22 @@ actor MobilePresenceSupervisor {
     private let onState: @Sendable (MobilePresenceState) async -> Void
     private var loop: Task<Void, Never>?
     private var backoff: Task<Void, Error>?
+    private var retryRequested = false
     private var stopped = false
     private var current: (token: MobileSignalBridge.SocketToken, session: AuthenticatedPresenceSession)?
     private var initialStop: Task<Void, Never>?
     private var finalDrain: Task<Void, Never>?
 
-    /// Production composition shares the foreground owner's ephemeral URLSession
-    /// with its TURN client. This object does not own URLSession invalidation.
+    /// Each socket attempt owns an ephemeral URLSession. Core invalidates that
+    /// session on socket close; TURN uses a separate foreground HTTP session.
     init(
         identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
-        session: URLSession,
         onState: @escaping @Sendable (MobilePresenceState) async -> Void = { _ in }
     ) {
         self.identity = identity
         self.repository = repository
         self.directory = directory
-        makeSocket = {
-            try URLSessionPresenceWebSocket(origin: MobileRuntimeConfiguration.webSocketURL, session: session)
-        }
+        makeSocket = { try MobileRuntimeConfiguration.makePresenceSocket() }
         sleep = { try await Task.sleep(for: $0) }
         self.onState = onState
     }
@@ -78,8 +76,12 @@ actor MobilePresenceSupervisor {
 
     func retryConnection() async {
         guard !stopped else { return }
+        retryRequested = true
         if let backoff { backoff.cancel() }
-        else { await stopCurrentSocket() }
+        else {
+            if let current { await beginDraining(current.token) }
+            await stopCurrentSocket()
+        }
     }
 
     /// The foreground owner persists trust and refreshes incoming policy first.
@@ -148,7 +150,7 @@ actor MobilePresenceSupervisor {
             // AuthenticatedPresenceSession directly mutates the directory. Join
             // connect/run above, then stop and join every forwarder before next
             // makeSocket. Signal token checks alone cannot protect presence.
-            await bridge.disconnect(token)
+            await beginDraining(token)
             for task in forwarders { task.cancel() }
             let initialStop = initialStop
             let drain = Task {
@@ -164,6 +166,10 @@ actor MobilePresenceSupervisor {
             self.initialStop = nil
             finalDrain = nil
             guard !stopped, !Task.isCancelled, !cancelled else { break }
+            if retryRequested {
+                retryRequested = false
+                continue
+            }
             let delay = Self.reconnectDelay(failures)
             failures = min(failures + 1, 4)
             let wait = Task { try await sleep(delay) }
@@ -171,6 +177,7 @@ actor MobilePresenceSupervisor {
             await publish(.reconnecting)
             _ = await wait.result
             backoff = nil
+            retryRequested = false
         }
         await bridge.finish()
         state = .stopped
@@ -196,11 +203,19 @@ actor MobilePresenceSupervisor {
 
     private func interrupt(_ token: MobileSignalBridge.SocketToken) async {
         guard !stopped, let current, current.token == token else { return }
-        await bridge.disconnect(token)
+        await beginDraining(token)
         guard !stopped, self.current?.token == token, finalDrain == nil else { return }
         // A forwarder cannot join finalDrain: that drain joins the forwarder.
         // Initiate close here and leave the join to the sole loop owner.
         if initialStop == nil { initialStop = Task { await current.session.stop() } }
+    }
+
+    /// Invalidates the socket route and publishes a truthful non-online state
+    /// before any cancellation-insensitive close work is awaited.
+    private func beginDraining(_ token: MobileSignalBridge.SocketToken) async {
+        guard !stopped, current?.token == token else { return }
+        await bridge.disconnect(token)
+        await publish(.reconnecting)
     }
 
     /// Every concurrent early stop joins the same operation. Final cleanup joins

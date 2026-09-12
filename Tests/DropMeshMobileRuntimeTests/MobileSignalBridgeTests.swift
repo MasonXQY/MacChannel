@@ -66,7 +66,70 @@ final class MobileSignalBridgeTests: XCTestCase {
         } catch is CancellationError { }
         await bridge.finish()
     }
+
+    func testLateThrowingSendIsCancelledAcrossSocketReplacement() async throws {
+        let bridge = MobileSignalBridge()
+        let gate = BridgeThrowingSendGate()
+        let oldValue = await bridge.beginSocket()
+        let old = try XCTUnwrap(oldValue)
+        await bridge.activate(old, sender: { _, _ in try await gate.wait() })
+        let send = Task { try await bridge.sendSignal(Data([1]), to: DeviceID(rawValue: UUID())) }
+        await gate.waitUntilEntered()
+        _ = await bridge.beginSocket()
+        await gate.release()
+        await assertCancellation(send)
+        await bridge.finish()
+    }
+
+    func testLateThrowingSendIsCancelledAfterFinish() async throws {
+        let bridge = MobileSignalBridge()
+        let gate = BridgeThrowingSendGate()
+        let tokenValue = await bridge.beginSocket()
+        let token = try XCTUnwrap(tokenValue)
+        await bridge.activate(token, sender: { _, _ in try await gate.wait() })
+        let send = Task { try await bridge.sendSignal(Data([1]), to: DeviceID(rawValue: UUID())) }
+        await gate.waitUntilEntered()
+        await bridge.finish()
+        await gate.release()
+        await assertCancellation(send)
+    }
+
+    func testLateThrowingSendIsCancelledWithCaller() async throws {
+        let bridge = MobileSignalBridge()
+        let gate = BridgeThrowingSendGate()
+        let tokenValue = await bridge.beginSocket()
+        let token = try XCTUnwrap(tokenValue)
+        await bridge.activate(token, sender: { _, _ in try await gate.wait() })
+        let send = Task { try await bridge.sendSignal(Data([1]), to: DeviceID(rawValue: UUID())) }
+        await gate.waitUntilEntered()
+        send.cancel()
+        await gate.release()
+        await assertCancellation(send)
+        await bridge.finish()
+    }
+
+    func testCurrentThrowingSendPreservesTransportError() async throws {
+        let bridge = MobileSignalBridge()
+        let tokenValue = await bridge.beginSocket()
+        let token = try XCTUnwrap(tokenValue)
+        await bridge.activate(token, sender: { _, _ in throw BridgeSendError.rejected })
+        do {
+            try await bridge.sendSignal(Data([1]), to: DeviceID(rawValue: UUID()))
+            XCTFail("Current send error must escape unchanged")
+        } catch BridgeSendError.rejected { }
+        await bridge.finish()
+    }
+
+    private func assertCancellation(_ task: Task<Void, Error>) async {
+        do {
+            try await task.value
+            XCTFail("Stale throwing send must be cancelled")
+        } catch is CancellationError { }
+        catch { XCTFail("Expected CancellationError, got \(error)") }
+    }
 }
+
+private enum BridgeSendError: Error { case rejected }
 
 private actor BridgeSendRecorder {
     var values: [Data] = []
@@ -80,6 +143,21 @@ private actor BridgeSendGate {
     func wait() async {
         entered = true; enteredWaiter?.resume(); enteredWaiter = nil
         await withCheckedContinuation { waiter = $0 }
+    }
+    func waitUntilEntered() async {
+        if !entered { await withCheckedContinuation { enteredWaiter = $0 } }
+    }
+    func release() { waiter?.resume(); waiter = nil }
+}
+
+private actor BridgeThrowingSendGate {
+    private var entered = false
+    private var enteredWaiter: CheckedContinuation<Void, Never>?
+    private var waiter: CheckedContinuation<Void, Never>?
+    func wait() async throws {
+        entered = true; enteredWaiter?.resume(); enteredWaiter = nil
+        await withCheckedContinuation { waiter = $0 }
+        throw BridgeSendError.rejected
     }
     func waitUntilEntered() async {
         if !entered { await withCheckedContinuation { enteredWaiter = $0 } }

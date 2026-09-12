@@ -53,7 +53,14 @@ actor MobileSignalBridge: RendezvousSignalSession {
     func sendSignal(_ payload: Data, to device: DeviceID) async throws {
         guard !finished, let token = socket, let sender else { throw CancellationError() }
         try Task.checkCancellation()
-        try await sender(payload, device)
+        do {
+            try await sender(payload, device)
+        } catch {
+            guard !finished, socket == token, self.sender != nil, !Task.isCancelled else {
+                throw CancellationError()
+            }
+            throw error
+        }
         guard !finished, socket == token, self.sender != nil, !Task.isCancelled else {
             throw CancellationError()
         }

@@ -38,9 +38,11 @@ implementation commit. This report is a separate scoped documentation commit.
   Failed trust sending stops the attempt and reconnect authenticates with the
   latest records. Persistence and immutable receive-policy refresh remain stage B.
 - `MobileRuntimeConfiguration` fixes the existing production WebSocket and HTTP
-  origins. Production supervisor creates `URLSessionPresenceWebSocket` using the
-  foreground owner's supplied URLSession. The test seam replaces only transport
-  and clock; every supervisor test executes real core authentication/presence.
+  origins. Each production presence attempt creates and owns a fresh ephemeral
+  URLSession, because core invalidates that session when its socket closes. TURN
+  keeps a different foreground HTTP session. The test seam replaces only the
+  final socket builder or transport and clock; supervisor tests still execute
+  real core authentication/presence.
 
 No core, protocol, App, iPhone, Package, server, signing or Store files changed.
 No diagnostics were added containing raw errors, identities, URLs or payloads.
@@ -57,7 +59,6 @@ await connector.disable() // before background cancellation
 
 let presence = MobilePresenceSupervisor(
     identity: identity, repository: repository, directory: directory,
-    session: foregroundURLSession,
     onState: { state in /* update runtime through its foreground token */ }
 )
 let signaling = RendezvousWebRTCSignaling(session: presence.bridge)
@@ -73,8 +74,9 @@ that actor, and must not synchronously call and await supervisor lifecycle work:
 it executes on the retained loop whose drain lifecycle calls join. The runtime
 should publish snapshots there and schedule its own transition separately.
 The owner sets its own stopping state immediately when background is requested.
-The supervisor does not invalidate URLSession; the foreground owner does that
-after all foreground consumers drain. Never reuse a stopped supervisor/bridge.
+Each presence attempt's socket close invalidates only that attempt's ephemeral
+URLSession. The stage-B foreground owner separately owns and invalidates the TURN
+HTTP session after its consumers drain. Never reuse a stopped supervisor/bridge.
 
 ## Verification and RED/GREEN evidence
 
@@ -149,3 +151,51 @@ UI integration, installation, signing or store acceptance occurred. Socket tests
 use in-memory data and ephemeral fixture identities. Builds establish compilation,
 not installed or end-to-end behavior. Root must independently review this stage
 before composing the remaining runtime.
+
+## Independent-review corrections — 2026-09-12
+
+Resolved all three findings from `iphone-network-stage-review.md` within the
+stage-A source/test boundary:
+
+- Production presence no longer accepts or shares the future TURN HTTP session.
+  `MobileRuntimeConfiguration.makePresenceSocket` creates a fresh ephemeral
+  URLSession per attempt and passes it only to that core socket. The narrow test
+  builder observes two distinct sessions without starting production networking;
+  invalidating the first therefore cannot affect the second or TURN.
+- Manual retry, receive/run error, trust failure and bridge overflow disconnect
+  the attempt's sender and publish `reconnecting` before awaiting socket close.
+  Delayed-close coverage verifies state is non-online, outgoing signals fail and
+  no replacement is created until the old close returns. A retained retry flag
+  prevents an explicit retry requested during this newly visible drain state from
+  being lost before backoff exists.
+- Outgoing bridge sends fence both success and failure. Late throwing sends after
+  socket replacement, final finish or caller cancellation now fail with
+  `CancellationError`; a genuine current-socket transport error is preserved.
+
+TDD evidence:
+
+- `.build/mobile-network-review-red.log`: 18 focused tests executed with four
+  expected behavioral failures: delayed close remained `online`, and stale
+  throwing sends leaked their old error after replacement, finish and caller
+  cancellation.
+- `.build/mobile-network-review-green-focused.log`: the same 18 focused tests
+  passed after the fixes.
+- `.build/mobile-network-review-final-tests.log`: full mobile suite, **41 tests,
+  zero failures, zero skipped**. This preserves the previous 36 and adds one
+  production session-ownership regression plus four bridge send regressions.
+- `.build/mobile-network-review-simulator.log` and
+  `.build/mobile-network-review-device.log`: cached unsigned iOS simulator and
+  device library builds both report **BUILD SUCCEEDED**. Neither is an app install
+  or physical-device networking test.
+- `--skip-update` emits its existing deprecation warning. Final test output has no
+  Swift compiler warnings; both Xcode logs have no `warning:` or `error:` lines.
+
+SHA-256, in RED, focused GREEN, full mobile, simulator and device order:
+
+```text
+47de76ee861e8d7e4217baf6ac05f9a7718183713c310f1bfc9b4ffed63c2571
+87cdf2c62c7584d6d61c6069c1c26386ca89c2b358ca829aa166fe09bb770258
+3cc4f032f69998323b6eebee60d6e028d1993d97370883f2f3e81b7635da1cfe
+6cd421eaf3d97685ef921f4dce0a442a48bddc4d277d3d7d142e91d52a39eeae
+459cfcdb954222aa7f78ea0348d5e079b5e6d68a6df276d122ac1db16dab38ab
+```
