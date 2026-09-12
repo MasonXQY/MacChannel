@@ -48,3 +48,9 @@
 "pairing.error.save" = "Pairing was confirmed but not saved on this iPhone. Retry saving; don’t start another pairing.";
 "pairing.error.cleanup" = "The local pairing attempt couldn’t finish stopping. Try closing again. This does not undo trust already saved on the Mac.";
 "pairing.error.generic" = "Pairing couldn’t finish. Check the code and connection, then try again.";
+"import.error.busy" = "Finish or cancel the current selection before choosing more files.";
+"import.error.cancelled" = "Import was interrupted. Choose the files again when you are ready.";
+"import.error.unavailable" = "The file provider could not supply this item. Check its availability and connection, then try again.";
+"import.error.storage" = "DropMesh could not prepare private storage. Check available space and try again.";
+"import.error.unsupported" = "This selection does not provide a supported file, photo, or video.";
+"import.error.cleanup" = "Temporary files could not be removed. Retry cleanup before choosing more files.";

@@ -48,3 +48,9 @@
 "pairing.error.save" = "配对已确认，但未能保存在这台 iPhone 上。请重试保存，不要开始新的配对。";
 "pairing.error.cleanup" = "本地配对尝试未能完全停止。请再次关闭。这不会撤销 Mac 上可能已保存的信任。";
 "pairing.error.generic" = "配对未能完成。请检查配对码和网络连接后重试。";
+"import.error.busy" = "请先完成或取消当前选择，再选择其他文件。";
+"import.error.cancelled" = "导入已中断。准备好后，请重新选择文件。";
+"import.error.unavailable" = "文件提供方无法提供此项目。请检查文件是否可用及网络连接，然后重试。";
+"import.error.storage" = "DropMesh 无法准备私有存储空间。请检查剩余空间后重试。";
+"import.error.unsupported" = "所选内容未提供受支持的文件、照片或视频。";
+"import.error.cleanup" = "无法移除临时文件。请重试清理，再选择其他文件。";
