@@ -47,10 +47,13 @@ warning/error matches. Combined review accepted the durability gate but found
 an in-foreground retry recovery diagnostic gap; focused fix8de36d2 is now
 independently Approved,41nativeunit+3UI and bothunsignedshippingbuilds/scoped
 audits pass. No Critical/Important remains in composition. Native Files/Photos
-adapter sourcea0c1251 plusPOSIXerrorfixf76b037/reporte89f6a9a is independently
+adapter sourcea0c1251 plusPOSIXerrorfixf76b037/report89f6a9a is independently
 Approved;61nativeunit+3UI,20focused,bothunsignedshippingbuilds/scoped audits pass.
 This is adapter ownership, not yet send UI. Bounded Photos presentation preflight
-is running; next fresh send/lifecycle/UI slice uses iphone-native-send-brief.md.
+is complete: app-owned inline systemPhotosPicker avoids unspecified modal
+selection/dismiss ordering, admission only after explicit selection commitment.
+Fresh iphone_native_send_ui is activebase89f6a9a using
+iphone-native-send-brief.md; no root build session is active.
 Send preflight confirms actual
 publicsend-return is the import-copy release boundary; Photos must explicitly
 cancel/join its copy. Root has no active build/test session.
