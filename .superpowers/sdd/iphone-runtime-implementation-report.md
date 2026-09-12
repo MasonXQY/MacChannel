@@ -199,3 +199,59 @@ SHA-256, in RED, focused GREEN, full mobile, simulator and device order:
 6cd421eaf3d97685ef921f4dce0a442a48bddc4d277d3d7d142e91d52a39eeae
 459cfcdb954222aa7f78ea0348d5e079b5e6d68a6df276d122ac1db16dab38ab
 ```
+
+## Retry retirement reentrancy correction — 2026-09-12
+
+Addressed the remaining P2 in the a9fb191 re-review. `beginDraining` now
+records the retired socket token synchronously before its first actor hop.
+Authentication entry/completion, bridge activation completion, online publication,
+run entry, trust refresh and both forwarding paths check that the attempt is
+still active. Duplicate drain requests do not republish the retired attempt's
+state. After bridge disconnect, state publication also revalidates the current
+token. Retry captures its original token and the early-close helper checks that
+token before joining or initiating close, so a suspended old callback cannot
+close a replacement. The sole loop retains final-drain/forwarder ownership;
+per-attempt production sessions and callback lifecycle constraints are unchanged.
+
+The deterministic regression holds the first reconnecting callback, releases
+late authentication, permits the loop to install a replacement while that
+callback remains suspended, then resumes the old retry. On unmodified production
+source it failed all three assertions: old run started, online count was two,
+and the old retry closed the replacement. The fixed source passes all three.
+The test fixture initially needed Swift async-autoclosure syntax corrections;
+the retained RED log is the subsequent behavioral reproduction.
+
+Executed commands and evidence on the final source:
+
+```sh
+swift test --skip-update --filter MobilePresenceSupervisorTests/testRetryRetiresAttemptBeforeSuspendedStateCallbackAndCannotCloseReplacement
+swift test --skip-update --filter MobilePresenceSupervisorTests
+swift test --skip-update --filter DropMeshMobileRuntimeTests
+xcodebuild -scheme DropMeshMobileRuntime -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/iphone-simulator -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO build
+xcodebuild -scheme DropMeshMobileRuntime -destination 'generic/platform=iOS' -derivedDataPath .build/iphone-device -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO build
+git diff --check
+```
+
+- Behavioral RED: `.build/mobile-retry-retirement-red.log`, 1 test, 3 expected failures.
+- Focused GREEN: `.build/mobile-retry-retirement-focused.log`, 12 tests, zero failures.
+- Full mobile: `.build/mobile-retry-retirement-full.log`, 42 tests, zero failures,
+  zero skipped, exit 0 (0.557 seconds test runtime).
+- Cached simulator/device library builds: `.build/mobile-retry-retirement-simulator.log`
+  and `.build/mobile-retry-retirement-device.log`, both BUILD SUCCEEDED, exit 0.
+- Only the existing SwiftPM `--skip-update` deprecation warning; neither Xcode
+  log has warning/error lines. Whitespace check passes.
+
+SHA-256 in RED, focused, full mobile, simulator, device order:
+
+```text
+6dee87c8b8d97a8fb8b91df9ba3187d892a60c8c1143b77aad24ffa1b86a7f31
+28cfb7fdf4d4a94c59ef0ce3d5bdf9f0e10e17b602cd44d4aaa2240c36e585a9
+9ee10b18bfefe52d8b8e3356edaaa0934c720fd7f59aae3aab658a475e4a17e9
+101d5a182b8d8b6586a4d0f77075894bd217402dadf02e5c519a246fb79c4225
+addd921ce879f64d9a41f0f178361f827467f3a6435065659b3b9488d7c5ed7f
+```
+
+Only supervisor source/tests and this appended report changed for the fix.
+Root-owned HANDOFF/readiness edits are excluded. No core/protocol changes,
+full-runtime implementation, production networking, installation, physical-device
+interoperability, signing or Store acceptance is implied by these checks.

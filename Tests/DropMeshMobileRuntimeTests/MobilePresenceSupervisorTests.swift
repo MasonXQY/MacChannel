@@ -190,6 +190,46 @@ final class MobilePresenceSupervisorTests: XCTestCase {
         XCTAssertEqual(onlineCount, 1, "Only the replacement socket may become online")
     }
 
+    func testRetryRetiresAttemptBeforeSuspendedStateCallbackAndCannotCloseReplacement() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let first = try SupervisorSocket(identity: identity, delayAuthentication: true)
+        let second = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([first, second])
+        let states = SupervisorStateRecorder()
+        let gate = SupervisorReconnectGate()
+        let supervisor = try makeSupervisor(identity, factory: factory, onState: {
+            await states.append($0)
+            if $0 == .reconnecting { await gate.holdFirst() }
+        })
+        await supervisor.start()
+        try await eventually { await first.waitingForFrame }
+        let retry = Task { await supervisor.retryConnection() }
+        try await eventually { await gate.waiting }
+        await first.push(try frame(["type": "auth-ok", "deviceID": identity.id.rawValue.uuidString.lowercased()]))
+        try await eventually {
+            let replacement = await factory.count == 2
+            let runStarted = await first.receiveCalls >= 3
+            return replacement || runStarted
+        }
+        let oldRunStarted = await first.receiveCalls >= 3
+        // Let even the buggy old loop drain, so the second half detects a stale
+        // retry closing the replacement after its callback finally resumes.
+        if oldRunStarted { await first.failReceive() }
+        try await eventually {
+            let count = await factory.count
+            let state = await supervisor.state
+            return count == 2 && state == .online
+        }
+        await gate.release()
+        await retry.value
+        let replacementClosed = await second.closed
+        let onlineCount = await states.values.filter { $0 == .online }.count
+        await supervisor.stop()
+        XCTAssertFalse(oldRunStarted, "Retired authentication must never enter run")
+        XCTAssertEqual(onlineCount, 1, "Only the replacement may publish online")
+        XCTAssertFalse(replacementClosed, "Resuming an old retry must not close its replacement")
+    }
+
     func testTrustUpdateSendFailureReauthenticatesWithCurrentRepository() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()
@@ -254,6 +294,18 @@ private actor SupervisorStateRecorder {
     func append(_ state: MobilePresenceState) { values.append(state) }
 }
 
+private actor SupervisorReconnectGate {
+    private var used = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    var waiting: Bool { continuation != nil }
+    func holdFirst() async {
+        guard !used else { return }
+        used = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { continuation?.resume(); continuation = nil }
+}
+
 private actor SupervisorSocketFactory {
     private var sockets: [SupervisorSocket]
     var count = 0
@@ -277,6 +329,7 @@ private actor SupervisorSocket: PresenceWebSocket {
     var sentTypes: [String] = []
     var authenticationRecordCount = 0
     var closed = false
+    var receiveCalls = 0
     var waitingForFrame: Bool { receiver != nil }
     init(identity: DeviceIdentity, delayAuthentication: Bool = false, delayFirstClose: Bool = false,
          rejectTrustUpdate: Bool = false) throws {
@@ -303,6 +356,7 @@ private actor SupervisorSocket: PresenceWebSocket {
     }
     func ping() { }
     func receive() async throws -> Data {
+        receiveCalls += 1
         if !incoming.isEmpty { return incoming.removeFirst() }
         if closed { throw CancellationError() }
         return try await withCheckedThrowingContinuation { receiver = $0 }

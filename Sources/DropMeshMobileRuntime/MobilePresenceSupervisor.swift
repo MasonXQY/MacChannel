@@ -23,6 +23,7 @@ actor MobilePresenceSupervisor {
     private var retryRequested = false
     private var stopped = false
     private var current: (token: MobileSignalBridge.SocketToken, session: AuthenticatedPresenceSession)?
+    private var retiredToken: MobileSignalBridge.SocketToken?
     private var initialStop: Task<Void, Never>?
     private var finalDrain: Task<Void, Never>?
 
@@ -69,7 +70,7 @@ actor MobilePresenceSupervisor {
         loop?.cancel()
         backoff?.cancel()
         await bridge.finish()
-        await stopCurrentSocket()
+        if let current { await stopCurrentSocket(current.token) }
         if let loop { await loop.value }
         state = .stopped
     }
@@ -78,9 +79,9 @@ actor MobilePresenceSupervisor {
         guard !stopped else { return }
         retryRequested = true
         if let backoff { backoff.cancel() }
-        else {
-            if let current { await beginDraining(current.token) }
-            await stopCurrentSocket()
+        else if let current {
+            await beginDraining(current.token)
+            await stopCurrentSocket(current.token)
         }
     }
 
@@ -90,7 +91,7 @@ actor MobilePresenceSupervisor {
     func refreshTrust() async {
         guard !stopped, state == .online, let current else { return }
         let records = await repository.authenticationRecords()
-        guard !stopped, self.current?.token == current.token, !records.isEmpty else { return }
+        guard isActive(current.token), !records.isEmpty else { return }
         do { try await current.session.sendTrustUpdate(records) }
         catch { await interrupt(current.token) }
     }
@@ -115,14 +116,16 @@ actor MobilePresenceSupervisor {
                 )
                 session = attempt
                 current = (token, attempt)
+                retiredToken = nil
                 await publish(failures == 0 ? .connecting : .reconnecting)
                 try Task.checkCancellation()
+                guard isActive(token) else { throw AttemptInterrupted.retry }
                 try await attempt.connect()
                 guard !stopped, !Task.isCancelled else { throw CancellationError() }
-                guard initialStop == nil else { throw AttemptInterrupted.retry }
+                guard isActive(token) else { throw AttemptInterrupted.retry }
                 await bridge.activate(token) { payload, peer in try await attempt.sendSignal(payload, to: peer) }
                 guard !stopped, !Task.isCancelled else { throw CancellationError() }
-                guard initialStop == nil else { throw AttemptInterrupted.retry }
+                guard isActive(token) else { throw AttemptInterrupted.retry }
                 forwarders = [
                     Task { [weak self] in
                         for await frame in await attempt.signalFrames() {
@@ -137,9 +140,9 @@ actor MobilePresenceSupervisor {
                         }
                     }
                 ]
-                await publish(.online)
+                if isActive(token) { await publish(.online) }
                 try Task.checkCancellation()
-                guard initialStop == nil else { throw AttemptInterrupted.retry }
+                guard isActive(token) else { throw AttemptInterrupted.retry }
                 try await attempt.run()
             } catch is CancellationError {
                 cancelled = true
@@ -192,12 +195,12 @@ actor MobilePresenceSupervisor {
     }
 
     private func forward(_ frame: RendezvousSignalFrame, token: MobileSignalBridge.SocketToken) async {
-        guard !stopped, current?.token == token else { return }
+        guard isActive(token) else { return }
         if !(await bridge.receive(frame, socket: token)) { await interrupt(token) }
     }
 
     private func forward(_ error: RendezvousProtocolError, token: MobileSignalBridge.SocketToken) async {
-        guard !stopped, current?.token == token else { return }
+        guard isActive(token) else { return }
         if !(await bridge.receive(error, socket: token)) { await interrupt(token) }
     }
 
@@ -213,17 +216,25 @@ actor MobilePresenceSupervisor {
     /// Invalidates the socket route and publishes a truthful non-online state
     /// before any cancellation-insensitive close work is awaited.
     private func beginDraining(_ token: MobileSignalBridge.SocketToken) async {
-        guard !stopped, current?.token == token else { return }
+        guard isActive(token) else { return }
+        // Retirement must be visible before bridge/callback actor hops. The
+        // loop may finish this attempt while the callback is still suspended.
+        retiredToken = token
         await bridge.disconnect(token)
+        guard !stopped, current?.token == token else { return }
         await publish(.reconnecting)
+    }
+
+    private func isActive(_ token: MobileSignalBridge.SocketToken) -> Bool {
+        !stopped && current?.token == token && retiredToken != token
     }
 
     /// Every concurrent early stop joins the same operation. Final cleanup joins
     /// it before closing again, so a lingering old disconnect cannot clear a
     /// replacement session's presence after reconnect.
-    private func stopCurrentSocket() async {
+    private func stopCurrentSocket(_ token: MobileSignalBridge.SocketToken) async {
+        guard let current, current.token == token else { return }
         if let finalDrain { await finalDrain.value; return }
-        guard let current else { return }
         if initialStop == nil { initialStop = Task { await current.session.stop() } }
         await initialStop?.value
     }
