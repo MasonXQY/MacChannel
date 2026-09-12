@@ -79,8 +79,10 @@ Physical-device access is needed at the integration gate; the user operates Mac 
 unless separately authorizing control. Do not purchase, install over the running
 Mac release, upload or change store records merely to satisfy a coding test.
 
-## Current state
+## Approval and implementation tracking
 
-Design only. No iPhone target, dependency migration, server change, installation
-or new cross-device verification has been performed. This document is pending
-owner review before a detailed implementation plan.
+Owner subsequently approved this design and continuous subagent-driven
+implementation. The original design-only snapshot is superseded by HANDOFF.md
+and docs/acceptance/iphone-native-readiness.md. Portability, mobile identity,
+pairing and a native development target now exist; this does not establish
+physical-device interoperability or authorize a Store submission.

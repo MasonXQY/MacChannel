@@ -8,10 +8,11 @@ found a destructive symlink-containment bug and blocking FIFO handling, both
 fixed with directory-descriptor-relative operations and regression tests.
 Focused staging 8 tests / mobile 19 tests pass; full iOS simulator and unsigned
 device library builds pass on the fixed source. Native app implementation at
-2db0788 passes 12 unit and 2 bilingual UI tests plus unsigned simulator/device
-app builds. Root inspected four retained screenshots and the extended production
-pasteboard audit passes. Independent review is active; preliminary dismissal
-lifecycle findings require repair before native task acceptance. Durable
+2db0788 plus review fixes 9ef3642 passes 14 unit and 2 bilingual UI tests plus
+unsigned simulator/device app builds. Root inspected retained screenshots and
+the extended production pasteboard audit passes. Independent re-review approves
+the native task after dismissal and cleanup-error fixes. Foreground runtime
+implementation is now delegated, owning only mobile library/runtime tests. Durable
 execution ledger: `.superpowers/sdd/progress.md`; scoped briefs/reports there.
 Read-only runtime composition and pairing lifecycle audits are complete. No
 physical device detected by devicectl; user asked asynchronously to connect an
