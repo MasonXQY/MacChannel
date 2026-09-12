@@ -5,6 +5,10 @@ Whole branch base c823400. Source-only development, not release acceptance.
 
 Accumulated Minor items requiring explicit final triage:
 
+- Share correction52f4878: MobileImportStagerTests15,36 rejection tests accept
+  any error. Assert POSIXError EFBIG to exclude unrelated failures. Independent
+  correction review Approved; add this precision check to final triage.
+
 0. History refresh correction8a7ae7d: MobileHistoryModelTests198 helper observes
    history request entry rather than model application. Assertion at20 can race
    later snapshot/application; use expected entries or deterministic completion
