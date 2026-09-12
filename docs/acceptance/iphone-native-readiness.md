@@ -4,6 +4,16 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
 
 ## Verified this continuation
 
+- Native history/settings production5f8e50d and evidence/reportf79d749:84unit+
+  9UI pass; final EN/ZHmaximumtype flows pass, with32retainedscreenshots. Both
+  actual app builds pass(signingdisabled); deviceunsigned, simulatornormal
+  linkeradhocsignature(no team/resource seal). Root checked selected captures,
+  actualbundle0.1.0(1)/Filesflags and current English navigation guard in isolated
+  testlog. Old-body/zero-test/tooling failures were not accepted as corrected
+  evidence. Temp9F77226A simulator retired afterexport; originalpreserved/restored
+  large. Independent reviewb12bb48..f79d749 is pending; no physical/system-provider
+  or network-interoperability claim. Share extension remains subsequent work.
+
 - Native send UI source5804b21/2df84dd, screenshot-helper-onlyc853b8e and
   report/evidencebe68272: final76unit+7UI, sixmaximum-Dynamic-Type UI and four
   supplementalerror-regionUI tests pass. Both actual unsigned shipping builds

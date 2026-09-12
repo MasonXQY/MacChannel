@@ -60,7 +60,13 @@ size EN/ZH screenshots, including explicit recipient and error-region evidence.
 Independent iphone_native_send_review approves89f6a9a..be68272 with no
 Critical/Important findings. Generic send-failure guidance and known AppIntents
 warning remain Minor ledger items. No build/test session is active. This is not
-physical transfer proof. Fresh history/settings implementation follows.
+physical transfer proof. History/settings production5f8e50d and test/report32PNG
+f79d749 now pass84unit+9UI and EN/ZHmaximumtype flows; both actual app builds
+pass with signing disabled. Root checked selected screenshots, actual bundle
+version0.1.0(1)/Files flags and current isolated English test-guard execution.
+One task-created temporary simulator was retired after evidence export; original
+simulator data remains and content size is restoredlarge. Independent history
+review is active fromb12bb48..f79d749; Share follows after approval.
 Send preflight confirms actual
 publicsend-return is the import-copy release boundary; Photos must explicitly
 cancel/join its copy. Root has no active build/test session.
