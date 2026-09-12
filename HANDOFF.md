@@ -28,8 +28,11 @@ are independently Approved,76mobile tests and both iOSlibrary builds pass;
 integrated959tests/5skips/0failures passes. Durable history/index source9f5da75
 and report4c0021e pass92mobile tests, both iOSlibrary builds and root full975tests/
 5skips/0failures. Independent review found incomplete availability diagnostic
-propagation; scoped correction is active and review remains Needs fixes.
-Native transfer/picker/history UI/Share remain pending. A source audit
+propagation; correction8c25fb3 is independently Approved,96mobile/36focused tests
+and both iOSlibrary builds pass. Root full979tests/5skips/0failures47.675s exit0
+on that exact source. Native composition/test-host/lifecycle/paired-list slice
+is active; picker/send, history/settings UI and Share are subsequent independently
+reviewed slices. A source audit
 added a mandatory re-entry barrier for
 initial sends hidden from durable snapshots; see iphone-late-send-audit.md. Durable
 execution ledger: `.superpowers/sdd/progress.md`; scoped briefs/reports there.

@@ -43,7 +43,10 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   0failures,47.298seconds,exit0, `.build/mobile-history-integrated-full.log`.
   Independent review is Needs fixes: auxiliary availability errors are not
   consistently recorded/published to runtime subscribers. Scoped correction
-  is active; a passing suite does not substitute for this review closure.
+  fixed by8c25fb3; independent re-review is compliant/Approved with no findings.
+  Correction36focused/96mobile tests and both iOSlibrary builds pass, logs checked.
+  Root exact-source full979tests/5skips/0failures47.675seconds exit0;
+  `.build/mobile-history-fixed-integrated-full.log`, no warning/error matches.
 - Native transfer/picker/
   history UI and Share integration remain pending. Old runtime test
   fixture temporary-directory cleanup is a documented nonblocking hygiene debt,
