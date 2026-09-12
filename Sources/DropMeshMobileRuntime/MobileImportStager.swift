@@ -97,6 +97,15 @@ public actor MobileImportStager {
         }
     }
 
+    /// Main-app startup/import admission only; never scan a received or outgoing root.
+    public func recoverAbandonedImports() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.addOperation { [copy] in
+                continuation.resume(with: Result { try copy.recoverAbandonedImports() })
+            }
+        }
+    }
+
     private nonisolated static func workerQueue() -> OperationQueue {
         let queue = OperationQueue()
         queue.name = "DropMesh.private-import"

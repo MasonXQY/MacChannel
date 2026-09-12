@@ -141,6 +141,10 @@ for mutation_root in iPhone/App iPhone/ShareExtension iPhone/Shared; do
         echo "sensitive logging scan accepted a $mutation_root mutation" >&2
         exit 1
     fi
+    if bash "$repository_root/Scripts/audit-privacy.sh" --static-only >/dev/null 2>&1; then
+        echo "privacy audit accepted a $mutation_root mutation" >&2
+        exit 1
+    fi
     rm -f "$mutation_path"
     mutation_path=""
 done
@@ -150,6 +154,10 @@ mutation_path="$mutation_directory/SensitiveLoggingMutation.swift"
 printf '%s\n' $'func sensitiveLoggingMutation(path: String) {\n    print("path=\\(path)")\n}' > "$mutation_path"
 if bash "$repository_root/Scripts/check-sensitive-logging.sh" >/dev/null 2>&1; then
     echo "sensitive logging scan excluded a production path merely because its name contains Tests" >&2
+    exit 1
+fi
+if bash "$repository_root/Scripts/audit-privacy.sh" --static-only >/dev/null 2>&1; then
+    echo "privacy audit excluded a production path merely because its name contains Tests" >&2
     exit 1
 fi
 rm -f "$mutation_path"

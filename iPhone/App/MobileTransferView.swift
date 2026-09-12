@@ -22,6 +22,17 @@ struct MobileTransferView: View {
                 Text(result == .requested ? "transfer.cancel.requested" : "transfer.cancel.late")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
+            if transfer.phase == .failed {
+                Text("transfer.failed.recovery")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("transfer-failure-guidance")
+                Menu("transfer.reselect") {
+                    Button("send.files") { model.reselectOriginals(for: transfer.id, kind: .files) }
+                    Button("send.photos") { model.reselectOriginals(for: transfer.id, kind: .photos) }
+                }
+                .disabled(!model.canSelect)
+                .accessibilityIdentifier("transfer-reselect-originals")
+            }
             if !terminal {
                 VStack(alignment: .leading, spacing: 12) {
                     if transfer.phase == .paused {

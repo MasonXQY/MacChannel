@@ -71,7 +71,9 @@
 "send.transfers" = "传输";
 "send.error.recipient" = "此 Mac 已离线或不再配对。设备可用后请重新选择文件。";
 "send.error.foreground" = "DropMesh 切到后台，准备已中断。请保持应用在前台并重新选择。";
-"send.error.transfer" = "无法准备发送。请检查 Mac 连接后重新选择。";
+"send.error.transfer" = "无法准备发送。请检查可用存储空间、所选原件的访问权限和 Mac 连接，然后重新选择原件。";
+"transfer.failed.recovery" = "本次发送失败，无法自动重试。请检查可用存储空间、原件的访问权限和 Mac 连接。重新选择原件后可准备一次新的发送。";
+"transfer.reselect" = "重新选择原件";
 "send.error.action" = "无法完成传输操作。请保持 DropMesh 在前台，确认已配对的 Mac 在线后重试。";
 "transfer.cancel.requested" = "已请求取消，正在等待传输停止。";
 "transfer.cancel.late" = "取消已来不及生效，请以传输状态为准。";

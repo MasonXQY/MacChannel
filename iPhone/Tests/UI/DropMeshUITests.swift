@@ -2,6 +2,35 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
+    func testEnglishFailedSendRecovery() { runFailedSend(language: "en", locale: "en_US", prefix: "English") }
+    func testChineseFailedSendRecovery() { runFailedSend(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
+
+    private func runFailedSend(language: String, locale: String, prefix: String) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-failed-send-evidence"]
+        app.launch()
+        let entry = app.buttons["send-open-button"]
+        reveal(entry, in: app)
+        XCTAssertTrue(entry.waitForExistence(timeout: 3))
+        entry.tap()
+        let guidance = app.staticTexts["transfer-failure-guidance"]
+        reveal(guidance, in: app)
+        XCTAssertTrue(guidance.waitForExistence(timeout: 3))
+        XCTAssertTrue(guidance.label.contains(language == "en" ? "cannot retry automatically" : "无法自动重试"))
+        positionExplanation(guidance, in: app)
+        attach(app.screenshot(), named: "\(prefix)-Failed-Send-Guidance")
+        let reselect = app.buttons["transfer-reselect-originals"]
+        reveal(reselect, in: app)
+        XCTAssertTrue(reselect.isEnabled)
+        XCTAssertEqual(reselect.label, language == "en" ? "Select originals again" : "重新选择原件")
+        attach(app.screenshot(), named: "\(prefix)-Failed-Send-Reselect")
+        reselect.tap()
+        app.buttons[language == "en" ? "Choose Photos or Videos" : "选择照片或视频"].tap()
+        XCTAssertTrue(app.buttons["photos-use-button"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["photos-use-button"].isEnabled)
+        app.buttons["photos-cancel-button"].tap()
+    }
+
     func testEnglishSharedBatch() { runShared(language: "en", locale: "en_US", prefix: "English") }
     func testChineseSharedBatch() { runShared(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
     private func runShared(language: String, locale: String, prefix: String) {

@@ -35,7 +35,9 @@ private func makeNativeEvidenceSession() async -> any MobileAppSession {
         await session.setHistoryFailure(ProcessInfo.processInfo.arguments.contains("-history-error"))
     }
     await session.setTransfers([TransferSnapshot(id: TransferID(rawValue: UUID()),
-        peer: session.peer.id, phase: .paused, completedBytes: 314_572_800,
+        peer: session.peer.id,
+        phase: ProcessInfo.processInfo.arguments.contains("-failed-send-evidence") ? .failed : .paused,
+        completedBytes: 314_572_800,
         totalBytes: 1_073_741_824, route: .lan)])
     return session
 }

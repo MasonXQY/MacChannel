@@ -37,6 +37,7 @@ public actor MobileForegroundRuntime {
 
     private struct SendOperation {
         let epoch: UInt64
+        let peer: DeviceID
         let cancellation: MobileSendCancellation
         let worker: Task<TransferID, Error>
     }
@@ -213,7 +214,7 @@ public actor MobileForegroundRuntime {
             await beforeSendAccounting()
             return try await accountSend(token, result: result)
         }
-        operations[token] = SendOperation(epoch: admittedEpoch, cancellation: cancellation, worker: worker)
+        operations[token] = SendOperation(epoch: admittedEpoch, peer: device, cancellation: cancellation, worker: worker)
         return try await withTaskCancellationHandler {
             try await worker.value
         } onCancel: {
@@ -240,14 +241,19 @@ public actor MobileForegroundRuntime {
     private func accountSend(_ token: UUID, result: Result<TransferID, Error>) async throws -> TransferID {
         guard let operation = operations[token] else { throw MobileRuntimeError.interrupted }
         // Keep the record while cancellation crosses the coordinator actor.
+        let trusted = await repository.currentTrustStore().trustedDeviceIDs.contains(operation.peer)
         let interrupted = operation.epoch != epoch || !desiredForeground
         let cancelled = operation.cancellation.finish()
-        if case let .success(id) = result, interrupted || cancelled {
-            _ = await coordinator?.cancel(id)
+        var revokedCancellation = false
+        if case let .success(id) = result, interrupted || cancelled || !trusted {
+            let outcome = await coordinator?.cancel(id)
+            // Completion may already have won. Retain Core's terminal outcome
+            // instead of turning a truthful completed send into an admission error.
+            revokedCancellation = !trusted && outcome == .requested
         }
         operations[token] = nil
         if cancelled { throw CancellationError() }
-        if interrupted { throw MobileRuntimeError.interrupted }
+        if interrupted || revokedCancellation { throw MobileRuntimeError.interrupted }
         switch result {
         case let .success(id): return id
         case .failure: throw MobileRuntimeError.sendFailed
@@ -363,6 +369,7 @@ public actor MobileForegroundRuntime {
         let revision = trustRevision
         do { try await persistTrust(); if failure == .trustPersistence { failure = nil } }
         catch { failure = .trustPersistence; publish() }
+        await cancelRevokedTransfers()
         await directory.waitForTrustUpdates()
         if let graph = network, desiredForeground, graphEpoch == epoch {
             // Re-read after the old immutable-policy owner actually drains.
@@ -428,6 +435,18 @@ public actor MobileForegroundRuntime {
             case .completed, .cancelled, .failed: break
             default: _ = await coordinator.cancel(snapshot.id)
             }
+        }
+    }
+
+    private func cancelRevokedTransfers() async {
+        guard let coordinator else { return }
+        var iterator = await coordinator.snapshots().makeAsyncIterator()
+        for snapshot in await iterator.next() ?? [] {
+            guard ![.completed, .cancelled, .failed].contains(snapshot.phase) else { continue }
+            // Re-read for each cancellation across actor suspension. Hidden
+            // packaging is independently checked when its ID is accounted.
+            let trusted = await repository.currentTrustStore().trustedDeviceIDs
+            if !trusted.contains(snapshot.peer) { _ = await coordinator.cancel(snapshot.id) }
         }
     }
 

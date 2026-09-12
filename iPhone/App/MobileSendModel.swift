@@ -9,7 +9,7 @@ import SwiftUI
 final class MobileSendModel {
     enum Phase: Equatable { case idle, selecting, preparing, ready, sending, cleaning, cleanupFailed }
     struct Presentation: Identifiable {
-        enum Kind { case photos, files }
+        enum Kind: Equatable { case photos, files }
         let id: UUID
         let kind: Kind
     }
@@ -234,6 +234,13 @@ final class MobileSendModel {
         requestCancellation()
     }
     func pauseTransfer(_ id: TransferID) { perform(id, operation: .pause) }
+    func reselectOriginals(for id: TransferID, kind: Presentation.Kind) {
+        guard canSelect, transfers.contains(where: { $0.id == id && $0.phase == .failed }) else { return }
+        switch kind {
+        case .files: openFiles()
+        case .photos: openPhotos()
+        }
+    }
     func resumeTransfer(_ id: TransferID) { perform(id, operation: .resume) }
     func cancelTransfer(_ id: TransferID) { perform(id, operation: .cancel) }
     private enum TransferAction { case pause, resume, cancel }

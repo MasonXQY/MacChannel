@@ -3,6 +3,80 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileImportStagerTests: XCTestCase {
+    func testRecoverySkipsCopyWhileItsWorkerIsStillWriting() async throws {
+        let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.source.appendingPathComponent("live.bin")
+        try Data(repeating: 1, count: 128 * 1024).write(to: source)
+        let entered = expectation(description: "copy owns partial")
+        let release = DispatchSemaphore(value: 0)
+        let stager = MobileImportStager(directory: fixture.staging) { entered.fulfill(); release.wait() }
+        let task = Task { try await stager.stage(file: source) }
+        await fulfillment(of: [entered], timeout: 2)
+        do { try await MobileImportStager(directory: fixture.staging).recoverAbandonedImports() }
+        catch { release.signal(); _ = try? await task.value; throw error }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path).count, 1)
+        release.signal()
+        let url = try await task.value
+        XCTAssertEqual(try Data(contentsOf: url).count, 128 * 1024)
+        try await stager.discard(url)
+    }
+
+    func testRecoveryReportsFailedRemovalAndCanRetryWithoutLosingPayload() async throws {
+        let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let directory = fixture.staging.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let payload = directory.appendingPathComponent("payload")
+        try Data([9]).write(to: payload)
+        XCTAssertEqual(chmod(directory.path, 0o500), 0)
+        let stager = MobileImportStager(directory: fixture.staging)
+        do { try await stager.recoverAbandonedImports(); XCTFail("Read-only directory must diagnose cleanup failure") }
+        catch { XCTAssertEqual((error as? POSIXError)?.code, .EACCES) }
+        XCTAssertEqual(try Data(contentsOf: payload), Data([9]))
+        XCTAssertEqual(chmod(directory.path, 0o700), 0)
+        try await stager.recoverAbandonedImports()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testRecoveryReclaimsAbandonedCompletedPartialAndEmptyImports() async throws {
+        let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
+        for name in ["payload.txt", ".\(UUID().uuidString).partial", ""] {
+            let directory = fixture.staging.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
+            if !name.isEmpty { try Data([1, 2]).write(to: directory.appendingPathComponent(name)) }
+        }
+        try await MobileImportStager(directory: fixture.staging).recoverAbandonedImports()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+    }
+
+    func testRecoveryPreservesLiveCopyAcrossNewOwnersAndAfterOriginalOwnerRelease() async throws {
+        let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.source.appendingPathComponent("keep.txt")
+        try Data([7]).write(to: source)
+        let live = try await MobileImportStager(directory: fixture.staging).stage(file: source)
+        let newOwner = MobileImportStager(directory: fixture.staging)
+        try await newOwner.recoverAbandonedImports()
+        XCTAssertEqual(try Data(contentsOf: live), Data([7]))
+        try await newOwner.discard(live)
+        try await newOwner.recoverAbandonedImports()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+    }
+
+    func testRecoveryRejectsMalformedSymlinkAndSpecialFilesWithoutDeletingThem() async throws {
+        for kind in ["malformed", "symlink", "fifo"] {
+            let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let directory = fixture.staging.appendingPathComponent(kind == "malformed" ? "unknown" : UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            let file = directory.appendingPathComponent("payload")
+            if kind == "symlink" { try FileManager.default.createSymbolicLink(at: file, withDestinationURL: fixture.source) }
+            else if kind == "fifo" { XCTAssertEqual(mkfifo(file.path, 0o600), 0) }
+            else { try Data([9]).write(to: file) }
+            do { try await MobileImportStager(directory: fixture.staging).recoverAbandonedImports(); XCTFail("Unsafe entry must fail closed") }
+            catch { }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        }
+    }
+
     func testBoundedCopyAcceptsExactBoundaryAndRejectsExcessWithoutResidue() async throws {
         let fixture = try fixture(); defer { try? FileManager.default.removeItem(at: fixture.root) }
         let source = fixture.source.appendingPathComponent("bounded.bin")
@@ -11,13 +85,13 @@ final class MobileImportStagerTests: XCTestCase {
         let exact = try await stager.stage(file: source, maximumBytes: 17)
         XCTAssertEqual(try Data(contentsOf: exact).count, 17)
         try await stager.discard(exact)
-        await XCTAssertThrowsErrorAsync { _ = try await stager.stage(file: source, maximumBytes: 16) }
+        await XCTAssertThrowsPOSIXErrorAsync(.EFBIG) { _ = try await stager.stage(file: source, maximumBytes: 16) }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
         try Data().write(to: source)
         let empty = try await stager.stage(file: source, maximumBytes: 0)
         XCTAssertEqual(try Data(contentsOf: empty).count, 0)
         try await stager.discard(empty)
-        await XCTAssertThrowsErrorAsync { _ = try await stager.stage(file: source, maximumBytes: -1) }
+        await XCTAssertThrowsPOSIXErrorAsync(.EFBIG) { _ = try await stager.stage(file: source, maximumBytes: -1) }
     }
 
     func testBoundedCopyRejectsGrowthOnPinnedDescriptorBeforeExcessWrite() async throws {
@@ -30,7 +104,7 @@ final class MobileImportStagerTests: XCTestCase {
                 try writer.seekToEnd(); try writer.write(contentsOf: Data([2])); try writer.close()
             } catch { XCTFail("fixture growth failed: \(error)") }
         }
-        await XCTAssertThrowsErrorAsync { _ = try await stager.stage(file: source, maximumBytes: 64 * 1024) }
+        await XCTAssertThrowsPOSIXErrorAsync(.EFBIG) { _ = try await stager.stage(file: source, maximumBytes: 64 * 1024) }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
         XCTAssertEqual(try Data(contentsOf: source).count, 64 * 1024 + 1)
     }
@@ -227,4 +301,12 @@ private func XCTAssertThrowsErrorAsync(
         try await expression()
         XCTFail("Expected error", file: file, line: line)
     } catch { }
+}
+
+private func XCTAssertThrowsPOSIXErrorAsync(
+    _ expected: POSIXErrorCode, _ expression: () async throws -> Void,
+    file: StaticString = #filePath, line: UInt = #line
+) async {
+    do { try await expression(); XCTFail("Expected POSIX error", file: file, line: line) }
+    catch { XCTAssertEqual((error as? POSIXError)?.code, expected, file: file, line: line) }
 }

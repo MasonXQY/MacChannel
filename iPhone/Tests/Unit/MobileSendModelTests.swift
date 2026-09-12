@@ -6,6 +6,31 @@ import XCTest
 
 @MainActor
 final class MobileSendModelTests: XCTestCase {
+    func testLateAndRestoredFailuresOfferExplicitOriginalReselectionWithoutSending() async throws {
+        for restored in [false, true] {
+            let fixture = try SendFixture(); defer { fixture.remove() }
+            let session = InertMobileSession()
+            let model = MobileSendModel(session: session, service: fixture.service())
+            model.setForeground(true)
+            let id = TransferID(rawValue: UUID())
+            if !restored {
+                await session.setTransfers([TransferSnapshot(id: id, peer: session.peer.id,
+                    phase: .transferring, completedBytes: 1, totalBytes: 3, route: .lan)])
+                model.update(await session.snapshot())
+            }
+            await session.setTransfers([TransferSnapshot(id: id, peer: session.peer.id,
+                phase: .failed, completedBytes: 1, totalBytes: 3, route: .lan)])
+            model.update(await session.snapshot())
+            model.reselectOriginals(for: id, kind: .photos)
+            XCTAssertEqual(model.presentation?.kind, .photos)
+            XCTAssertEqual(model.transfers.first?.phase, .failed)
+            XCTAssertNil(model.selectedRecipient)
+            let sends = await session.sendCount
+            XCTAssertEqual(sends, 0)
+            await model.cancelAndWait()
+        }
+    }
+
     func testFilesSelectionDismissalKeepsEveryOwnedCopyUntilExplicitAbandonment() async throws {
         let fixture = try SendFixture()
         defer { fixture.remove() }

@@ -16,7 +16,10 @@ final class MobileHistoryModelTests: XCTestCase {
         snapshot.receivedCompletionIDs = [row.id]
         model.update(snapshot)
         await waitForHistoryReads(1, session: session)
-
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.entries.map(\.id) != [row.id], ContinuousClock.now < deadline {
+            await Task.yield()
+        }
         XCTAssertEqual(model.entries.map(\.id), [row.id])
         let reads = await session.historyReadCount
         XCTAssertEqual(reads, 1)

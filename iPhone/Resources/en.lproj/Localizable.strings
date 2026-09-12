@@ -71,7 +71,9 @@
 "send.transfers" = "Transfers";
 "send.error.recipient" = "This Mac is offline or no longer paired. Choose files again when it is available.";
 "send.error.foreground" = "Preparation was interrupted when DropMesh left the foreground. Keep the app open and select again.";
-"send.error.transfer" = "The send could not be prepared. Check the Mac connection and select again.";
+"send.error.transfer" = "The send could not be prepared. Check available storage, access to the selected originals, and the Mac connection, then select the originals again.";
+"transfer.failed.recovery" = "This send failed and cannot retry automatically. Check available storage, access to the originals, and the Mac connection. Select the originals again to prepare a new send.";
+"transfer.reselect" = "Select originals again";
 "send.error.action" = "The transfer action could not finish. Keep DropMesh open and check that the paired Mac is online, then try again.";
 "transfer.cancel.requested" = "Cancellation requested. Waiting for the transfer to stop.";
 "transfer.cancel.late" = "Cancellation was too late. The transfer status shows the actual outcome.";

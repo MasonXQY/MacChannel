@@ -64,6 +64,8 @@ actor MobileImportService {
         else { throw MobileImportError.storage }
         let layout = MobileStorageLayout(applicationSupport: support, documents: documents)
         try layout.prepare()
+        do { try await MobileImportStager(directory: layout.stagingDirectory).recoverAbandonedImports() }
+        catch { throw MobileImportError.cleanupFailed }
         return MobileSystemImportStager(directory: layout.stagingDirectory)
     })
 

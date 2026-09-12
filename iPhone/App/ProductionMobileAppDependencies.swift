@@ -21,6 +21,7 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         let context = try await MobileIdentityContext.load(
             layout: MobileStorageLayout(applicationSupport: support, documents: documents),
             secrets: KeychainStore(policy: MobileIdentityPolicy.policy))
+        try await MobileImportStager(directory: context.layout.stagingDirectory).recoverAbandonedImports()
         let dependencies = try ProductionMobileAppDependencies(context: context)
         await dependencies.applyInitialDiscoveryPreference()
         return dependencies

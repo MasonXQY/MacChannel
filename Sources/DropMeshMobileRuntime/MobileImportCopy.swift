@@ -3,6 +3,9 @@ import Foundation
 
 // Pure payload copy owner; safe to compile without Core or identity dependencies.
 final class MobileImportCopy: @unchecked Sendable {
+    // Leases survive a stager's deinit: a returned URL can still have borrowers.
+    // Only exact successful discard retires a lease; process death clears them.
+    private static let leases = MobileImportLeases()
     private let lock = NSLock()
     private let directory: URL
     private let rootDescriptor: Int32
@@ -48,12 +51,16 @@ final class MobileImportCopy: @unchecked Sendable {
 
         try cancellation.check()
         let importName = UUID().uuidString
-        guard mkdirat(rootDescriptor, importName, 0o700) == 0 else { throw currentPOSIXError() }
+        try Self.leases.withLock {
+            guard mkdirat(rootDescriptor, importName, 0o700) == 0 else { throw currentPOSIXError() }
+            Self.leases.names.insert(try leaseKey(importName))
+        }
         let importDirectory = directory.appendingPathComponent(importName, isDirectory: true)
         let importDescriptor = openat(rootDescriptor, importName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard importDescriptor >= 0 else {
-            _ = unlinkat(rootDescriptor, importName, AT_REMOVEDIR)
-            throw currentPOSIXError()
+            let error = currentPOSIXError()
+            if unlinkat(rootDescriptor, importName, AT_REMOVEDIR) == 0 { retireLease(importName) }
+            throw error
         }
         defer { close(importDescriptor) }
         let destinationName = source.lastPathComponent
@@ -72,7 +79,7 @@ final class MobileImportCopy: @unchecked Sendable {
         } catch {
             _ = unlinkat(importDescriptor, partialName, 0)
             _ = unlinkat(importDescriptor, destinationName, 0)
-            _ = unlinkat(rootDescriptor, importName, AT_REMOVEDIR)
+            if unlinkat(rootDescriptor, importName, AT_REMOVEDIR) == 0 { retireLease(importName) }
             throw error
         }
     }
@@ -114,6 +121,57 @@ final class MobileImportCopy: @unchecked Sendable {
 
         guard unlinkat(importDescriptor, candidate.lastPathComponent, 0) == 0 else { throw currentPOSIXError() }
         guard unlinkat(rootDescriptor, importName, AT_REMOVEDIR) == 0 else { throw currentPOSIXError() }
+        retireLease(importName)
+    }
+
+    /// Invoked by main-app composition before import admission. The private root
+    /// descriptor and process leases prevent another service from reclaiming live work.
+    func recoverAbandonedImports() throws {
+        lock.lock(); defer { lock.unlock() }
+        try requireRootDescriptor()
+        try Self.leases.withLock {
+            for name in try directoryEntryNames(descriptor: rootDescriptor) {
+                guard UUID(uuidString: name)?.uuidString == name else { throw POSIXError(.EINVAL) }
+                if Self.leases.names.contains(try leaseKey(name)) { continue }
+                let child = openat(rootDescriptor, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard child >= 0 else { throw currentPOSIXError() }
+                defer { close(child) }
+                var info = stat()
+                guard fstat(child, &info) == 0, info.st_uid == getuid() else { throw POSIXError(.EPERM) }
+                let files = try directoryEntryNames(descriptor: child)
+                guard files.count <= 1 else { throw POSIXError(.EINVAL) }
+                for file in files {
+                    let descriptor = openat(child, file, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+                    guard descriptor >= 0 else { throw currentPOSIXError() }
+                    defer { close(descriptor) }
+                    var payload = stat()
+                    guard fstat(descriptor, &payload) == 0,
+                          payload.st_mode & S_IFMT == S_IFREG, payload.st_nlink == 1,
+                          payload.st_uid == getuid() else { throw POSIXError(.EINVAL) }
+                    try requireSameEntry(parent: child, name: file, expected: payload)
+                    guard unlinkat(child, file, 0) == 0 else { throw currentPOSIXError() }
+                }
+                try requireSameEntry(parent: rootDescriptor, name: name, expected: info)
+                guard unlinkat(rootDescriptor, name, AT_REMOVEDIR) == 0 else { throw currentPOSIXError() }
+            }
+        }
+    }
+
+    private func leaseKey(_ name: String) throws -> String {
+        var info = stat()
+        guard fstat(rootDescriptor, &info) == 0 else { throw currentPOSIXError() }
+        return "\(info.st_dev):\(info.st_ino):\(name)"
+    }
+
+    private func retireLease(_ name: String) {
+        if let key = try? leaseKey(name) { Self.leases.withLock { _ = Self.leases.names.remove(key) } }
+    }
+
+    private func requireSameEntry(parent: Int32, name: String, expected: stat) throws {
+        var current = stat()
+        guard fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+              current.st_dev == expected.st_dev, current.st_ino == expected.st_ino,
+              current.st_mode == expected.st_mode else { throw POSIXError(.ESTALE) }
     }
 
     private func copy(sourceDescriptor: Int32, to destinationName: String, in importDescriptor: Int32,
@@ -182,6 +240,7 @@ final class MobileImportCopy: @unchecked Sendable {
             throw currentPOSIXError()
         }
         defer { closedir(stream) }
+        rewinddir(stream)
         var names: [String] = []
         errno = 0
         while let entry = readdir(stream) {
@@ -197,5 +256,14 @@ final class MobileImportCopy: @unchecked Sendable {
 
     private func currentPOSIXError() -> POSIXError {
         POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+}
+
+private final class MobileImportLeases: @unchecked Sendable {
+    private let lock = NSLock()
+    var names: Set<String> = []
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock(); defer { lock.unlock() }
+        return try body()
     }
 }

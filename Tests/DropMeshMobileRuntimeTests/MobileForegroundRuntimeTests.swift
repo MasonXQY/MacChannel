@@ -4,6 +4,96 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileForegroundRuntimeTests: XCTestCase {
+    func testCompletedSendWinsLateRevocationAccountingWithoutRewritingHistory() async throws {
+        let fixture = try await RuntimeFixture.make()
+        await fixture.persistence.release.open()
+        try await fixture.runtime.startForeground()
+        let pair = RuntimeChannel.pair()
+        await fixture.networks.lastConnector.install(pair.0)
+        let send = Task { try await fixture.runtime.send(items: [fixture.file], to: fixture.peer) }
+        await fixture.accounting.entered.wait()
+        let coordinator = await fixture.probe.coordinator!
+        var stream = await coordinator.snapshots().makeAsyncIterator()
+        let snapshots = await stream.next() ?? []
+        let id = try XCTUnwrap(snapshots.first?.id)
+        _ = try await ReceiveSession(transferID: id, destinationDirectory: fixture.layout.receiveDirectory).run(on: pair.1)
+        try await eventually { try await fixture.persistence.database.history().contains { $0.id == id && $0.phase == .completed } }
+        _ = try await fixture.repository.revoke(fixture.peer)
+        try await fixture.runtime.refreshTrust()
+        await fixture.accounting.release.open()
+        do { let result = try await send.value; XCTAssertEqual(result, id) }
+        catch { XCTFail("Completion won cancellation and must remain truthful: \(error)") }
+        let cancellation = await fixture.runtime.cancel(id)
+        XCTAssertEqual(cancellation, .tooLate)
+        let history = try await fixture.persistence.database.history()
+        XCTAssertEqual(history.first { $0.id == id }?.phase, .completed)
+        await fixture.runtime.stopForeground()
+    }
+
+    func testRevocationCancelsWorkOnAnEstablishedChannel() async throws {
+        let fixture = try await RuntimeFixture.make()
+        await fixture.persistence.release.open(); await fixture.accounting.release.open()
+        try await fixture.runtime.startForeground()
+        let channel = RuntimeHeldOutgoingChannel()
+        await fixture.networks.lastConnector.install(channel)
+        let id = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer)
+        await channel.challenge(id)
+        do { try await eventually { await channel.entered.isOpen } }
+        catch { await channel.close(); await fixture.runtime.stopForeground(); throw error }
+        _ = try await fixture.repository.revoke(fixture.peer)
+        try await fixture.runtime.refreshTrust()
+        let coordinator = await fixture.probe.coordinator!
+        var stream = await coordinator.snapshots().makeAsyncIterator()
+        let snapshots = await stream.next() ?? []
+        XCTAssertTrue(snapshots.contains { $0.id == id && [.cancelling, .cancelled].contains($0.phase) })
+        await channel.release.open()
+        await fixture.runtime.stopForeground()
+    }
+
+    func testRevocationCancelsPausedAndActivePeerButPreservesOtherPeer() async throws {
+        let fixture = try await RuntimeFixture.make()
+        let peer = try DeviceIdentity.loadOrCreate(keychain: RuntimeSecrets(), policy: MobileIdentityPolicy.policy)
+        let other = try DeviceIdentity.loadOrCreate(keychain: RuntimeSecrets(), policy: MobileIdentityPolicy.policy)
+        for identity in [peer, other] {
+            _ = try await fixture.repository.issueAuthorization(subject: identity.id,
+                subjectPublicKey: identity.publicKey.rawRepresentation, timestamp: Date())
+        }
+        await fixture.persistence.release.open(); await fixture.accounting.release.open()
+        try await fixture.runtime.startForeground()
+        let active = try await fixture.runtime.send(items: [fixture.file], to: peer.id)
+        let paused = try await fixture.runtime.send(items: [fixture.file], to: peer.id)
+        try await fixture.runtime.pause(paused)
+        let retained = try await fixture.runtime.send(items: [fixture.file], to: other.id)
+        _ = try await fixture.repository.revoke(peer.id)
+        try await fixture.runtime.refreshTrust()
+        let owner = await fixture.probe.coordinator!
+        var stream = await owner.snapshots().makeAsyncIterator()
+        let values = await stream.next() ?? []
+        for id in [active, paused] {
+            XCTAssertTrue(values.contains { $0.id == id && [.cancelling, .cancelled].contains($0.phase) })
+        }
+        XCTAssertTrue(values.contains { $0.id == retained && ![.cancelling, .cancelled].contains($0.phase) })
+        await fixture.runtime.stopForeground()
+    }
+
+    func testRevocationDuringHiddenAccountingRejectsLateAdmission() async throws {
+        let fixture = try await RuntimeFixture.make()
+        let peer = try DeviceIdentity.loadOrCreate(keychain: RuntimeSecrets(), policy: MobileIdentityPolicy.policy)
+        _ = try await fixture.repository.issueAuthorization(subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        try await fixture.runtime.startForeground()
+        let send = Task { try await fixture.runtime.send(items: [fixture.file], to: peer.id) }
+        await fixture.persistence.entered.wait()
+        _ = try await fixture.repository.revoke(peer.id)
+        try await fixture.runtime.refreshTrust()
+        await fixture.persistence.release.open()
+        await fixture.accounting.entered.wait()
+        await fixture.accounting.release.open()
+        do { _ = try await send.value; XCTFail("Revoked late admission must not succeed") }
+        catch { XCTAssertEqual(error as? MobileRuntimeError, .interrupted) }
+        await fixture.runtime.stopForeground()
+    }
+
     func testActionLookupPublishesNewIndexReplacementDiagnostic() async throws {
         let fixture = try await RuntimeFixture.make()
         let peer = try DeviceIdentity.loadOrCreate(keychain: RuntimeSecrets(), policy: MobileIdentityPolicy.policy)
@@ -52,7 +142,7 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         let fixture = try await RuntimeFixture.make()
         let runtime = fixture.runtime
         try await runtime.startForeground()
-        let send = Task { try await runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID())) }
+        let send = Task { try await runtime.send(items: [fixture.file], to: fixture.peer) }
         await fixture.persistence.entered.wait()
         let coordinator = await fixture.probe.coordinator!
         var snapshots = await coordinator.snapshots().makeAsyncIterator()
@@ -81,7 +171,7 @@ final class MobileForegroundRuntimeTests: XCTestCase {
     func testCallerCancellationRetainsHiddenWorkerAndInputUntilAccounted() async throws {
         let fixture = try await RuntimeFixture.make()
         try await fixture.runtime.startForeground()
-        let send = Task { try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID())) }
+        let send = Task { try await fixture.runtime.send(items: [fixture.file], to: fixture.peer) }
         await fixture.persistence.entered.wait()
         send.cancel()
         let stop = Task { await fixture.runtime.stopForeground() }
@@ -107,7 +197,7 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         let initial = await stream.next()
         XCTAssertEqual(initial?.state, .inactive)
         XCTAssertEqual(initial?.received.count, 0)
-        do { _ = try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID())); XCTFail() }
+        do { _ = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer); XCTFail() }
         catch MobileRuntimeError.notForeground { }
         let restores = await fixture.probe.restores
         XCTAssertEqual(restores, 0)
@@ -118,12 +208,12 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         await fixture.persistence.release.open()
         await fixture.accounting.release.open()
         try await fixture.runtime.startForeground()
-        let old = try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID()))
+        let old = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer)
         await fixture.persistence.blockTerminal()
         await fixture.runtime.stopForeground()
         await fixture.persistence.terminalEntered.wait()
         try await fixture.runtime.startForeground()
-        let fresh = try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID()))
+        let fresh = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer)
         let connector = await fixture.networks.lastConnector
         try await eventually { await connector.calls.contains(fresh) }
         let calls = await connector.calls
@@ -140,7 +230,7 @@ final class MobileForegroundRuntimeTests: XCTestCase {
     func testStopStartStopDuringHiddenSendOnlyHonorsLatestDesiredState() async throws {
         let fixture = try await RuntimeFixture.make()
         try await fixture.runtime.startForeground()
-        let send = Task { try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID())) }
+        let send = Task { try await fixture.runtime.send(items: [fixture.file], to: fixture.peer) }
         await fixture.persistence.entered.wait()
         let stop = Task { await fixture.runtime.stopForeground() }
         await fixture.networks.firstStopped.wait()
@@ -164,12 +254,12 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         await fixture.accounting.release.open()
         await fixture.persistence.release.open()
         try await fixture.runtime.startForeground()
-        do { _ = try await fixture.runtime.send(items: [fixture.file.appendingPathComponent("missing")], to: DeviceID(rawValue: UUID())); XCTFail() }
+        do { _ = try await fixture.runtime.send(items: [fixture.file.appendingPathComponent("missing")], to: fixture.peer); XCTFail() }
         catch MobileRuntimeError.sendFailed { }
         let gate = RuntimeGate()
         let cancelled = Task {
             await gate.wait()
-            return try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID()))
+            return try await fixture.runtime.send(items: [fixture.file], to: fixture.peer)
         }
         cancelled.cancel(); await gate.open()
         do { _ = try await cancelled.value; XCTFail() } catch is CancellationError { }
@@ -341,7 +431,7 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         let fixture = try await RuntimeFixture.make()
         await fixture.persistence.release.open(); await fixture.accounting.release.open()
         try await fixture.runtime.startForeground()
-        let peer = DeviceID(rawValue: UUID())
+        let peer = fixture.peer
         let first = try await fixture.runtime.send(items: [fixture.file], to: peer)
         let second = try await fixture.runtime.send(items: [fixture.file], to: peer)
         let paused = try await fixture.runtime.send(items: [fixture.file], to: peer)
@@ -364,7 +454,7 @@ final class MobileForegroundRuntimeTests: XCTestCase {
 
     func testRestoresExistingPausedPackageOnceAndBackgroundCancelsIt() async throws {
         let fixture = try await RuntimeFixture.make()
-        let package = try OutgoingTransferPackage.create(items: [fixture.file], peer: DeviceID(rawValue: UUID()), in: fixture.layout.stateDirectory.appendingPathComponent("outgoing"))
+        let package = try OutgoingTransferPackage.create(items: [fixture.file], peer: fixture.peer, in: fixture.layout.stateDirectory.appendingPathComponent("outgoing"))
         try await fixture.persistence.database.persist(TransferSnapshot(id: package.id, peer: package.peer,
             phase: .paused, completedBytes: 0, totalBytes: package.totalBytes, route: .lan),
             displayFilename: package.displayFilename, expectedPhase: nil)
@@ -384,9 +474,9 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         await fixture.persistence.blockIndividually()
         await fixture.accounting.release.open()
         try await fixture.runtime.startForeground()
-        let first = Task { try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID())) }
+        let first = Task { try await fixture.runtime.send(items: [fixture.file], to: fixture.peer) }
         try await eventually { await fixture.persistence.individual.count == 1 }
-        let second = Task { try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID())) }
+        let second = Task { try await fixture.runtime.send(items: [fixture.file], to: fixture.peer) }
         try await eventually { await fixture.persistence.individual.count == 2 }
         let stop = Task { await fixture.runtime.stopForeground() }
         await fixture.networks.firstStopped.wait()
@@ -412,7 +502,7 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         await fixture.networks.startControl.entered.wait()
         let stop = Task { await fixture.runtime.stopForeground() }
         await fixture.networks.firstStopped.wait()
-        do { _ = try await fixture.runtime.send(items: [fixture.file], to: DeviceID(rawValue: UUID())); XCTFail() }
+        do { _ = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer); XCTFail() }
         catch MobileRuntimeError.notForeground { }
         await fixture.networks.startControl.release.open()
         do { try await start.value; XCTFail() } catch MobileRuntimeError.interrupted { }
@@ -515,13 +605,31 @@ private actor RuntimeProbe {
 private actor RuntimeConnector: RouteEscalatingPeerConnector {
     var calls: [TransferID] = []
     let release = RuntimeGate()
+    var channel: (any SecureChannel)?
+    func install(_ channel: any SecureChannel) { self.channel = channel }
     func connect(to device: DeviceID) async throws -> any SecureChannel { throw CancellationError() }
     func connect(to device: DeviceID, transferID: TransferID) async throws -> any SecureChannel {
-        calls.append(transferID); await release.wait(); throw CancellationError()
+        calls.append(transferID)
+        if let channel { return channel }
+        await release.wait(); throw CancellationError()
     }
     func connect(to device: DeviceID, transferID: TransferID, after failedRoute: ConnectionRoute?) async throws -> any SecureChannel {
-        calls.append(transferID); await release.wait(); throw CancellationError()
+        calls.append(transferID)
+        if let channel { return channel }
+        await release.wait(); throw CancellationError()
     }
+}
+
+private actor RuntimeHeldOutgoingChannel: SecureChannel {
+    nonisolated let route: ConnectionRoute = .lan
+    private nonisolated let stream = AsyncThrowingStream<Data, Error>.makeStream()
+    let entered = RuntimeGate()
+    let release = RuntimeGate()
+    func challenge(_ id: TransferID) { stream.continuation.yield(TransferReceiverChallenge.fresh(for: id).encode()) }
+    func send(_ frame: Data) async throws { await entered.open(); await release.wait(); throw CancellationError() }
+    nonisolated func frames() -> AsyncThrowingStream<Data, Error> { stream.stream }
+    func exportKey(label: String, context: Data, length: Int) async throws -> Data { Data(repeating: 7, count: length) }
+    func close() async { stream.continuation.finish(); await release.open() }
 }
 
 private actor RuntimeSource: IncomingTransferConnectionSource {
@@ -575,6 +683,7 @@ private actor RuntimeNetworks {
 }
 
 private struct RuntimeFixture {
+    let peer: DeviceID
     let runtime: MobileForegroundRuntime
     let file: URL
     let persistence: RuntimePersistence
@@ -588,6 +697,9 @@ private struct RuntimeFixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mobile-runtime-\(UUID())")
         let layout = MobileStorageLayout(applicationSupport: root.appendingPathComponent("Support"), documents: root.appendingPathComponent("Documents"))
         let context = try await MobileIdentityContext.load(layout: layout, secrets: RuntimeSecrets())
+        let peer = try DeviceIdentity.loadOrCreate(keychain: RuntimeSecrets(), policy: MobileIdentityPolicy.policy)
+        _ = try await context.repository.issueAuthorization(subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
         if corruptIndex { try Data("invalid".utf8).write(to: layout.receivedOutputIndexFile) }
         let database = try TransferDatabase(url: layout.stateDirectory.appendingPathComponent("transfers.sqlite3"))
         let persistence = RuntimePersistence(database)
@@ -601,7 +713,7 @@ private struct RuntimeFixture {
             database: database, persistence: persistence, persistTrust: { await trustPersistence.wait(); try await context.persistTrust() },
             makeNetwork: { _, state, _ in try await networks.make(state: state) },
             onRestored: { await probe.restored($0) }, beforeSendAccounting: { await accounting.wait() })
-        return Self(runtime: runtime, file: file, persistence: persistence, accounting: accounting, networks: networks, probe: probe, repository: context.repository, layout: layout, trustPersistence: trustPersistence)
+        return Self(peer: peer.id, runtime: runtime, file: file, persistence: persistence, accounting: accounting, networks: networks, probe: probe, repository: context.repository, layout: layout, trustPersistence: trustPersistence)
     }
 }
 
