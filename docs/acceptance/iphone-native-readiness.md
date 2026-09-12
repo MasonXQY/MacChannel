@@ -32,8 +32,14 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   `.build/mobile-runtime-mac-store-build.log` and
   `.build/mobile-runtime-mac-direct-build.log`; no warning/error matches.
   No app bundle was installed, launched or replaced by these build checks.
-- Provider-safe utility-worker import adaptation is now in progress; native
-  transfer/picker/history and Share integration remain pending. Old runtime test
+- Provider import implementationec40ef9/reportab9b9f8 is independently Approved:
+  76mobile tests0failures, both cached iOSlibrary builds pass without diagnostics;
+  two-file importer compiles under extension restrictions without Core linkage.
+  Root integrated full atab9b9f8 exits0:959tests,5skips,0failures,47.171seconds,
+  `.build/mobile-import-integrated-full.log`. Real local NSFileCoordinator is
+  tested; physical Files/iCloud/Photos and owned Transferable wrappers are not.
+- Durable received history/index is now in progress; native transfer/picker/
+  history UI and Share integration remain pending. Old runtime test
   fixture temporary-directory cleanup is a documented nonblocking hygiene debt,
   since scene stop does not mean outbound terminal persistence is quiescent.
 
