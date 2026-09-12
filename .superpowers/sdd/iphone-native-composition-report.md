@@ -218,3 +218,119 @@ SwiftPM/Mac regression and independent review. Files/Photos/send ownership,
 history/open/share/settings and the separate Share extension remain later slices.
 Largest Dynamic Type naturally requires native scrolling; no font-size clamp or
 assumption of background reception was added.
+
+## Bounded review correction — 2026-09-12
+
+Source commit `162e1a1` (parent `cff3fcb`, documentation after original `9c8d609`).
+Lifecycle finding is corrected and verified. **Durable presentation finding
+remains blocked and unchanged**; this is not completion of the correction brief.
+
+### Lifecycle correction
+
+Foreground-start failures now have a separate diagnostic from explicit trust
+refresh failures. Only the current scene request can record or clear its start
+diagnostic. Expected `MobileRuntimeError.interrupted` is ignored; later successful
+foreground starts clear their recovered error without clearing explicit trust
+refresh failures. Existing bootstrap intent, parallel pairing/network cleanup,
+and retained task ownership remain covered. Tests exercise interruption before
+and after the next successful foreground, late non-interruption failure, genuine
+start failure recovery, and explicit trust-refresh error retention.
+
+The test-only start hook controls an inert session, with no production runtime
+or network assembly. BootstrapGate now uses a cancellable three-second deadline
+and fails explicitly on timeout, so an assertion/fixture error cannot strand an
+unbounded continuation. Production source membership and all views/resources
+are unchanged; concrete production assembly remains excluded from the host.
+
+### Durability capability gap (no unsafe gate added)
+
+`MobileIdentityContext.persistTrust()` (lines 33–35) returns Void and privately
+owns its authenticated snapshot store. `AuthenticatedTrustSnapshotStore.
+persistLatest` (lines 163–175) captures repository state across an await, writes
+that captured snapshot, then anchors its generation, but exposes no saved
+snapshot/generation receipt or observation. Its missing-state guard returns
+success without writing. `TrustRepository.persistenceState()` is internal;
+public `latestSignedSnapshot()` is the latest in-memory mutation, not a disk
+receipt. `TrustStore.persistedGeneration` likewise advances when `snapshot()`
+signs an in-memory mutation (line 247).
+
+Consequently promoting a post-save repository ID set can admit a newer unsaved
+mutation. A before/after generation equality check can conservatively prove a
+stable checkpoint, but a raced mutation then needs additional retry/error
+semantics and cannot simply be presented as successful current durability.
+Remembering an ID forever also allows removal and fresh pairing to reuse stale
+eligibility; an exact durable membership version must be joined with current
+trust. No such heuristic, second database, identity, storage owner, library
+contract edit, or real-key access was introduced.
+
+Recommended prerequisite: an additive completion surface identifying the exact
+authenticated snapshot/generation that was written and anchored, including an
+explicit no-write outcome, exposed through the retained identity context.
+Native composition can then retain loaded authenticated trust as its startup
+baseline, observe exact durable state, and invalidate revoked/replaced membership
+versions. The required real pairing/publication → held/failed-save integration
+regression remains outstanding with that implementation. Coordinator owns this
+scope decision; raw repository presentation remains the known open defect.
+
+### TDD and verification evidence
+
+All files below are under `.build/`. Frozen source throughout final runs matches
+`162e1a1`; no caches were purged. Xcode 16.4, iOS 18.6, iPhone 16 simulator
+`ACEA4034-2629-4A24-A7C8-C146BD8B0688` were retained.
+
+Common test command:
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests -destination 'platform=iOS Simulator,id=ACEA4034-2629-4A24-A7C8-C146BD8B0688' -derivedDataPath .build/native-composition-final-cache -clonedSourcePackagesDirPath .build/iphone-simulator/SourcePackages -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO test
+```
+
+Append the following suffixes to that command; each output was redirected to the
+same basename `.log` as the listed `.xcresult`:
+
+- RED: `-only-testing:DropMeshTests/MobileAppModelTests -resultBundlePath .build/native-composition-correction-lifecycle-red.xcresult`.
+  Exit 65, 13 tests, two expected failures before production edits:
+  `testInterruptedStartCannotOverwriteSuccessfulForeground` and
+  `testSuccessfulForegroundClearsRecoveredStartFailure` each reported
+  `XCTAssertNil failed: "network"`. Explicit trust-error retention passed.
+- GREEN: same class filter and result basename
+  `native-composition-correction-lifecycle-green`; exit 0, 13/13 passing.
+- Expanded completion-order coverage: same filter, basename
+  `native-composition-correction-lifecycle-expanded`; exit 0, 15/15 passing.
+- Final complete native suite: no class filter, `-resultBundlePath .build/native-composition-correction-complete.xcresult`;
+  exit 0, **31 unit tests + 3 UI tests**, zero failures, zero skips.
+  Unit duration 0.156 seconds; UI duration 34.675 seconds. Original 26 unit
+  and 3 UI tests remain, plus five lifecycle regressions.
+- Maximum Dynamic Type: `-only-testing:DropMeshUITests/DropMeshUITests/testEnglishHomeAndPairingEntrySmoke -only-testing:DropMeshUITests/DropMeshUITests/testSimplifiedChineseHomeAndPairingEntrySmoke -resultBundlePath .build/native-composition-correction-large.xcresult`;
+  exit 0, two bilingual UI tests passing. Before this run, `xcrun simctl ui
+  <UDID> content_size` returned `large`; set to
+  `accessibility-extra-extra-extra-large`, then restored to `large` and read back.
+
+Shipping and audit commands:
+
+```sh
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMesh -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/iphone-simulator -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMesh -destination 'generic/platform=iOS' -derivedDataPath .build/iphone-device -disableAutomaticPackageResolution -skipPackageUpdates CODE_SIGNING_ALLOWED=NO build
+bash Scripts/check-sensitive-logging.sh iPhone/App/*.swift
+bash Scripts/audit-privacy.sh --static-only
+swift test --disable-automatic-resolution --filter AppRuntimeTests.testSystemGeneralPasteboardReferenceIsConfinedToExplicitSendAdapter
+git diff --check
+```
+
+Result logs: `native-composition-correction-shipping-simulator.log` and
+`native-composition-correction-shipping-device.log` both BUILD SUCCEEDED/exit 0;
+`native-composition-correction-logging.log` and `-privacy.log` both PASS;
+`native-composition-correction-pasteboard.log` one test, zero failures, exit 0,
+1.272 seconds. Whitespace check passes. The known AppIntents metadata-extraction
+warning remains in native/build logs; no Swift compiler errors or warnings were
+observed. This is not described as pristine output.
+
+Files changed: MobileAppModel.swift, Tests/TestHost/InertMobileSession.swift,
+Tests/Unit/MobileAppModelTests.swift, and this report. Self-review confirmed the
+diagnostic writes are guarded by current request and closed state, explicit
+trust errors retain their existing ownership, and all fixture waits are bounded.
+No new visual captures were exported or inspected; prior tracked captures are
+retained unchanged-layout evidence because no view/resource changed. All build
+and test sessions were drained before handoff. No installed/physical iPhone,
+Mac interoperability, real production pairing, actual keychain, signing, Store,
+protocol, or server verification is claimed. Full SwiftPM/Mac regression remains
+the coordinator's responsibility.
