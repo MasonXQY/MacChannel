@@ -4,6 +4,38 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileForegroundRuntimeTests: XCTestCase {
+    func testActionLookupPublishesNewIndexReplacementDiagnostic() async throws {
+        let fixture = try await RuntimeFixture.make()
+        let peer = try DeviceIdentity.loadOrCreate(keychain: RuntimeSecrets(), policy: MobileIdentityPolicy.policy)
+        _ = try await fixture.repository.issueAuthorization(subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        try await fixture.runtime.startForeground()
+        let source = await fixture.networks.lastSource
+        let manifest = try TransferManifest.build(from: fixture.file)
+        let pair = RuntimeChannel.pair()
+        let sender = Task { try await SendSession(manifest).run(on: pair.0) }
+        try await source.offer(IncomingTransferConnection(source: peer.id, transferID: manifest.id, channel: pair.1))
+        _ = try await sender.value
+        try await eventually { await fixture.runtime.currentSnapshot().received.count == 1 }
+
+        let stream = await fixture.runtime.snapshots()
+        let observation = Task<MobileRuntimeSnapshot?, Never> {
+            for await snapshot in stream where snapshot.historyAvailabilityFailure != nil { return snapshot }
+            return nil
+        }
+        let oldIndex = fixture.layout.stateDirectory.appendingPathComponent("old-index")
+        try FileManager.default.moveItem(at: fixture.layout.receivedOutputIndexFile, to: oldIndex)
+        try Data("replacement".utf8).write(to: fixture.layout.receivedOutputIndexFile,
+            options: .atomic)
+        let available = await fixture.runtime.availableReceivedURL(for: manifest.id)
+        XCTAssertNil(available)
+        let changed = try await observedSnapshot(from: observation)
+        XCTAssertEqual(changed?.historyAvailabilityFailure, .receivedOutputIndexUnavailable)
+        let current = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(current.historyAvailabilityFailure, .receivedOutputIndexUnavailable)
+        await fixture.runtime.stopForeground()
+    }
+
     func testCorruptIndexAtConstructionReportsAvailabilityWithoutBlockingStartup() async throws {
         let fixture = try await RuntimeFixture.make(corruptIndex: true)
         let initial = await fixture.runtime.currentSnapshot()
@@ -410,6 +442,23 @@ final class MobileForegroundRuntimeTests: XCTestCase {
             guard ContinuousClock.now < deadline else { throw RuntimeTestError.timeout }
             await Task.yield()
         }
+    }
+
+    private func observedSnapshot(from observation: Task<MobileRuntimeSnapshot?, Never>) async throws -> MobileRuntimeSnapshot? {
+        let result = await withTaskGroup(of: MobileRuntimeSnapshot?.self) { group in
+            group.addTask { await observation.value }
+            group.addTask { try? await Task.sleep(for: .seconds(5)); return nil }
+            let first = await group.next() ?? nil
+            if first == nil { observation.cancel() }
+            group.cancelAll()
+            return first
+        }
+        if result == nil {
+            observation.cancel()
+            _ = await observation.value
+            throw RuntimeTestError.timeout
+        }
+        return result
     }
 }
 

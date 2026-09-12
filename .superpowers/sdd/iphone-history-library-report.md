@@ -187,3 +187,64 @@ before use, and no promise of atomicity across a later OS open is made. No conte
 hashing or moved-file recovery is introduced. Test roots are synthetic; the new
 history fixtures remove only their own generated roots. Existing runtime fixture
 cleanup limitations remain unchanged, as documented by the stage-B/drain reports.
+
+## Diagnostic propagation correction at 4c0021e
+
+Implemented the bounded correction from `iphone-history-diagnostic-fix-brief.md`.
+Auxiliary index parent/root validation, index replacement, and persistence
+failures now set the existing coarse `receivedOutputIndexUnavailable` diagnostic.
+Registration input rejection remains separate: an absent/outside/otherwise
+invalid callback cannot mutate or poison a healthy index. An ordinary received
+user file that is missing, moved, replaced, symlinked, or changes kind remains a
+per-item nil URL without a global index failure. Database metadata and networking
+remain independent and no reset, repair, scan, or deletion was added.
+
+Both `history()` and `availableReceivedURL(for:)` now refresh the runtime's cached
+diagnostic and publish to existing snapshot subscribers only when that diagnostic
+changes. The action-time subscription regression uses a five-second bound and
+cancels/joins its observer on timeout, so a publication regression fails instead
+of hanging the suite.
+
+### Correction TDD evidence
+
+- RED command: `swift test --disable-automatic-resolution --filter
+  'MobileReceivedOutputIndexTests|MobileTransferHistoryTests'`. The compiled
+  behavioral run executed 17 tests with 2 expected failures: both direct lookup
+  and history read returned nil after real parent-directory identity replacement,
+  but `availabilityFailure` incorrectly remained nil. Log:
+  `.build/mobile-history-diagnostic-fix-red.log` (SHA-256
+  `ecd7830c1395aa9e85d62af7d8d5a1cd5637b5411f9e4a6986d0c25c206f62f5`).
+- The first runtime subscriber RED attempt waited indefinitely because the old
+  implementation published no changed snapshot; it was interrupted and is not
+  used as assertion evidence. The final regression has an explicit bounded wait.
+- GREEN focused command: `swift test --disable-automatic-resolution --filter
+  'MobileReceivedOutputIndexTests|MobileTransferHistoryTests|MobileForegroundRuntimeTests'`.
+  36 tests, 0 failures, 0 skips in 0.953 seconds. Log:
+  `.build/mobile-history-diagnostic-fix-focused-final.log` (SHA-256
+  `5fffa3e881357669d269d1949c22c96666a38cd50ab699a4ade39458251d1b62`).
+- GREEN complete mobile command: `swift test --disable-automatic-resolution
+  --filter DropMeshMobileRuntimeTests`. 96 tests, 0 failures, 0 skips in 2.700
+  seconds. Log: `.build/mobile-history-diagnostic-fix-mobile-final.log`
+  (SHA-256 `d65b00ec13897a5f517344788ed57ae5c7dc01da3feb01170397090cab3d107d`).
+
+### Correction builds and scoped checks
+
+- Cached simulator library build: `xcodebuild -scheme DropMeshMobileRuntime
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath
+  .build/iphone-simulator -disableAutomaticPackageResolution -skipPackageUpdates
+  CODE_SIGNING_ALLOWED=NO build`; exit 0, `BUILD SUCCEEDED`. Log SHA-256
+  `5b815d77395dcf051d1d5d546ae17f821770df185ccbb1c866af40e30bbc1aed`.
+- Cached unsigned device library build: same command with `generic/platform=iOS`
+  and `.build/iphone-device`; exit 0, `BUILD SUCCEEDED`. Log SHA-256
+  `f0300a5fec87bb997b0ddce643b85b07fb85c775fe4d6907068b3826bd37b53f`.
+- `bash Scripts/audit-privacy.sh --static-only`, scoped
+  `Scripts/check-sensitive-logging.sh` over the three owned source files, and
+  `bash Scripts/test-app-store-source-contract.sh`: all exit 0 and PASS.
+  `git diff --check` also passes; no warning/error matches occurred in final
+  focused/mobile/build logs.
+
+Changed only the owned output-index/runtime source, their owned test files, and
+this report. Public APIs are unchanged. No Core, protocol, trust, server, Mac,
+native UI/project, signing, Store, installed-app, production endpoint, keychain,
+or user-file action occurred. Root retains ownership of the full repository
+regression; physical-device/native-app acceptance remains downstream.

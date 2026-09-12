@@ -6,6 +6,41 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileReceivedOutputIndexTests: XCTestCase {
+    func testParentIdentityFailureReportsDiagnosticButMissingUserFileDoesNot() async throws {
+        let missing = try HistoryFixture(); defer { missing.remove() }
+        let missingResult = try await missing.receive("ordinary-missing")
+        let missingIndex = missing.index()
+        try await missingIndex.recordCompletedReceive(missingResult)
+        try FileManager.default.removeItem(at: missingResult.receivedURLs[0])
+        let missingURL = await missingIndex.availableURL(for: missingResult.transferID)
+        let missingFailure = await missingIndex.availabilityFailure
+        XCTAssertNil(missingURL)
+        XCTAssertNil(missingFailure)
+
+        let broken = try HistoryFixture(); defer { broken.remove() }
+        let brokenResult = try await broken.receive("valid")
+        let brokenIndex = broken.index()
+        try await brokenIndex.recordCompletedReceive(brokenResult)
+        let oldState = broken.root.appendingPathComponent("old-state")
+        try FileManager.default.moveItem(at: broken.indexURL.deletingLastPathComponent(), to: oldState)
+        try FileManager.default.createDirectory(at: broken.indexURL.deletingLastPathComponent(),
+            withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let brokenURL = await brokenIndex.availableURL(for: brokenResult.transferID)
+        let brokenFailure = await brokenIndex.availabilityFailure
+        XCTAssertNil(brokenURL)
+        XCTAssertEqual(brokenFailure, .receivedOutputIndexUnavailable)
+    }
+
+    func testInvalidRegistrationDoesNotPoisonOtherwiseHealthyIndex() async throws {
+        let f = try HistoryFixture(); defer { f.remove() }
+        let result = try await f.receive("valid")
+        let index = f.index()
+        await reject(index, TransferReceiveResult(transferID: result.transferID,
+            receivedURLs: [f.root.appendingPathComponent("outside")], source: f.peer))
+        let failure = await index.availabilityFailure
+        XCTAssertNil(failure)
+    }
+
     func testReplacedIndexReportsCoarseAvailabilityFailure() async throws {
         let f = try HistoryFixture(); defer { f.remove() }
         let result = try await f.receive("valid")

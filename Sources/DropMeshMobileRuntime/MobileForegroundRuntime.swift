@@ -128,13 +128,15 @@ public actor MobileForegroundRuntime {
 
     public func history(limit: Int = 100) async throws -> [MobileTransferHistoryItem] {
         let items = try await transferHistory.items(limit: limit)
-        historyAvailabilityFailure = await transferHistory.availabilityFailure
+        await refreshHistoryAvailabilityFailure()
         return items
     }
 
     /// Resolve immediately before presenting an open/share action.
     public func availableReceivedURL(for transferID: TransferID) async -> URL? {
-        await transferHistory.availableURL(for: transferID)
+        let url = await transferHistory.availableURL(for: transferID)
+        await refreshHistoryAvailabilityFailure()
+        return url
     }
 
     deinit {
@@ -469,6 +471,13 @@ public actor MobileForegroundRuntime {
     private func trustChanged() { trustRevision &+= 1; _ = reconcileTask() }
     private func unsubscribe(_ token: UUID) { subscribers[token] = nil }
     private func publish() { let value = currentSnapshot(); subscribers.values.forEach { $0.yield(value) } }
+
+    private func refreshHistoryAvailabilityFailure() async {
+        let updated = await transferHistory.availabilityFailure
+        guard updated != historyAvailabilityFailure else { return }
+        historyAvailabilityFailure = updated
+        publish()
+    }
 }
 
 /// Cancellation wins only if recorded before finalization takes this lock.

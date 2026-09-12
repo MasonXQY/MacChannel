@@ -91,16 +91,20 @@ public actor MobileReceivedOutputIndex {
 
     public func availableURL(for transferID: TransferID) async -> URL? {
         guard availabilityFailure == nil, let entry = entries[transferID.rawValue] else { return nil }
+        let row: TransferHistoryRecord
+        do { guard let persisted = try await database.persistedTransfer(id: transferID) else { return nil }; row = persisted }
+        catch { return nil }
+        guard Self.completedInbound(row) else { return nil }
         do {
-            guard let row = try await database.persistedTransfer(id: transferID), Self.completedInbound(row) else { return nil }
             let parent = try checkedParent(); defer { close(parent) }
-            do { try checkIndex(parent) }
-            catch { availabilityFailure = Self.unavailable; return nil }
+            try checkIndex(parent)
             let root = try checkedRoot(); defer { close(root) }
-            guard let status = try Self.status(root, leaf: entry.leafName, allowMissing: true),
-                  (try? Self.identity(status)) == entry.identity else { return nil }
+            guard let status = try Self.status(root, leaf: entry.leafName, allowMissing: true) else { return nil }
+            // A missing, moved, replaced, or type-changed user file is a
+            // per-item availability result, not corruption of the index.
+            guard (try? Self.identity(status)) == entry.identity else { return nil }
             return receiveDirectory.appendingPathComponent(entry.leafName, isDirectory: entry.kind == .directory)
-        } catch { return nil }
+        } catch { markUnavailable(); return nil }
     }
 
     func recordCompletedReceive(_ result: TransferReceiveResult) async throws {
@@ -112,14 +116,22 @@ public actor MobileReceivedOutputIndex {
               let row = try await database.persistedTransfer(id: result.transferID),
               Self.completedInbound(row), result.source == row.peer else { throw Self.unavailable }
         guard availabilityFailure == nil else { throw Self.unavailable }
-        let root = try checkedRoot(); defer { close(root) }
-        guard let status = try Self.status(root, leaf: url.lastPathComponent) else { throw Self.unavailable }
+        let root: Int32
+        do { root = try checkedRoot() }
+        catch { markUnavailable(); throw Self.unavailable }
+        defer { close(root) }
+        let status: stat?
+        do { status = try Self.status(root, leaf: url.lastPathComponent, allowMissing: true) }
+        catch { markUnavailable(); throw Self.unavailable }
+        guard let status else { throw Self.unavailable }
         let identity = try Self.identity(status)
         if let existing = entries[result.transferID.rawValue] {
             // A duplicate callback cannot repin a replacement to a completed ID.
             guard existing.leafName == url.lastPathComponent, existing.identity == identity else { throw Self.unavailable }
-            let parent = try checkedParent(); defer { close(parent) }
-            try checkIndex(parent)
+            do {
+                let parent = try checkedParent(); defer { close(parent) }
+                try checkIndex(parent)
+            } catch { markUnavailable(); throw Self.unavailable }
             return
         }
         var updated = entries
@@ -133,11 +145,13 @@ public actor MobileReceivedOutputIndex {
             try persist(Array(retained))
             entries = Dictionary(uniqueKeysWithValues: retained.map { ($0.transferID, $0) })
         } catch {
-            availabilityFailure = Self.unavailable
+            markUnavailable()
             entries = [:]
             throw Self.unavailable
         }
     }
+
+    private func markUnavailable() { availabilityFailure = Self.unavailable }
 
     private static func completedInbound(_ row: TransferHistoryRecord) -> Bool {
         row.direction == .inbound && row.phase == .completed && row.completedBytes == row.aggregateSize

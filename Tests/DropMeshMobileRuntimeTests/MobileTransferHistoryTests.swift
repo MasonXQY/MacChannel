@@ -4,6 +4,29 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileTransferHistoryTests: XCTestCase {
+    func testHistoryReadPropagatesParentIdentityFailureButNotMissingUserFile() async throws {
+        let f = try HistoryFixture(); defer { f.remove() }
+        let index = f.index()
+        let history = MobileTransferHistory(database: f.database, outputs: index)
+        let result = try await f.receive("published")
+        await history.recordCompletedReceive(result)
+        try FileManager.default.removeItem(at: result.receivedURLs[0])
+        let missingItems = try await history.items()
+        let missingFailure = await history.availabilityFailure
+        XCTAssertNil(missingItems.first?.availableURL)
+        XCTAssertNil(missingFailure)
+
+        try Data([1]).write(to: result.receivedURLs[0])
+        let oldState = f.root.appendingPathComponent("old-state")
+        try FileManager.default.moveItem(at: f.indexURL.deletingLastPathComponent(), to: oldState)
+        try FileManager.default.createDirectory(at: f.indexURL.deletingLastPathComponent(),
+            withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let brokenItems = try await history.items()
+        let brokenFailure = await history.availabilityFailure
+        XCTAssertNil(brokenItems.first?.availableURL)
+        XCTAssertEqual(brokenFailure, .receivedOutputIndexUnavailable)
+    }
+
     func testJoinsCanonicalMetadataOrderingAndClampsVisibleLimitWithoutPruning() async throws {
         let f = try HistoryFixture(); defer { f.remove() }
         let index = f.index()
