@@ -1,5 +1,7 @@
 # iPhone continuation ledger
 
+ACTIVE: iphone_logging_inventory(sol) sole implementer atb5445e2; scoped brief/report iphone-logging-inventory. Root full and bothMac builds drained successfully. No source build/enumeration while mutation tests run. After independent logging review, wholebranch gpt6 review fromc823400 with final-review-carryforward; no more feature tasks pending. Preserve physical/signing gate and installed Mac.
+
 Task Share: complete(a7712c6..d49f33f, correction52f4878, independent review Approved). Saved iphone-share-correction-review.md. New Minor exactEFBIG assertion carried to finalreview. Root final-source full988tests5existing skips0fail71.732s exit0; Mac release build session61369 sequential next. Logging inventory dispatch only after builds drain. No physical acceptance claimed; finalbasec823400.
 
 CURRENT: Share correction source52f4878/reportd49f33f DONE, independent iphone_share_correction_review active on frozen3026e81..d49f33f. Root read appended report and actual resource/build logs:109unit11UI,17storage,11importer14provider,56actual EN/ZH embeddedBundle lookups,both unsigned builds pass. No acceptance before review. Root full SwiftPM session8575 log iphone-share-corrected-integrated-full.log running; both Mac release compile next sequentially. Sole source implementation is finished; next logging inventory only after review Approved AND root builds drained. Finalbasec823400; physical phone/signing still unverified. Existing installed Mac untouched.

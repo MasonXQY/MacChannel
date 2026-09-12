@@ -2,18 +2,15 @@
 
 ## Current iPhone work — 2026-09-12
 
-Latest cursor: history refresh correction8a7ae7d independently accepted.
-Share96e35d0/reportf57aa0a passes103nativeunit+11UI, bothunsigned app+extension
-builds and18retained standard/AX captures, but independent review found THREE
-Important issues: missing extension translation resources, unreclaimable lockless
-crash directories, and pre-stat limits without a streaming byte ceiling. Fresh
-iphone_share_correction at3026e81 owns the bounded correction brief, including
-authorized additive limit API in the two pure mobile importer files; old callers
-and Mac/core protocol remain unchanged. Share is not accepted yet. Root full
-packagef57aa0a985tests/5existing skips/0fail48.194s exit0; MacStore0.31s/Direct0.80s
-release builds pass. No active rootbuild session. No physical iPhone detected.
-Remaining gates: correction+rereview, defaultlogging, integrated/wholebranch
-review, then connected-device signing and unchanged-Mac interoperability.
+Latest cursor: Share correction52f4878/reportd49f33f independently Approved;
+all three Important findings closed.109nativeunit+11UI,17focusedstorage,
+11importer+14provider,56actual embedded EN/ZH lookups and both unsigned shipping
+builds pass. Existing18view captures remain valid for unchanged views.
+Root full988tests/5existing skips/0fail71.732s exit0; MacStore0.31s/Direct0.32s
+release builds pass. No active rootbuild session. Default logging inventory
+closure is active atb5445e2, root owns docs. No physical iPhone detected.
+Remaining gates: logging review, final wholebranch review fromc823400,
+then connected-device signing and unchanged-Mac interoperability.
 No Mac installation, production, Store or Mac B action occurred.
 
 Continuous subagent-driven integration is now authorized. Current code milestone

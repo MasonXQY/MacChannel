@@ -4,6 +4,14 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
 
 ## Verified this continuation
 
+- Latest Share correction52f4878/reportd49f33f independently Approved: actual
+  embedded translations, crash-orphan recovery and streaming cap corrected.
+  109nativeunit+11UI,17storage,11importer+14provider tests pass;56actual resource
+  lookups and both unsigned shipping builds pass. Root full988tests,5existing
+  skips,0failures,71.732s exit0; MacStore/Direct release builds0.31s/0.32s pass.
+  Logs iphone-share-corrected-integrated-full and corrected-mac builds. This
+  supersedes the pre-correction gaps below; physical gates remain unverified.
+
 - Share production96e35d0/reportf57aa0a:103nativeunit+11UI,16focused and bilingual
   AX flows pass; both unsigned embedded-extension builds pass. Root inspected6
   of18retainedcaptures, actual link output and reported logs. Independent review
