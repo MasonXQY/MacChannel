@@ -33,20 +33,33 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
     init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
          onState: @escaping @Sendable (MobilePresenceState) async -> Void,
          onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
-        self.repository = repository
-        self.onDiscovery = onDiscovery
-        session = URLSession(configuration: .ephemeral)
-        presence = MobilePresenceSupervisor(identity: identity, repository: repository,
+        let session = URLSession(configuration: .ephemeral)
+        let presence = MobilePresenceSupervisor(identity: identity, repository: repository,
             directory: directory, onState: onState)
         let signaling = RendezvousWebRTCSignaling(session: presence.bridge)
         let turn = try RendezvousTURNCredentialClient(identity: identity,
             origin: MobileRuntimeConfiguration.httpOrigin, session: session)
         let ice = RefreshingICEConfigurationProvider(
             base: ICEConfiguration(stunURLs: [], turnServers: []), fetcher: turn)
+        try self.init(identity: identity, repository: repository, directory: directory,
+            presence: presence, signaling: signaling, iceProvider: ice,
+            factory: WebRTCFactory(), session: session, onDiscovery: onDiscovery)
+    }
+
+    /// Transport injection keeps the actual connector, listener and shutdown
+    /// composition in use while local tests replace external I/O dependencies.
+    init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+         presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
+         iceProvider: any ICEConfigurationProviding, factory: any WebRTCChannelFactory,
+         session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
+        self.repository = repository
+        self.onDiscovery = onDiscovery
+        self.session = session
+        self.presence = presence
         connector = ConnectionCoordinator(directory: directory, identity: identity,
-            trustRepository: repository, signaling: signaling, iceProvider: ice)
+            trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
         listener = WebRTCConnectionListener(directory: directory, identity: identity,
-            trustRepository: repository, signaling: signaling, iceProvider: ice)
+            trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
         source = listener
         browser = BonjourPeerBrowser(directory: directory, trust: DeviceTrust(trustedIDs: []))
         advertiser = try BonjourPeerAdvertiser(device: identity.id, port: 45_873) { $0.cancel() }
@@ -66,7 +79,9 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
         // HTTP cancellation begins immediately, separately from socket sessions.
         session.invalidateAndCancel()
         let task = Task { [listener, presence, browser, advertiser] in
-            async let inbound: Void = listener.stop()
+            // All shutdowns start before any join: socket close and HTTP
+            // invalidation may unblock the listener's ICE/factory dependencies.
+            async let inbound: Void = listener.stopAndWait()
             async let socket: Void = presence.stop()
             async let browsing: Void = browser.stop()
             async let advertising: Void = advertiser.stopAndWait()

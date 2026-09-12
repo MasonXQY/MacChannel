@@ -680,6 +680,7 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation?
     private var readerTask: Task<Void, Never>?
     private var acceptanceTasks: [UUID: Acceptance] = [:]
+    private var drainTask: Task<Void, Never>?
     private var stopped = false
     private var consumer = Consumer.none
 
@@ -727,7 +728,7 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
 
     public func channels() async -> AsyncThrowingStream<WebRTCSecureChannel, Error> {
         if consumer == .none { consumer = .legacyChannels }
-        await beginReadingIfNeeded()
+        beginReadingIfNeeded()
         return channelStream
     }
 
@@ -748,26 +749,45 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
             continuation = $0
         }
         transferContinuation = continuation
-        await beginReadingIfNeeded()
+        beginReadingIfNeeded()
         return stream
     }
 
     public func stop() {
         guard !stopped else { return }
         stopped = true
-        readerTask?.cancel()
+        let reader = readerTask
+        let acceptances = acceptanceTasks.values.map(\.task)
+        reader?.cancel()
         readerTask = nil
-        for acceptance in acceptanceTasks.values { acceptance.task.cancel() }
+        for task in acceptances { task.cancel() }
         acceptanceTasks.removeAll()
+        // Retain every retired owner even when the caller only requests the
+        // existing nonjoining stop. Late factory results own their close work.
+        drainTask = Task {
+            await reader?.value
+            for task in acceptances { await task.value }
+        }
         channelContinuation.finish()
         transferContinuation?.finish()
         transferContinuation = nil
     }
 
-    private func beginReadingIfNeeded() async {
+    /// Initiates cancellation and joins the same retirement as prior/concurrent
+    /// stop calls. A non-cooperative dependency keeps this drain pending.
+    public func stopAndWait() async {
+        stop()
+        await drainTask?.value
+    }
+
+    private func beginReadingIfNeeded() {
         guard !stopped, readerTask == nil else { return }
-        let offers = await signaling.incomingOffers()
-        readerTask = Task { [weak self] in
+        // Install ownership before the first suspension. Stream initialization
+        // itself can be blocked, and must neither escape drain nor spawn a
+        // reader after stop has captured its owners.
+        readerTask = Task { [weak self, signaling] in
+            let offers = await signaling.incomingOffers()
+            guard !Task.isCancelled else { return }
             for await offer in offers {
                 guard !Task.isCancelled else { return }
                 await self?.beginAccepting(offer)
