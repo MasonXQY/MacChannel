@@ -10,6 +10,7 @@ final class DropMeshUITests: XCTestCase {
         app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-history-evidence"]
         app.launch()
         let filename = app.staticTexts["history-entry-name"].firstMatch
+        reveal(filename, in: app)
         XCTAssertTrue(filename.waitForExistence(timeout: 5))
         positionExplanation(filename, in: app)
         attach(app.screenshot(), named: "\(prefix)-Home-Filename")
@@ -19,7 +20,7 @@ final class DropMeshUITests: XCTestCase {
         attach(app.screenshot(), named: "\(prefix)-Home-Latest")
         open.tap()
         let unavailable = app.staticTexts["history-action-message"]
-        reveal(unavailable, in: app)
+        revealAbove(unavailable, in: app)
         XCTAssertTrue(unavailable.waitForExistence(timeout: 3))
         positionExplanation(unavailable, in: app)
         attach(app.screenshot(), named: "\(prefix)-Home-Unavailable")
@@ -29,7 +30,13 @@ final class DropMeshUITests: XCTestCase {
         attach(app.screenshot(), named: "\(prefix)-Home-Actions")
         let history = app.buttons["history-open-button"]
         reveal(history, in: app)
+        positionExplanation(history, in: app)
         history.tap()
+        guard app.navigationBars[language == "en" ? "History" : "历史记录"].waitForExistence(timeout: 3) else {
+            XCTFail("History navigation must finish before inspecting rows or going back")
+            return
+        }
+        reveal(app.staticTexts["history-entry-name"].firstMatch, in: app)
         XCTAssertTrue(app.staticTexts["history-entry-name"].firstMatch.waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-History")
         app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -48,6 +55,7 @@ final class DropMeshUITests: XCTestCase {
         app.launch()
         let failedHistory = app.buttons["history-open-button"]
         reveal(failedHistory, in: app)
+        positionExplanation(failedHistory, in: app)
         failedHistory.tap()
         XCTAssertTrue(app.staticTexts["history-load-error"].waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-History-Error")
