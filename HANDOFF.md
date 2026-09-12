@@ -2,6 +2,15 @@
 
 ## Current iPhone work — 2026-09-12
 
+FINAL REVIEW CURSOR: wholebranch c823400..07f4680 requires three integration
+corrections: stop revoked-peer outbound work, reclaim process-abandoned private
+imports, and actionable post-admission failures. One fresh iphone_final_correction
+agent at14047d3 owns all3Important+4Minor in iphone-final-correction-brief.md.
+Report iphone-final-correction-report.md pending. Previous component gates below
+remain valid but whole-source acceptance is not complete. Logging gate5ebb85d
+is independently Approved. No active root builds; all physical/signing gates
+remain unavailable. Do not reinstall Mac or access Mac B/production/Store.
+
 Latest cursor: Share correction52f4878/reportd49f33f independently Approved;
 all three Important findings closed.109nativeunit+11UI,17focusedstorage,
 11importer+14provider,56actual embedded EN/ZH lookups and both unsigned shipping

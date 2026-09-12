@@ -4,6 +4,11 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
 
 ## Verified this continuation
 
+- Wholebranch reviewc823400..07f4680 is Needs fixes despite passing component
+  tests: revoked outbound lifetime, process-abandoned private staging and
+  post-admission failure recovery. Fresh combined correction active at14047d3;
+  no final source/physical readiness claim. Default logging5ebb85d is accepted.
+
 - Latest Share correction52f4878/reportd49f33f independently Approved: actual
   embedded translations, crash-orphan recovery and streaming cap corrected.
   109nativeunit+11UI,17storage,11importer+14provider tests pass;56actual resource
