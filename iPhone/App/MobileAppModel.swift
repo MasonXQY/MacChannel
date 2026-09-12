@@ -26,6 +26,8 @@ final class MobileAppModel {
     @ObservationIgnored nonisolated(unsafe) private var observationTask: Task<Void, Never>?
     private var lifecycleTasks: [UUID: Task<Void, Never>] = [:]
     private var lifecycleRequest = UUID()
+    private var retryRecoveryRequest: UUID?
+    private var retryCommandReturned = false
     private var removalTask: Task<Void, Never>?
     private var revokedIDs: Set<DeviceID> = []
     private var refreshTask: Task<Void, Never>?
@@ -71,7 +73,10 @@ final class MobileAppModel {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active: desiredForeground = true
-        case .background: desiredForeground = false
+        case .background:
+            desiredForeground = false
+            retryRecoveryRequest = nil
+            retryCommandReturned = false
         case .inactive: return
         @unknown default: return
         }
@@ -151,6 +156,12 @@ final class MobileAppModel {
         guard !closed else { return }
         serviceState = snapshot.state
         runtimeFailure = snapshot.failure
+        if retryRecoveryRequest != nil, retryCommandReturned,
+           desiredForeground == true, snapshot.state == .online {
+            lifecycleFailure = nil
+            retryRecoveryRequest = nil
+            retryCommandReturned = false
+        }
         let reachable = Dictionary(snapshot.reachable.map { ($0.id, $0) }, uniquingKeysWith: { _, newest in newest })
         pairedDevices = snapshot.trustedIDs.subtracting(revokedIDs).filter { $0 != snapshot.localID }.map { id in
             DeviceSummary(id: id, displayName: snapshot.names[id] ?? "",
@@ -164,8 +175,14 @@ final class MobileAppModel {
     func retryConnection() {
         guard desiredForeground == true, let session else { return }
         let id = UUID()
+        retryRecoveryRequest = id
+        retryCommandReturned = false
         lifecycleTasks[id] = Task { [weak self] in
             await session.retryConnection()
+            if self?.retryRecoveryRequest == id, self?.desiredForeground == true,
+               self?.closed == false {
+                self?.retryCommandReturned = true
+            }
             do { try await session.refreshTrust(); self?.explicitFailure = nil }
             catch { self?.explicitFailure = .network }
             await self?.refreshDevices()
@@ -218,6 +235,8 @@ final class MobileAppModel {
     func close() async {
         closed = true
         desiredForeground = false
+        retryRecoveryRequest = nil
+        retryCommandReturned = false
         observationTask?.cancel()
         async let stop: Void = session?.stopForeground() ?? ()
         async let pair: Void = pairing?.handleBackground() ?? ()

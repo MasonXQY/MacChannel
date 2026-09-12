@@ -13,6 +13,8 @@ actor InertMobileSession: MobileAppSession {
     private var pairingAttempt: (any PairingAttempt)?
     private var beforeRevoke: @Sendable () async -> Void = {}
     private var beforeStart: @Sendable () async throws -> Void = {}
+    private var beforeRetry: @Sendable () async -> Void = {}
+    private var retryState: MobileRuntimeState = .online
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private(set) var revokeCount = 0
@@ -42,7 +44,10 @@ actor InertMobileSession: MobileAppSession {
         value.state = .online; publish()
     }
     func stopForeground() { stopCount += 1; value.state = .inactive; value.reachable = []; publish() }
-    func retryConnection() { value.state = .online; publish() }
+    func retryConnection() async {
+        await beforeRetry()
+        value.state = retryState; publish()
+    }
     func refreshTrust() throws {
         refreshCount += 1
         if refreshFailure { throw MobileRuntimeError.notReady }
@@ -63,6 +68,8 @@ actor InertMobileSession: MobileAppSession {
     func setPairingAttempt(_ attempt: any PairingAttempt) { pairingAttempt = attempt }
     func setBeforeRevoke(_ operation: @escaping @Sendable () async -> Void) { beforeRevoke = operation }
     func setBeforeStart(_ operation: @escaping @Sendable () async throws -> Void) { beforeStart = operation }
+    func setBeforeRetry(_ operation: @escaping @Sendable () async -> Void) { beforeRetry = operation }
+    func setRetryState(_ state: MobileRuntimeState) { retryState = state }
     func setNames(_ names: [DeviceID: String]) { value.names = names; publish() }
     func setTrustedIDs(_ ids: Set<DeviceID>) { value.trustedIDs = ids; publish() }
     func setPresence(_ state: MobileRuntimeState, peers: [DeviceSummary]) {

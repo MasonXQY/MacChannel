@@ -109,6 +109,118 @@ final class MobileAppModelTests: XCTestCase {
         await model.close()
     }
 
+    func testSuccessfulRetryClearsRecoveredStartFailureAfterOnlineSnapshot() async {
+        let session = InertMobileSession()
+        await session.setBeforeStart { throw MobileRuntimeError.notReady }
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+        XCTAssertEqual(model.serviceFailure, .network)
+
+        await session.setBeforeStart {}
+        model.retryConnection()
+        await model.waitForLifecycle()
+
+        XCTAssertEqual(model.serviceState, .online)
+        XCTAssertNil(model.serviceFailure)
+        await model.close()
+    }
+
+    func testDelayedRetryClearsRecoveredStartFailureOnlyWhenSnapshotBecomesOnline() async {
+        let session = InertMobileSession()
+        await session.setBeforeStart { throw MobileRuntimeError.notReady }
+        await session.setRetryState(.reconnecting)
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+
+        model.retryConnection()
+        await model.waitForLifecycle()
+        XCTAssertEqual(model.serviceState, .reconnecting)
+        XCTAssertEqual(model.serviceFailure, .network)
+
+        await session.setPresence(.online, peers: [])
+        await model.refreshDevices()
+        XCTAssertNil(model.serviceFailure)
+        await model.close()
+    }
+
+    func testFailedRetryKeepsRecoveredStartFailure() async {
+        let session = InertMobileSession()
+        await session.setBeforeStart { throw MobileRuntimeError.notReady }
+        await session.setRetryState(.reconnecting)
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+
+        model.retryConnection()
+        await model.waitForLifecycle()
+
+        XCTAssertEqual(model.serviceFailure, .network)
+        await model.close()
+    }
+
+    func testBackgroundSupersedesHeldRetryRecovery() async throws {
+        let session = InertMobileSession()
+        let gate = BootstrapGate()
+        await session.setBeforeStart { throw MobileRuntimeError.notReady }
+        await session.setBeforeRetry { await gate.wait() }
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+
+        model.retryConnection()
+        try await gate.entered()
+        model.scenePhaseChanged(.background)
+        await gate.release()
+        await model.waitForLifecycle()
+
+        XCTAssertEqual(model.serviceFailure, .network)
+        await model.close()
+    }
+
+    func testNewerRetrySupersedesHeldRetryRecovery() async throws {
+        let session = InertMobileSession()
+        let gate = BootstrapGate()
+        await session.setBeforeStart { throw MobileRuntimeError.notReady }
+        await session.setBeforeRetry { await gate.wait() }
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+
+        model.retryConnection()
+        try await gate.entered()
+        await session.setBeforeRetry {}
+        await session.setRetryState(.reconnecting)
+        model.retryConnection()
+        await gate.release()
+        await model.waitForLifecycle()
+
+        XCTAssertEqual(model.serviceFailure, .network)
+        await model.close()
+    }
+
+    func testSuccessfulRetryPreservesExplicitTrustRefreshFailure() async {
+        let session = InertMobileSession()
+        await session.setBeforeStart { throw MobileRuntimeError.notReady }
+        await session.setRefreshFailure(true)
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+
+        model.retryConnection()
+        await model.waitForLifecycle()
+
+        XCTAssertEqual(model.serviceState, .online)
+        XCTAssertEqual(model.serviceFailure, .network)
+
+        await session.setRefreshFailure(false)
+        model.retryConnection()
+        await model.waitForLifecycle()
+        XCTAssertNil(model.serviceFailure)
+        await model.close()
+    }
+
     func testRemovalOwnsCheckpointEvenWhenPresentationOwnerIsReleased() async throws {
         let session = InertMobileSession()
         let gate = BootstrapGate()

@@ -481,3 +481,62 @@ No new visual captures were exported or inspected. Previously tracked captures
 remain unchanged-layout evidence. All implementer test/build sessions drained;
 no caches purged, actual keychain accessed, installed app replaced, physical
 iPhone/real network pairing performed, or signing/Store/server/protocol changed.
+
+## Native retry recovery correction — 2026-09-12
+
+Parent source `6febf64` (functional base `67ae2e8`; concurrent root documentation
+through `d990146`). The remaining retry diagnostic finding is corrected without
+changing transfer, trust, persistence, view, resource, project, protocol, Mac,
+Store or production-service code.
+
+`MobileAppModel` now gives each foreground retry a recovery request identity.
+The lifecycle start failure is cleared only after that current retry command has
+returned and an actual session snapshot reports `.online`. A reconnecting or
+failed snapshot keeps the diagnostic. Background, close and a newer retry retire
+the prior request, so a held/stale completion cannot clear current diagnostics.
+The existing explicit trust-refresh failure remains independently owned and
+visible. Existing lifecycle, observation, removal and delayed recovery ownership
+is unchanged; no polling, sleeps or new production owner was added.
+
+The inert host gained only a controllable retry gate and retry state. Its held
+wait uses the existing bounded, cancellable `BootstrapGate`. Six regressions cover
+immediate success, delayed snapshot success, failed/reconnecting retry, background
+supersession, newer-retry supersession and explicit trust-refresh retention.
+
+### TDD and verification
+
+All result bundles and logs are under `.build/`; pinned package caches and the
+existing iPhone 16 simulator `ACEA4034-2629-4A24-A7C8-C146BD8B0688` were reused.
+No cache was purged and source was frozen during final test/build/audit runs.
+
+- Behavioral RED: the standard cached native command from the preceding section,
+  filtered to `DropMeshTests/MobileAppModelTests`, result
+  `native-retry-fix-red.xcresult` and log `native-retry-fix-red.log`; exit 65,
+  21 tests, two expected failures. Immediate and delayed successful retry both
+  retained `"network"` where `XCTAssertNil` was required. The failed retry,
+  supersession and explicit-failure cases already passed.
+- Focused GREEN: same command/filter, result
+  `native-retry-fix-green-final.xcresult` and matching log; exit 0, **21/21**.
+- Complete native suite, same command without a filter, result
+  `native-retry-fix-complete.xcresult` and matching log; exit 0,
+  **41 unit tests + 3 UI tests**, zero failures and zero skips. Unit duration
+  0.811 seconds; UI duration 34.675 seconds. This is the prior 35 unit + 3 UI
+  suite plus six retry regressions. Views/resources did not change, so the
+  prior tracked responsive captures remain the applicable layout evidence and
+  no screenshot or maximum-type rerun is claimed.
+- Both standard unsigned shipping app builds from the preceding section passed:
+  `native-retry-fix-shipping-simulator.log` and
+  `native-retry-fix-shipping-device.log`, exit 0 / BUILD SUCCEEDED.
+- `bash Scripts/check-sensitive-logging.sh iPhone/App/*.swift` and
+  `bash Scripts/audit-privacy.sh --static-only` passed in
+  `native-retry-fix-logging.log` and `native-retry-fix-privacy.log`.
+  Direct scoped source audit found no logger, print, pasteboard or key material
+  references in the three owned Swift files. `git diff --check` passed.
+
+The known AppIntents metadata-extraction warning remains output noise; no Swift
+compiler warning/error match is present in either final shipping build. These
+are inert-host simulator tests and unsigned builds, not installed/physical-iPhone,
+production network/keychain, signed, Store or unchanged-Mac interoperability
+acceptance. The retained root 985-test and two Mac build proofs apply to unchanged
+Package/Core/Mac paths and were not needlessly rerun. Self-review found no known
+remaining defect in the scoped retry recovery path.
