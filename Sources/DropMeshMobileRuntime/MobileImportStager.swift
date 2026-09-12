@@ -1,183 +1,152 @@
-import Darwin
 import Foundation
 
+/// Composition supplies the existing private staging directory. The caller owns
+/// each result until discard, including a success racing UI cancellation.
 public actor MobileImportStager {
-    private let directory: URL
-    private let rootDescriptor: Int32
-    private let rootOpenError: Int32
-    private let didCopyFirstChunk: (@Sendable () -> Void)?
+    private nonisolated let copy: MobileImportCopy
+    private let queue: OperationQueue
+    private let access: MobileImportSecurityAccess
+    private let makeCoordinator: @Sendable () -> any MobileImportCoordinating
 
     public init(directory: URL) {
-        self.directory = directory.standardizedFileURL
-        rootDescriptor = open(self.directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        rootOpenError = rootDescriptor < 0 ? errno : 0
-        didCopyFirstChunk = nil
+        copy = MobileImportCopy(directory: directory)
+        queue = Self.workerQueue()
+        access = .system
+        makeCoordinator = { MobileSystemImportCoordinator() }
+    }
+
+    init(directory: URL, access: MobileImportSecurityAccess = .system,
+         makeCoordinator: @escaping @Sendable () -> any MobileImportCoordinating = { MobileSystemImportCoordinator() },
+         didCopyFirstChunk: (@Sendable () -> Void)? = nil,
+         didFinalize: (@Sendable () -> Void)? = nil) {
+        copy = MobileImportCopy(directory: directory, didCopyFirstChunk: didCopyFirstChunk, didFinalize: didFinalize)
+        queue = Self.workerQueue()
+        self.access = access
+        self.makeCoordinator = makeCoordinator
     }
 
     init(directory: URL, didCopyFirstChunk: @escaping @Sendable () -> Void) {
-        self.directory = directory.standardizedFileURL
-        rootDescriptor = open(self.directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        rootOpenError = rootDescriptor < 0 ? errno : 0
-        self.didCopyFirstChunk = didCopyFirstChunk
-    }
-
-    deinit {
-        if rootDescriptor >= 0 { close(rootDescriptor) }
+        copy = MobileImportCopy(directory: directory, didCopyFirstChunk: didCopyFirstChunk)
+        queue = Self.workerQueue()
+        access = .system
+        makeCoordinator = { MobileSystemImportCoordinator() }
     }
 
     public func stage(file source: URL) async throws -> URL {
-        guard source.isFileURL else { throw CocoaError(.fileReadUnsupportedScheme) }
-
-        try requireRootDescriptor()
-        let sourceDescriptor = open(source.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard sourceDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { close(sourceDescriptor) }
-
-        var sourceInfo = stat()
-        guard fstat(sourceDescriptor, &sourceInfo) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        guard (sourceInfo.st_mode & S_IFMT) == S_IFREG else {
-            throw CocoaError(.fileReadUnsupportedScheme)
-        }
-
-        try Task.checkCancellation()
-        let importName = UUID().uuidString
-        guard mkdirat(rootDescriptor, importName, 0o700) == 0 else { throw currentPOSIXError() }
-        let importDirectory = directory.appendingPathComponent(importName, isDirectory: true)
-        let importDescriptor = openat(rootDescriptor, importName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard importDescriptor >= 0 else {
-            _ = unlinkat(rootDescriptor, importName, AT_REMOVEDIR)
-            throw currentPOSIXError()
-        }
-        defer { close(importDescriptor) }
-        let destinationName = source.lastPathComponent
-        let partialName = ".\(UUID().uuidString).partial"
-        do {
-            guard fchmod(importDescriptor, 0o700) == 0 else { throw currentPOSIXError() }
-            try copy(sourceDescriptor: sourceDescriptor, to: partialName, in: importDescriptor)
-            try Task.checkCancellation()
-            guard renameat(importDescriptor, partialName, importDescriptor, destinationName) == 0 else {
-                throw currentPOSIXError()
-            }
-            return importDirectory.appendingPathComponent(destinationName, isDirectory: false)
-        } catch {
-            _ = unlinkat(importDescriptor, partialName, 0)
-            _ = unlinkat(importDescriptor, destinationName, 0)
-            _ = unlinkat(rootDescriptor, importName, AT_REMOVEDIR)
-            throw error
-        }
-    }
-
-    public func discard(_ stagedFile: URL) throws {
-        guard stagedFile.isFileURL else { throw CocoaError(.fileNoSuchFile) }
-        let candidate = stagedFile.standardizedFileURL
-        let importDirectory = candidate.deletingLastPathComponent()
-        guard UUID(uuidString: importDirectory.lastPathComponent) != nil,
-              importDirectory.deletingLastPathComponent().standardizedFileURL == directory,
-              candidate.lastPathComponent != ".",
-              candidate.lastPathComponent != ".."
-        else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-        try requireRootDescriptor()
-        let importName = importDirectory.lastPathComponent
-        let importDescriptor = openat(rootDescriptor, importName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard importDescriptor >= 0 else { throw CocoaError(.fileNoSuchFile) }
-        defer { close(importDescriptor) }
-
-        let children = try directoryEntryNames(descriptor: importDescriptor)
-        guard children == [candidate.lastPathComponent] else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-        let fileDescriptor = openat(
-            importDescriptor,
-            candidate.lastPathComponent,
-            O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC
-        )
-        guard fileDescriptor >= 0 else { throw CocoaError(.fileNoSuchFile) }
-        defer { close(fileDescriptor) }
-        var fileInfo = stat()
-        guard fstat(fileDescriptor, &fileInfo) == 0, (fileInfo.st_mode & S_IFMT) == S_IFREG else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-
-        guard unlinkat(importDescriptor, candidate.lastPathComponent, 0) == 0 else { throw currentPOSIXError() }
-        guard unlinkat(rootDescriptor, importName, AT_REMOVEDIR) == 0 else { throw currentPOSIXError() }
-    }
-
-    private func copy(sourceDescriptor: Int32, to destinationName: String, in importDescriptor: Int32) throws {
-        let destinationDescriptor = openat(
-            importDescriptor,
-            destinationName,
-            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-            0o600
-        )
-        guard destinationDescriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        defer { close(destinationDescriptor) }
-
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        var copiedFirstChunk = false
-        while true {
-            try Task.checkCancellation()
-            let count = read(sourceDescriptor, &buffer, buffer.count)
-            if count == 0 { break }
-            guard count > 0 else {
-                if errno == EINTR { continue }
-                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-            }
-            var written = 0
-            while written < count {
-                let result = buffer.withUnsafeBytes { bytes in
-                    write(destinationDescriptor, bytes.baseAddress!.advanced(by: written), count - written)
+        let cancellation = MobileImportCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.addOperation { [copy] in
+                    continuation.resume(with: Result { try copy.stage(file: source, cancellation: cancellation) })
                 }
-                guard result > 0 else {
-                    if result < 0, errno == EINTR { continue }
-                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        } onCancel: { cancellation.cancel() }
+    }
+
+    /// Call inline inside an off-main NSItemProvider callback before it returns.
+    /// Async FileRepresentation importing closures can await stage(file:) fully.
+    /// Bind the configured stager in composition, never a mutable global root.
+    public nonisolated func copyProviderFile(_ source: URL, cancellation: MobileImportCancellation) throws -> URL {
+        try copy.stage(file: source, cancellation: cancellation)
+    }
+
+    public func stageCoordinated(file source: URL) async throws -> URL {
+        let cancellation = MobileImportCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.addOperation { [copy, queue, access, makeCoordinator] in
+                    do { try cancellation.check() } catch {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    let coordinator = makeCoordinator()
+                    let scoped = access.start(source)
+                    coordinator.coordinate(file: source, queue: queue) { coordinatedURL, error in
+                        let result = Result {
+                            try cancellation.check()
+                            if let error { throw error }
+                            return try copy.stage(file: coordinatedURL, cancellation: cancellation)
+                        }
+                        // Serial queue runs this only AFTER the accessor returns.
+                        // Copy itself is inline and never waits on this queue.
+                        queue.addOperation {
+                            if scoped { access.stop(source) }
+                            cancellation.clear()
+                            withExtendedLifetime(coordinator) { continuation.resume(with: result) }
+                        }
+                    }
+                    // Register after acquisition is submitted, so cancellation
+                    // racing setup cancels a pending coordinator operation.
+                    cancellation.install { coordinator.cancel() }
                 }
-                written += result
             }
-            if !copiedFirstChunk {
-                copiedFirstChunk = true
-                didCopyFirstChunk?()
+        } onCancel: { cancellation.cancel() }
+    }
+
+    public func discard(_ stagedFile: URL) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.addOperation { [copy] in
+                continuation.resume(with: Result { try copy.discard(stagedFile) })
             }
-            try Task.checkCancellation()
-        }
-        guard fchmod(destinationDescriptor, 0o600) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 
-    private func requireRootDescriptor() throws {
-        guard rootDescriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: rootOpenError) ?? .EIO)
-        }
+    private nonisolated static func workerQueue() -> OperationQueue {
+        let queue = OperationQueue()
+        queue.name = "DropMesh.private-import"
+        queue.qualityOfService = .utility
+        queue.maxConcurrentOperationCount = 1
+        return queue
     }
+}
 
-    private func directoryEntryNames(descriptor: Int32) throws -> [String] {
-        let duplicate = dup(descriptor)
-        guard duplicate >= 0 else { throw currentPOSIXError() }
-        guard let stream = fdopendir(duplicate) else {
-            close(duplicate)
-            throw currentPOSIXError()
-        }
-        defer { closedir(stream) }
-        var names: [String] = []
-        errno = 0
-        while let entry = readdir(stream) {
-            let name = withUnsafePointer(to: &entry.pointee.d_name) {
-                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) { String(cString: $0) }
-            }
-            if name != ".", name != ".." { names.append(name) }
-            errno = 0
-        }
-        guard errno == 0 else { throw currentPOSIXError() }
-        return names
+/// Per-import flag. Legacy provider Progress owners cancel both their Progress
+/// and this token. Cancellation never abandons local cleanup.
+public final class MobileImportCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var cancelProvider: (@Sendable () -> Void)?
+    public init() {}
+    public func cancel() {
+        lock.lock()
+        cancelled = true
+        let action = cancelProvider
+        cancelProvider = nil
+        lock.unlock()
+        action?()
     }
+    func check() throws {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled { throw CancellationError() }
+    }
+    func install(_ action: @escaping @Sendable () -> Void) {
+        lock.lock()
+        let runNow = cancelled
+        if !runNow { cancelProvider = action }
+        lock.unlock()
+        if runNow { action() }
+    }
+    func clear() { lock.lock(); cancelProvider = nil; lock.unlock() }
+}
 
-    private func currentPOSIXError() -> POSIXError {
-        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+struct MobileImportSecurityAccess: Sendable {
+    var start: @Sendable (URL) -> Bool
+    var stop: @Sendable (URL) -> Void
+    static let system = Self(start: { $0.startAccessingSecurityScopedResource() },
+                             stop: { $0.stopAccessingSecurityScopedResource() })
+}
+
+protocol MobileImportCoordinating: AnyObject, Sendable {
+    // Invoke accessor exactly once on queue, including failure/cancellation.
+    func coordinate(file: URL, queue: OperationQueue, accessor: @escaping @Sendable (URL, Error?) -> Void)
+    func cancel()
+}
+
+private final class MobileSystemImportCoordinator: MobileImportCoordinating, @unchecked Sendable {
+    private let coordinator = NSFileCoordinator()
+    func coordinate(file: URL, queue: OperationQueue, accessor: @escaping @Sendable (URL, Error?) -> Void) {
+        let intent = NSFileAccessIntent.readingIntent(with: file, options: [])
+        coordinator.coordinate(with: [intent], queue: queue) { error in accessor(intent.url, error) }
     }
+    func cancel() { coordinator.cancel() }
 }
