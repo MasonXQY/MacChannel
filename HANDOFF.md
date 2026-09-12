@@ -66,7 +66,10 @@ pass with signing disabled. Root checked selected screenshots, actual bundle
 version0.1.0(1)/Files flags and current isolated English test-guard execution.
 One task-created temporary simulator was retired after evidence export; original
 simulator data remains and content size is restoredlarge. Independent history
-review is active fromb12bb48..f79d749; Share follows after approval.
+review of b12bb48..f79d749 found one Important: inbound completion is not
+forwarded to Home history invalidation. Fresh iphone_history_refresh_fix is
+correcting the signal and adding regressions at base26fea95; independent
+rereview is required before Share. Prior passing tests do not cover this gap.
 Send preflight confirms actual
 publicsend-return is the import-copy release boundary; Photos must explicitly
 cancel/join its copy. Root has no active build/test session.

@@ -11,7 +11,9 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   actualbundle0.1.0(1)/Filesflags and current English navigation guard in isolated
   testlog. Old-body/zero-test/tooling failures were not accepted as corrected
   evidence. Temp9F77226A simulator retired afterexport; originalpreserved/restored
-  large. Independent reviewb12bb48..f79d749 is pending; no physical/system-provider
+  large. Independent reviewb12bb48..f79d749 found missing incoming-completion
+  invalidation on Home. A bounded correction with regression tests is active;
+  the history slice is not accepted until rereview. No physical/system-provider
   or network-interoperability claim. Share extension remains subsequent work.
 
 - Native send UI source5804b21/2df84dd, screenshot-helper-onlyc853b8e and
