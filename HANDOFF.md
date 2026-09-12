@@ -57,8 +57,10 @@ test-only supplemental capturesc853b8e and report/evidencebe68272. Final native
 76unit+7UI, sixmaximum-typeUI and four supplementalAXUI cases pass; actual
 unsigned simulator/device app builds pass. Root inspected standard and maximum
 size EN/ZH screenshots, including explicit recipient and error-region evidence.
-Fresh independent iphone_native_send_review is active over89f6a9a..be68272;
-no remaining build/test session is active. This is not physical transfer proof.
+Independent iphone_native_send_review approves89f6a9a..be68272 with no
+Critical/Important findings. Generic send-failure guidance and known AppIntents
+warning remain Minor ledger items. No build/test session is active. This is not
+physical transfer proof. Fresh history/settings implementation follows.
 Send preflight confirms actual
 publicsend-return is the import-copy release boundary; Photos must explicitly
 cancel/join its copy. Root has no active build/test session.

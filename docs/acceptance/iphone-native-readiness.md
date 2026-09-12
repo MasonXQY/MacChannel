@@ -12,7 +12,8 @@ Date: 2026-09-12. Isolated branch: feature/dropmesh-iphone.
   in reviewed app-owned controls. System Photos search placeholder truncates at
   maximumsize. Photos captures show browsing/no selection, not provider delivery.
   Prepared files/progress/errors use an inert host and actual local import copies,
-  not remote transfer. Independent task review is in progress from89f6a9a..be68272.
+  not remote transfer. Independent task review Approved89f6a9a..be68272, no
+  Critical/Important. Generic runtime-failure guidance is a Minor final-review item.
   History/settings and Share remain next; latest device enumeration still empty.
 
 - Starting revision 14034d6; mobile baseline: 11 tests, 0 failures.
