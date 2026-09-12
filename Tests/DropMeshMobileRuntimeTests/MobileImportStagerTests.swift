@@ -80,6 +80,50 @@ final class MobileImportStagerTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
     }
 
+    func testCancelledCopyAfterImportDirectoryCreationLeavesNoStagedItem() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.source.appendingPathComponent("large.bin")
+        try Data(repeating: 0x5a, count: 256 * 1024).write(to: source)
+        let copiedChunk = expectation(description: "copied first chunk")
+        let allowCopyToContinue = DispatchSemaphore(value: 0)
+        let stager = MobileImportStager(directory: fixture.staging) {
+            copiedChunk.fulfill()
+            allowCopyToContinue.wait()
+        }
+
+        let stagingTask = Task { try await stager.stage(file: source) }
+        await fulfillment(of: [copiedChunk], timeout: 2)
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path).isEmpty)
+        stagingTask.cancel()
+        allowCopyToContinue.signal()
+
+        await XCTAssertThrowsErrorAsync { _ = try await stagingTask.value }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+    }
+
+    func testStageRejectsFIFOWithoutWaitingForAWriter() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let fifo = fixture.source.appendingPathComponent("provider.fifo")
+        XCTAssertEqual(mkfifo(fifo.path, 0o600), 0)
+        let unblockLegacyOpen = Task.detached {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let writer = open(fifo.path, O_WRONLY | O_NONBLOCK)
+            if writer >= 0 { close(writer) }
+        }
+        defer { unblockLegacyOpen.cancel() }
+        let finished = expectation(description: "FIFO classified without blocking")
+        let stagingTask = Task {
+            defer { finished.fulfill() }
+            return try await MobileImportStager(directory: fixture.staging).stage(file: fifo)
+        }
+
+        await fulfillment(of: [finished], timeout: 0.5)
+        await XCTAssertThrowsErrorAsync { _ = try await stagingTask.value }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+    }
+
     func testDiscardRemovesOnlyOwnedImportAndRejectsExternalPathsAndRoot() async throws {
         let fixture = try fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -101,6 +145,25 @@ final class MobileImportStagerTests: XCTestCase {
         await XCTAssertThrowsErrorAsync { try await stager.discard(fixture.staging) }
         XCTAssertTrue(FileManager.default.fileExists(atPath: external.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
+    }
+
+    func testDiscardRejectsUUIDSymlinkAndPreservesExternalVictim() async throws {
+        let fixture = try fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let externalDirectory = fixture.root.appendingPathComponent("external", isDirectory: true)
+        let victim = externalDirectory.appendingPathComponent("victim.txt")
+        try FileManager.default.createDirectory(at: externalDirectory, withIntermediateDirectories: false)
+        try Data("keep me".utf8).write(to: victim)
+        let uuidLink = fixture.staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: uuidLink, withDestinationURL: externalDirectory)
+
+        let stager = MobileImportStager(directory: fixture.staging)
+        await XCTAssertThrowsErrorAsync {
+            try await stager.discard(uuidLink.appendingPathComponent(victim.lastPathComponent))
+        }
+
+        XCTAssertEqual(try Data(contentsOf: victim), Data("keep me".utf8))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: uuidLink.path))
     }
 
     private func permissions(at url: URL) -> Int {
