@@ -2,6 +2,18 @@
 
 ## Current iPhone work — 2026-09-12
 
+FILES FIX INSTALLED — 2026-09-13: user explicitly requested updating connected
+iPhone for their own testing. Source901c30a plus app/Share CFBundleVersion bump
+to2 (marketing0.1.0); no behavior edits. Both plists lint and diff-check pass.
+Signed build exit0 using existing ZENSYS dev identities and owner-only
+/private/tmp/dropmesh-iphone-update.SyBIWl, log .build/iphone-files-update-build.log.
+Deep strict signature verification passes; app and Share entitlements match
+their existing dev IDs, team and private AppGroup. In-place devicectl install
+exit0; exact bundle query confirms0.1.0(2); foreground launch request exit0.
+Evidence .build/iphone-files-update-{before,install,installed,launch}.json.
+No uninstall, data clearing, Mac/core/Store changes. All build/install sessions
+drained. Successful iCloud file import remains for user testing, not claimed.
+
 FILES BRIDGE FIX — 2026-09-13 (base c4a64f7): user clarified that downloaded
 iCloud Drive files disappear from selection after confirmation, before recipient
 choice. Added 3 regressions; valid RED43/6 expected assertions then GREEN43/0.
