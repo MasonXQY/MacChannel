@@ -2,6 +2,56 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
+    func testEnglishPairingSaving() { runPairingSaving(language: "en", locale: "en_US") }
+    func testChinesePairingSaving() { runPairingSaving(language: "zh-Hans", locale: "zh_CN") }
+
+    private func runPairingSaving(language: String, locale: String) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-pairing-saving-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        let saving = language == "en" ? "Saving the trusted device on this iPhone…" : "正在这台 iPhone 上保存受信任设备…"
+        let retry = app.buttons[language == "en" ? "Retry Saving" : "重试保存"]
+        let success = app.staticTexts[language == "en" ? "Paired and saved on this iPhone" : "已配对并保存在这台 iPhone 上"]
+        func assertSaving(_ stage: String) {
+            let progress = app.activityIndicators["pairing-saving-progress"]
+            revealPairingElement(progress, in: app)
+            XCTAssertTrue(progress.waitForExistence(timeout: 5))
+            XCTAssertEqual(progress.label, saving)
+            XCTAssertFalse(retry.exists)
+            XCTAssertFalse(app.staticTexts["pairing-error"].exists)
+            XCTAssertFalse(success.exists)
+            XCTAssertFalse(app.staticTexts[language == "en" ? "Confirm the matching fingerprint on your Mac." : "请在 Mac 上确认指纹一致。"].exists)
+            attach(app.screenshot(), named: "PairingSaving-\(language)-\(stage)")
+        }
+        assertSaving("First")
+        app.buttons["fixture-save-fail"].tap()
+        revealPairingElement(retry, in: app)
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "PairingSaving-\(language)-Failed")
+        retry.tap()
+        assertSaving("Retry")
+        app.buttons["fixture-save-finish"].tap()
+        revealPairingElement(success, in: app)
+        XCTAssertTrue(success.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts[saving].exists)
+        XCTAssertFalse(retry.exists)
+        attach(app.screenshot(), named: "PairingSaving-\(language)-Saved")
+    }
+
+    private func revealPairingElement(_ element: XCUIElement, in app: XCUIApplication) {
+        let top = app.navigationBars.firstMatch.frame.maxY + 8
+        let bottom = app.buttons["fixture-save-fail"].frame.minY - 12
+        for _ in 0..<6 {
+            if !element.exists { app.swipeUp(); continue }
+            if element.frame.height > 0, element.frame.minY >= top, element.frame.maxY <= bottom { break }
+            if element.frame.minY < top { app.swipeDown() } else { app.swipeUp() }
+        }
+        XCTAssertGreaterThan(element.frame.height, 0)
+        XCTAssertGreaterThanOrEqual(element.frame.minY, top)
+        XCTAssertLessThanOrEqual(element.frame.maxY, bottom)
+    }
+
     func testEnglishPresencePresentation() { runAccessibleDetails(languages: ["en"]) }
     func testChinesePresencePresentation() { runAccessibleDetails(languages: ["zh-Hans"]) }
     func testEnglishPresenceMatrix() { runPresence(language: "en", locale: "en_US") }

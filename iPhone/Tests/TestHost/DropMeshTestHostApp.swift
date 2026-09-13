@@ -1,5 +1,6 @@
 import SwiftUI
 import MacChannelCore
+import DropMeshMobileRuntime
 
 @main
 struct DropMeshTestHostApp: App {
@@ -8,7 +9,9 @@ struct DropMeshTestHostApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if ProcessInfo.processInfo.arguments.contains("-share-evidence") {
+            if ProcessInfo.processInfo.arguments.contains("-pairing-saving-evidence") {
+                PairingSavingEvidenceHost()
+            } else if ProcessInfo.processInfo.arguments.contains("-share-evidence") {
                 MobileShareEvidenceHost(extensionOnly: false)
             } else if ProcessInfo.processInfo.arguments.contains("-share-extension-evidence") {
                 MobileShareEvidenceHost(extensionOnly: true)
@@ -20,6 +23,74 @@ struct DropMeshTestHostApp: App {
                 .onChange(of: scenePhase) { _, phase in model.scenePhaseChanged(phase) }
             }
         }
+    }
+}
+
+/// Inert controls release synthetic persistence; the content is the shipping pairing view.
+private struct PairingSavingEvidenceHost: View {
+    @State private var attempt: SavingEvidenceAttempt
+    @State private var model: PairingModel
+
+    init() {
+        let attempt = SavingEvidenceAttempt()
+        _attempt = State(initialValue: attempt)
+        _model = State(initialValue: PairingModel(makeAttempt: { attempt }))
+    }
+
+    var body: some View {
+        PairingView(model: model, onDismiss: {})
+            .safeAreaInset(edge: .bottom) {
+                HStack {
+                    Text("Fixture controls")
+                    Button("Fail save") { attempt.release.yield(false) }
+                        .accessibilityIdentifier("fixture-save-fail")
+                    Button("Finish save") { attempt.release.yield(true) }
+                        .accessibilityIdentifier("fixture-save-finish")
+                }
+                .font(.caption)
+                .dynamicTypeSize(.medium)
+                .padding(8)
+                .background(.bar)
+            }
+            .task { model.code = "123456"; model.submit() }
+            .onDisappear {
+                attempt.release.finish()
+                Task { await model.cancelAndClose() }
+            }
+    }
+}
+
+private actor SavingEvidenceAttempt: PairingAttempt {
+    nonisolated let release: AsyncStream<Bool>.Continuation
+    private let outcomes: AsyncStream<Bool>
+    private let peer = DeviceSummary(
+        id: DeviceID(rawValue: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!),
+        displayName: "Fixture Mac", availability: .offline)
+    private var state: MobilePairingState = .active(.joining)
+
+    init() {
+        let stream = AsyncStream<Bool>.makeStream()
+        outcomes = stream.stream
+        release = stream.continuation
+    }
+    func join(code: String) async throws -> PairingJoinResult {
+        .init(sessionID: PairingSessionID(), peer: peer, fingerprint: "Fixture fingerprint",
+              hostEphemeralPublicKey: Data([1]), joiningEphemeralPublicKey: Data([2]))
+    }
+    func awaitApproval() async throws -> DeviceSummary { try await save() }
+    func retrySaving() async throws -> DeviceSummary { try await save() }
+    func currentState() async -> MobilePairingState { state }
+    func cancel() async throws { release.finish() }
+    func stop() async { release.finish() }
+    private func save() async throws -> DeviceSummary {
+        state = .saving(peer)
+        var iterator = outcomes.makeAsyncIterator()
+        guard await iterator.next() == true else {
+            state = .saveFailed(peer)
+            throw MobilePairingError.saveRequired
+        }
+        state = .paired(peer)
+        return peer
     }
 }
 
