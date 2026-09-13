@@ -128,4 +128,34 @@ func TestPersistenceReproExpiredHigherSequence(t *testing.T) {
 			t.Fatalf("overflow accepted: %v", err)
 		}
 	}
+	// Exercise an existing metadata-only issuer through public authentication
+	// and actual SQL cleanup; no pair deletion occurs in this cleanup call.
+	if _, err := db.Exec(`TRUNCATE trust_pair_states; UPDATE trust_issuer_states SET high_water = 10; UPDATE trust_state_version SET version = version + 1`); err != nil {
+		t.Fatal(err)
+	}
+	metadataOnly, err := NewPostgresTrustRegistryWithConfig(ctx, db, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadataOnly.AuthenticateDevice(established.Issuer, pub(issuer), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadataOnly.Cleanup(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, seq := range []uint64{5, 10} {
+		candidate := record(other, seq)
+		metadataOnly.mu.Lock()
+		_, memoryErr := metadataOnly.preparePendingLocked(candidate.Issuer, []SignedTrustRecord{candidate})
+		metadataOnly.mu.Unlock()
+		if !errors.Is(memoryErr, ErrInvalidTrust) {
+			t.Fatalf("metadata-only memory accepted%d: %v", seq, memoryErr)
+		}
+		if _, err := metadataOnly.PrepareConfirmBatch(candidate.Issuer, pub(issuer), []SignedTrustRecord{candidate}); !errors.Is(err, ErrInvalidTrust) {
+			t.Fatalf("metadata-only registry accepted%d: %v", seq, err)
+		}
+	}
+	if len(metadataOnly.publicKeys) != 0 || len(metadataOnly.directional) != 0 {
+		t.Fatal("metadata-only issuer fabricated trust")
+	}
 }

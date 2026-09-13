@@ -135,6 +135,45 @@ func TestTrustSnapshotMetadataOnlyAndFailure(t *testing.T) {
 		t.Fatal("startup ignored metadata failure")
 	}
 }
+
+func TestTrustSnapshotMetadataOnlySurvivesAuthenticationAndCleanup(t *testing.T) {
+	for _, operation := range []string{"authentication", "cleanup", "refresh"} {
+		t.Run(operation, func(t *testing.T) {
+			s, record := snapshotFixture(t)
+			s.records = nil
+			r, err := NewPersistentTrustRegistry(context.Background(), s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := record(1)
+			switch operation {
+			case "authentication":
+				err = r.AuthenticateDevice(identity.Issuer, identity.IssuerPublicKey, nil)
+			case "cleanup":
+				err = r.Cleanup(context.Background(), time.Now().Add(time.Hour))
+			case "refresh":
+				s.version++
+				_, err = r.RefreshPersistent()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, seq := range []uint64{5, 10} {
+				candidate := record(seq)
+				if _, err := r.PrepareConfirmBatch(candidate.Issuer, candidate.IssuerPublicKey, []SignedTrustRecord{candidate}); !errors.Is(err, ErrInvalidTrust) {
+					t.Fatalf("metadata-only replay sequence%d accepted after %s: %v", seq, operation, err)
+				}
+			}
+			if len(r.publicKeys) != 0 || len(r.directional) != 0 || len(r.adjacency) != 0 {
+				t.Fatal("metadata fabricated authorization")
+			}
+			candidate := record(11)
+			if _, err := r.PrepareConfirmBatch(candidate.Issuer, candidate.IssuerPublicKey, []SignedTrustRecord{candidate}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 func TestTrustSnapshotVersionBracketsMetadata(t *testing.T) {
 	s, record := snapshotFixture(t)
 	calls := 0
@@ -157,6 +196,63 @@ func TestTrustSnapshotVersionBracketsMetadata(t *testing.T) {
 	s.onMetadata = func() { s.mu.Lock(); s.version++; s.mu.Unlock() }
 	if _, err := NewPersistentTrustRegistry(context.Background(), s); err == nil {
 		t.Fatal("unbounded changing snapshot accepted")
+	}
+}
+
+func TestTrustSnapshotRetiresOnlyAuthoritativelyRemovedMetadata(t *testing.T) {
+	s, record := snapshotFixture(t)
+	s.records = nil
+	r, err := NewPersistentTrustRegistry(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := record(1).Issuer
+	if err := r.Cleanup(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !r.durableIssuers[issuer] {
+		t.Fatal("memory cleanup retired existing durable issuer")
+	}
+	// Model the existing SQL orphan cleanup policy: a committed new snapshot
+	// no longer contains either pair records or this issuer metadata.
+	s.water = nil
+	s.version++
+	if changed, err := r.RefreshPersistent(); err != nil || !changed {
+		t.Fatalf("refresh: %v %v", changed, err)
+	}
+	if len(r.durableIssuers) != 0 {
+		t.Fatal("retired durable issuer marker retained")
+	}
+	if err := r.Cleanup(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.issuerSequence) != 0 {
+		t.Fatal("authoritatively retired orphan retained forever")
+	}
+}
+
+func TestTrustSnapshotLocalDurableConfirmationSurvivesMemoryExpiry(t *testing.T) {
+	s, record := snapshotFixture(t)
+	s.records = nil
+	s.water = make(map[string]uint64)
+	r, err := NewPersistentTrustRegistry(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := record(11)
+	if _, err := r.PrepareConfirmBatch(candidate.Issuer, candidate.IssuerPublicKey, []SignedTrustRecord{candidate}); err != nil {
+		t.Fatal(err)
+	}
+	// No refresh intervenes: the successful durable confirmation itself must
+	// protect its highwater while local pending pair state expires.
+	if err := r.Cleanup(context.Background(), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if r.issuerSequence[candidate.Issuer] != 11 || !r.durableIssuers[candidate.Issuer] {
+		t.Fatal("local durable confirmation lost replay barrier")
+	}
+	if len(r.publicKeys) != 0 || len(r.directional) != 0 {
+		t.Fatal("expired pending pair retained authorization state")
 	}
 }
 func TestTrustSnapshotStaleRefreshCannotUndoConfirmation(t *testing.T) {

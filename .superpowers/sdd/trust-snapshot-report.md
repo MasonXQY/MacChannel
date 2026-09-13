@@ -105,3 +105,67 @@ integration suites requiring their own environment were not enabled; the require
 real auth reproducer ran without a skip. Coordinator owns HANDOFF/progress and
 independent review/integration. Client-state and installed interoperability tasks
 remain separate approved program work.
+
+## Independent review repair: metadata-only purge
+
+Review found that `purgeUnconfirmedLocked` deleted an issuer's restored highwater
+when no directional pair survived. The original metadata-only map assertion did
+not exercise authentication or cleanup and missed this behavior.
+
+New RED command (exit1):
+
+```sh
+go test ./internal/auth -run TestTrustSnapshotMetadataOnlySurvives -count=1
+```
+
+All three subtests failed: `metadata-only replay sequence5 accepted after
+authentication: <nil>`, likewise after `cleanup` and `refresh`.
+
+Repair adds durable issuer provenance. Loaded metadata and successful persisted
+confirmations protect their issuer barrier through memory-only pair expiry.
+Accepted consistent snapshots replace that provenance, rather than accumulating
+markers forever. This preserves existing SQL orphan cleanup policy: an issuer
+still present in durable metadata is protected; an issuer legitimately removed
+from a newer durable snapshot loses the marker and normal local orphan cleanup
+can retire its barrier. Record-only/memory-only store behavior remains unchanged.
+No pins or authorization are created from provenance.
+
+Added behavior coverage rejects signed5/10 after authentication, cleanup and
+refresh with metadata10/no pair rows, accepts11, checks no fabricated trust,
+checks authoritative metadata removal retires markers, and checks a newly
+persisted local11 remains protected when its pending in-memory pair expires
+before refresh. The real PostgreSQL reproducer also creates metadata-only state
+and checks both memory rejection and public confirmation after actual SQL cleanup.
+
+Same isolated pg_ctl start command above succeeded. Final focused GREEN command:
+
+```sh
+DROPMESH_AUTH_REPRO_DATABASE_URL='postgres://mason@127.0.0.1:55439/dropmesh_auth_repro?sslmode=disable' go test ./internal/auth -run 'Test.*TrustSnapshot|TestPersistenceReproExpiredHigherSequence' -count=1
+```
+
+Exit0: `ok macchannel/rendezvous/internal/auth 1.005s`.
+
+Final full GREEN command:
+
+```sh
+DROPMESH_AUTH_REPRO_DATABASE_URL='postgres://mason@127.0.0.1:55439/dropmesh_auth_repro?sslmode=disable' go test ./... -race -count=1
+```
+
+Exit0:
+
+```text
+?   macchannel/rendezvous/cmd/runner-lock [no test files]
+ok  macchannel/rendezvous/cmd/secret-launcher 1.260s
+ok  macchannel/rendezvous/cmd/server 1.281s
+ok  macchannel/rendezvous/cmd/stack-secrets 33.245s
+ok  macchannel/rendezvous/cmd/turn-probe 1.513s
+ok  macchannel/rendezvous/internal/auth 2.113s
+ok  macchannel/rendezvous/internal/httpapi 3.169s
+ok  macchannel/rendezvous/internal/pairing 2.803s
+ok  macchannel/rendezvous/internal/presence 2.289s
+ok  macchannel/rendezvous/internal/signal 2.564s
+ok  macchannel/rendezvous/internal/turn 10.193s
+```
+
+`git diff --check` passed. Same pg_ctl stop command exit0 (`server stopped`),
+status exit3 (`no server running`). No production or device access.

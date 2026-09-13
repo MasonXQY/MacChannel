@@ -47,6 +47,7 @@ func (r *TrustRegistry) restoreTrustSnapshot(records []PersistedTrustRecord, hig
 	r.applyPendingLocked(pending)
 	for issuer, sequence := range highWater {
 		issuer = strings.ToLower(issuer)
+		r.durableIssuers[issuer] = true
 		if sequence > r.issuerSequence[issuer] {
 			r.issuerSequence[issuer] = sequence
 		}

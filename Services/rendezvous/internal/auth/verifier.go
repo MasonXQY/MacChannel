@@ -681,6 +681,7 @@ type TrustRegistry struct {
 	directional        map[directedTrustEdge]directionalTrustState
 	adjacency          map[string]map[string]bool
 	issuerSequence     map[string]uint64
+	durableIssuers     map[string]bool
 	records            map[[32]byte]directedTrustEdge
 	maxRecords         int
 	recordStore        TrustRecordStore
@@ -727,6 +728,7 @@ func NewTrustRegistryWithConfig(config TrustRegistryConfig) *TrustRegistry {
 		directional:        make(map[directedTrustEdge]directionalTrustState),
 		adjacency:          make(map[string]map[string]bool),
 		issuerSequence:     make(map[string]uint64),
+		durableIssuers:     make(map[string]bool),
 		records:            make(map[[32]byte]directedTrustEdge),
 		maxRecords:         config.GlobalPairs,
 		clock:              config.Clock,
@@ -851,6 +853,11 @@ func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, r
 	}
 
 	r.applyPendingLocked(pending)
+	if _, ok := r.recordStore.(issuerHighWaterStore); ok {
+		for _, item := range pending {
+			r.durableIssuers[strings.ToLower(item.record.Issuer)] = true
+		}
+	}
 	r.mutationGeneration++
 	results := make([]BatchRecordResult, len(records))
 	seen := make(map[[32]byte]bool, len(records))
@@ -1000,7 +1007,11 @@ func (r *TrustRegistry) purgeUnconfirmedLocked(now time.Time) {
 	}
 	for issuer := range r.issuerSequence {
 		if r.issuerSubjectCountLocked(issuer) == 0 {
-			delete(r.issuerSequence, issuer)
+			// Only a subsequent consistent durable snapshot may retire a persisted
+			// barrier. Expiring local pair rows does not prove durable retirement.
+			if !r.durableIssuers[issuer] {
+				delete(r.issuerSequence, issuer)
+			}
 			delete(r.issuerUpdateEvents, issuer)
 		}
 	}
@@ -1412,6 +1423,7 @@ func (r *TrustRegistry) refreshPersistent() error {
 	r.directional = fresh.directional
 	r.adjacency = fresh.adjacency
 	r.issuerSequence = fresh.issuerSequence
+	r.durableIssuers = fresh.durableIssuers
 	r.records = fresh.records
 	r.nextTrustOrder = fresh.nextTrustOrder
 	r.storeVersion = version
