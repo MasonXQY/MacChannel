@@ -769,6 +769,57 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertEqual(try encoder.encode(retriedProofs), try encoder.encode(proofs))
     }
 
+    @MainActor
+    func testMacContainerReplacementJoinsHostPairingPersistenceBeforeLoadingStorage() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settingsURL = root.appendingPathComponent("settings.json")
+        let owner = try DeviceIdentity.ephemeral()
+        let remote = try DeviceIdentity.ephemeral()
+        let peer = DeviceSummary(id: remote.id, displayName: "Phone", availability: .internet)
+        let repository = try TrustRepository(ownerIdentity: owner, trustStore: TrustStore(owner: owner.id), persistedGeneration: 0)
+        let settings = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [])
+        let persister = BlockingPairingTrustPersister()
+        let service = PersistingPairingSurfaceService(
+            coordinator: MutatingProductionPairingCoordinator(repository: repository, peerIdentity: remote, peer: peer),
+            settings: settings, trustStore: persister, trustRepository: repository)
+        var staleCallbacks = 0
+        service.onReceiveConfigurationChanged = { staleCallbacks += 1 }
+        let base = AppContainer.localShell()
+        let shell = MacChannelApplicationDelegate(initialContainer: base, initialStatus: .ready, runtimeHost: nil,
+            receiveNotificationController: ReceiveNotificationController(
+                center: ApplicationShellNotificationCenter(),
+                revealer: ApplicationShellReceiveTargetRevealer(revealResult: false)),
+            statusItemControllerFactory: makeApplicationShellStatusController)
+        _ = await shell.replace(AppContainer(deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator, pairingSurfaceService: service,
+            durablePairingStates: service.durableStates), status: .ready)
+        let approval = Task { try await service.approve() }
+        await persister.waitUntilSaving()
+        var replacementLoadedStorage = false
+        let replacement = Task { @MainActor in
+            _ = await shell.replace(.loadingShell(), status: .loading)
+            let reloaded = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [peer.id])
+            replacementLoadedStorage = true
+            return await reloaded.current()
+        }
+        var retirementEntered = false
+        for _ in 0..<1000 {
+            do { _ = try await service.createCode(); XCTFail("Retirement cannot admit new work") }
+            catch PairingError.staleOperation { retirementEntered = true; break }
+            catch PairingError.operationInProgress { await Task.yield() }
+        }
+        XCTAssertTrue(retirementEntered)
+        XCTAssertFalse(replacementLoadedStorage)
+        await persister.release()
+        _ = try await approval.value
+        let reloaded = try await replacement.value
+        XCTAssertEqual(reloaded.devices.first?.id, peer.id)
+        XCTAssertEqual(staleCallbacks, 0)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
+    }
+
     func testSuccessfulReceivePublishesAfterHistoryRecording() async {
         let history = BlockingReceiveHistoryRecorder()
         let receiveEvents = RuntimeReceiveEventSource()
@@ -2458,6 +2509,17 @@ private actor FailingTrustSnapshotPersister: TrustSnapshotPersisting {
 
 private actor RecordingTrustSnapshotPersister: TrustSnapshotPersisting {
     func persistLatest(from repository: TrustRepository) async throws {}
+}
+
+private actor BlockingPairingTrustPersister: TrustSnapshotPersisting {
+    private var saving = false
+    private var released = false
+    func persistLatest(from repository: TrustRepository) async throws {
+        saving = true
+        while !released { await Task.yield() }
+    }
+    func waitUntilSaving() async { while !saving { await Task.yield() } }
+    func release() { released = true }
 }
 
 private actor BlockingReceiveHistoryRecorder {

@@ -168,6 +168,66 @@ final class DurablePairingSessionTests: XCTestCase {
         do { _ = try await gate.createCode(); XCTFail("Retired gate must not be reused") }
         catch PairingError.staleOperation { }
     }
+
+    func testRetirementDrainsSuspendedHostPersistenceBeforeReplacement() async throws {
+        try await assertRetirementDrainsPersistence(retrying: false)
+    }
+
+    func testRetirementDrainsSuspendedRetryPersistenceBeforeReplacement() async throws {
+        try await assertRetirementDrainsPersistence(retrying: true)
+    }
+
+    func testRetirementPreservesAlreadyStartedSaveFailure() async throws {
+        try await assertRetirementDrainsPersistence(retrying: false, finalSaveFails: true)
+    }
+
+    private func assertRetirementDrainsPersistence(retrying: Bool, finalSaveFails: Bool = false) async throws {
+        let core = try DurableCoordinatorProbe()
+        let disk = DurableDiskProbe()
+        let gate = DurablePairingSession(coordinator: core) { _ in try await disk.save() }
+        let recorder = DurableStateRecorder()
+        let consumer = Task { for await state in gate.states { await recorder.record(state) } }
+        let operation: Task<DeviceSummary, Error>
+        if retrying {
+            await disk.release(failing: true)
+            let approval = Task { try await gate.approve() }
+            await core.waitForApproval()
+            await core.confirm()
+            do { _ = try await approval.value; XCTFail("Expected initial save failure") }
+            catch DurableDiskProbe.Failure.disk { }
+            await disk.block()
+            operation = Task { try await gate.retrySaving() }
+        } else {
+            operation = Task { try await gate.approve() }
+            await core.waitForApproval()
+            await core.confirm()
+        }
+        await disk.waitForSave(count: retrying ? 2 : 1)
+        let replaced = ObservationStopProbe()
+        let retirement = Task {
+            await gate.stopObservation()
+            // A replacement storage owner may only be built after this boundary.
+            await replaced.finish()
+        }
+        var retirementEntered = false
+        for _ in 0..<1000 {
+            do { _ = try await gate.createCode(); XCTFail("No new operation during retirement") }
+            catch PairingError.staleOperation { retirementEntered = true; break }
+            catch PairingError.operationInProgress { await Task.yield() }
+        }
+        XCTAssertTrue(retirementEntered)
+        assertValue(await replaced.finished, false)
+        await disk.release(failing: finalSaveFails)
+        if finalSaveFails {
+            do { _ = try await operation.value; XCTFail("The failed save must remain a failure") }
+            catch DurableDiskProbe.Failure.disk { }
+        } else { _ = try await operation.value }
+        await retirement.value
+        await consumer.value
+        assertValue(await replaced.finished, true)
+        assertValue(await gate.currentState(), finalSaveFails ? .saveFailed(core.peer) : .paired(core.peer))
+        assertValue(await recorder.last, .saving(core.peer))
+    }
 }
 
 private extension XCTestCase {
@@ -242,5 +302,6 @@ private actor DurableDiskProbe {
     private var failing = false
     func save() async throws { calls += 1; while !ready { await Task.yield() }; if failing { throw Failure.disk } }
     func release(failing: Bool = false) { self.failing = failing; ready = true }
-    func waitForSave() async { while calls == 0 { await Task.yield() } }
+    func block() { ready = false; failing = false }
+    func waitForSave(count: Int = 1) async { while calls < count { await Task.yield() } }
 }

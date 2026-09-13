@@ -37,6 +37,7 @@ public actor DurablePairingSession {
     private let persistTrust: @Sendable (DeviceSummary) async throws -> Void
     private let confirmationTimeout: Duration
     private var busy = false
+    private var operationDrainWaiters: [CheckedContinuation<Void, Never>] = []
     private var unsettled = false
     private var savedPeer: DeviceSummary?
     private var savingPeer: DeviceSummary?
@@ -72,7 +73,8 @@ public actor DurablePairingSession {
     }
 
     /// Terminal runtime retirement. Closing a pairing sheet calls `cancel`, not
-    /// this method. A replacement runtime must construct a fresh gate/stream.
+    /// this method. Joins every admitted operation, including suspended saves,
+    /// before a replacement runtime may load storage and create a fresh gate.
     public func stopObservation() async {
         retired = true
         observationGeneration += 1
@@ -80,6 +82,9 @@ public actor DurablePairingSession {
         task?.cancel()
         await task?.value
         observation = nil
+        if busy {
+            await withCheckedContinuation { operationDrainWaiters.append($0) }
+        }
         continuation.finish()
     }
 
@@ -102,7 +107,7 @@ public actor DurablePairingSession {
 
     public func createCode() async throws -> String {
         try await begin(newPair: true)
-        defer { busy = false }
+        defer { endOperation() }
         savedPeer = nil
         let code = try await coordinator.createCode()
         publish(await currentState())
@@ -111,7 +116,7 @@ public actor DurablePairingSession {
 
     public func join(code: String) async throws -> PairingJoinResult {
         try await begin(newPair: true)
-        defer { busy = false }
+        defer { endOperation() }
         savedPeer = nil
         let result = try await coordinator.join(code: code)
         publish(await currentState())
@@ -123,8 +128,9 @@ public actor DurablePairingSession {
 
     private func complete(host: Bool) async throws -> DeviceSummary {
         try await begin(newPair: true)
-        defer { busy = false }
+        defer { endOperation() }
         guard let peer = await coordinator.pendingPeerSummary() else { throw PairingError.noPendingConfirmation }
+        guard !retired else { throw PairingError.staleOperation }
         unsettled = true
         do {
             if host { _ = try await coordinator.approvePendingPairing() }
@@ -132,6 +138,7 @@ public actor DurablePairingSession {
             let deadline = ContinuousClock.now.advanced(by: confirmationTimeout)
             while true {
                 try Task.checkCancellation()
+                guard !retired else { throw PairingError.staleOperation }
                 let state = await coordinator.currentState()
                 if case let .confirmed(confirmed) = state, confirmed.id == peer.id {
                     return try await save(confirmed)
@@ -149,7 +156,7 @@ public actor DurablePairingSession {
 
     public func reject() async throws {
         try await begin(newPair: false)
-        defer { busy = false }
+        defer { endOperation() }
         try await coordinator.rejectPendingPairing()
         try await reconcileCancellation()
     }
@@ -157,7 +164,7 @@ public actor DurablePairingSession {
     /// Cancel and await any active caller before invoking this operation.
     public func cancel() async throws {
         try await begin(newPair: false)
-        defer { busy = false }
+        defer { endOperation() }
         try await coordinator.cancelPendingPairing()
         try await reconcileCancellation()
     }
@@ -176,7 +183,7 @@ public actor DurablePairingSession {
         guard !retired else { throw PairingError.staleOperation }
         guard !busy else { throw PairingError.operationInProgress }
         busy = true
-        defer { busy = false }
+        defer { endOperation() }
         guard case let .confirmed(peer) = await coordinator.currentState(), savedPeer?.id != peer.id else {
             throw DurablePairingError.noPendingSave
         }
@@ -188,19 +195,31 @@ public actor DurablePairingSession {
         guard !busy else { throw PairingError.operationInProgress }
         busy = true
         let state = await currentState()
+        guard !retired else {
+            endOperation()
+            throw PairingError.staleOperation
+        }
         if case .saveFailed = state {
-            busy = false
+            endOperation()
             publish(state)
             throw DurablePairingError.saveRequired
         }
         if newPair && unsettled {
-            busy = false
+            endOperation()
             throw PairingError.operationInProgress
         }
     }
 
+    private func endOperation() {
+        busy = false
+        let waiters = operationDrainWaiters
+        operationDrainWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     private func save(_ peer: DeviceSummary) async throws -> DeviceSummary {
         try await validateConfirmation(peer)
+        guard !retired else { throw PairingError.staleOperation }
         savingPeer = peer
         publish(.saving(peer))
         do {

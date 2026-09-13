@@ -928,6 +928,7 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     let codeLifetime: TimeInterval = 300
     var onReceiveConfigurationChanged: (() async -> Void)?
     private let session: DurablePairingSession
+    private var retired = false
     var durableStates: AsyncStream<DurablePairingState> { session.states }
     var usesDurableStates: Bool { true }
 
@@ -950,23 +951,26 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     }
     func approve() async throws -> SurfaceActionResult {
         _ = try await session.approve()
-        await onReceiveConfigurationChanged?()
+        if !retired { await onReceiveConfigurationChanged?() }
         return .committed
     }
     func reject() async throws { try await session.reject() }
     func awaitHostApproval() async throws -> SurfaceActionResult {
         _ = try await session.awaitApproval()
-        await onReceiveConfigurationChanged?()
+        if !retired { await onReceiveConfigurationChanged?() }
         return .committed
     }
     func cancel() async throws { try await session.cancel() }
     func pendingPeer() async -> DeviceSummary? { await session.pendingPeerSummary() }
     func currentDurableState() async -> DurablePairingState? { await session.currentState() }
     func startObservation() async { await session.startObservation() }
-    func stopObservation() async { await session.stopObservation() }
+    func stopObservation() async {
+        retired = true
+        await session.stopObservation()
+    }
     func retrySaving() async throws {
         _ = try await session.retrySaving()
-        await onReceiveConfigurationChanged?()
+        if !retired { await onReceiveConfigurationChanged?() }
     }
 }
 
