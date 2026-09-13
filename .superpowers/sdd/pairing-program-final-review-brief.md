@@ -32,7 +32,9 @@ The first real shared-owner live gate at `a03ef7c` exposed valid peer→owner re
 
 Root evidence: `docs/acceptance/pairing-reconnect-local-evidence-2026-09-13.md`; program cursor is the final section of `.superpowers/sdd/progress.md`. Earlier unrelated iPhone iteration sections are not this review's scope.
 
-Recorded remaining qualifications: existing Xcode AppIntents metadata-extraction warning; original live HTTP transport fixture warnings about shared-session invalidation unless separately corrected. Presence visual evidence has a root-inspected report `docs/acceptance/presence-presentation-visual-review-2026-09-13.md`; largest text needs native scrolling. The live test initializes verified static directory trust to avoid introducing a test observer that lacks an explicit stop/join API; this test does not establish dynamic DeviceDirectory trust-observer teardown.
+Recorded remaining qualifications: existing Xcode AppIntents metadata-extraction warning; the original live HTTP transport fixture shared-session invalidation warnings were corrected with independently owned ephemeral sessions. Presence visual evidence has a root-inspected report `docs/acceptance/presence-presentation-visual-review-2026-09-13.md`; largest text needs native scrolling. The live test initializes verified static directory trust to avoid introducing a test observer that lacks an explicit stop/join API; this test does not establish dynamic DeviceDirectory trust-observer teardown.
+
+Final corrective source/test revision0aa5c2b: full1081tests/6conditional-skips/0fail, real live gate passed, both Mac products and shipping iPhone/Share compile passed. Controller verified logs and final report772a72b. Combined task reviewer Approved/no actionable findings; report completion qualification resolved. Final candidate metadata increments iPhone main and Share build4 to5 together; bundle identities and marketing version unchanged. Signed artifacts must validate these metadata values independently.
 
 Inspect cross-task interactions, particularly:
 - coherent server snapshot/high-water/version recovery and concurrent mutation;

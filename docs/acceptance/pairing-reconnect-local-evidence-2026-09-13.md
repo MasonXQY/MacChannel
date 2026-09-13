@@ -1,6 +1,12 @@
 # Pairing/reconnect local evidence
 
-Partial implementation evidence, not installed or production acceptance.
+Local implementation evidence, not installed or production acceptance.
+
+## Final corrective integration gate
+
+Production4d093b8, finaltest0aa5c2b, report772a72b. Full Swift1081tests/6conditional-skips/0fail50.332s (.build/peer-revocation-full-swift-green.log2383–2385). Separate real Go wrapper PASS8.890s, actual Swift1/0fail3.633s (.build/peer-revocation-live-green.log). Both Mac products debug builds passed1.07s/0.19s; shipping iPhone+Share unsigned BUILD SUCCEEDED, existing AppIntents warning only. Root read each actual log. Combined independent review Approved; report .superpowers/sdd/peer-withdrawal-review.md. Initial failed live and obsolete mobile test expectation are retained in implementer report; no test was disabled to obtain GREEN.
+
+Root targeted devicectl query23:38 confirmed original phone bundle com.zensystech.dropmesh.iphone.dev0.1.0(4) still installed; no device writes. Candidate main and Share plist build5 retain marketingversion0.1.0 and identities. Wholeprogramreview, signed artifacts and installed/production validation remain pending.
 
 ## Server connection handover repeated gate
 

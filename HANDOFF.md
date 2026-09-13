@@ -56,6 +56,14 @@ Corrective peer_revocation_catchup activebase39f90ef per new2026-09-13-peer-revo
 plan; scope verifiedpeerrelationshipwithdrawal withoutlocalidentityrevocation,
 unrelatedtrustchanges or bypass. See shared-owner-live-interop-report.md. Combined
 independentreview plus wholeprogramreview remainbefore anyinstall/deployment.
+Update: corrective production4d093b8/test0aa5c2b/report772a72b complete. Exact
+retained withdrawal is saved separately from wire eligibility; owner identity and
+unrelated peers survive. Real liveGo gate nowPASS8.890s,Swift1/0fail3.633s,
+bothdirections forbidden and no reconnect. Full1081/6conditional-skips/0fail50.332s;
+bothMacproducts and shippingiPhone/Sharecompilepass. Combinedindependentreview
+Approved, peer-withdrawal-review.md; final report qualification resolved.
+Wholeprogramreview next, then signed/install/deploy/physicalgates. Phone main+Share
+candidate build number increments together4→5, same identities/version; no install yet.
 Read-only inventory rechecked21:27: local running Store PID85546 still
 DropMesh-review-1b4a641.app, actual1.3.0(4), source4c69c524c80226e872ea363733a4c83d0c4bb00f,
 com.zensystech.dropmesh. Physical595721D3-DBB4-5D8B-8A93-51AF0D218183 available/paired;
