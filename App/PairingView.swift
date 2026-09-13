@@ -27,9 +27,19 @@ protocol PairingSurfaceServicing: AnyObject {
     func awaitHostApproval() async throws -> SurfaceActionResult
     func cancel() async throws
     func pendingPeer() async -> DeviceSummary?
+    var usesDurableStates: Bool { get }
+    func currentDurableState() async -> DurablePairingState?
+    func retrySaving() async throws
+    func startObservation() async
+    func stopObservation() async
 }
 
 extension PairingSurfaceServicing {
+    var usesDurableStates: Bool { false }
+    func currentDurableState() async -> DurablePairingState? { nil }
+    func retrySaving() async throws { throw PairingSurfaceError.unavailable }
+    func startObservation() async {}
+    func stopObservation() async {}
     var codeLifetime: TimeInterval { 300 }
     func pendingPeer() async -> DeviceSummary? { nil }
     func approve() async throws -> SurfaceActionResult { throw PairingSurfaceError.unavailable }
@@ -42,6 +52,7 @@ extension PairingSurfaceServicing {
 @MainActor
 final class PairingSurfaceModel: ObservableObject {
     @Published var state: PairingState
+    @Published private(set) var durableState: DurablePairingState?
     @Published var hostedCode: String?
     @Published var entryCode: String
     @Published var pendingPeer: DeviceSummary?
@@ -53,6 +64,8 @@ final class PairingSurfaceModel: ObservableObject {
     @Published var hostedCodeLifetimeMinutes: Int = 5
     private let announcer: any AccessibilityAnnouncing
     private var approvalTask: Task<Void, Never>?
+    private var invalidatedSuccessPeers: Set<DeviceID> = []
+    private var retired = false
 
     init(
         state: PairingState = .idle,
@@ -76,6 +89,7 @@ final class PairingSurfaceModel: ObservableObject {
         actionError = nil
         do {
             let code = try await service.createCode()
+            guard !retired else { return }
             hostedCode = PairingCodeInput.sanitize(code)
             hostedCodeLifetimeMinutes = max(1, Int(service.codeLifetime / 60))
             state = .displayingCode(expiresAt: Date().addingTimeInterval(service.codeLifetime))
@@ -90,19 +104,24 @@ final class PairingSurfaceModel: ObservableObject {
         actionError = nil
         do {
             let result = try await service.join(code: code)
+            guard !retired else { return }
             pendingPeer = result.peer
             state = .awaitingHostApproval(result.peer)
             approvalTask?.cancel()
             approvalTask = Task { [weak self, service] in
                 do {
                     let outcome = try await service.awaitHostApproval()
-                    guard !Task.isCancelled else { return }
-                    self?.state = .confirmed(result.peer)
+                    guard !Task.isCancelled, self?.retired == false else { return }
+                    if service.usesDurableStates {
+                        if let state = await service.currentDurableState() { self?.updateDurableState(state) }
+                    } else { self?.state = .confirmed(result.peer) }
                     self?.publishWarning(outcome.warningContent)
                 } catch is CancellationError {
                     return
                 } catch {
                     guard !Task.isCancelled else { return }
+                    if let state = await service.currentDurableState() { self?.updateDurableState(state) }
+                    if case .saveFailed = self?.durableState { return }
                     self?.publishError(.pairingCompleteFailed)
                 }
             }
@@ -117,9 +136,12 @@ final class PairingSurfaceModel: ObservableObject {
         if let peer { state = .committing(peer) }
         do {
             let result = try await service.approve()
+            if let state = await service.currentDurableState() { updateDurableState(state) }
             publishWarning(result.warningContent)
         } catch {
-            if let peer { state = .approvalRequested(peer) }
+            if let state = await service.currentDurableState() { updateDurableState(state) }
+            if case .saveFailed = durableState { return }
+            if !service.usesDurableStates, let peer { state = .approvalRequested(peer) }
             publishError(.pairingAllowFailed)
         }
     }
@@ -127,6 +149,7 @@ final class PairingSurfaceModel: ObservableObject {
     func reject(using service: any PairingSurfaceServicing) async {
         actionError = nil
         approvalTask?.cancel()
+        await approvalTask?.value
         approvalTask = nil
         do {
             try await service.reject()
@@ -140,33 +163,87 @@ final class PairingSurfaceModel: ObservableObject {
     func cancel(using service: any PairingSurfaceServicing) async -> Bool {
         actionError = nil
         approvalTask?.cancel()
+        await approvalTask?.value
         approvalTask = nil
         do {
             try await service.cancel()
             resetToIdle()
             return true
         } catch {
+            if let state = await service.currentDurableState() { updateDurableState(state) }
+            if case .saveFailed = durableState { return false }
             publishError(.pairingCancelFailed)
             return false
         }
     }
 
     func resetToIdle() {
+        if case let .confirmed(peer) = state { invalidatedSuccessPeers.insert(peer.id) }
         approvalTask?.cancel()
         approvalTask = nil
         state = .idle
+        durableState = nil
         hostedCode = nil
         entryCode = ""
         pendingPeer = nil
         actionError = nil
     }
 
+    func updateDurableState(_ next: DurablePairingState) {
+        guard !retired else { return }
+        if case let .paired(peer) = next, invalidatedSuccessPeers.contains(peer.id) { return }
+        if case let .active(.approvalRequested(peer)) = next { invalidatedSuccessPeers.remove(peer.id) }
+        if case let .active(.awaitingHostApproval(peer)) = next { invalidatedSuccessPeers.remove(peer.id) }
+        durableState = next
+        switch next {
+        case let .active(raw):
+            // A raw confirmation is never a durable success, including test adapters.
+            if case let .confirmed(peer) = raw {
+                durableState = .saveFailed(peer)
+                state = .committing(peer)
+                publishError(.pairingSaveFailed)
+            } else { state = raw }
+        case let .saving(peer):
+            state = .committing(peer)
+            actionError = nil
+        case let .saveFailed(peer):
+            state = .committing(peer)
+            publishError(.pairingSaveFailed)
+        case let .paired(peer):
+            state = .confirmed(peer)
+            actionError = nil
+        }
+    }
+
+    func invalidateSuccess(for id: DeviceID) {
+        invalidatedSuccessPeers.insert(id)
+        if case let .confirmed(peer) = state, peer.id == id { resetToIdle() }
+    }
+
+    func retire() async {
+        retired = true
+        let task = approvalTask
+        task?.cancel()
+        await task?.value
+        resetToIdle()
+    }
+
+    func retrySaving(using service: any PairingSurfaceServicing) async {
+        guard case let .saveFailed(peer) = durableState else { return }
+        updateDurableState(.saving(peer))
+        do { try await service.retrySaving() }
+        catch { updateDurableState(.saveFailed(peer)) }
+        if let state = await service.currentDurableState() { updateDurableState(state) }
+    }
+
     private func publishError(_ key: LocalizedKey) {
+        guard !retired else { return }
         actionErrorContent = .keys([key])
         announcer.announce(L10n.text(key))
     }
 
     private func publishWarning(_ warning: LocalizedContent?) {
+        guard !retired else { return }
         guard let warning else { return }
         actionErrorContent = warning
         announcer.announce(warning.text)
@@ -222,6 +299,19 @@ struct PairingView: View {
                 description: Text(L10n.text(.pairingUnavailableHelp))
             )
             .frame(minHeight: 180)
+        } else if case .saving = model.durableState {
+            ProgressView(L10n.text(.pairingSaving))
+                .frame(maxWidth: .infinity, minHeight: 80)
+        } else if case .saveFailed = model.durableState {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(L10n.text(.pairingSaveRecoveryHelp))
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(L10n.text(.pairingRetrySaving)) {
+                    Task { await model.retrySaving(using: service) }
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(minHeight: 40)
+            }
         } else {
             switch model.state {
             case .idle:

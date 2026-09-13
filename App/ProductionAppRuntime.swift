@@ -451,7 +451,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             pairingSurfaceService: pairingService,
             settingsSurfaceService: settingsService,
             transferSnapshots: { await transferCoordinator.snapshots() },
-            pairingStates: pairingCoordinator.states,
+            durablePairingStates: pairingService.durableStates,
             initialSettingsSnapshot: settingsSnapshot,
             settingsSnapshots: { await settingsStore.snapshots() },
             transferHistory: { await history.stream() },
@@ -491,6 +491,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     func shutdown() async {
         guard !stopped else { return }
         stopped = true
+        await container.pairingSurfaceService.stopObservation()
         await receiveEvents.finish()
         await historySource.stop()
         publicServiceTrustTask?.cancel()
@@ -919,27 +920,16 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
     }
 }
 
-protocol ProductionPairingCoordinating: Sendable {
-    func createCode() async throws -> String
-    func join(code: String) async throws -> PairingJoinResult
-    func approvePendingPairing() async throws -> SignedTrustRecord
-    func rejectPendingPairing() async throws
-    func awaitHostApproval() async throws -> SignedTrustRecord
-    func cancelPendingPairing() async throws
-    func pendingPeerSummary() async -> DeviceSummary?
-}
-
-extension PairingCoordinator: ProductionPairingCoordinating {}
+typealias ProductionPairingCoordinating = DurablePairingCoordinating
 
 @MainActor
 final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     let isAvailable = true
     let codeLifetime: TimeInterval = 300
     var onReceiveConfigurationChanged: (() async -> Void)?
-    private let coordinator: any ProductionPairingCoordinating
-    private let settings: RuntimeSettingsStore
-    private let trustStore: any TrustSnapshotPersisting
-    private let trustRepository: TrustRepository
+    private let session: DurablePairingSession
+    var durableStates: AsyncStream<DurablePairingState> { session.states }
+    var usesDurableStates: Bool { true }
 
     init(
         coordinator: any ProductionPairingCoordinating,
@@ -947,87 +937,36 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
         trustStore: any TrustSnapshotPersisting,
         trustRepository: TrustRepository
     ) {
-        self.coordinator = coordinator
-        self.settings = settings
-        self.trustStore = trustStore
-        self.trustRepository = trustRepository
+        self.session = DurablePairingSession(coordinator: coordinator) { device in
+            try await trustStore.persistLatest(from: trustRepository)
+            guard await trustRepository.isTrusted(device.id) else { throw PairingError.staleOperation }
+            try await settings.recordPaired(device)
+        }
     }
 
-    func createCode() async throws -> String { try await coordinator.createCode() }
+    func createCode() async throws -> String { try await session.createCode() }
     func join(code: String) async throws -> PairingJoinResult {
-        return try await coordinator.join(code: code)
+        return try await session.join(code: code)
     }
     func approve() async throws -> SurfaceActionResult {
-        let pendingPeer = await coordinator.pendingPeerSummary()
-        var warnings: [LocalizedKey] = []
-        do {
-            _ = try await coordinator.approvePendingPairing()
-        } catch {
-            guard let pendingPeer,
-                await trustRepository.isTrusted(pendingPeer.id)
-            else { throw error }
-            warnings.append(.trustPeerApprovalIncomplete)
-        }
-        do {
-            try await trustStore.persistLatest(from: trustRepository)
-        } catch {
-            warnings.append(.trustRecordsSaveFailed)
-        }
-        if let device = pendingPeer,
-            await trustRepository.isTrusted(device.id)
-        {
-            do {
-                try await settings.recordPaired(device)
-            } catch {
-                warnings.append(.trustSettingsSaveFailed)
-            }
-        } else if let device = pendingPeer {
-            persistWhenBilateralTrustCommits(device)
-        }
+        _ = try await session.approve()
         await onReceiveConfigurationChanged?()
-        guard !warnings.isEmpty else { return .committed }
-        return SurfaceActionResult(warningKeys: warnings)
+        return .committed
     }
-    func reject() async throws { try await coordinator.rejectPendingPairing() }
+    func reject() async throws { try await session.reject() }
     func awaitHostApproval() async throws -> SurfaceActionResult {
-        let pendingPeer = await coordinator.pendingPeerSummary()
-        _ = try await coordinator.awaitHostApproval()
-        var warnings: [LocalizedKey] = []
-        do {
-            try await trustStore.persistLatest(from: trustRepository)
-        } catch {
-            warnings.append(.trustRecordsSaveFailed)
-        }
-        if let device = pendingPeer, await trustRepository.isTrusted(device.id) {
-            do {
-                try await settings.recordPaired(device)
-            } catch {
-                warnings.append(.trustSettingsSaveFailed)
-            }
-        }
+        _ = try await session.awaitApproval()
         await onReceiveConfigurationChanged?()
-        guard !warnings.isEmpty else { return .committed }
-        return SurfaceActionResult(warningKeys: warnings)
+        return .committed
     }
-    func cancel() async throws { try await coordinator.cancelPendingPairing() }
-    func pendingPeer() async -> DeviceSummary? { await coordinator.pendingPeerSummary() }
-
-    private func persistWhenBilateralTrustCommits(_ device: DeviceSummary) {
-        let settings = self.settings
-        let trustStore = self.trustStore
-        let trustRepository = self.trustRepository
-        let onReceiveConfigurationChanged = self.onReceiveConfigurationChanged
-        Task {
-            let updates = await trustRepository.updates()
-            for await trust in updates {
-                guard !Task.isCancelled else { return }
-                guard trust.isTrusted(device.id) else { continue }
-                try? await trustStore.persistLatest(from: trustRepository)
-                try? await settings.recordPaired(device)
-                await onReceiveConfigurationChanged?()
-                return
-            }
-        }
+    func cancel() async throws { try await session.cancel() }
+    func pendingPeer() async -> DeviceSummary? { await session.pendingPeerSummary() }
+    func currentDurableState() async -> DurablePairingState? { await session.currentState() }
+    func startObservation() async { await session.startObservation() }
+    func stopObservation() async { await session.stopObservation() }
+    func retrySaving() async throws {
+        _ = try await session.retrySaving()
+        await onReceiveConfigurationChanged?()
     }
 }
 

@@ -223,3 +223,7 @@
 "presentation.listSeparator" = ", ";
 "send.ready" = "Ready to Send";
 "send.readyAccessibility" = "Ready to send, choose a recipient";
+"pairing.saving" = "Saving pairing on this Mac…";
+"pairing.saveFailed" = "Pairing could not be saved on this Mac.";
+"pairing.saveRecoveryHelp" = "Both devices confirmed the pairing. Retry saving on this Mac to finish. The other device may already have saved its trust.";
+"pairing.retrySaving" = "Retry Saving";

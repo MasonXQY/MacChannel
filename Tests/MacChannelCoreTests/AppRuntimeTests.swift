@@ -641,7 +641,7 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testProductionPairingCombinesAuthorizationAndPersistenceWarningsAfterTrustCommit()
+    func testProductionPairingDoesNotReportCommittedWhenLocalSaveFails()
         async throws
     {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -667,7 +667,7 @@ final class AppRuntimeTests: XCTestCase {
             repository: repository,
             peerIdentity: peerIdentity,
             peer: peer,
-            throwsAfterMutation: true
+            throwsAfterMutation: false
         )
         let service = PersistingPairingSurfaceService(
             coordinator: coordinator,
@@ -676,15 +676,14 @@ final class AppRuntimeTests: XCTestCase {
             trustRepository: repository
         )
 
-        let result = try await service.approve()
-
-        let warning = try XCTUnwrap(result.warning)
-        XCTAssertTrue(warning.contains("对端授权确认未完成"))
-        XCTAssertTrue(warning.contains("本地信任记录未保存"))
+        do {
+            _ = try await service.approve()
+            XCTFail("Local save failure must fail completion, never return committed with warnings")
+        } catch { }
         let isTrusted = await repository.isTrusted(peer.id)
         XCTAssertTrue(isTrusted)
         let snapshot = await settings.current()
-        XCTAssertEqual(snapshot.devices.first?.id, peer.id)
+        XCTAssertTrue(snapshot.devices.isEmpty)
     }
 
     @MainActor
@@ -719,7 +718,8 @@ final class AppRuntimeTests: XCTestCase {
             trustRepository: repository
         )
 
-        _ = try await service.approve()
+        let approval = Task { try await service.approve() }
+        for _ in 0..<100 { await Task.yield() }
         let beforeCommit = await settings.current()
         XCTAssertTrue(beforeCommit.devices.isEmpty)
 
@@ -728,6 +728,7 @@ final class AppRuntimeTests: XCTestCase {
             subjectPublicKey: peerIdentity.publicKey.rawRepresentation,
             timestamp: Date()
         )
+        _ = try await approval.value
         for _ in 0..<100 {
             if !(await settings.current()).devices.isEmpty { break }
             await Task.yield()
@@ -735,6 +736,37 @@ final class AppRuntimeTests: XCTestCase {
 
         let afterCommit = await settings.current()
         XCTAssertEqual(afterCommit.devices.first?.displayName, "远端 Mac")
+    }
+
+    @MainActor
+    func testPairingSettingsWriteFailureRequiresRetryWithoutNewAuthorization() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settingsURL = root.appendingPathComponent("settings.json")
+        let owner = try DeviceIdentity.ephemeral()
+        let remote = try DeviceIdentity.ephemeral()
+        let peer = DeviceSummary(id: remote.id, displayName: "Phone", availability: .internet)
+        let repository = try TrustRepository(ownerIdentity: owner, trustStore: TrustStore(owner: owner.id), persistedGeneration: 0)
+        let settings = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [])
+        let coordinator = MutatingProductionPairingCoordinator(repository: repository, peerIdentity: remote, peer: peer)
+        let service = PersistingPairingSurfaceService(coordinator: coordinator, settings: settings,
+            trustStore: RecordingTrustSnapshotPersister(), trustRepository: repository)
+        // A directory at the file destination deterministically fails the atomic settings write.
+        if FileManager.default.fileExists(atPath: settingsURL.path) { try FileManager.default.removeItem(at: settingsURL) }
+        try FileManager.default.createDirectory(at: settingsURL, withIntermediateDirectories: false)
+        do { _ = try await service.approve(); XCTFail("Settings are part of local completion") } catch { }
+        let failed = await service.currentDurableState()
+        XCTAssertEqual(failed, .saveFailed(peer))
+        let proofs = await repository.authenticationRecords()
+        try FileManager.default.removeItem(at: settingsURL)
+        try await service.retrySaving()
+        let saved = await service.currentDurableState()
+        XCTAssertEqual(saved, .paired(peer))
+        let retriedProofs = await repository.authenticationRecords()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(try encoder.encode(retriedProofs), try encoder.encode(proofs))
     }
 
     func testSuccessfulReceivePublishesAfterHistoryRecording() async {
@@ -2490,6 +2522,8 @@ private actor ReceiveEventPublisherRecorder {
 }
 
 private actor DeferredProductionPairingCoordinator: ProductionPairingCoordinating {
+    nonisolated let states = AsyncStream<PairingState> { _ in }
+    func isTrusted(_ id: DeviceID) async -> Bool { await repository.isTrusted(id) }
     private let repository: TrustRepository
     private let peerIdentity: DeviceIdentity
     private let peer: DeviceSummary
@@ -2513,9 +2547,14 @@ private actor DeferredProductionPairingCoordinator: ProductionPairingCoordinatin
     func awaitHostApproval() async throws -> SignedTrustRecord { throw RuntimeTestError.failed }
     func cancelPendingPairing() async throws {}
     func pendingPeerSummary() async -> DeviceSummary? { peer }
+    func currentState() async -> PairingState {
+        await repository.isTrusted(peer.id) ? .confirmed(peer) : .committing(peer)
+    }
 }
 
 private actor MutatingProductionPairingCoordinator: ProductionPairingCoordinating {
+    nonisolated let states = AsyncStream<PairingState> { _ in }
+    func isTrusted(_ id: DeviceID) async -> Bool { await repository.isTrusted(id) }
     private let repository: TrustRepository
     private let peerIdentity: DeviceIdentity
     private let peer: DeviceSummary
@@ -2548,6 +2587,9 @@ private actor MutatingProductionPairingCoordinator: ProductionPairingCoordinatin
     func awaitHostApproval() async throws -> SignedTrustRecord { throw RuntimeTestError.failed }
     func cancelPendingPairing() async throws {}
     func pendingPeerSummary() async -> DeviceSummary? { peer }
+    func currentState() async -> PairingState {
+        await repository.isTrusted(peer.id) ? .confirmed(peer) : .approvalRequested(peer)
+    }
 }
 
 private actor CancellationInsensitivePresenceGate {

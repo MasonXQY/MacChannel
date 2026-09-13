@@ -10,6 +10,7 @@ final class AppContainer {
     let directorySelector: any DirectorySelecting
     let transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)?
     let pairingStates: AsyncStream<PairingState>?
+    let durablePairingStates: AsyncStream<DurablePairingState>?
     let initialSettingsSnapshot: SettingsSurfaceSnapshot?
     let settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)?
     let receiveDirectoryConfigurationPending: Bool
@@ -28,6 +29,7 @@ final class AppContainer {
         directorySelector: any DirectorySelecting = NativeDirectorySelector(),
         transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)? = nil,
         pairingStates: AsyncStream<PairingState>? = nil,
+        durablePairingStates: AsyncStream<DurablePairingState>? = nil,
         initialSettingsSnapshot: SettingsSurfaceSnapshot? = nil,
         settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)? = nil,
         receiveDirectoryConfigurationPending: Bool = false,
@@ -49,7 +51,8 @@ final class AppContainer {
         self.settingsSurfaceService = settingsSurfaceService
         self.directorySelector = directorySelector
         self.transferSnapshots = transferSnapshots
-        self.pairingStates = pairingStates
+        self.pairingStates = durablePairingStates == nil ? pairingStates : nil
+        self.durablePairingStates = durablePairingStates
         self.initialSettingsSnapshot = initialSettingsSnapshot
         self.settingsSnapshots = settingsSnapshots
         self.receiveDirectoryConfigurationPending = receiveDirectoryConfigurationPending

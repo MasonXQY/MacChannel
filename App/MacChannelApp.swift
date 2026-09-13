@@ -406,7 +406,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         if let transferSnapshots = container.transferSnapshots {
             surfaces.observeTransferSnapshots(transferSnapshots)
         }
-        if let pairingStates = container.pairingStates {
+        if let states = container.durablePairingStates {
+            surfaces.observeDurablePairingStates(states)
+        } else if let pairingStates = container.pairingStates {
             surfaces.observePairingStates(pairingStates)
         }
         if let settingsSnapshots = container.settingsSnapshots {
@@ -437,6 +439,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         generation: Int
     ) async -> Bool {
         await drainReceiveEventObservation()
+        await surfaceController?.stopPairingObservation()
         guard generation == containerReplacementGeneration else { return false }
         receiveNotificationController.stopPendingNotifications()
         install(container, status: status)
@@ -476,6 +479,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             return .terminateNow
         }
         Task {
+            await surfaceController?.stopPairingObservation()
             if let receiveDrain {
                 await receiveDrain.task.value
                 finishReceiveEventDrain(receiveDrain)

@@ -289,6 +289,43 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testRemovedDurablePeerCannotReturnThroughStaleSuccessWithSameName() {
+        let peer = DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Mac", availability: .offline)
+        let other = DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Mac", availability: .offline)
+        let pairing = PairingSurfaceModel()
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(coordinator: SurfaceTransferCoordinator()),
+            pairingService: HostApprovalPairingSurfaceService(peer: peer),
+            settingsService: UnavailableDeviceSettingsService(), directorySelector: NativeDirectorySelector(),
+            pairingModel: pairing, settingsModel: SettingsSurfaceModel(devices: [DeviceSetting(device: peer)]))
+        surfaces.updateDurablePairingState(.paired(peer))
+        surfaces.updateSettings(SettingsSurfaceSnapshot(defaultDirectory: nil, devices: [DeviceSetting(device: other)]))
+        surfaces.updateDurablePairingState(.paired(peer))
+        XCTAssertEqual(pairing.state, .idle)
+    }
+
+    @MainActor
+    func testDurableSurfaceShowsSavingAndRecoverableErrorBeforeGreen() {
+        let peer = DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Phone", availability: .internet)
+        let model = PairingSurfaceModel()
+        model.updateDurableState(.saving(peer))
+        XCTAssertEqual(model.state, .committing(peer))
+        model.updateDurableState(.saveFailed(peer))
+        XCTAssertEqual(model.state, .committing(peer))
+        XCTAssertNotNil(model.actionErrorContent)
+        model.updateDurableState(.paired(peer))
+        XCTAssertEqual(model.state, .confirmed(peer))
+        XCTAssertNil(model.actionErrorContent)
+        for language in [AppLanguage.english, .simplifiedChinese] {
+            for key in [LocalizedKey.pairingSaving, .pairingSaveFailed, .pairingSaveRecoveryHelp, .pairingRetrySaving] {
+                let text = L10n.format(key, arguments: [], language: language)
+                XCTAssertFalse(text.isEmpty)
+                XCTAssertNotEqual(text, key.rawValue)
+            }
+        }
+    }
+
+    @MainActor
     func testLoginItemRegistrationFailureRollsBackVisibleSetting() async {
         let loginItems = StubLoginItemRegistration(error: SurfaceActionFailure.expected)
         let service = RecordingEssentialSettingsService()

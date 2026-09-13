@@ -186,6 +186,44 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         }
     }
 
+    func observeDurablePairingStates(_ states: AsyncStream<DurablePairingState>) {
+        let previous = pairingTask
+        previous?.cancel()
+        pairingTask = Task { [weak self, pairingService] in
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await pairingService.startObservation()
+            for await state in states {
+                guard !Task.isCancelled else { break }
+                self?.updateDurablePairingState(state)
+            }
+            await pairingService.stopObservation()
+        }
+    }
+
+    func updateDurablePairingState(_ state: DurablePairingState) {
+        pairingModel.updateDurableState(state)
+        switch state {
+        case let .active(raw):
+            if case .confirmed = raw { return }
+            updatePairingState(raw)
+        case let .paired(peer):
+            guard pairingModel.state == .confirmed(peer) else { return }
+            updatePairingState(.confirmed(peer))
+        case let .saving(peer), let .saveFailed(peer):
+            pairingModel.pendingPeer = peer
+        }
+    }
+
+    func stopPairingObservation() async {
+        await pairingModel.retire()
+        let task = pairingTask
+        pairingTask = nil
+        task?.cancel()
+        await task?.value
+        await pairingService.stopObservation()
+    }
+
     func observeSettings(
         _ snapshots: @escaping @Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>
     ) {
@@ -261,6 +299,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     func updateSettings(_ snapshot: SettingsSurfaceSnapshot) {
+        let removedIDs = Set(settingsModel.devices.map(\.id)).subtracting(snapshot.devices.map(\.id))
+        for id in removedIDs { pairingModel.invalidateSuccess(for: id) }
         settingsModel.localDisplayName = snapshot.localDisplayName
         settingsModel.defaultDirectory = snapshot.defaultDirectory
         settingsModel.autoReceive = snapshot.autoReceive
