@@ -8,6 +8,15 @@
 
 **Tech Stack:** Swift 6, Foundation, UIKit, SwiftUI, XCTest; existing Xcode 16.4 project and simulator.
 
+**Execution checkpoint (2026-09-13):** Task 1 implemented/reviewed at 482490d;
+Task 2 implemented/reviewed at ce2190d. Root fresh 40 selected tests/zero failures
+and actual unsigned iPhone app+Share build pass. Both task RED/GREEN reports are
+in `.superpowers/sdd/iphone-feedback-task-{1,2}-report.md`. Task 2 review noted a
+non-blocking report-file inclusion beyond four implementation files; no product
+finding. Remaining roadmap below is NOT implemented by this milestone. Device,
+speed and actual Files failure acceptance remain open. Checkboxes below retain
+the reproducible procedure; authoritative completion state is the SDD ledger.
+
 ## Global Constraints
 
 - 中英文体验同时交付。继续使用独立 iPhone 开发身份和当前隔离分支。

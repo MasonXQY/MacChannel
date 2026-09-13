@@ -2,6 +2,87 @@
 
 ## Current iPhone work — 2026-09-12
 
+FEEDBACK CHECKPOINT — 2026-09-13: approved-spec iteration has two implemented
+and reviewed corrections, NOT the full requested update. Task1 482490d classifies
+unsupported Cocoa inputs accurately; Task2 ce2190d presents positive full-byte
+nonterminal transfers as Confirming completion / 正在确认完成. Root fresh40native
+model/import tests pass (0fail, exit0), log .build/iphone-feedback-root-final.log;
+actual unsigned shipping app+Share build passes, .build/iphone-feedback-shipping-device.log.
+Both resource lints/diff-check pass. Independent reviews PASS; Task2 has one Minor
+process note that its report was included alongside four implementation files.
+No Mac/core edits, physical tests, app installation, performance improvement or
+resolution of the user's actual Files failure claimed. All sessions drained.
+Investigation facts/hypotheses are in docs/acceptance/iphone-batch-investigation-2026-09-13.md.
+User was asked whether Files fails before recipient selection or after Send and
+whether local/cloud source; no reply assumed. Continue approved batch queue,
+history cache/preview/name/location, and iPhone host pairing stages; additional
+implementation plans before each subsystem, no repeat product approval required.
+
+NEXT ITERATION DESIGN — 2026-09-13: user reports iPhone photos send successfully,
+Files sending fails, and slow sending/long post-100% completion. These are user
+observations, not reproduced root causes. User approved the recommended scope:
+multi-file/multi-peer bounded sending, accurate completion phases, sent-history
+preview, friendly peer names/receive-location guidance, plus iPhone-to-iPhone
+pairing and foreground transfer. Source inspection confirms photo/recipient
+single-selection, Files picker already multi-select, history raw peer prefix
+and inbound-only preview, and join-only iPhone pairing UI. No fixes implemented.
+Written spec: docs/superpowers/specs/2026-09-13-iphone-batch-transfer-design.md.
+Written spec now approved by user “确认”; first executable feedback plan925f575
+in docs/superpowers/plans/2026-09-13-iphone-transfer-feedback.md is underway.
+Native baseline36tests/0fail (.build/iphone-batch-baseline.log). Read-only diagnoses
+find no proven cause for the physical Files failure: need phase/provider evidence.
+Confirmed directory unsupported error maps to unavailable; first correction in TDD.
+Confirmed full local bytes precede remote completion and local terminal cleanup;
+iPhone label must say broad “Confirming completion”, not claim speed improvement.
+Both diagnostics read-only, no Mac/core changes. Approved defaults: two active tasks/one per
+peer; private sent-history copies bounded by 1 GiB and 30 days, with user-visible
+cleanup and no deletion of sources or received files. Retain Mac compatibility,
+isolated dev app identity, no Store or Mac B operations.
+
+DEVICE INSTALLED — 2026-09-13: after authenticated ZENSYS portal access, created
+only group.com.zensystech.dropmesh.iphone.dev (25K2Y3R2N4), assigned it to the
+separate main dev App ID H8AT2X2XX4 and Share dev App ID 7TG8858XR8, and saved
+both. Automatic provisioning then passed the previous entitlement mismatch.
+The first new build failed codesigning the generated Share.appex because its
+bundle directory had com.apple.FinderInfo and fileprovider metadata; retained
+.build/iphone-device-signing-appgroup.log. No source or user metadata removed.
+Rebuilt exact HEAD fe10a66 with the same scoped signing flags, using owner-only
+/private/tmp/dropmesh-iphone-device.QhiNpT as DerivedData. Exit0 BUILD SUCCEEDED,
+.build/iphone-device-signing-private.log. Deep strict codesign verification
+passed; main and embedded Share entitlements and profiles both contain only the
+intended development AppGroup and matching ZENSYS development identities.
+devicectl install exit0, launch exit0, exact bundle query confirms DropMesh
+0.1.0 (1) installed on the connected iPhone16ProMax. Evidence: .build/
+iphone-device-{install,launch,installed-app}.json. All build/install sessions
+drained. No physical screen observation or Mac/iPhone transfer acceptance yet;
+next confirm visible phone Home/local-network prompt, then follow physical
+runbook. Do not confuse successful launch request with tested foreground runtime
+or end-to-end transfer. No Mac app, production identity, Store, or Mac B changes.
+The prior signing/device gates below are historical and superseded by this entry.
+
+SIGNING AUTHORIZED — 2026-09-13: user explicitly allows existing ZENSYS team
+signing, device registration and necessary AppGroup configuration/install of
+separate iPhone development app, not Mac changes or Store submission. Automatic
+device-target build used teamXKAZ67HN45, Apple Development and provisioning/device
+registration flags; exit65 before signing because BOTH app/Share profiles do not
+match group.com.zensystech.dropmesh.iphone.dev entitlement. Log
+.build/iphone-device-signing.log; session4184 drained. No successful signed
+build/install claimed. Apple developer identifiers portal opened in visible
+in-app tab14; currently Sign In. Next user login, then inspect/register/bind only
+the approved development AppGroup to the two development IDs and rebuild.
+Do not remove AppGroup entitlement to bypass the error or mutate Mac IDs.
+
+DEVICE GATE UPDATE — 2026-09-13: physical iPhone16ProMax/iOS26.6.1 now
+connected by cable, host pairing succeeded, Developer Mode enabled. Initial
+developer-image mount failed while locked; after user unlock, services and
+exact development-app query succeeded but returned no installed developer app.
+Existing Apple Development certificate subject OU matches ZENSYS teamXKAZ67HN45.
+No signing, provisioning registration or installation performed yet. Confirm
+using that team for separate iPhone development app/Share AppGroup provisioning
+before account mutations. Installed Mac and production identities untouched.
+The generic apps name filter did not narrow output; do not reuse it or retain
+unrelated app inventory. Use exact bundle queries/structured output as needed.
+
 SOURCE ACCEPTED — 2026-09-13: final wholebranch correction14047d3..4952486
 independently Approved; all3Important+4actionableMinor closed, no new findings.
 Production5877e2e, final testhelper1015e99, evidence/report4952486. Root full997

@@ -1,5 +1,32 @@
 # iPhone continuation ledger
 
+FEEDBACK MILESTONE VERIFIED 2026-09-13: Task2 complete (482490d..ce2190d,
+spec PASS/task quality PASS). No Critical/Important findings. Minor process note:
+task commit also contains its authorized report despite brief's four-source-file
+commit wording; retained as evidence, no product change required. Root independent
+final40tests/0fail exit0 (.build/iphone-feedback-root-final.log), actual unsigned
+iPhone app+embeddedShare BUILD SUCCEEDED (.build/iphone-feedback-shipping-device.log).
+Root verified diff and both resource lints; sessions77714/84410 drained. No install,
+speed or actual Files fix claim. Next approved stage: reproduce Files phase/provider
+failure and design/implement batch queue without releasing slots at admission return;
+then history/name/location and iPhone-host pairing. No broad iteration completion.
+
+Feedback Task1 complete (925f575..482490d, independent spec PASS/quality Approved,
+no findings). Root checked actual RED38/2expected and GREEN38/0 logs including
+both new method names; old20-test false-greens retained. Fresh private DerivedData
+proved RED; normal cache subsequent GREEN executed38. No physical acceptance.
+Feedback Task2 IN PROGRESS on482490d; same-spec whole iteration remains incomplete.
+
+NEW ITERATION 2026-09-13: user approved written batch-transfer spec0f41e96.
+Feedback milestone plan925f575 starts with two confirmed iPhone-only corrections.
+Baseline36native model/import tests pass (.build/iphone-batch-baseline.log).
+Task1 unsupported-input error classification IN PROGRESS; Task2 honest full-byte
+confirmation label pending. Actual Files failure and performance remain unproven;
+read-only diagnostics complete. Phone dev0.1.0(1) previously signed/installed;
+do not repeat stale physical-absence gates below. No current device/Store/Mac writes.
+Remaining approved roadmap: batch queue, private sent-history/index/names/location,
+iPhone pairing-host, integrated physical verification. Root owns HANDOFF/ledger.
+
 CURRENT FINAL SOURCE: correction14047d3..4952486 independently Approved (all3Important+4Minor closed, no new findings). Wholebranch source c823400..4952486 ready for source integration, NOT physical/release acceptance. Report iphone-final-correction-review.md. Root full997/5skip/0fail48.393s, native110unit13UI plusfinalhelper2+2, actualbothunsignedbuilds andMacStore/Directrelease0.31/0.33s, auditsPASS.8captures tracked/root4inspected. Current devicectl on2026-09-13 againNo devices found; team/profile not configured. No active sessions. NEXT genuinely blocked on connected unlocked trusted iPhone and development signing choice before physical runbook; do not redo completed source stages. Preserve isolated branch/worktree, no merge/push/install/Store/MacB without task authority. AppIntents warning and fixture-only teardown debt explicitly retained; no product fix outstanding from review.
 
 ROOT VERIFIED: on production5877e2e/test1015e99, full997tests5existing skips0fail48.393s exit0(.build/iphone-final-integrated-full.log). BothMac release Store0.31s/Direct0.33s exit0(.build/iphone-final-mac-{store,direct}-build.log); no installed changes. Root sessions33230/3253 drained. Final correction agent completing report+8PNG commit; all2+2affectedUI/bothactualbuilds/audits reportedPASS. Root inspected4actual standard/AX images and wrote iphone-final-correction-visual-review.md. Need finalreport+SHA then wholebranch reviewer rereview BEFORE source acceptance. Physical remains absent.
