@@ -77,14 +77,55 @@ func TestPersistenceReproExpiredHigherSequence(t *testing.T) {
 	restarted.mu.Lock()
 	_, memoryErr := restarted.preparePendingLocked(candidate.Issuer, []SignedTrustRecord{candidate})
 	restarted.mu.Unlock()
-	if memoryErr != nil {
-		t.Fatalf("memory unexpectedly rejects: %v", memoryErr)
+	if !errors.Is(memoryErr, ErrInvalidTrust) {
+		t.Fatalf("restored memory must reject old issuer sequence, got %v", memoryErr)
 	}
 	if _, err := restarted.PrepareConfirmBatch(candidate.Issuer, pub(issuer), []SignedTrustRecord{candidate}); !errors.Is(err, ErrInvalidTrust) {
 		t.Fatalf("expected durable highwater rejection, got %v", err)
 	}
-	t.Log("confirmed memory accepts sequence5 after expired sequence10 row deletion, durable highwater rejects")
+	t.Log("restored memory and durable highwater both reject sequence5")
 	if _, err := restarted.PrepareConfirmBatch(pending.Subject, pub(other), []SignedTrustRecord{pending}); !errors.Is(err, ErrInvalidTrust) {
 		t.Fatalf("expected exact expired original proof to reject at durable highwater, got %v", err)
+	}
+	// Existing established exact duplicates remain idempotent below highwater.
+	if _, err := restarted.PrepareConfirmBatch(established.Issuer, pub(issuer), []SignedTrustRecord{established}); err != nil {
+		t.Fatalf("established duplicate rejected: %v", err)
+	}
+	newer := record(other, 11)
+	if _, err := restarted.PrepareConfirmBatch(newer.Issuer, pub(issuer), []SignedTrustRecord{newer}); err != nil {
+		t.Fatal(err)
+	}
+	revoked := record(subject, 12)
+	revoked.Action = TrustRevoke
+	digest := sha256.Sum256(revoked.CanonicalPayload())
+	revoked.Signature, err = ecdsa.SignASN1(rand.Reader, issuer, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.PrepareConfirmBatch(revoked.Issuer, pub(issuer), []SignedTrustRecord{revoked}); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := NewPostgresTrustRegistryWithConfig(ctx, db, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ShareGraph(established.Issuer, established.Subject) {
+		t.Fatal("restart lost revocation")
+	}
+	if _, err := restored.PrepareConfirmBatch(established.Subject, pub(subject), []SignedTrustRecord{established}); !errors.Is(err, ErrInvalidTrust) {
+		t.Fatalf("revoked authorization replay accepted: %v", err)
+	}
+	for _, raw := range []string{"18446744073709551615", "18446744073709551616"} {
+		if _, err := db.Exec(`UPDATE trust_issuer_states SET high_water = $1 WHERE issuer_device_id = $2`, raw, established.Issuer); err != nil {
+			t.Fatal(err)
+		}
+		water, err := store.LoadIssuerHighWater(ctx)
+		if raw == "18446744073709551615" {
+			if err != nil || water[established.Issuer] != ^uint64(0) {
+				t.Fatalf("uint64 maximum: %v %v", water, err)
+			}
+		} else if !errors.Is(err, ErrInvalidTrust) {
+			t.Fatalf("overflow accepted: %v", err)
+		}
 	}
 }
