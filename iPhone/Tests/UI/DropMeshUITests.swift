@@ -2,8 +2,58 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
-    func testEnglishPresencePresentation() { runPresence(language: "en", locale: "en_US") }
-    func testChinesePresencePresentation() { runPresence(language: "zh-Hans", locale: "zh_CN") }
+    func testEnglishPresencePresentation() { runAccessibleDetails(languages: ["en"]) }
+    func testChinesePresencePresentation() { runAccessibleDetails(languages: ["zh-Hans"]) }
+    func testEnglishPresenceMatrix() { runPresence(language: "en", locale: "en_US") }
+    func testChinesePresenceMatrix() { runPresence(language: "zh-Hans", locale: "zh_CN") }
+
+    private func runAccessibleDetails(languages: [String]) {
+        for language in languages {
+            for mode in ["pending", "attention", "save-failed"] {
+                let app = XCUIApplication()
+                app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", language == "en" ? "en_US" : "zh_CN",
+                                        "-presence-evidence-\(mode)"]
+                app.launch()
+                XCTAssertTrue(app.staticTexts["service-status"].waitForExistence(timeout: 5))
+                let label: String = switch mode {
+                case "pending": language == "en" ? "Device changes are waiting to be saved on this device." : "设备更改正在等待保存到本机。"
+                case "save-failed": language == "en" ? "Device changes could not be saved on this iPhone." : "设备更改未能保存到此 iPhone。"
+                default: language == "en" ? "Trust sync needs attention" : "信任同步需要处理"
+                }
+                let detail = app.staticTexts[label].firstMatch
+                reveal(detail, in: app)
+                positionPresenceText(detail, in: app)
+                XCTAssertGreaterThanOrEqual(detail.frame.minY, app.navigationBars.firstMatch.frame.maxY)
+                attach(app.screenshot(), named: "Presence-\(language)-\(mode)-Sync-Detail")
+                if mode == "save-failed" {
+                    let retry = app.buttons[language == "en" ? "Retry saving" : "重试保存"]
+                    reveal(retry, in: app)
+                    positionPresenceText(retry, in: app)
+                    attach(app.screenshot(), named: "Presence-\(language)-Save-Retry")
+                    retry.tap()
+                    let recovered = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: retry)
+                    XCTAssertEqual(XCTWaiter.wait(for: [recovered], timeout: 5), .completed)
+                }
+                let unnamed = app.staticTexts[language == "en" ? "Unnamed device" : "未命名设备"]
+                reveal(unnamed, in: app)
+                positionPresenceText(unnamed, in: app)
+                XCTAssertGreaterThanOrEqual(unnamed.frame.minY, app.navigationBars.firstMatch.frame.maxY)
+                attach(app.screenshot(), named: "Presence-\(language)-\(mode)-Devices-Detail")
+                app.terminate()
+            }
+        }
+    }
+
+    private func positionPresenceText(_ element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<12 {
+            let delta = element.frame.minY - app.frame.height * 0.23
+            if abs(delta) < 20 { return }
+            let distance = max(-app.frame.height * 0.15, min(delta * 0.75, app.frame.height * 0.15))
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.2, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -distance)),
+                        withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+    }
 
     private func runPresence(language: String, locale: String) {
         for mode in ["synchronized", "syncing", "pending", "attention", "reconnecting"] {

@@ -24,18 +24,24 @@ final class RuntimePresencePresentationTests: XCTestCase {
 
     func testManualSaveRetryIsJoinedAndCannotPublishAfterStop() async {
         let owner = RuntimeTrustSaveRetry()
-        var release: CheckedContinuation<Void, Never>?
+        let release = AsyncStream<Void>.makeStream()
+        defer { release.continuation.finish() }
+        let entered = expectation(description: "save entered")
+        let stopEntered = expectation(description: "stop requested")
         var didPublish = false
         let saving = Task {
-            await owner.run(save: { await withCheckedContinuation { release = $0 } },
+            await owner.run(save: {
+                entered.fulfill()
+                for await _ in release.stream { break }
+            },
                 completed: { _ in didPublish = true })
         }
-        while release == nil { await Task.yield() }
+        await fulfillment(of: [entered], timeout: 2)
         var stopped = false
-        let stopping = Task { await owner.stop(); stopped = true }
-        for _ in 0..<20 { await Task.yield() }
+        let stopping = Task { stopEntered.fulfill(); await owner.stop(); stopped = true }
+        await fulfillment(of: [stopEntered], timeout: 2)
         XCTAssertFalse(stopped)
-        release?.resume()
+        release.continuation.finish()
         await stopping.value
         await saving.value
         XCTAssertTrue(stopped)

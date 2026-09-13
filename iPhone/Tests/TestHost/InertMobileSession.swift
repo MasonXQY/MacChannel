@@ -40,13 +40,14 @@ actor InertMobileSession: MobileAppSession {
     }
     func snapshot() -> MobileAppSnapshot { value }
     func setPresentation(state: MobileRuntimeState, sync: PresenceTrustSyncState,
-                         names: [DeviceID: String], reachable: [DeviceSummary]) {
+                         names: [DeviceID: String], reachable: [DeviceSummary], failure: MobileRuntimeFailure? = nil) {
         value.state = state
         forcedStartState = state
         value.trustSyncState = sync
         value.names = names
         value.trustedIDs = Set(names.keys)
         value.reachable = reachable
+        value.failure = failure
         publish()
     }
     func observe(_ changed: @escaping @Sendable () async -> Void) async {
@@ -72,6 +73,10 @@ actor InertMobileSession: MobileAppSession {
     func refreshTrust() throws {
         refreshCount += 1
         if refreshFailure { throw MobileRuntimeError.notReady }
+        if value.failure == .trustPersistence {
+            value.failure = nil
+            value.trustSyncState = .synchronized
+        }
         publish()
     }
     func makePairingAttempt() throws -> any PairingAttempt {

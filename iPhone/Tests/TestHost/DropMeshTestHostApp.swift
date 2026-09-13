@@ -42,7 +42,7 @@ private func makeNativeEvidenceSession() async -> any MobileAppSession {
         let unnamed = DeviceID(rawValue: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!)
         let duplicate = DeviceID(rawValue: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!)
         let sync: PresenceTrustSyncState = switch mode {
-        case "pending": .pendingPersistence
+        case "pending", "save-failed": .pendingPersistence
         case "attention": .needsAttention
         case "syncing": .synchronizing
         default: .synchronized
@@ -50,7 +50,7 @@ private func makeNativeEvidenceSession() async -> any MobileAppSession {
         let nearby = DeviceSummary(id: session.peer.id, displayName: session.peer.displayName, availability: .lan)
         await session.setPresentation(state: mode == "reconnecting" ? .reconnecting : .online, sync: sync,
             names: [session.peer.id: session.peer.displayName, unnamed: " \n", duplicate: session.peer.displayName],
-            reachable: [nearby])
+            reachable: [nearby], failure: mode == "save-failed" ? .trustPersistence : nil)
         return session
     }
     if ProcessInfo.processInfo.arguments.contains("-history-evidence") {
