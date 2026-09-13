@@ -47,7 +47,15 @@ visualcheck recorded66f91cd;78captures tracked,allcommandsdrained,simlarge resto
 Next: shared-owner live Go interoperability and signed installed cross-device verification. Detailed final procedure:
 docs/acceptance/pairing-reconnect-final-runbook-2026-09-13.md (not passed evidence).
 Focused final live interoperability requirements are in
-docs/superpowers/plans/2026-09-13-shared-owner-live-interop.md; implementation is pending.
+docs/superpowers/plans/2026-09-13-shared-owner-live-interop.md. Testcommit a03ef7c
+reproduces real membershipcatchup defect three times: A revokesB, B ingests valid
+recordtargetingitsowner and genericTrustStore throwscannotRevokeOwner, causing
+reconnect/CancellationError. Prior auth-only/durableACKs/bilateralpresence/payloads
+and first realforbidden pass; cleanupjoins. Test intentionallyfailing, notaccepted.
+Corrective peer_revocation_catchup activebase39f90ef per new2026-09-13-peer-revocation-catchup
+plan; scope verifiedpeerrelationshipwithdrawal withoutlocalidentityrevocation,
+unrelatedtrustchanges or bypass. See shared-owner-live-interop-report.md. Combined
+independentreview plus wholeprogramreview remainbefore anyinstall/deployment.
 Read-only inventory rechecked21:27: local running Store PID85546 still
 DropMesh-review-1b4a641.app, actual1.3.0(4), source4c69c524c80226e872ea363733a4c83d0c4bb00f,
 com.zensystech.dropmesh. Physical595721D3-DBB4-5D8B-8A93-51AF0D218183 available/paired;
