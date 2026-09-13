@@ -45,3 +45,36 @@ The existing profile at `/Users/mason/Developer/DropMesh-Releases/build4-4c69c52
 `codesign -dv --verbose=4` confirms the currently running historical-name review app uses TestFlight Beta Distribution signing and teamXKAZ67HN45. It has no embedded development/distribution provisioning profile at that copied app path; use the explicit build4 profile for later validation, not an assumed file inside the TestFlight app. The original app remains unchanged.
 
 Two plist inspection attempts failed harmlessly (unescaped dotted entitlement key and JSON serialization of a plist containing Data). The corrected escaped-key extraction verified the application identifier. No profile, keychain item or installed app was written.
+
+## Full Go race suite with both PostgreSQL fixture families enabled
+
+Root ran this while client source advanced from88c482a to4bde8d9; Go source remains unchanged since9a631b7. Unlike the earlier auth-only database gate, this run also enabled the HTTP/router PostgreSQL tests.
+
+- Verified the existing owner-only fixture directory, started PostgreSQL16 at127.0.0.1:55439, and verified current user/server address/port.
+- Created a new empty `dropmesh_http_acceptance_20260913` database (confirmed it did not exist before creation), applied the seven repository migrations, and verified its identity and empty trust rows before running tests that truncate fixture tables.
+- Auth reproduction retained its separately guarded `dropmesh_auth_repro` database, avoiding parallel package interference. No production database or network endpoint was used.
+
+From Services/rendezvous:
+
+```sh
+MACCHANNEL_CROSS_LANGUAGE=0 \
+DROPMESH_AUTH_REPRO_DATABASE_URL='postgres://mason@127.0.0.1:55439/dropmesh_auth_repro?sslmode=disable' \
+TEST_DATABASE_URL='postgres://mason@127.0.0.1:55439/dropmesh_http_acceptance_20260913?sslmode=disable' \
+go test ./... -race -count=1
+```
+
+Exit0, all packages passed. Auth2.488s, HTTP/router6.363s, pairing2.647s, presence3.348s, signal3.378s; longest package stack-secrets35.303s. Log `.build/pairing-final-go-postgres-race.log`.
+
+Cross-language Swift launch was intentionally disabled to avoid sharing the active Swift build cache; its separate shared-owner live gate remains required. PostgreSQL was stopped successfully afterward and pg_ctl confirmed no server running. Synthetic fixture databases are retained, not deleted. HTTPS `/healthz` independently returned `{"status":"ok"}` before this local run; that public health response is not transfer acceptance or proof the new server image is deployed.
+
+## Prepared nonprivate physical-transfer fixtures (not sent yet)
+
+Under `.build/pairing-acceptance-fixtures/`:
+
+| Filename | Bytes | SHA-256 |
+| --- | ---: | --- |
+| dropmesh-acceptance-message.txt | 306 | b55acf6cd1c4cb2b0ca5a3c7cf0ca1615ceb72028d862379f9f15a030643197e |
+| dropmesh-acceptance-image.png | 616852 | 7e88a745f71d71ee1f49dd206f581156dcf12c47820750ba0c806315177f6354 |
+| dropmesh-acceptance-8MiB.bin | 8388608 | 139180b5aa0656db97a0b862a7ad5140bddea37d8ae2d31fc590ec374b8d9b8b |
+
+Text is a new synthetic bilingual message; image is an unchanged copy of the repository's Store logo, visually inspected; binary is freshly generated random fixture data, not a key or user file. The generator refuses overwriting an existing fixture. Sizes and hashes were independently measured with wc/shasum. Only these three files are transfer fixtures; the local generator source is not part of the send batch. No device transfer has been performed with them yet.

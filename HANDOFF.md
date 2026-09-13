@@ -31,7 +31,12 @@ retirement.128focused0skip0fail,bothMacproductsbuild; root checked logs. Earlier
 1059/5skips/0fail is pre-final-fix evidence only. No remaining task-scoped findings.
 Root85 client baseline tests passed, log
 .build/pairing-cleanup-client-baseline.log. No new production/device changes.
-Next: durable proof publication (base81a44ab), truthful UI
+Task5 durable proof publication complete81a44ab..035c2d1, finalreviewApproved/no findings.
+Production4bde8d9 full1072/5skips/0fail;111finalfocused,39test-fixfocused,bothMacbuilds.
+Exact saved/current records, current-revoke exclusion, pendingPersistence without
+reconnect, and joined receipt/repository refresh observers verified locally.
+RootfullGo-race with separate auth/HTTP PostgreSQL fixtures passed; DB stopped.
+Next: truthful UI (base035c2d1),
 states, shared-owner live Go interoperability and signed installed cross-device verification. Detailed final procedure:
 docs/acceptance/pairing-reconnect-final-runbook-2026-09-13.md (not passed evidence).
 Focused final live interoperability requirements are in
