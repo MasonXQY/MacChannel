@@ -35,3 +35,13 @@ On2026-09-13 at approximately21:27 localtime, root verified:
 - Inert test host exists on booted iPhone16 simulator iOS18.6, UUID ACEA4034-2629-4A24-A7C8-C146BD8B0688.
 
 The first device inventory command used a nonexistent Xcode-local xcrun path and exited127; corrected to system xcrun with DEVELOPER_DIR. No device state change resulted from the failed invocation.
+
+## Signing inventory for the later candidate gate (read-only)
+
+At source81a44ab, `security find-identity -v -p codesigning` listed valid Apple Development, Developer ID Application and 3rd Party Mac Developer Application identities for the existing configured developer/team. This only establishes inventory, not a successful signing operation.
+
+The existing profile at `/Users/mason/Developer/DropMesh-Releases/build4-4c69c52/DropMesh.app/Contents/embedded.provisionprofile` decodes as `DropMesh Mac App Store 2026`, expiration2027-09-06T17:29:47Z, teamXKAZ67HN45 and application identifierXKAZ67HN45.com.zensystech.dropmesh. The final build script must still validate Apple CMS trust, full entitlements and the chosen certificate match; none is bypassed by this inventory.
+
+`codesign -dv --verbose=4` confirms the currently running historical-name review app uses TestFlight Beta Distribution signing and teamXKAZ67HN45. It has no embedded development/distribution provisioning profile at that copied app path; use the explicit build4 profile for later validation, not an assumed file inside the TestFlight app. The original app remains unchanged.
+
+Two plist inspection attempts failed harmlessly (unescaped dotted entitlement key and JSON serialization of a plist containing Data). The corrected escaped-key extraction verified the application identifier. No profile, keychain item or installed app was written.

@@ -25,10 +25,13 @@ Task3 completefdcc562: identity-only authentication, ACK-gated singlewriter,
 1046Swift/5conditional-skips/0fail at995c9c1 plus33focusedaftertestseamfixfdcc562;
 bothMacproductsbuild. RootliveSwift-GointeropPASS7.68s. Both server20roundrace
 and client20sameownerreconnectcycles passed locally, not physicalnetworkevidence.
-Task4 durablepairinggate activebasefdcc562; prevents success-before-local-save.
+Task4 completefdcc562..81a44ab; shared durablepairinggate prevents success-before-local-save.
+Independent re-review Approved after70a5959 drains admitted persistence before runtime
+retirement.128focused0skip0fail,bothMacproductsbuild; root checked logs. Earlierfull
+1059/5skips/0fail is pre-final-fix evidence only. No remaining task-scoped findings.
 Root85 client baseline tests passed, log
 .build/pairing-cleanup-client-baseline.log. No new production/device changes.
-Next: finish durable pairing, then durable proof publication, truthful UI
+Next: durable proof publication (base81a44ab), truthful UI
 states, shared-owner live Go interoperability and signed installed cross-device verification. Detailed final procedure:
 docs/acceptance/pairing-reconnect-final-runbook-2026-09-13.md (not passed evidence).
 Focused final live interoperability requirements are in
