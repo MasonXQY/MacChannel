@@ -29,13 +29,13 @@ Policy (text keys, not strings, live in Core):
 | Service | Sync | Existing reachability | Presentation |
 | --- | --- | --- | --- |
 | Not authenticated / stopping | Any | Any old value | Status pending / 状态待确认 |
-| Authenticated | Idle or synchronizing | Any | Syncing devices / 正在同步设备 |
-| Authenticated | Needs attention | Any | Trust sync needs attention / 信任同步需要处理 |
-| Authenticated | Synchronized | LAN | Online nearby / 附近在线 |
-| Authenticated | Synchronized | Internet | Online / 在线 |
+| Authenticated | Any | Fresh authenticated LAN | Online nearby / 附近在线 |
+| Authenticated | Any | Fresh authenticated Internet | Online / 在线 |
+| Authenticated | Idle or synchronizing | Missing or offline | Syncing devices / 正在同步设备 |
+| Authenticated | Needs attention | Missing or offline | Status pending / 状态待确认 |
 | Authenticated | Synchronized | Missing or offline | Currently unreachable / 暂不可达 |
 
-The conservative aggregate needs-attention state must not disable unrelated valid routes. It must not imply every peer's authorization failed. Service header explains that connection and device synchronization are separate; retry requests the existing owner, never creates another owner. The wire protocol has no initial snapshot-complete frame or authoritative per-peer offline enumeration, so do not claim certainty about remote power/network state.
+The service header separately shows `Trust sync needs attention / 信任同步需要处理` when needed. The aggregate sync state must not disable unrelated valid routes or hide freshly authenticated reachability. It must not imply every peer's authorization failed. Service header explains that connection and device synchronization are separate; retry requests the existing owner, never creates another owner. The wire protocol has no initial snapshot-complete frame or authoritative per-peer offline enumeration, so do not claim certainty about remote power/network state.
 
 - [ ] RED: test the entire policy table, stale availability while service reconnects, epoch-retired sync callbacks, empty/whitespace name, same-name distinct IDs and a revoke/removal while success UI is visible. Test current code's offline mapping before replacement where feasible.
 - [ ] Carry sync state end-to-end, defaulting legacy/test initializer values conservatively; no production default synchronized before acknowledgements. Reset sync state on retired connection/foreground generation.
