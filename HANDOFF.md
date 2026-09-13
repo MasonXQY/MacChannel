@@ -62,7 +62,12 @@ unrelated peers survive. Real liveGo gate nowPASS8.890s,Swift1/0fail3.633s,
 bothdirections forbidden and no reconnect. Full1081/6conditional-skips/0fail50.332s;
 bothMacproducts and shippingiPhone/Sharecompilepass. Combinedindependentreview
 Approved, peer-withdrawal-review.md; final report qualification resolved.
-Wholeprogramreview next, then signed/install/deploy/physicalgates. Phone main+Share
+Wholeprogramreview at e88d1c2 found one Important shipping iPhone saving-state
+mapping gap, no concrete security/replay/sessionoverlap defect. Report
+.superpowers/sdd/pairing-program-final-review.md. Sole implementer
+iphone_pairing_saving_fix active at7b13bd2 per iphone-pairing-saving-fix-brief.md,
+owns narrow iPhone model/view/localization/native tests and caches. Rootownsdocs.
+Re-review then signed/install/deploy/physicalgates. Phone main+Share
 candidate build number increments together4→5, same identities/version; no install yet.
 Read-only inventory rechecked21:27: local running Store PID85546 still
 DropMesh-review-1b4a641.app, actual1.3.0(4), source4c69c524c80226e872ea363733a4c83d0c4bb00f,
