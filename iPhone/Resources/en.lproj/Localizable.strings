@@ -41,6 +41,7 @@
 "pairing.success" = "Paired and saved on this iPhone";
 "pairing.save.failed" = "The Mac confirmed, but this iPhone couldn’t save the trusted device. Retry saving before starting another pairing.";
 "pairing.save.retry" = "Retry Saving";
+"pairing.save.progress" = "Saving the trusted device on this iPhone…";
 "pairing.close.accessibility" = "Close pairing";
 "pairing.error.code" = "That code is invalid, expired, or already used. Generate a new code on your Mac.";
 "pairing.error.rejected" = "The Mac rejected this pairing request.";

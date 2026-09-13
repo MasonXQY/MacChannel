@@ -5,6 +5,89 @@ import XCTest
 
 @MainActor
 final class PairingModelTests: XCTestCase {
+    func testHeldFirstSaveShowsLocalProgressUntilDurableSuccess() async throws {
+        try await exerciseHeldSaving(failFirstSave: false)
+    }
+
+    func testHeldRetryImmediatelyLeavesFailureAndPreservesAuthorization() async throws {
+        try await exerciseHeldSaving(failFirstSave: true)
+    }
+
+    private func exerciseHeldSaving(failFirstSave: Bool) async throws {
+        let server = MemoryPairingServer()
+        let hostIdentity = try DeviceIdentity.ephemeral()
+        let joinIdentity = try DeviceIdentity.ephemeral()
+        let hostRepository = try TrustRepository(ownerIdentity: hostIdentity,
+            trustStore: TrustStore(owner: hostIdentity.id), persistedGeneration: 0)
+        let joinRepository = try TrustRepository(ownerIdentity: joinIdentity,
+            trustStore: TrustStore(owner: joinIdentity.id), persistedGeneration: 0)
+        let hostCoordinator = try PairingCoordinator(identity: hostIdentity, displayName: "Fixture Mac",
+            trustRepository: hostRepository,
+            transport: MemoryPairingTransport(server: server, observedSource: "held-host"))
+        let joinCoordinator = try PairingCoordinator(identity: joinIdentity, displayName: "Fixture iPhone",
+            trustRepository: joinRepository,
+            transport: MemoryPairingTransport(server: server, observedSource: "held-join"))
+        let host = MobilePairingSession(coordinator: hostCoordinator, persistTrust: {})
+        let release = AsyncStream<Bool>.makeStream()
+        let saves = SaveCounter()
+        let join = MobilePairingSession(coordinator: joinCoordinator, persistTrust: {
+            await saves.record()
+            var iterator = release.stream.makeAsyncIterator()
+            guard await iterator.next() == true else { throw TestFailure.expected }
+        })
+        var factories = 0
+        var refreshes = 0
+        let model = PairingModel(makeAttempt: {
+            factories += 1
+            return MemoryModelAttempt(session: join)
+        }, refreshDevices: { refreshes += 1 })
+        addTeardownBlock {
+            release.continuation.finish()
+            await model.cancelAndClose()
+            await host.stopObservation()
+            await join.stopObservation()
+        }
+        model.code = try await host.createCode()
+        model.submit()
+        await boundedWait { if case .active(.approvalRequested) = await host.currentState() { return true }; return false }
+        _ = try await host.approve()
+        await boundedWait { await saves.count == 1 }
+        await boundedWait { !model.showsWaitingProgress }
+        XCTAssertFalse(model.showsWaitingProgress, "A held local save must no longer wait for the Mac")
+        guard case .saving = model.phase else { return XCTFail("Expected local saving phase") }
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.requiresSaveRecovery)
+        XCTAssertTrue(model.isBusy)
+        XCTAssertEqual(refreshes, 0)
+        let authorization = await joinRepository.authenticationRecords()
+        release.continuation.yield(!failFirstSave)
+        await boundedWait { !model.isBusy }
+        if failFirstSave {
+            XCTAssertTrue(model.requiresSaveRecovery)
+            for succeeds in [false, true] {
+                model.retrySaving()
+                XCTAssertFalse(model.requiresSaveRecovery, "Retry must immediately replace failure with saving")
+                guard case .saving = model.phase else { return XCTFail("Expected immediate retry saving phase") }
+                XCTAssertNil(model.errorMessage)
+                XCTAssertTrue(model.isBusy)
+                XCTAssertEqual(refreshes, 0)
+                model.submit()
+                XCTAssertEqual(factories, 1)
+                let expectedCount = succeeds ? 3 : 2
+                await boundedWait { await saves.count == expectedCount }
+                XCTAssertFalse(model.showsWaitingProgress)
+                let unchanged = await joinRepository.authenticationRecords()
+                XCTAssertEqual(unchanged, authorization)
+                release.continuation.yield(succeeds)
+                await boundedWait { !model.isBusy }
+                if !succeeds { XCTAssertTrue(model.requiresSaveRecovery) }
+            }
+        }
+        guard case .paired = model.phase else { return XCTFail("Only released successful persistence may pair") }
+        XCTAssertEqual(refreshes, 1)
+        XCTAssertEqual(factories, 1)
+    }
+
     func testDoubleSubmitCreatesOnlyOneAttempt() async {
         let attempt = ControlledPairingAttempt()
         let factory = AttemptFactory(attempt: attempt)
@@ -248,6 +331,16 @@ final class PairingModelTests: XCTestCase {
 }
 
 private enum TestFailure: Error { case expected }
+
+@MainActor
+private func boundedWait(_ condition: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+    while !(await condition()) {
+        guard ContinuousClock.now < deadline else { XCTFail("Condition did not arrive", file: file, line: line); return }
+        await Task.yield()
+    }
+
+}
 
 @MainActor
 private func waitUntilIdle(_ model: PairingModel) async {

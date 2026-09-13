@@ -27,6 +27,7 @@ enum PairingPhase: Equatable {
     case entry
     case joining
     case waitingForMac(peer: DeviceSummary, fingerprint: String)
+    case saving(DeviceSummary)
     case saveFailed(DeviceSummary)
     case paired(DeviceSummary)
     case failed
@@ -86,9 +87,10 @@ final class PairingModel: Identifiable {
     }
 
     func retrySaving() {
-        guard requiresSaveRecovery, !isBusy, !isClosing, let attempt = activeAttempt else { return }
+        guard case let .saveFailed(peer) = phase, !isBusy, !isClosing, let attempt = activeAttempt else { return }
         isBusy = true
         errorMessage = nil
+        phase = .saving(peer)
         operationTask = Task { [weak self] in
             do {
                 let peer = try await attempt.retrySaving()
@@ -212,8 +214,9 @@ final class PairingModel: Identifiable {
                 errorMessage = String(localized: "pairing.error.save")
             case let .paired(peer):
                 phase = .paired(peer)
-            case .saving:
-                break
+            case let .saving(peer):
+                phase = .saving(peer)
+                errorMessage = nil
             case .active:
                 break
             }
@@ -230,9 +233,12 @@ final class PairingModel: Identifiable {
         case let .paired(peer):
             phase = .paired(peer)
             errorMessage = nil
-        case let .saveFailed(peer), let .saving(peer):
+        case let .saveFailed(peer):
             phase = .saveFailed(peer)
             errorMessage = String(localized: "pairing.error.save")
+        case let .saving(peer):
+            phase = .saving(peer)
+            errorMessage = nil
         case .active:
             phase = .failed
             errorMessage = actionableMessage(for: fallbackError)

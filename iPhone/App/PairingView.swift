@@ -60,6 +60,12 @@ struct PairingView: View {
                     ProgressView("pairing.waiting.body")
                 }
             }
+        case let .saving(peer):
+            Section {
+                ProgressView("pairing.save.progress")
+                    .accessibilityIdentifier("pairing-saving-progress")
+                Text(peer.displayName)
+            }
         case let .saveFailed(peer):
             Section {
                 Label("pairing.save.failed", systemImage: "externaldrive.badge.exclamationmark")

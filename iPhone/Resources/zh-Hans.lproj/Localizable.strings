@@ -41,6 +41,7 @@
 "pairing.success" = "已配对并保存在这台 iPhone 上";
 "pairing.save.failed" = "Mac 已确认，但这台 iPhone 无法保存受信任设备。开始新的配对前请重试保存。";
 "pairing.save.retry" = "重试保存";
+"pairing.save.progress" = "正在这台 iPhone 上保存受信任设备…";
 "pairing.close.accessibility" = "关闭配对";
 "pairing.error.code" = "配对码无效、已过期或已被使用。请在 Mac 上生成新配对码。";
 "pairing.error.rejected" = "Mac 拒绝了此次配对请求。";
