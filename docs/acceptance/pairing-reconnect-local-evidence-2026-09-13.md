@@ -78,3 +78,13 @@ Under `.build/pairing-acceptance-fixtures/`:
 | dropmesh-acceptance-8MiB.bin | 8388608 | 139180b5aa0656db97a0b862a7ad5140bddea37d8ae2d31fc590ec374b8d9b8b |
 
 Text is a new synthetic bilingual message; image is an unchanged copy of the repository's Store logo, visually inspected; binary is freshly generated random fixture data, not a key or user file. The generator refuses overwriting an existing fixture. Sizes and hashes were independently measured with wc/shasum. Only these three files are transfer fixtures; the local generator source is not part of the send batch. No device transfer has been performed with them yet.
+
+## Signing/deployment preflight after presentation review
+
+Read-only signing validation on unchanged profile from `/Users/mason/Developer/DropMesh-Releases/build4-4c69c52/DropMesh.app/Contents/embedded.provisionprofile`:
+
+- `Scripts/verify-apple-provisioning-profile.swift` exited0, verifying CMS signature and Apple system-root chain; verified public profile payload retained in owner-only `/private/tmp/dropmesh-profile-preflight.tSg88b/profile.plist`.
+- Existing `macchannel_validate_macos_profile` passed exact macOS distribution kind, application ID `XKAZ67HN45.com.zensystech.dropmesh`, team/keychain group, and unexpired profile requirements.
+- Existing `macchannel_require_profile_certificate` passed inclusion of valid local Store signing identity fingerprint `B990ABAD9E4AB3814BCC078501D8F76A896FFD8C`. Profile name DropMesh Mac App Store 2026, expiry2027-09-06T17:29:47Z. This did not sign a new app or exercise private-key access.
+
+Deployment connectivity preflight: current workstation public IPv4 `92.96.17.75`; one5second BatchMode/StrictHostKeyChecking SSH probe to178.105.165.209 timed out. Logged-in Hetzner firewall page11546024 shows Fully applied,7rules,1resource and SSH22 still restricted to92.96.19.217. No browser configuration was changed; source-restricted temporary access, if needed, remains a later deployment action with removal afterward. Other exposed service rules were only read. No server image or database mutation occurred.
