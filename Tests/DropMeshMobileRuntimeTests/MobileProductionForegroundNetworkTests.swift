@@ -15,8 +15,8 @@ final class MobileProductionForegroundNetworkTests: XCTestCase {
         let graphs = DrainGraphs(fixture: fixture)
         let runtime = MobileForegroundRuntime(identity: fixture.identity, repository: fixture.repository,
             layout: layout, database: database, persistence: database, persistTrust: { },
-            makeNetwork: { directory, state, discovery in
-                try await graphs.make(directory: directory, state: state, discovery: discovery)
+            makeNetwork: { directory, state, sync, discovery in
+                try await graphs.make(directory: directory, state: state, sync: sync, discovery: discovery)
             })
         try await runtime.startForeground()
         await graphs.socketEntered.wait()
@@ -171,11 +171,13 @@ private actor DrainGraphs {
     init(fixture: DrainFixture) { self.fixture = fixture }
     func make(directory: DeviceDirectory,
               state: @escaping @Sendable (MobilePresenceState) async -> Void,
+              sync: @escaping @Sendable (PresenceTrustSyncState) async -> Void,
               discovery: @escaping @Sendable (Bool) async -> Void) throws -> any MobileForegroundNetwork {
         count += 1
         let socket = DrainSocket(entered: socketEntered, closed: socketClosed)
         let presence = MobilePresenceSupervisor(identity: fixture.identity, repository: fixture.repository,
-            directory: directory, makeSocket: { socket }, sleep: { try await Task.sleep(for: $0) }, onState: state)
+            directory: directory, makeSocket: { socket }, sleep: { try await Task.sleep(for: $0) }, onState: state,
+            onTrustSyncState: sync)
         let session = URLSession(configuration: .ephemeral, delegate: DrainHTTPDelegate(httpInvalidated), delegateQueue: nil)
         let signaling = count == 1 ? fixture.signaling : RendezvousWebRTCSignaling(session: presence.bridge)
         return try MobileProductionForegroundNetwork(identity: fixture.identity, repository: fixture.repository,

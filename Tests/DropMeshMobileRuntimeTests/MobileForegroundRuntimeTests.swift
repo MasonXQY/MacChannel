@@ -4,6 +4,25 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileForegroundRuntimeTests: XCTestCase {
+    func testTrustSyncCallbacksRetireWithForegroundEpoch() async throws {
+        let fixture = try await RuntimeFixture.make()
+        try await fixture.runtime.startForeground()
+        await fixture.networks.syncCallbacks[0](.synchronized)
+        let synced = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(synced.trustSyncState, .synchronized)
+        await fixture.runtime.stopForeground()
+        let stopped = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(stopped.trustSyncState, .idle)
+        try await fixture.runtime.startForeground()
+        await fixture.networks.syncCallbacks[0](.needsAttention)
+        let current = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(current.trustSyncState, .idle)
+        await fixture.networks.syncCallbacks[1](.pendingPersistence)
+        let pending = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(pending.trustSyncState, .pendingPersistence)
+        XCTAssertEqual(pending.state, .online)
+        await fixture.runtime.stopForeground()
+    }
     func testCompletedSendWinsLateRevocationAccountingWithoutRewritingHistory() async throws {
         let fixture = try await RuntimeFixture.make()
         await fixture.persistence.release.open()
@@ -681,6 +700,8 @@ private struct RuntimeNetwork: MobileForegroundNetwork {
 }
 
 private actor RuntimeNetworks {
+    var syncCallbacks: [@Sendable (PresenceTrustSyncState) async -> Void] = []
+    func recordSync(_ callback: @escaping @Sendable (PresenceTrustSyncState) async -> Void) { syncCallbacks.append(callback) }
     let firstStopped = RuntimeGate()
     let startControl = RuntimeTrustPersistence()
     var count = 0
@@ -726,7 +747,10 @@ private struct RuntimeFixture {
         try Data("fixture".utf8).write(to: file)
         let runtime = MobileForegroundRuntime(identity: context.identity, repository: context.repository, layout: layout,
             database: database, persistence: persistence, persistTrust: { await trustPersistence.wait(); try await context.persistTrust() },
-            makeNetwork: { _, state, _ in try await networks.make(state: state) },
+            makeNetwork: { _, state, sync, _ in
+                await networks.recordSync(sync)
+                return try await networks.make(state: state)
+            },
             onRestored: { await probe.restored($0) }, beforeSendAccounting: { await accounting.wait() })
         return Self(peer: peer.id, runtime: runtime, file: file, persistence: persistence, accounting: accounting, networks: networks, probe: probe, repository: context.repository, layout: layout, trustPersistence: trustPersistence)
     }

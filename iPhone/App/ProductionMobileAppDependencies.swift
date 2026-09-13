@@ -39,7 +39,7 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     func snapshot() async -> MobileAppSnapshot {
         let current = await runtime.currentSnapshot()
         let trustedIDs = await durableTrust.trustedIDs()
-        return MobileAppSnapshot(state: current.state, localID: context.identity.id,
+        return MobileAppSnapshot(state: current.state, trustSyncState: current.trustSyncState, localID: context.identity.id,
             trustedIDs: trustedIDs, reachable: current.devices,
             names: names.values, failure: current.failure, transfers: current.transfers,
             receivedCompletionIDs: current.received.map(\.transferID),

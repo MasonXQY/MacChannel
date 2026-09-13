@@ -138,3 +138,15 @@
 "share.error.disk" = "存储空间不足，无法保存副本。请释放 iPhone 空间后重新分享。";
 "share.error.cancelled" = "分享已取消，未发送任何文件。";
 "share.error.cleanup" = "无法移除临时副本。请重试清理后再关闭。未发送任何文件。";
+"presence.status.pending" = "状态待确认";
+"presence.online.nearby" = "附近在线";
+"presence.online" = "在线";
+"presence.syncing" = "正在同步设备";
+"presence.unreachable" = "暂不可达";
+"presence.sync.attention" = "信任同步需要处理";
+"presence.pending.save" = "设备更改正在等待保存到本机。";
+"presence.service.explanation" = "服务连接与设备同步是独立的。缺少设备状态并不能确定对方已关机或断网。";
+"presence.unnamed" = "未命名设备";
+"presence.retry.service" = "重试连接";
+"presence.retry.save" = "重试保存";
+"presence.save.failed" = "设备更改未能保存到此 iPhone。";

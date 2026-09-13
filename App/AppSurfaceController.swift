@@ -35,6 +35,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private let notificationService: (any ReceiveNotificationServicing)?
     private let transferSurfacePresentation: ((TransferSurfaceSection) -> Void)?
     private let onRetryRuntime: () -> Void
+    private let onRetryPresence: () -> Void
+    private let onRetryTrustSave: () -> Void
     private let onUseLocalNetwork: () -> Void
     private let now: () -> Date
 
@@ -74,6 +76,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         notificationService: (any ReceiveNotificationServicing)? = nil,
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
         onRetryRuntime: @escaping () -> Void = {},
+        onRetryPresence: @escaping () -> Void = {},
+        onRetryTrustSave: @escaping () -> Void = {},
         onUseLocalNetwork: @escaping () -> Void = {},
         now: @escaping () -> Date = Date.init
     ) {
@@ -90,6 +94,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         self.notificationService = notificationService
         self.transferSurfacePresentation = transferSurfacePresentation
         self.onRetryRuntime = onRetryRuntime
+        self.onRetryPresence = onRetryPresence
+        self.onRetryTrustSave = onRetryTrustSave
         self.onUseLocalNetwork = onUseLocalNetwork
         self.now = now
     }
@@ -329,6 +335,9 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     func updateRuntimeStatus(_ status: AppRuntimeStatus) {
         settingsModel.runtimeStatus = status
+    }
+    func updateRuntimePresence(_ snapshot: RuntimePresenceSnapshot) {
+        settingsModel.runtimePresence = snapshot
     }
 
     func updateReceiveNotification(
@@ -570,6 +579,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 updateService: updateService,
                 localNetworkModel: localNetworkModel,
                 onRetryRuntime: onRetryRuntime,
+                onRetryPresence: onRetryPresence,
+                onRetryTrustSave: onRetryTrustSave,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
             ).environmentObject(LocalizationController.shared)
         )

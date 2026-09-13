@@ -298,6 +298,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             }
+            runtimeHost.onPresenceChange = { [weak self] snapshot in
+                self?.surfaceController?.updateRuntimePresence(snapshot)
+            }
             bootstrapTask = Task { await runtimeHost.bootstrap() }
             NSWorkspace.shared.notificationCenter.addObserver(
                 self,
@@ -360,6 +363,12 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             onRetryRuntime: { [weak runtimeHost] in
                 Task { await runtimeHost?.bootstrap() }
             },
+            onRetryPresence: { [weak runtimeHost] in
+                Task { await runtimeHost?.reconnectPublicService() }
+            },
+            onRetryTrustSave: { [weak runtimeHost] in
+                Task { await runtimeHost?.retryTrustPersistence() }
+            },
             onUseLocalNetwork: { [weak self, weak runtimeHost] in
                 if self?.distributionChannel == .appStore {
                     self?.localNetworkActivationStore.activate()
@@ -402,6 +411,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         }
         statusController.setRuntimeStatus(status)
         surfaces.updateRuntimeStatus(status)
+        if let runtimeHost { surfaces.updateRuntimePresence(runtimeHost.presence) }
         surfaces.observe(container.deviceDirectory)
         if let transferSnapshots = container.transferSnapshots {
             surfaces.observeTransferSnapshots(transferSnapshots)

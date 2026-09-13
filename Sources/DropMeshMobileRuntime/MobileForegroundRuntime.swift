@@ -16,6 +16,7 @@ public enum MobileRuntimeError: Error, Equatable, Sendable {
 
 public struct MobileRuntimeSnapshot: Sendable {
     public let state: MobileRuntimeState
+    public let trustSyncState: PresenceTrustSyncState
     public let foregroundRequested: Bool
     public let devices: [DeviceSummary]
     public let transfers: [TransferSnapshot]
@@ -32,6 +33,7 @@ public actor MobileForegroundRuntime {
     typealias NetworkFactory = @Sendable (
         DeviceDirectory,
         @escaping @Sendable (MobilePresenceState) async -> Void,
+        @escaping @Sendable (PresenceTrustSyncState) async -> Void,
         @escaping @Sendable (Bool) async -> Void
     ) async throws -> any MobileForegroundNetwork
 
@@ -76,6 +78,7 @@ public actor MobileForegroundRuntime {
     private var handledDiscoveryEnabled = false
     private var operations: [UUID: SendOperation] = [:]
     private var state: MobileRuntimeState = .inactive
+    private var trustSyncState: PresenceTrustSyncState = .idle
     private var devices: [DeviceSummary] = []
     private var transfers: [TransferSnapshot] = []
     private var received: [TransferReceiveResult] = []
@@ -97,11 +100,11 @@ public actor MobileForegroundRuntime {
         persistTrust = { try await context.persistTrust() }
         let identity = context.identity
         let repository = context.repository
-        makeNetwork = { directory, state, discovery in
+        makeNetwork = { directory, state, sync, discovery in
             try MobileProductionForegroundNetwork(identity: identity, repository: repository,
                 directory: directory, publication: { await context.trustPublicationSnapshot() },
                 persistedUpdates: { await context.persistedTrustUpdates() },
-                onState: state, onDiscovery: discovery)
+                onState: state, onTrustSyncState: sync, onDiscovery: discovery)
         }
         onRestored = { _ in }
         beforeSendAccounting = { }
@@ -124,7 +127,7 @@ public actor MobileForegroundRuntime {
     }
 
     public func currentSnapshot() -> MobileRuntimeSnapshot {
-        MobileRuntimeSnapshot(state: state, foregroundRequested: desiredForeground, devices: devices, transfers: transfers,
+        MobileRuntimeSnapshot(state: state, trustSyncState: trustSyncState, foregroundRequested: desiredForeground, devices: devices, transfers: transfers,
             received: received, localNetworkAvailable: localAvailable, failure: failure,
             historyAvailabilityFailure: historyAvailabilityFailure)
     }
@@ -173,6 +176,7 @@ public actor MobileForegroundRuntime {
         acceptingSends = false
         epoch &+= 1
         state = .stopping
+        trustSyncState = .idle
         localAvailable = false
         publish()
         // Initiate all graph shutdown even when transition is joining a policy drain.
@@ -289,12 +293,13 @@ public actor MobileForegroundRuntime {
                 await accountOutstandingSends()
                 guard desiredForeground else { continue }
                 let generation = epoch
-                state = .starting; failure = nil; publish()
+                state = .starting; trustSyncState = .idle; failure = nil; publish()
                 do {
                     await startObserversIfNeeded()
                     guard desiredForeground, generation == epoch else { continue }
                     let graph = try await makeNetwork(directory,
                         { [weak self] in await self?.presenceChanged($0, generation: generation) },
+                        { [weak self] in await self?.trustSyncChanged($0, generation: generation) },
                         { [weak self] in await self?.discoveryChanged($0, generation: generation) })
                     network = graph; graphEpoch = generation
                     guard desiredForeground, generation == epoch else { continue }
@@ -460,12 +465,18 @@ public actor MobileForegroundRuntime {
 
     private func presenceChanged(_ value: MobilePresenceState, generation: UInt64) {
         guard desiredForeground, graphEpoch == generation, epoch == generation else { return }
+        if value != .online { trustSyncState = .idle }
         switch value {
         case .online: state = .online
         case .connecting: state = .starting
         case .reconnecting: state = .reconnecting
         default: break
         }
+        publish()
+    }
+    private func trustSyncChanged(_ value: PresenceTrustSyncState, generation: UInt64) {
+        guard desiredForeground, graphEpoch == generation, epoch == generation else { return }
+        trustSyncState = value
         publish()
     }
     private func discoveryChanged(_ value: Bool, generation: UInt64) {

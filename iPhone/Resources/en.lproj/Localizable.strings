@@ -138,3 +138,15 @@
 "share.error.disk" = "There is not enough storage for these copies. Free space on your iPhone and share again.";
 "share.error.cancelled" = "Sharing was cancelled. No files were sent.";
 "share.error.cleanup" = "Temporary copies could not be removed. Retry cleanup before closing. No files were sent.";
+"presence.status.pending" = "Status pending";
+"presence.online.nearby" = "Online nearby";
+"presence.online" = "Online";
+"presence.syncing" = "Syncing devices";
+"presence.unreachable" = "Currently unreachable";
+"presence.sync.attention" = "Trust sync needs attention";
+"presence.pending.save" = "Device changes are waiting to be saved on this device.";
+"presence.service.explanation" = "Service connection and device synchronization are separate. A missing device status does not tell us whether it is powered off or disconnected.";
+"presence.unnamed" = "Unnamed device";
+"presence.retry.service" = "Retry connection";
+"presence.retry.save" = "Retry saving";
+"presence.save.failed" = "Device changes could not be saved on this iPhone.";

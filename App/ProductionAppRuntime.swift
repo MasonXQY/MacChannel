@@ -183,6 +183,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let launchTestKeychain: KeychainStore?
     private let launchTestDataDirectory: URL?
     private var stopped = false
+    private let trustSaveRetry = RuntimeTrustSaveRetry()
     private var localNetworkStarted = false
 
     init(
@@ -322,6 +323,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                 guard !Task.isCancelled else { return }
                 do {
                     try await trustStore.persistLatest(from: trustRepository)
+                    statusSource.clearTrustSaveFailure()
                 } catch {
                     statusSource.yield(.serviceError(.statusTrustSaveFailed))
                 }
@@ -364,6 +366,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             sleep: { try await Task.sleep(for: $0) },
             onState: { state in
                 await MainActor.run {
+                    statusSource.updatePresence(state)
                     switch state {
                     case .connecting, .reconnecting:
                         statusSource.yield(.serviceOffline(.statusServiceRecovering))
@@ -373,6 +376,9 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                         statusSource.yield(.serviceOffline(.statusServiceOffline))
                     }
                 }
+            },
+            onTrustSyncState: { state in
+                await MainActor.run { statusSource.updateTrustSync(state) }
             },
             publication: { await trustRepository.publicationSnapshot(persisted: trustStore.persistedState()) },
             persistedUpdates: { await trustStore.persistedUpdates() }
@@ -476,6 +482,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     func shutdown() async {
         guard !stopped else { return }
         stopped = true
+        await trustSaveRetry.stop()
         await container.pairingSurfaceService.stopObservation()
         await receiveEvents.finish()
         await historySource.stop()
@@ -506,6 +513,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     }
 
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { statusSource.stream }
+    func presenceUpdates() -> AsyncStream<RuntimePresenceSnapshot>? { statusSource.presenceStream }
 
     func reconnectPublicService() async {
         await publicServiceLifecycle?.retryConnection()
@@ -513,6 +521,19 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             browser?.start()
             advertiser?.start()
         }
+    }
+
+    func retryTrustPersistence() async {
+        guard !stopped else { return }
+        await trustSaveRetry.run(save: { [trustStore, trustRepository] in
+            try await trustStore.persistLatest(from: trustRepository)
+        }, completed: { [weak self] saved in
+            guard let self, !self.stopped else { return }
+            if saved {
+                self.statusSource.clearTrustSaveFailure()
+                await self.publicServiceLifecycle?.refreshTrust()
+            } else { self.statusSource.yield(.serviceError(.statusTrustSaveFailed)) }
+        })
     }
 
     func startLocalNetwork() async {
@@ -524,17 +545,45 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
 }
 
 final class RuntimeStatusSource: @unchecked Sendable {
+    let presenceStream: AsyncStream<RuntimePresenceSnapshot>
+    private let presenceContinuation: AsyncStream<RuntimePresenceSnapshot>.Continuation
+    @MainActor private var presence = RuntimePresenceSnapshot()
     let stream: AsyncStream<AppRuntimeStatus>
     private let continuation: AsyncStream<AppRuntimeStatus>.Continuation
 
     init() {
+        let presencePair = AsyncStream<RuntimePresenceSnapshot>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        presenceStream = presencePair.stream
+        presenceContinuation = presencePair.continuation
+        presenceContinuation.yield(RuntimePresenceSnapshot())
         let pair = AsyncStream<AppRuntimeStatus>.makeStream(bufferingPolicy: .bufferingNewest(1))
         stream = pair.stream
         continuation = pair.continuation
     }
 
-    func yield(_ status: AppRuntimeStatus) { continuation.yield(status) }
-    func finish() { continuation.finish() }
+    @MainActor func yield(_ status: AppRuntimeStatus) {
+        if status == .serviceError(.statusTrustSaveFailed) {
+            presence.trustSaveFailed = true
+            presenceContinuation.yield(presence)
+        }
+        continuation.yield(status)
+    }
+    @MainActor func clearTrustSaveFailure() {
+        guard presence.trustSaveFailed else { return }
+        presence.trustSaveFailed = false
+        presenceContinuation.yield(presence)
+        continuation.yield(presence.authenticated ? .ready : .serviceOffline(.statusServiceRecovering))
+    }
+    @MainActor func updatePresence(_ state: PresenceSessionState) {
+        presence.authenticated = state == .online
+        if !presence.authenticated { presence.trustSync = .idle }
+        presenceContinuation.yield(presence)
+    }
+    @MainActor func updateTrustSync(_ state: PresenceTrustSyncState) {
+        presence.trustSync = state
+        presenceContinuation.yield(presence)
+    }
+    func finish() { continuation.finish(); presenceContinuation.finish() }
 }
 
 protocol RuntimeReceiveSettingsProviding: Sendable {

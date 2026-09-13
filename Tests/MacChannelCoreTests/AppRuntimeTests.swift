@@ -265,6 +265,27 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testRetiredPresenceStreamCannotUpdateReplacementRuntime() async {
+        let first = RuntimeLifecycleSpy(), second = RuntimeLifecycleSpy()
+        let host = AppRuntimeHost(builder: SequencedRuntimeBuilder(results: [
+            .success(AppRuntimeLaunch(runtime: first, status: .ready)),
+            .success(AppRuntimeLaunch(runtime: second, status: .ready))
+        ]))
+        await host.bootstrap()
+        first.presenceSource.updatePresence(.online)
+        first.presenceSource.updateTrustSync(.synchronized)
+        for _ in 0..<100 where !host.presence.authenticated { await Task.yield() }
+        XCTAssertTrue(host.presence.authenticated)
+        await host.stopCurrentRuntime()
+        XCTAssertEqual(host.presence, RuntimePresenceSnapshot())
+        await host.bootstrap()
+        first.presenceSource.updateTrustSync(.needsAttention)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(host.presence, RuntimePresenceSnapshot())
+        await host.shutdown()
+    }
+
+    @MainActor
     func testStoreRelaunchRestoresOnlyPersistedLocalNetworkActivation() async {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)
@@ -2692,6 +2713,8 @@ private actor CancellationInsensitivePresenceGate {
 
 @MainActor
 private final class RuntimeLifecycleSpy: AppRuntimeLifecycle {
+    let presenceSource = RuntimeStatusSource()
+    func presenceUpdates() -> AsyncStream<RuntimePresenceSnapshot>? { presenceSource.presenceStream }
     let container = AppContainer.localShell()
     private(set) var shutdownCount = 0
     private(set) var localNetworkStartCount = 0

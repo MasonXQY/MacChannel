@@ -83,10 +83,21 @@ struct DeviceListView: View {
                 Label("receiving.foreground", systemImage: "iphone.radiowaves.left.and.right")
                     .font(.body)
                     .foregroundStyle(.secondary)
-                if model.serviceFailure != nil {
+                Text("presence.service.explanation").font(.caption).foregroundStyle(.secondary)
+                if model.trustSyncState == .needsAttention {
+                    Label("presence.sync.attention", systemImage: "exclamationmark.triangle")
+                } else if model.trustSyncState == .pendingPersistence {
+                    Text("presence.pending.save")
+                } else if model.serviceState == .online && model.trustSyncState != .synchronized {
+                    Text("presence.syncing")
+                }
+                if model.serviceFailure == .trustPersistence {
+                    Text("presence.save.failed")
+                    Button("presence.retry.save") { model.retryTrustSave() }
+                } else if model.serviceFailure != nil {
                     Text("service.error").foregroundStyle(.secondary)
                     Button("action.retry") { model.retryConnection() }
-                } else if model.serviceState == .reconnecting {
+                } else if model.serviceState == .reconnecting || model.trustSyncState == .needsAttention {
                     Button("action.retry") { model.retryConnection() }
                 }
             }
@@ -105,7 +116,7 @@ struct DeviceListView: View {
                 } else {
                     ForEach(model.pairedDevices, id: \.id) { device in
                         VStack(alignment: .leading, spacing: 12) {
-                            DeviceRow(device: device)
+                            DeviceRow(device: device, presentation: model.presentation(for: device))
                             Button("devices.remove", role: .destructive) { removalCandidate = device }
                                 .buttonStyle(.borderless)
                                 .accessibilityIdentifier("remove-device-\(device.id.rawValue.uuidString)")
@@ -166,6 +177,7 @@ struct DeviceListView: View {
 
 private struct DeviceRow: View {
     let device: DeviceSummary
+    let presentation: PeerConnectionPresentation
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
@@ -183,11 +195,11 @@ private struct DeviceRow: View {
 
     private var details: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(device.displayName.isEmpty ? String(localized: "devices.paired.mac") : device.displayName)
+            Text(PeerConnectionPresentation.displayName(device.displayName, unnamed: String(localized: "presence.unnamed")))
             Text(device.id.rawValue.uuidString.prefix(8))
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
-            Text(device.availability == .offline ? "devices.offline" : "devices.online")
+            Text(LocalizedStringKey(presentation.rawValue))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }

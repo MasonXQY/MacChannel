@@ -193,6 +193,7 @@ final class LocalizationTests: XCTestCase {
             receiveNotificationSnapshot: ReceiveNotificationSnapshot(authorizationState: .denied)
         )
         let snapshot = TransferSnapshot(id: TransferID(rawValue: UUID()), peer: device.id, phase: .transferring, completedBytes: 25, totalBytes: 100, route: .lan)
+        settingsModel.runtimePresence = RuntimePresenceSnapshot(authenticated: true, trustSync: .synchronized)
         let transferModel = TransferSurfaceModel(active: [TransferSurfaceItem(snapshot: snapshot, peerName: "Studio Mac", displayName: "fixture.txt", bytesPerSecond: 1_000, estimatedTimeRemaining: 60, outputURL: nil, updatedAt: Date(timeIntervalSince1970: 1_000))])
         // Instantiate the exact production child rows once, with unchanged snapshots/models.
         // The observed parent mirrors Settings/TransferPopover; changing language must also
@@ -209,7 +210,7 @@ final class LocalizationTests: XCTestCase {
             let text = try nativeRenderedText(host, language: language, artifactName: "retained-rows-\(index)-\(language.localeIdentifier())")
             print("retained-rows-\(index): \(text)")
             let expectedSettings = language == .english
-                ? ["Online Nearby", "Rename", "Receive Notifications", "Not Allowed", "Software Update", "Version 9.9 is available"]
+                ? ["Online nearby", "Rename", "Receive Notifications", "Not Allowed", "Software Update", "Version 9.9 is available"]
                 : ["附近在线", "重命名", "接收通知", "未允许", "软件更新", "发现新版本"]
             let expectedTransfer = language == .english ? ["Transferring", "Local network", "Pause"] : ["传输中", "局域网直连", "暂停"]
             for value in expectedSettings + expectedTransfer {
@@ -328,7 +329,46 @@ final class LocalizationTests: XCTestCase {
     }
 
     @MainActor
-    private func render(_ view: NSView, size: NSSize, to url: URL) async throws {
+    func testPresenceNativeLocalizedRendersWhenRequested() async throws {
+        guard let path = ProcessInfo.processInfo.environment["DROPMESH_LOCALIZATION_RENDER_DIR"] else {
+            throw XCTSkip("Set DROPMESH_LOCALIZATION_RENDER_DIR to capture presence UI")
+        }
+        let output = URL(fileURLWithPath: path, isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let suite = "presence-render-\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let localization = LocalizationController(defaults: defaults)
+        for language in [AppLanguage.english, .simplifiedChinese] {
+            localization.setLanguage(language)
+            for (name, presence) in [
+                ("synchronized", RuntimePresenceSnapshot(authenticated: true, trustSync: .synchronized)),
+                ("syncing", RuntimePresenceSnapshot(authenticated: true, trustSync: .synchronizing)),
+                ("pending", RuntimePresenceSnapshot(authenticated: true, trustSync: .pendingPersistence)),
+                ("attention", RuntimePresenceSnapshot(authenticated: true, trustSync: .needsAttention)),
+                ("save-failed", RuntimePresenceSnapshot(authenticated: true, trustSync: .pendingPersistence, trustSaveFailed: true)),
+                ("reconnecting", RuntimePresenceSnapshot())
+            ] {
+                let model = SettingsSurfaceModel(localDisplayName: "Studio Mac", defaultDirectory: nil, runtimeStatus: .ready)
+                model.runtimePresence = presence
+                model.devices = [
+                    DeviceSetting(device: DeviceSummary(id: DeviceID(rawValue: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!), displayName: "Studio — Design and Engineering 工作室设计与工程", availability: .lan)),
+                    DeviceSetting(device: DeviceSummary(id: DeviceID(rawValue: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!), displayName: " \t", availability: .offline)),
+                    DeviceSetting(device: DeviceSummary(id: DeviceID(rawValue: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!), displayName: "Studio — Design and Engineering 工作室设计与工程", availability: .offline))
+                ]
+                let settings = SettingsView(model: model, service: LocalizationSettingsService(), directorySelector: NativeDirectorySelector(),
+                    updateService: LocalizationUpdateService(), onDismiss: {})
+                    .environmentObject(localization).background(Color(nsColor: .windowBackgroundColor))
+                try await render(NSHostingView(rootView: settings), size: NSSize(width: 620, height: 1320),
+                    to: output.appendingPathComponent("presence-\(language.localeIdentifier())-\(name).png"))
+                try await render(NSHostingView(rootView: settings), size: NSSize(width: 540, height: 650),
+                    to: output.appendingPathComponent("presence-\(language.localeIdentifier())-\(name)-devices.png"), scrollY: 410)
+            }
+        }
+    }
+
+    @MainActor
+    private func render(_ view: NSView, size: NSSize, to url: URL, scrollY: CGFloat? = nil) async throws {
         let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10_000, y: -10_000), size: size),
                               styleMask: .borderless, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -337,6 +377,16 @@ final class LocalizationTests: XCTestCase {
         view.appearance = NSAppearance(named: .aqua)
         view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(100))
+        if let scrollY {
+            func scrollView(in candidate: NSView) -> NSScrollView? {
+                if let scroll = candidate as? NSScrollView { return scroll }
+                return candidate.subviews.lazy.compactMap { scrollView(in: $0) }.first
+            }
+            let scroll = try XCTUnwrap(scrollView(in: view))
+            scroll.documentView?.scroll(NSPoint(x: 0, y: scrollY))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            view.layoutSubtreeIfNeeded()
+        }
         view.displayIfNeeded()
         let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: bitmap)

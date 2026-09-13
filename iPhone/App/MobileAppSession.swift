@@ -4,6 +4,7 @@ import MacChannelCore
 
 struct MobileAppSnapshot: Sendable {
     var state: MobileRuntimeState = .inactive
+    var trustSyncState: PresenceTrustSyncState = .idle
     var localID: DeviceID
     var trustedIDs: Set<DeviceID> = []
     var reachable: [DeviceSummary] = []

@@ -1,6 +1,39 @@
 import Foundation
 import MacChannelCore
 
+struct RuntimePresenceSnapshot: Equatable, Sendable {
+    var authenticated = false
+    var trustSync: PresenceTrustSyncState = .idle
+    var trustSaveFailed = false
+}
+
+/// Joins an admitted manual retry before its runtime can be replaced.
+@MainActor
+final class RuntimeTrustSaveRetry {
+    private var task: Task<Void, Never>?
+    private var stopped = false
+
+    func run(save: @escaping @MainActor () async throws -> Void,
+             completed: @escaping @MainActor (Bool) async -> Void) async {
+        guard !stopped else { return }
+        if let task { await task.value; return }
+        let operation = Task {
+            let saved: Bool
+            do { try await save(); saved = true } catch { saved = false }
+            guard !stopped else { return }
+            await completed(saved)
+        }
+        task = operation
+        await operation.value
+        task = nil
+    }
+
+    func stop() async {
+        stopped = true
+        await task?.value
+    }
+}
+
 enum AppLaunchMode: Equatable {
     case production
     case localShell
@@ -49,14 +82,18 @@ enum AppRuntimeStatus: Equatable {
 protocol AppRuntimeLifecycle: AnyObject {
     var container: AppContainer { get }
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>?
+    func presenceUpdates() -> AsyncStream<RuntimePresenceSnapshot>?
     func reconnectPublicService() async
+    func retryTrustPersistence() async
     func startLocalNetwork() async
     func shutdown() async
 }
 
 extension AppRuntimeLifecycle {
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { nil }
+    func presenceUpdates() -> AsyncStream<RuntimePresenceSnapshot>? { nil }
     func reconnectPublicService() async {}
+    func retryTrustPersistence() async {}
     func startLocalNetwork() async {}
 }
 
@@ -76,6 +113,7 @@ final class AppRuntimeHost {
     private var buildTask: Task<Void, Never>?
     private var runtime: (any AppRuntimeLifecycle)?
     private var statusTask: Task<Void, Never>?
+    private var presenceTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
     private let eligibility: (any RuntimeEligibilityMonitoring)?
     private var eligibilityTask: Task<Void, Never>?
@@ -84,6 +122,8 @@ final class AppRuntimeHost {
 
     private(set) var status: AppRuntimeStatus = .loading
     var onChange: ((AppRuntimeStatus, AppContainer?) -> Void)?
+    var onPresenceChange: ((RuntimePresenceSnapshot) -> Void)?
+    private(set) var presence = RuntimePresenceSnapshot()
     var onWillStop: (() async -> Void)?
 
     init(builder: any AppRuntimeBuilding, eligibility: (any RuntimeEligibilityMonitoring)? = nil) {
@@ -130,6 +170,15 @@ final class AppRuntimeHost {
             runtime = launch.runtime
             status = launch.status
             onChange?(launch.status, launch.runtime.container)
+            if let updates = launch.runtime.presenceUpdates() {
+                presenceTask = Task { [weak self] in
+                    for await snapshot in updates {
+                        guard !Task.isCancelled, self?.generation == generation else { return }
+                        self?.presence = snapshot
+                        self?.onPresenceChange?(snapshot)
+                    }
+                }
+            }
             if let updates = launch.runtime.statusUpdates() {
                 statusTask = Task { [weak self] in
                     for await status in updates {
@@ -170,6 +219,11 @@ final class AppRuntimeHost {
     func stopCurrentRuntime() async {
         if let stopTask { await stopTask.value; return }
         generation += 1
+        presence = RuntimePresenceSnapshot()
+        onPresenceChange?(presence)
+        presenceTask?.cancel()
+        let oldPresenceTask = presenceTask
+        presenceTask = nil
         statusTask?.cancel()
         let oldStatusTask = statusTask
         statusTask = nil
@@ -181,6 +235,7 @@ final class AppRuntimeHost {
             if !isShuttingDown { await onWillStop?() }
             await pendingBuild?.value
             await oldStatusTask?.value
+            await oldPresenceTask?.value
             await oldRuntime?.shutdown()
         }
         stopTask = task
@@ -198,6 +253,7 @@ final class AppRuntimeHost {
     func reconnectPublicService() async {
         await runtime?.reconnectPublicService()
     }
+    func retryTrustPersistence() async { await runtime?.retryTrustPersistence() }
 
     func startLocalNetwork() async {
         await runtime?.startLocalNetwork()

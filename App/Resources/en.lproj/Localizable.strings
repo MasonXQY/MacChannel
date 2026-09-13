@@ -227,3 +227,14 @@
 "pairing.saveFailed" = "Pairing could not be saved on this Mac.";
 "pairing.saveRecoveryHelp" = "Both devices confirmed the pairing. Retry saving on this Mac to finish. The other device may already have saved its trust.";
 "pairing.retrySaving" = "Retry Saving";
+"presence.status.pending" = "Status pending";
+"presence.online.nearby" = "Online nearby";
+"presence.online" = "Online";
+"presence.syncing" = "Syncing devices";
+"presence.unreachable" = "Currently unreachable";
+"presence.sync.attention" = "Trust sync needs attention";
+"presence.pending.save" = "Device changes are waiting to be saved on this device.";
+"presence.service.explanation" = "Service connection and device synchronization are separate. A missing device status does not tell us whether it is powered off or disconnected.";
+"presence.unnamed" = "Unnamed device";
+"presence.retry.service" = "Retry connection";
+"presence.retry.save" = "Retry saving";

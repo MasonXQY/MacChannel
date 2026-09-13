@@ -4,7 +4,7 @@ import MacChannelCore
 @main
 struct DropMeshTestHostApp: App {
     @Environment(\.scenePhase) private var scenePhase
-    @State private var model = MobileAppModel(loadSession: makeNativeEvidenceSession)
+    @State private var model = makeTestHostModel()
 
     var body: some Scene {
         WindowGroup {
@@ -23,8 +23,36 @@ struct DropMeshTestHostApp: App {
     }
 }
 
+@MainActor
+private func makeTestHostModel() -> MobileAppModel {
+    if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("-presence-evidence-") }) {
+        // Synthetic empty inbox, avoiding App Group entitlement errors in the inert host.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("presence-empty-inbox-\(UUID())")
+        return MobileAppModel(pendingShares: MobilePendingShareModel(makeStore: { ShareBatchStore(root: root) }),
+                              loadSession: makeNativeEvidenceSession)
+    }
+    return MobileAppModel(loadSession: makeNativeEvidenceSession)
+}
+
 private func makeNativeEvidenceSession() async -> any MobileAppSession {
     let session = InertMobileSession()
+    let arguments = ProcessInfo.processInfo.arguments
+    if let argument = arguments.first(where: { $0.hasPrefix("-presence-evidence-") }) {
+        let mode = String(argument.dropFirst("-presence-evidence-".count))
+        let unnamed = DeviceID(rawValue: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!)
+        let duplicate = DeviceID(rawValue: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!)
+        let sync: PresenceTrustSyncState = switch mode {
+        case "pending": .pendingPersistence
+        case "attention": .needsAttention
+        case "syncing": .synchronizing
+        default: .synchronized
+        }
+        let nearby = DeviceSummary(id: session.peer.id, displayName: session.peer.displayName, availability: .lan)
+        await session.setPresentation(state: mode == "reconnecting" ? .reconnecting : .online, sync: sync,
+            names: [session.peer.id: session.peer.displayName, unnamed: " \n", duplicate: session.peer.displayName],
+            reachable: [nearby])
+        return session
+    }
     if ProcessInfo.processInfo.arguments.contains("-history-evidence") {
         await session.setHistory([MobileHistoryEntry(
             id: TransferID(rawValue: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!),

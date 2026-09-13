@@ -6,6 +6,44 @@ import XCTest
 
 @MainActor
 final class MobileAppModelTests: XCTestCase {
+    func testPresentationUsesSyncWithoutChangingEligibilityAndPreservesDistinctNames() async {
+        let session = InertMobileSession()
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+        let other = DeviceID(rawValue: UUID())
+        await session.setPresentation(state: .online, sync: .needsAttention,
+            names: [session.peer.id: "Same name", other: "Same name"], reachable: [session.peer])
+        await model.refreshDevices()
+        XCTAssertEqual(model.pairedDevices.count, 2)
+        XCTAssertEqual(model.presentation(for: session.peer), .online)
+        XCTAssertTrue(model.isEligible(session.peer.id))
+        let missing = model.pairedDevices.first { $0.id == other }!
+        XCTAssertEqual(model.presentation(for: missing), .statusPending)
+        await session.setPresentation(state: .reconnecting, sync: .synchronized,
+            names: [session.peer.id: " "], reachable: [session.peer])
+        await model.refreshDevices()
+        XCTAssertEqual(model.presentation(for: session.peer), .statusPending)
+        XCTAssertFalse(model.isEligible(session.peer.id))
+        await model.close()
+    }
+
+    func testRemovalDismissesVisiblePairingSuccess() async throws {
+        let session = InertMobileSession()
+        await session.setPairingAttempt(AlreadyPairedAttempt(peer: session.peer))
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+        model.presentPairing()
+        model.pairing?.code = "123456"
+        model.pairing?.submit()
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.pairing?.phase != .paired(session.peer), ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertEqual(model.pairing?.phase, .paired(session.peer))
+        model.removeDevice(session.peer.id)
+        XCTAssertNil(model.pairing)
+        await model.close()
+    }
     func testInterruptedStartCannotOverwriteSuccessfulForeground() async throws {
         let session = InertMobileSession()
         let gate = BootstrapGate()

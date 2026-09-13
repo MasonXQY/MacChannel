@@ -162,6 +162,7 @@ final class SettingsSurfaceModel: ObservableObject {
     @Published var launchAtLogin: Bool
     @Published var devices: [DeviceSetting]
     @Published var runtimeStatus: AppRuntimeStatus
+    @Published var runtimePresence = RuntimePresenceSnapshot()
     @Published var updateSnapshot: SoftwareUpdateSnapshot
     @Published var receiveNotificationSnapshot: ReceiveNotificationSnapshot
     @Published var actionErrorContent: LocalizedContent?
@@ -427,6 +428,8 @@ struct SettingsView: View {
     @ObservedObject var localNetworkModel: LocalNetworkPermissionModel
     let loginItems: any LoginItemRegistering
     let onRetryRuntime: () -> Void
+    let onRetryPresence: () -> Void
+    let onRetryTrustSave: () -> Void
     let onDismiss: () -> Void
     @State private var draftLocalName: String
 
@@ -439,6 +442,8 @@ struct SettingsView: View {
         localNetworkModel: LocalNetworkPermissionModel = LocalNetworkPermissionModel(),
         loginItems: any LoginItemRegistering = LoginItemController.shared,
         onRetryRuntime: @escaping () -> Void = {},
+        onRetryPresence: @escaping () -> Void = {},
+        onRetryTrustSave: @escaping () -> Void = {},
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
@@ -449,6 +454,8 @@ struct SettingsView: View {
         self.localNetworkModel = localNetworkModel
         self.loginItems = loginItems
         self.onRetryRuntime = onRetryRuntime
+        self.onRetryPresence = onRetryPresence
+        self.onRetryTrustSave = onRetryTrustSave
         self.onDismiss = onDismiss
         _draftLocalName = State(initialValue: model.localDisplayName)
     }
@@ -579,6 +586,28 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var statusMessages: some View {
+        if service.isAvailable {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L10n.text(model.runtimePresence.authenticated ? .statusServiceConnected : .statusServiceRecovering))
+                Text(L10n.text(.presenceServiceExplanation)).font(.caption).foregroundStyle(.secondary)
+                if model.runtimePresence.trustSync == .needsAttention {
+                    Label(L10n.text(.presenceSyncAttention), systemImage: "exclamationmark.triangle")
+                } else if model.runtimePresence.trustSync == .pendingPersistence {
+                    Text(L10n.text(.presencePendingSave))
+                } else if model.runtimePresence.authenticated && model.runtimePresence.trustSync != .synchronized {
+                    Text(L10n.text(.presenceSyncing))
+                }
+                if model.runtimePresence.trustSaveFailed {
+                    Text(L10n.text(.statusTrustSaveFailed))
+                    Button(L10n.text(.presenceRetrySave), action: onRetryTrustSave)
+                }
+                if !model.runtimePresence.authenticated || model.runtimePresence.trustSync == .needsAttention {
+                    Button(L10n.text(.presenceRetryService), action: onRetryPresence)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+        }
         if !service.isAvailable {
             switch model.runtimeStatus {
             case .loading:
@@ -813,11 +842,14 @@ struct DeviceSettingRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if device.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(PeerConnectionPresentation.displayName(device.displayName, unnamed: L10n.text(.presenceUnnamed)))
+            }
             HStack {
                 Label(statusText, systemImage: statusSymbol)
                     .font(.caption)
                     .foregroundStyle(
-                        device.availability == .offline ? Color.secondary : Color.green
+                        presentation == .online || presentation == .onlineNearby ? Color.green : Color.secondary
                     )
                 Spacer()
                 Button(L10n.text(.commonRemove), systemImage: "trash", role: .destructive) {
@@ -834,24 +866,28 @@ struct DeviceSettingRow: View {
                     .disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .frame(minHeight: 40)
             }
+            Text(device.id.rawValue.uuidString.prefix(8))
+                .font(.caption.monospaced()).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6)
         .onChange(of: device) { _, updated in draftName = updated.displayName }
     }
 
     private var statusText: String {
-        switch device.availability {
-        case .lan: L10n.text(.deviceNearby)
-        case .internet: L10n.text(.deviceOnline)
-        case .offline: L10n.text(.deviceOffline)
-        }
+        L10n.text(LocalizedKey(rawValue: presentation.rawValue)!)
+    }
+
+    private var presentation: PeerConnectionPresentation {
+        .resolve(authenticated: model.runtimePresence.authenticated,
+                 sync: model.runtimePresence.trustSync, availability: device.availability)
     }
 
     private var statusSymbol: String {
-        switch device.availability {
-        case .lan: "wifi"
-        case .internet: "network"
-        case .offline: "wifi.slash"
+        switch presentation {
+        case .onlineNearby: "wifi"
+        case .online: "network"
+        case .syncingDevices: "arrow.triangle.2.circlepath"
+        case .statusPending, .currentlyUnreachable: "questionmark.circle"
         }
     }
 

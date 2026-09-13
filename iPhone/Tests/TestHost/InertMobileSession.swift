@@ -7,6 +7,7 @@ actor InertMobileSession: MobileAppSession {
     nonisolated let peer = DeviceSummary(id: DeviceID(rawValue: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!),
         displayName: "Studio MacBook Pro — Design and Engineering 工作室设计与工程", availability: .internet)
     private var value: MobileAppSnapshot
+    private var forcedStartState: MobileRuntimeState?
     private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     private var saveFailure = false
     private var refreshFailure = false
@@ -38,6 +39,16 @@ actor InertMobileSession: MobileAppSession {
         value.names = [peer.id: peer.displayName]
     }
     func snapshot() -> MobileAppSnapshot { value }
+    func setPresentation(state: MobileRuntimeState, sync: PresenceTrustSyncState,
+                         names: [DeviceID: String], reachable: [DeviceSummary]) {
+        value.state = state
+        forcedStartState = state
+        value.trustSyncState = sync
+        value.names = names
+        value.trustedIDs = Set(names.keys)
+        value.reachable = reachable
+        publish()
+    }
     func observe(_ changed: @escaping @Sendable () async -> Void) async {
         let id = UUID()
         let stream = AsyncStream<Void> { observers[id] = $0 }
@@ -51,7 +62,7 @@ actor InertMobileSession: MobileAppSession {
     func startForeground() async throws {
         startCount += 1
         try await beforeStart()
-        value.state = .online; publish()
+        value.state = forcedStartState ?? .online; publish()
     }
     func stopForeground() { stopCount += 1; value.state = .inactive; value.reachable = []; publish() }
     func retryConnection() async {

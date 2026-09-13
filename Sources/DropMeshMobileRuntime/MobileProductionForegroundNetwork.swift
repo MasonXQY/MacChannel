@@ -34,10 +34,11 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
          publication: @escaping @Sendable () async throws -> TrustPublicationSnapshot,
          persistedUpdates: @escaping @Sendable () async -> AsyncStream<AuthenticatedTrustState?>,
          onState: @escaping @Sendable (MobilePresenceState) async -> Void,
+         onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
          onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
         let session = URLSession(configuration: .ephemeral)
         let presence = MobilePresenceSupervisor(identity: identity, repository: repository,
-            directory: directory, onState: onState,
+            directory: directory, onState: onState, onTrustSyncState: onTrustSyncState,
             publication: publication, persistedUpdates: persistedUpdates)
         let signaling = RendezvousWebRTCSignaling(session: presence.bridge)
         let turn = try RendezvousTURNCredentialClient(identity: identity,

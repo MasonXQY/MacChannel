@@ -2,6 +2,30 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
+    func testEnglishPresencePresentation() { runPresence(language: "en", locale: "en_US") }
+    func testChinesePresencePresentation() { runPresence(language: "zh-Hans", locale: "zh_CN") }
+
+    private func runPresence(language: String, locale: String) {
+        for mode in ["synchronized", "syncing", "pending", "attention", "reconnecting"] {
+            let app = XCUIApplication()
+            app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-presence-evidence-\(mode)"]
+            app.launch()
+            XCTAssertTrue(app.staticTexts["service-status"].waitForExistence(timeout: 5))
+            attach(app.screenshot(), named: "Presence-\(language)-\(mode)-Service")
+            let unnamed = app.staticTexts[language == "en" ? "Unnamed device" : "未命名设备"]
+            reveal(unnamed, in: app)
+            XCTAssertTrue(unnamed.exists)
+            let expected: String = switch mode {
+            case "synchronized": language == "en" ? "Currently unreachable" : "暂不可达"
+            case "syncing": language == "en" ? "Syncing devices" : "正在同步设备"
+            default: language == "en" ? "Status pending" : "状态待确认"
+            }
+            XCTAssertTrue(app.staticTexts[expected].firstMatch.exists)
+            positionExplanation(unnamed, in: app)
+            attach(app.screenshot(), named: "Presence-\(language)-\(mode)-Devices")
+            app.terminate()
+        }
+    }
     func testEnglishFilesPickerCancellation() { runFilesCancellation(language: "en", locale: "en_US", cancel: "Cancel") }
     func testChineseFilesPickerCancellation() { runFilesCancellation(language: "zh-Hans", locale: "zh_CN", cancel: "取消") }
 

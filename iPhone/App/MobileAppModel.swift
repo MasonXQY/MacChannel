@@ -13,6 +13,7 @@ final class MobileAppModel {
     private(set) var bootstrapError: String?
     private(set) var pairedDevices: [DeviceSummary] = []
     private(set) var serviceState: MobileRuntimeState = .inactive
+    private(set) var trustSyncState: PresenceTrustSyncState = .idle
     var serviceFailure: MobileRuntimeFailure? { explicitFailure ?? lifecycleFailure ?? runtimeFailure }
     private var explicitFailure: MobileRuntimeFailure?
     private var lifecycleFailure: MobileRuntimeFailure?
@@ -86,6 +87,7 @@ final class MobileAppModel {
         case .active: desiredForeground = true
         case .background:
             desiredForeground = false
+            trustSyncState = .idle
             retryRecoveryRequest = nil
             retryCommandReturned = false
         case .inactive: return
@@ -162,7 +164,12 @@ final class MobileAppModel {
         let task = Task { [weak self] in
             while self?.refreshPending == true {
                 self?.refreshPending = false
+                let request = self?.lifecycleRequest
                 let snapshot = await session.snapshot()
+                guard self?.lifecycleRequest == request else {
+                    self?.refreshPending = true
+                    continue
+                }
                 self?.apply(snapshot)
             }
             self?.refreshTask = nil
@@ -173,6 +180,7 @@ final class MobileAppModel {
     private func apply(_ snapshot: MobileAppSnapshot) {
         guard !closed else { return }
         serviceState = snapshot.state
+        trustSyncState = desiredForeground == true ? snapshot.trustSyncState : .idle
         runtimeFailure = snapshot.failure
         history?.update(snapshot)
         settings?.update(snapshot)
@@ -190,6 +198,14 @@ final class MobileAppModel {
             DeviceSummary(id: id, displayName: snapshot.names[id] ?? "",
                 availability: reachable[id]?.availability ?? .offline)
         }.sorted { $0.id.rawValue.uuidString < $1.id.rawValue.uuidString }
+        if case let .paired(peer) = pairing?.phase,
+           !snapshot.trustedIDs.subtracting(revokedIDs).contains(peer.id) {
+            pairing = nil
+        }
+    }
+    func presentation(for device: DeviceSummary) -> PeerConnectionPresentation {
+        .resolve(authenticated: desiredForeground == true && serviceState == .online,
+                 sync: trustSyncState, availability: device.availability)
     }
     func isEligible(_ id: DeviceID) -> Bool {
         desiredForeground == true && serviceState == .online &&
@@ -212,11 +228,22 @@ final class MobileAppModel {
             self?.lifecycleTasks[id] = nil
         }
     }
+    func retryTrustSave() {
+        guard let session else { return }
+        let id = UUID()
+        lifecycleTasks[id] = Task { [weak self] in
+            do { try await session.refreshTrust(); self?.explicitFailure = nil }
+            catch { self?.explicitFailure = .trustPersistence }
+            await self?.refreshDevices()
+            self?.lifecycleTasks[id] = nil
+        }
+    }
     func removeDevice(_ id: DeviceID) {
         guard removalTask == nil, removalState != .saveFailed,
               pairedDevices.contains(where: { $0.id == id }), let session else { return }
         removalState = .removing
         revokedIDs.insert(id)
+        if case let .paired(peer) = pairing?.phase, peer.id == id { pairing = nil }
         send?.revokeLocally(id)
         pairedDevices.removeAll { $0.id == id }
         removalTask = Task { [self] in

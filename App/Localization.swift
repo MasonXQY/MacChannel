@@ -28,6 +28,17 @@ package enum AppLanguage: String, Codable, CaseIterable, Sendable {
 }
 
 package enum LocalizedKey: String, CaseIterable, Sendable {
+    case presenceStatusPending = "presence.status.pending"
+    case presenceOnlineNearby = "presence.online.nearby"
+    case presenceOnline = "presence.online"
+    case presenceSyncing = "presence.syncing"
+    case presenceUnreachable = "presence.unreachable"
+    case presenceSyncAttention = "presence.sync.attention"
+    case presencePendingSave = "presence.pending.save"
+    case presenceServiceExplanation = "presence.service.explanation"
+    case presenceUnnamed = "presence.unnamed"
+    case presenceRetryService = "presence.retry.service"
+    case presenceRetrySave = "presence.retry.save"
     case transferPreparing = "transfer.preparing"
     case transferConnecting = "transfer.connecting"
     case transferTransferring = "transfer.transferring"

@@ -227,3 +227,14 @@
 "pairing.saveFailed" = "未能在此 Mac 上保存配对。";
 "pairing.saveRecoveryHelp" = "双方已确认配对。请在此 Mac 上重试保存以完成配对；对方可能已保存信任。";
 "pairing.retrySaving" = "重试保存";
+"presence.status.pending" = "状态待确认";
+"presence.online.nearby" = "附近在线";
+"presence.online" = "在线";
+"presence.syncing" = "正在同步设备";
+"presence.unreachable" = "暂不可达";
+"presence.sync.attention" = "信任同步需要处理";
+"presence.pending.save" = "设备更改正在等待保存到本机。";
+"presence.service.explanation" = "服务连接与设备同步是独立的。缺少设备状态并不能确定对方已关机或断网。";
+"presence.unnamed" = "未命名设备";
+"presence.retry.service" = "重试连接";
+"presence.retry.save" = "重试保存";
