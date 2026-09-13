@@ -27,6 +27,7 @@ public actor AuthenticatedPresenceSupervisor {
     private let identity: DeviceIdentity
     private let repository: TrustRepository
     private let directory: DeviceDirectory
+    private let makeClient: @Sendable (DeviceDirectory) -> PresenceClient
     private let makeSocket: @Sendable () async throws -> any PresenceWebSocket
     private let sleep: @Sendable (Duration) async throws -> Void
     private let onState: @Sendable (PresenceSessionState) async -> Void
@@ -48,10 +49,24 @@ public actor AuthenticatedPresenceSupervisor {
         sleep: @escaping @Sendable (Duration) async throws -> Void,
         onState: @escaping @Sendable (PresenceSessionState) async -> Void = { _ in }
     ) {
+        self.init(identity: identity, repository: repository, directory: directory,
+                  origin: origin, makeSocket: makeSocket, sleep: sleep, onState: onState,
+                  makeClient: { PresenceClient(directory: $0) })
+    }
+
+    /// Internal construction seam to verify attempt-local client ownership.
+    init(
+        identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory, origin: URL,
+        makeSocket: @escaping @Sendable () async throws -> any PresenceWebSocket,
+        sleep: @escaping @Sendable (Duration) async throws -> Void,
+        onState: @escaping @Sendable (PresenceSessionState) async -> Void = { _ in },
+        makeClient: @escaping @Sendable (DeviceDirectory) -> PresenceClient
+    ) {
         self.origin = origin
         self.identity = identity
         self.repository = repository
         self.directory = directory
+        self.makeClient = makeClient
         self.makeSocket = makeSocket
         self.sleep = sleep
         self.onState = onState
@@ -133,7 +148,7 @@ public actor AuthenticatedPresenceSupervisor {
                 guard !stopped, !Task.isCancelled else { await socket.close(); break }
                 let attempt = try AuthenticatedPresenceSession(
                     identity: identity, origin: origin,
-                    socket: socket, client: PresenceClient(directory: directory), trustRepository: repository
+                    socket: socket, client: makeClient(directory), trustRepository: repository
                 )
                 session = attempt
                 current = (token, attempt)

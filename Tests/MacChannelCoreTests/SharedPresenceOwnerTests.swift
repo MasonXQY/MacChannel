@@ -3,6 +3,31 @@ import XCTest
 @testable import MacChannelCore
 
 final class SharedPresenceOwnerTests: XCTestCase {
+    func testEverySocketAttemptOwnsADistinctPresenceClient() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let trust = TrustStore(owner: identity.id)
+        let repository = try TrustRepository(ownerIdentity: identity, trustStore: trust, persistedGeneration: 0)
+        let first = try SupervisorSocket(identity: identity)
+        let second = try SupervisorSocket(identity: identity)
+        let factory = SupervisorSocketFactory([first, second])
+        let clients = SupervisorClientProbe()
+        let supervisor = AuthenticatedPresenceSupervisor(
+            identity: identity, repository: repository, directory: DeviceDirectory(trust: trust),
+            origin: URL(string: "wss://fixture.invalid/v1/ws")!,
+            makeSocket: { try await factory.next() }, sleep: { _ in },
+            makeClient: { clients.make(directory: $0) })
+        await supervisor.start()
+        try await eventually { await first.waitingForFrame }
+        await first.failReceive()
+        try await eventually { await second.waitingForFrame }
+        await supervisor.stop()
+        let values = clients.values
+        XCTAssertEqual(values.count, 2)
+        if values.count == 2 {
+            XCTAssertFalse(values[0] === values[1], "No online set or heartbeat may be reused across attempts")
+        }
+    }
+
     func testConcurrentStopsBothWaitForSameBlockedCleanup() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let socket = try SupervisorSocket(identity: identity, delayFirstClose: true)
@@ -410,4 +435,15 @@ private actor SupervisorSocket: PresenceWebSocket {
 private actor SupervisorDelayRecorder {
     var values: [Duration] = []
     func append(_ value: Duration) { values.append(value) }
+}
+
+private final class SupervisorClientProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var clients: [PresenceClient] = []
+    var values: [PresenceClient] { lock.withLock { clients } }
+    func make(directory: DeviceDirectory) -> PresenceClient {
+        let client = PresenceClient(directory: directory)
+        lock.withLock { clients.append(client) }
+        return client
+    }
 }

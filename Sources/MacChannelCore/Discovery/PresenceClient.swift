@@ -94,31 +94,54 @@ public final class URLSessionPresenceWebSocket: PresenceWebSocket, @unchecked Se
 public actor PresenceClient {
     public static let heartbeatInterval: TimeInterval = 20
 
-    private let directory: DeviceDirectory
+    private let applyPresence: @Sendable (DevicePresence) async -> Void
     private let heartbeatInterval: TimeInterval
     private var onlineDevices: Set<DeviceID> = []
+    // Includes offline peers until drain: an older in-flight renewal may still
+    // land after their offline event, so final cleanup must clear them too.
+    private var touchedDevices: Set<DeviceID> = []
     private var heartbeatTask: Task<Void, Never>?
+    private var disconnectTask: Task<Void, Never>?
+    private var generation: UInt64 = 0
+    private var acceptingEvents = true
+    private var deliveries: [UUID: Task<Void, Never>] = [:]
 
     public init(
         directory: DeviceDirectory,
         heartbeatInterval: TimeInterval = PresenceClient.heartbeatInterval
     ) {
-        self.directory = directory
+        self.applyPresence = { await directory.apply($0) }
         self.heartbeatInterval = heartbeatInterval
+    }
+
+    /// Internal directory-delivery seam for deterministic actor-hop drain tests.
+    init(heartbeatInterval: TimeInterval,
+         applyPresence: @escaping @Sendable (DevicePresence) async -> Void) {
+        self.heartbeatInterval = heartbeatInterval
+        self.applyPresence = applyPresence
     }
 
     deinit { heartbeatTask?.cancel() }
 
     func receiveAuthenticated(_ event: RendezvousPresenceEvent) async {
+        guard acceptingEvents else { return }
         switch event {
         case let .availability(device, isOnline):
+            touchedDevices.insert(device)
             if isOnline { onlineDevices.insert(device) } else { onlineDevices.remove(device) }
-            await directory.apply(.internet(device, online: isOnline))
+            // Track admitted directory work independently of the sole reader.
+            // Cleanup can join it without joining that reader (which joins us).
+            let id = UUID()
+            let delivery = Task { await applyPresence(.internet(device, online: isOnline)) }
+            deliveries[id] = delivery
+            await delivery.value
+            deliveries[id] = nil
         }
     }
 
     func startHeartbeats() {
-        guard heartbeatTask == nil else { return }
+        guard heartbeatTask == nil, disconnectTask == nil else { return }
+        acceptingEvents = true
         heartbeatTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -129,23 +152,41 @@ public actor PresenceClient {
         }
     }
 
-    func stopHeartbeats() {
-        heartbeatTask?.cancel()
+    func stopHeartbeats() async {
+        let heartbeat = heartbeatTask
+        heartbeat?.cancel()
+        await heartbeat?.value
         heartbeatTask = nil
     }
 
     func disconnect() async {
-        stopHeartbeats()
-        let previouslyOnline = onlineDevices
+        if let disconnectTask { await disconnectTask.value; return }
+        // Retire renewal before any directory/heartbeat actor hop. Keep the
+        // handle until joined so concurrent disconnects share the same drain.
+        generation += 1
+        acceptingEvents = false
+        heartbeatTask?.cancel()
+        let pendingDeliveries = Array(deliveries.values)
+        let previouslyOnline = touchedDevices
+        touchedDevices = []
         onlineDevices = []
-        for device in previouslyOnline {
-            await directory.apply(.internet(device, online: false))
+        let drain = Task {
+            await stopHeartbeats()
+            for delivery in pendingDeliveries { await delivery.value }
+            for device in previouslyOnline {
+                await applyPresence(.internet(device, online: false))
+            }
         }
+        disconnectTask = drain
+        await drain.value
+        disconnectTask = nil
     }
 
     func renewOnlinePresence() async {
+        let currentGeneration = generation
         for device in onlineDevices {
-            await directory.apply(.internet(device, online: true))
+            guard generation == currentGeneration, !Task.isCancelled else { return }
+            await applyPresence(.internet(device, online: true))
         }
     }
 }
@@ -171,6 +212,8 @@ public actor AuthenticatedPresenceSession {
     private var running = false
     private var readerActive = false
     private var livenessTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
+    private var retired = false
     private let presenceStream: AsyncStream<RendezvousPresenceEvent>
     private let signalStream: AsyncStream<RendezvousSignalFrame>
     private let trustResultStream: AsyncStream<RendezvousTrustResult>
@@ -308,6 +351,7 @@ public actor AuthenticatedPresenceSession {
     public private(set) var authenticationCapacityRejected = false
 
     public func connect(includeTrustRecords: Bool = true) async throws {
+        guard !retired else { throw AuthenticatedPresenceError.transport("session_retired") }
         trustAuthenticationRejected = false
         authenticationCapacityRejected = false
         await client.disconnect()
@@ -334,8 +378,13 @@ public actor AuthenticatedPresenceSession {
         else {
             throw AuthenticatedPresenceError.authenticationRejected
         }
+        guard !retired else { throw AuthenticatedPresenceError.transport("session_retired") }
         running = true
         await client.startHeartbeats()
+        guard !retired else {
+            await client.disconnect()
+            throw AuthenticatedPresenceError.transport("session_retired")
+        }
     }
 
     public func run() async throws {
@@ -346,13 +395,14 @@ public actor AuthenticatedPresenceSession {
         readerActive = true
         startLivenessMonitoring()
         defer {
-            stopLivenessMonitoring()
             readerActive = false
             if !running { finishStreams() }
         }
         do {
             while running {
-                let frame = try decodeFrame(try await receiveFrame())
+                let data = try await receiveFrame()
+                guard running, !retired else { break }
+                let frame = try decodeFrame(data)
                 switch frame.type {
                 case "presence":
                     guard let deviceID = frame.deviceID, let availability = frame.availability,
@@ -411,23 +461,39 @@ public actor AuthenticatedPresenceSession {
                 }
             }
         } catch {
-            running = false
-            await client.disconnect()
+            await stop()
             throw error
         }
+        await stop()
     }
 
     public func stop() async {
+        await beginStop().value
+    }
+
+    /// A liveness callback may initiate this cleanup but must not await it:
+    /// the cleanup joins that callback's task. External stop/run callers join.
+    private func beginStop() -> Task<Void, Never> {
+        if let stopTask { return stopTask }
+        retired = true
         running = false
-        stopLivenessMonitoring()
+        let liveness = livenessTask
+        liveness?.cancel()
         pendingTrustRecords.removeAll()
         finishStreams()
-        await client.disconnect()
-        await socket.close()
+        let drain = Task {
+            // Closing first releases production ping/receive continuations.
+            // Cancellation-insensitive transports still keep the drain pending.
+            await socket.close()
+            await liveness?.value
+            await client.disconnect()
+        }
+        stopTask = drain
+        return drain
     }
 
     private func startLivenessMonitoring() {
-        livenessTask?.cancel()
+        guard !retired, livenessTask == nil else { return }
         let interval = livenessInterval
         let timeout = livenessTimeout
         let socket = socket
@@ -467,16 +533,9 @@ public actor AuthenticatedPresenceSession {
         }
     }
 
-    private func stopLivenessMonitoring() {
-        livenessTask?.cancel()
-        livenessTask = nil
-    }
-
-    private func failStaleConnection() async {
+    private func failStaleConnection() {
         guard running else { return }
-        running = false
-        await socket.close()
-        await client.disconnect()
+        _ = beginStop()
     }
 
     private func ingestMembershipCatchUp(
