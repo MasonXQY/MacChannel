@@ -136,10 +136,12 @@ private struct MobilePickerPresentation: View {
             case .files:
                 if let picker = model.filesPicker {
                     MobileDocumentPicker(picker: picker)
-                        .onChange(of: picker.phase) { _, _ in model.filesChanged(presentation.id) }
                 }
             }
         }
+        // Keep cancellation explicit through the document picker's Cancel action;
+        // automatic dismissal can precede delivery of the selected documents.
+        .interactiveDismissDisabled(presentation.kind == .files)
         .onDisappear { model.presentationDismissed(presentation.id) }
     }
 }

@@ -2,6 +2,25 @@
 
 ## Current iPhone work — 2026-09-12
 
+FILES BRIDGE FIX — 2026-09-13 (base c4a64f7): user clarified that downloaded
+iCloud Drive files disappear from selection after confirmation, before recipient
+choice. Added 3 regressions; valid RED43/6 expected assertions then GREEN43/0.
+Retained picker now notifies retained model without a SwiftUI observer; Files
+disappearance is not explicit cancellation. Native Cancel/Done/background retain
+cleanup behavior; interactive Files-sheet dismissal disabled. Independent review
+Approved, stale cancellation comment corrected, focused rereview no findings.
+Root final xcresult summary confirms119/0 (117 unit + 2 EN/ZH native Cancel/reopen),
+.build/iphone-files-bridge-final.{log,xcresult}; all test sessions drained.
+Initial UI failure was a broad Cancel selector hitting underlying List; retained
+evidence and corrected navigation-bar selector. Earlier all-unit bundle-save
+failure superseded by readable final xcresult. Model defect fixed, actual iCloud
+callback ordering and successful provider import NOT physically verified. No
+phone installation, Mac/core/server/Store changes. Broader batch/history/pairing
+iteration remains incomplete. See investigation document for evidence/limits.
+Actual unsigned shipping iPhone app + embedded Share build also passes (exit0,
+.build/iphone-files-bridge-shipping.log), private DerivedData
+/private/tmp/dropmesh-files-bridge.baCh92. Build session drained; no installation.
+
 FEEDBACK CHECKPOINT — 2026-09-13: approved-spec iteration has two implemented
 and reviewed corrections, NOT the full requested update. Task1 482490d classifies
 unsupported Cocoa inputs accurately; Task2 ce2190d presents positive full-byte

@@ -1,5 +1,15 @@
 # iPhone continuation ledger
 
+FILES BRIDGE 2026-09-13: root TDD + independent review on base c4a64f7,
+not an SDD implementer task. User reports already-downloaded iCloud selection
+lost before recipient choice. Three model regressions RED43/6 then GREEN43/0;
+model-owned weak callback replaces view-lifetime result observation. Explicit
+cancellation and generation cleanup preserved. Final119tests/0 confirmed by
+readable .build/iphone-files-bridge-final.xcresult (117unit+2EN/ZHCancel/reopen).
+Initial UI selector failure retained; navigation-scoped Cancel corrected it.
+Review and final recheck Approved. No physical iCloud acceptance or phone update.
+No full batch iteration completion; installed Mac/core and Store unchanged.
+
 FEEDBACK MILESTONE VERIFIED 2026-09-13: Task2 complete (482490d..ce2190d,
 spec PASS/task quality PASS). No Critical/Important findings. Minor process note:
 task commit also contains its authorized report despite brief's four-source-file

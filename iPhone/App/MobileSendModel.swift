@@ -101,6 +101,7 @@ final class MobileSendModel {
                 // even when cancellation won before make returned.
                 let picker = try await MobileFilesPicker.make(service: service)
                 filesPicker = picker
+                picker.onPhaseChange = { [weak self] in self?.filesChanged(id) }
                 if !cancelled {
                     phase = .selecting
                     presentation = Presentation(id: id, kind: .files)
@@ -156,8 +157,13 @@ final class MobileSendModel {
     }
     func presentationDismissed(_ id: UUID) {
         guard generation == id, phase == .selecting else { return }
-        if filesPicker != nil { filesChanged(id) }
-        if phase == .selecting { requestCancellation() }
+        if filesPicker != nil {
+            // UIKit delivers selection and explicit cancellation independently
+            // of SwiftUI presentation teardown. Disappearance is not rejection.
+            filesChanged(id)
+            return
+        }
+        requestCancellation()
     }
     func selectRecipient(_ id: DeviceID) {
         guard phase == .ready else { return }

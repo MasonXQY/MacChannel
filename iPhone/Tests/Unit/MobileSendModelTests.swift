@@ -6,6 +6,50 @@ import XCTest
 
 @MainActor
 final class MobileSendModelTests: XCTestCase {
+    func testFilesResultReachesModelWithoutPresentationObservation() async throws {
+        let fixture = try SendFixture(); defer { fixture.remove() }
+        let model = MobileSendModel(session: InertMobileSession(), service: fixture.service())
+        model.setForeground(true); model.openFiles(); await model.waitForWork()
+        let picker = try XCTUnwrap(model.filesPicker)
+        picker.documentPicker(picker.controller, didPickDocumentsAt: [fixture.source])
+        await picker.waitForImport(); await model.waitForWork()
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.files.count, 1)
+        XCTAssertNil(model.presentation)
+        await model.cancelAndWait()
+    }
+
+    func testFilesSelectionAfterPresentationDisappearsIsNotCancellation() async throws {
+        let fixture = try SendFixture(); defer { fixture.remove() }
+        let model = MobileSendModel(session: InertMobileSession(), service: fixture.service())
+        model.setForeground(true); model.openFiles(); await model.waitForWork()
+        let picker = try XCTUnwrap(model.filesPicker)
+        let id = try XCTUnwrap(model.presentation?.id)
+        model.presentationDismissed(id)
+        picker.documentPicker(picker.controller, didPickDocumentsAt: [fixture.source])
+        await picker.waitForImport(); await model.waitForWork()
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.files.count, 1)
+        if let file = model.files.first {
+            XCTAssertEqual(try Data(contentsOf: file.url), try Data(contentsOf: fixture.source))
+        }
+        await model.cancelAndWait()
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+    }
+
+    func testFilesDelegateCancellationReachesModelWithoutPresentationObservation() async throws {
+        let fixture = try SendFixture(); defer { fixture.remove() }
+        let model = MobileSendModel(session: InertMobileSession(), service: fixture.service())
+        model.setForeground(true); model.openFiles(); await model.waitForWork()
+        let picker = try XCTUnwrap(model.filesPicker)
+        picker.documentPickerWasCancelled(picker.controller)
+        try await picker.cancelAndWait()
+        await model.waitForWork()
+        XCTAssertNotEqual(model.phase, .selecting)
+        await model.cancelAndWait()
+        XCTAssertNil(model.filesPicker)
+    }
+
     func testFullByteTransferIsConfirmingNotCompleted() {
         func snapshot(_ phase: TransferPhase, _ completed: Int64, _ total: Int64) -> TransferSnapshot {
             TransferSnapshot(id: TransferID(rawValue: UUID()), peer: DeviceID(rawValue: UUID()),

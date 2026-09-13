@@ -2,6 +2,44 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
+    func testEnglishFilesPickerCancellation() { runFilesCancellation(language: "en", locale: "en_US", cancel: "Cancel") }
+    func testChineseFilesPickerCancellation() { runFilesCancellation(language: "zh-Hans", locale: "zh_CN", cancel: "取消") }
+
+    private func runFilesCancellation(language: String, locale: String, cancel: String) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale]
+        app.launch()
+        let entry = app.buttons["send-open-button"]
+        reveal(entry, in: app)
+        XCTAssertTrue(entry.waitForExistence(timeout: 5))
+        entry.tap()
+        for _ in 0..<2 {
+            let files = app.buttons["send-files-button"]
+            reveal(files, in: app)
+            let available = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: files)
+            guard XCTWaiter.wait(for: [available], timeout: 5) == .completed else {
+                attach(app.screenshot(), named: "Files-reopen-failure")
+                XCTFail("Files selection must become available again")
+                return
+            }
+            files.tap()
+            let cancelButton = app.navigationBars.buttons[cancel].firstMatch
+            guard cancelButton.waitForExistence(timeout: 8) else {
+                attach(app.screenshot(), named: "Files-picker-missing")
+                let tree = XCTAttachment(string: app.debugDescription)
+                tree.lifetime = .keepAlways
+                add(tree)
+                XCTFail("Native document picker must expose its navigation Cancel action")
+                return
+            }
+            attach(app.screenshot(), named: "Files-picker-before-cancel")
+            cancelButton.tap()
+        }
+        let files = app.buttons["send-files-button"]
+        let available = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: files)
+        XCTAssertEqual(XCTWaiter.wait(for: [available], timeout: 5), .completed)
+    }
+
     func testEnglishFailedSendRecovery() { runFailedSend(language: "en", locale: "en_US", prefix: "English") }
     func testChineseFailedSendRecovery() { runFailedSend(language: "zh-Hans", locale: "zh_CN", prefix: "Simplified-Chinese") }
 

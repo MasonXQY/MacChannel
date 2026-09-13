@@ -3,14 +3,19 @@ import Observation
 import UIKit
 import UniformTypeIdentifiers
 
-/// Retain this adapter while its picker or prepared files are in use. Dismissal,
-/// background, or abandonment must call cancelAndWait. After preparation, callers
+/// Retain this adapter while its picker or prepared files are in use. Explicit
+/// cancellation, background, or abandonment must call cancelAndWait (not normal
+/// selection dismissal). After preparation, callers
 /// must first join any runtime.send that borrows files before discarding them.
 @MainActor @Observable
 final class MobileFilesPicker: NSObject, UIDocumentPickerDelegate {
     enum Phase: Equatable { case waiting, preparing, ready, cancelling, cancelled, failed }
     let controller: UIDocumentPickerViewController
-    private(set) var phase: Phase = .waiting
+    private(set) var phase: Phase = .waiting {
+        didSet { if phase != oldValue { onPhaseChange?() } }
+    }
+    /// Delivery belongs to the retained model, not the lifetime of the picker view.
+    @ObservationIgnored var onPhaseChange: (@MainActor () -> Void)?
     private(set) var files: [MobileImportedFile] = []
     private(set) var failure: MobileImportError?
     private let service: MobileImportService

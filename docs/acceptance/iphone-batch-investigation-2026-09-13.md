@@ -45,9 +45,10 @@ No new physical reproduction or speed measurements have been performed here.
 
 ## Required observations
 
-The user was asked asynchronously whether failure is before recipient selection
-or after pressing Send, and whether the source is local or a cloud provider.
-That answer narrows the reproduction; no answer has been assumed.
+User clarification on 2026-09-13: after confirming selection, no file appears
+selected. The source is iCloud Drive and Files reports it already downloaded.
+This narrows the failure to picker/import before recipient choice, not network
+transfer. Actual provider callback ordering remains unobserved on the phone.
 
 For synthetic fixtures only, record coarse events and monotonic durations:
 picker selection/dismissal, coordination/copy readiness, package admission,
@@ -64,3 +65,40 @@ exit0, log .build/iphone-batch-baseline.log. This is a regression baseline only.
 Two bounded source-feedback corrections are tracked in
 docs/superpowers/plans/2026-09-13-iphone-transfer-feedback.md.
 Neither is a performance fix or complete implementation of batch/iPhone pairing.
+
+## Files result delivery correction (base c4a64f7)
+
+Three new model regressions reproduce lost selection without a live SwiftUI
+observer, dismissal-before-selection, and native delegate cancellation without
+that observer. The valid RED run executes 43 tests with six expected assertions
+failing; an earlier missing-try compiler failure is not RED evidence.
+Logs: .build/iphone-files-bridge-red-valid.log and
+.build/iphone-files-bridge-green.log (43 tests / zero failures after correction).
+
+The retained picker now notifies the retained model through a weak MainActor
+callback. Normal presentation disappearance no longer cancels Files selection;
+explicit delegate Cancel, Done, and background still cancel and drain owned
+imports. Interactive sheet dismissal is disabled for Files to keep cancellation
+explicit. Generation guards and source cleanup remain unchanged. This addresses
+a demonstrated model defect, not a proven iCloud-provider root cause.
+Apple documents separate selection and cancellation delegate methods:
+https://developer.apple.com/documentation/uikit/uidocumentpickerdelegate
+No guaranteed ordering against SwiftUI disappearance is assumed.
+
+Initial full native run passed 117 tests, but Xcode failed to save its result
+bundle (CAS mkstemp error); console retained in iphone-files-bridge-all-unit.log.
+Initial UI Cancel/reopen tests failed: their broad same-name selector chose an
+underlying List button (invalid hit point), not navigation Cancel. Correcting the
+selector to navigationBars.buttons passed the English native picker twice, with
+actual screenshot reviewed. Initial failures are retained in
+.build/iphone-files-bridge-ui.log; corrected run in
+.build/iphone-files-bridge-ui-navigation.log and matching xcresult.
+No actual iCloud selection, physical installation, or Mac behavior change claimed.
+
+Final fresh verification: .build/iphone-files-bridge-final.{log,xcresult}, exit0.
+Readable xcresult summary reports 119 passed, zero failed/skipped (117 native
+unit tests plus EN/ZH native picker Cancel/reopen twice each). This supersedes
+the earlier bundle-save problem. Independent source review and final selector/
+comment recheck Approved with no remaining actionable findings.
+Actual unsigned device-target DropMesh app and embedded Share build passes exit0,
+.build/iphone-files-bridge-shipping.log; no signing or installation this iteration.
