@@ -20,6 +20,10 @@ enum MobileImportError: LocalizedError, Equatable, Sendable {
         if error is CancellationError { return .cancelled }
         let cocoa = error as NSError
         if cocoa.domain == NSCocoaErrorDomain,
+           cocoa.code == CocoaError.Code.fileReadUnsupportedScheme.rawValue {
+            return .unsupported
+        }
+        if cocoa.domain == NSCocoaErrorDomain,
            [NSFileWriteOutOfSpaceError, NSFileWriteNoPermissionError, NSFileWriteUnknownError].contains(cocoa.code) {
             return .storage
         }

@@ -5,6 +5,33 @@ import UIKit
 @testable import DropMeshTestHost
 
 final class MobileImportAdapterTests: XCTestCase {
+    func testUnsupportedInputClassificationPreservesErrorDomainBoundary() {
+        let code = CocoaError.Code.fileReadUnsupportedScheme.rawValue
+        XCTAssertEqual(MobileImportError.category(CocoaError(.fileReadUnsupportedScheme)), .unsupported)
+        XCTAssertEqual(MobileImportError.category(NSError(domain: "fixture.other", code: code)), .unavailable)
+        XCTAssertEqual(MobileImportError.category(CocoaError(.fileNoSuchFile)), .unavailable)
+        XCTAssertEqual(MobileImportError.category(CocoaError(.fileWriteOutOfSpace)), .storage)
+        XCTAssertEqual(MobileImportError.category(CancellationError()), .cancelled)
+    }
+
+    @MainActor
+    func testFilesDirectoryIsUnsupportedAndReleasesImportAdmission() async throws {
+        let fixture = try ImportFixture()
+        defer { fixture.remove() }
+        let directory = fixture.root.appendingPathComponent("selected-directory", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let service = MobileImportService(makeStager: { fixture.stager() })
+        let picker = try await MobileFilesPicker.make(service: service)
+        picker.documentPicker(picker.controller, didPickDocumentsAt: [directory])
+        await picker.waitForImport()
+        XCTAssertEqual(picker.phase, .failed)
+        XCTAssertEqual(picker.failure, .unsupported)
+        XCTAssertTrue(picker.files.isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+        let next = try await service.begin()
+        try await service.discard(next)
+    }
+
     func testPinnedRootOpenFailureDoesNotPoisonLaterAttempt() async throws {
         let fixture = try ImportFixture()
         defer { fixture.remove() }
