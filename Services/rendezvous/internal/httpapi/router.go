@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -736,18 +737,29 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 	}
 	var authentication auth.WebSocketAuthentication
 	if err := connection.ReadJSON(&authentication); err != nil {
+		log.Print("websocket_auth_rejected category=decode")
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
 		return
 	}
-	if err := r.verifier.VerifyChallengeFrom(request.Context(), authentication.Envelope, source); err != nil ||
-		!bytes.Equal(authentication.Envelope.Payload, webSocketAuthPayload) ||
-		r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, authentication.TrustRecords) != nil {
+	if err := r.verifier.VerifyChallengeFrom(request.Context(), authentication.Envelope, source); err != nil {
+		log.Printf("websocket_auth_rejected category=%s", envelopeRejectionCategory(err))
+		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
+		return
+	}
+	if !bytes.Equal(authentication.Envelope.Payload, webSocketAuthPayload) {
+		log.Print("websocket_auth_rejected category=payload")
+		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
+		return
+	}
+	if err := r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, authentication.TrustRecords); err != nil {
+		log.Printf("websocket_auth_rejected category=%s", trustRejectionCategory(err))
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
 		return
 	}
 	deviceID := strings.ToLower(authentication.Envelope.DeviceID)
 	releaseConnection, err := r.connections.Acquire(source, deviceID)
 	if err != nil {
+		log.Print("websocket_auth_rejected category=capacity")
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "capacity_reached"})
 		return
 	}

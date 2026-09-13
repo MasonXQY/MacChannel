@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -820,20 +821,24 @@ func (r *TrustRegistry) AuthenticateDeviceWithResult(deviceID string, publicKey 
 func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, records []SignedTrustRecord) ([]BatchRecordResult, error) {
 	deviceID = strings.ToLower(deviceID)
 	if DeviceID(publicKey) != deviceID || len(records) > 256 {
+		log.Print("trust_auth_rejected category=invalid_identity_or_count")
 		return nil, ErrInvalidTrust
 	}
 	for _, record := range records {
 		if err := record.Validate(); err != nil {
+			log.Print("trust_auth_rejected category=invalid_signed_record")
 			return nil, err
 		}
 	}
 	if r.recordStore != nil && r.refreshPersistent() != nil {
+		log.Print("trust_auth_rejected category=persistent_refresh")
 		return nil, ErrInvalidTrust
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if pinned, ok := r.publicKeys[deviceID]; ok && !equalBytes(pinned, publicKey) {
+		log.Print("trust_auth_rejected category=pin_mismatch")
 		return nil, ErrInvalidTrust
 	}
 	pending, err := r.preparePendingLocked(deviceID, records)
@@ -850,6 +855,7 @@ func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, r
 		err := r.recordStore.ConfirmBatch(ctx, deviceID, toSave)
 		cancel()
 		if err != nil {
+			log.Print("trust_auth_rejected category=persistent_confirm")
 			return nil, err
 		}
 	}
@@ -900,6 +906,7 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 		issuer := strings.ToLower(record.Issuer)
 		subject := strings.ToLower(record.Subject)
 		if presentedBy != issuer && (record.Action != TrustAuthorize || presentedBy != subject) {
+			log.Print("trust_auth_rejected category=unrelated_presenter")
 			return nil, ErrInvalidTrust
 		}
 		edge := directedTrustEdge{issuer: issuer, subject: subject}
@@ -907,10 +914,12 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 		reverse := r.directional[directedTrustEdge{issuer: subject, subject: issuer}]
 		sameRecord := exists && current.hash == recordHash
 		if sameRecord && current.pendingExpired {
+			log.Print("trust_auth_rejected category=pending_expired")
 			return nil, ErrInvalidTrust
 		}
 		established := current.established || reverse.established
 		if record.Action == TrustRevoke && !established {
+			log.Print("trust_auth_rejected category=unestablished_revoke")
 			return nil, ErrInvalidTrust
 		}
 		issuerConfirmed := presentedBy == issuer
@@ -951,6 +960,7 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 			current = r.issuerSequence[issuer]
 		}
 		if record.IssuerSequence <= current {
+			log.Print("trust_auth_rejected category=nonincreasing_sequence")
 			return nil, ErrInvalidTrust
 		}
 		highWater[issuer] = record.IssuerSequence
