@@ -117,3 +117,19 @@ session contract; future durable receipt filtering must match the exact record.
 Identity connectivity never changes graph/routing, receive policy or transfer
 identity checks. No production deployment, installed binary replacement, device
 private-key access, record clearing or physical transfer acceptance occurred.
+
+## Independent-review follow-up: deterministic offline admission
+
+Independent review approved the implementation with one Minor test-strength
+finding: the same-peer overlap test inferred admission from a 30ms sleep.
+Replaced that wait with an explicit lock-protected admission signal. The internal
+PresenceClient fixture initializer optionally observes a delivery synchronously
+after its task and per-peer tail are recorded, before awaiting the delivery.
+The production initializer supplies no observer. This adds no callback actor hop,
+logging, or ordering change. The test releases the held renewal only after the
+offline delivery is actually queued.
+
+`swift test --disable-automatic-resolution --filter 'PresenceDrainTests|PresenceTrustSynchronizerTests|SharedPresenceOwnerTests'`
+passed 33 tests, zero failures, exit 0; no compiler warnings. Evidence:
+`.build/identity-trust-sync-admission-green.log`. `git diff --check` passed.
+The full suite was not repeated for this narrow test seam, per coordinator scope.

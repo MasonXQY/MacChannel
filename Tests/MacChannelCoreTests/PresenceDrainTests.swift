@@ -30,17 +30,20 @@ final class PresenceDrainTests: XCTestCase {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))
         let gate = RenewalGate()
+        let admission = OfflineAdmissionProbe()
         let client = PresenceClient(heartbeatInterval: 60, applyPresence: { event in
             if case .internet(_, online: true) = event { await gate.holdRenewal() }
             await directory.apply(event)
+        }, onDeliveryAdmitted: { event in
+            if case .internet(_, online: false) = event { admission.mark() }
         })
         await client.receiveAuthenticated(.availability(device: peer, isOnline: true))
         let renewal = Task { await client.renewOnlinePresence() }
         try await eventually { await gate.waiting }
         let offline = Task { await client.receiveAuthenticated(.availability(device: peer, isOnline: false)) }
-        // Give the actor the offline input while the admitted online delivery
-        // remains held. Offline may enqueue, but cannot be overtaken on resume.
-        try await Task.sleep(for: .milliseconds(30))
+        // Keep the renewal held until the newer offline delivery is actually
+        // admitted to the per-peer queue; elapsed time is not an admission signal.
+        try await eventually { admission.admitted }
         await gate.release()
         await renewal.value
         await offline.value
@@ -159,6 +162,13 @@ final class PresenceDrainTests: XCTestCase {
         XCTFail("Drain fixture did not reach barrier")
         throw CancellationError()
     }
+}
+
+private final class OfflineAdmissionProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var admitted: Bool { lock.withLock { value } }
+    func mark() { lock.withLock { value = true } }
 }
 
 private actor PeerRenewalGate {

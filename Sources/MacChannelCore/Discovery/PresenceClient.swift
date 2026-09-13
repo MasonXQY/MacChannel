@@ -95,6 +95,7 @@ public actor PresenceClient {
     public static let heartbeatInterval: TimeInterval = 20
 
     private let applyPresence: @Sendable (DevicePresence) async -> Void
+    private let onDeliveryAdmitted: (@Sendable (DevicePresence) -> Void)?
     private let heartbeatInterval: TimeInterval
     private var onlineDevices: Set<DeviceID> = []
     // Includes offline peers until drain: an older in-flight renewal may still
@@ -112,14 +113,17 @@ public actor PresenceClient {
         heartbeatInterval: TimeInterval = PresenceClient.heartbeatInterval
     ) {
         self.applyPresence = { await directory.apply($0) }
+        self.onDeliveryAdmitted = nil
         self.heartbeatInterval = heartbeatInterval
     }
 
     /// Internal directory-delivery seam for deterministic actor-hop drain tests.
     init(heartbeatInterval: TimeInterval,
-         applyPresence: @escaping @Sendable (DevicePresence) async -> Void) {
+         applyPresence: @escaping @Sendable (DevicePresence) async -> Void,
+         onDeliveryAdmitted: (@Sendable (DevicePresence) -> Void)? = nil) {
         self.heartbeatInterval = heartbeatInterval
         self.applyPresence = applyPresence
+        self.onDeliveryAdmitted = onDeliveryAdmitted
     }
 
     deinit { heartbeatTask?.cancel() }
@@ -198,6 +202,9 @@ public actor PresenceClient {
         }
         deliveries[id] = delivery
         deliveryTails[device] = (id, delivery)
+        // Synchronous internal observation: tests can release a held predecessor
+        // only after this delivery is queued, without introducing an actor hop.
+        onDeliveryAdmitted?(event)
         await delivery.value
         deliveries[id] = nil
         if deliveryTails[device]?.id == id { deliveryTails[device] = nil }
