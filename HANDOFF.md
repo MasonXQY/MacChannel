@@ -36,8 +36,13 @@ Production4bde8d9 full1072/5skips/0fail;111finalfocused,39test-fixfocused,bothMa
 Exact saved/current records, current-revoke exclusion, pendingPersistence without
 reconnect, and joined receipt/repository refresh observers verified locally.
 RootfullGo-race with separate auth/HTTP PostgreSQL fixtures passed; DB stopped.
-Next: truthful UI (base035c2d1),
-states, shared-owner live Go interoperability and signed installed cross-device verification. Detailed final procedure:
+Task6 source3b88b7e adds truthful shared presence presentation, actual auth/storage-error
+separation and retained/drained manual save retry. Root checked full1079/4conditional
+skips/0fail,119nativeunit,bothMacproducts and unsigned shipping iPhone main/Share build.
+Finalstandard bilingual screenshots inspected: long/same/empty names remain distinct,
+sync errors do not hide unrelated online rows. FinalAX tests passed; supplemental
+framing/save-retry captures and task report/review still pending. No task acceptance yet.
+Next: finish UI review, shared-owner live Go interoperability and signed installed cross-device verification. Detailed final procedure:
 docs/acceptance/pairing-reconnect-final-runbook-2026-09-13.md (not passed evidence).
 Focused final live interoperability requirements are in
 docs/superpowers/plans/2026-09-13-shared-owner-live-interop.md; implementation is pending.
