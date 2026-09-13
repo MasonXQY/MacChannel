@@ -63,7 +63,7 @@ public actor TrustRepository {
             // be safely discarded when an older app persisted them out of sync.
             guard (try? record.validated()) != nil else { continue }
             guard
-                Self.isAuthenticationRecord(
+                Self.isRetainedRecord(
                     record,
                     consistentWith: trustStore,
                     ownerIdentity: ownerIdentity
@@ -97,11 +97,17 @@ public actor TrustRepository {
     }
 
     public func authenticationRecords() -> [SignedTrustRecord] {
-        // Graph catch-up may retain third-party edges for ingestion idempotence,
-        // but only owner-related proofs can authenticate this presenter. Apply
+        // The server accepts a revocation only from its issuer. Received peer
+        // withdrawals remain durable evidence, but are not presenter proofs.
+        retainedRecords().filter { $0.action != .revoke || $0.issuer == ownerID }
+    }
+
+    private func retainedRecords() -> [SignedTrustRecord] {
+        // Persist only owner-related proofs, including received withdrawals.
+        // Graph catch-up edges stay in memory for ingestion idempotence. Apply
         // the same signed-store consistency rule used when restoring proofs.
         authenticationRecordsByPair.values.filter {
-            Self.isAuthenticationRecord($0, consistentWith: store, ownerIdentity: ownerIdentity)
+            Self.isRetainedRecord($0, consistentWith: store, ownerIdentity: ownerIdentity)
         }.sorted {
             if $0.issuerSequence != $1.issuerSequence {
                 return $0.issuerSequence < $1.issuerSequence
@@ -115,17 +121,18 @@ public actor TrustRepository {
     /// newer mutation need not withhold unrelated, already saved proofs.
     public func publicationSnapshot(persisted receipt: AuthenticatedTrustState?) -> TrustPublicationSnapshot {
         let current = authenticationRecords()
+        let retained = retainedRecords()
         guard let receipt,
               receipt.snapshot.owner == ownerID,
               receipt.snapshot.ownerPublicKey == ownerIdentity.publicKey.rawRepresentation,
               receipt.snapshot.generation <= store.persistedGeneration
         else {
-            return TrustPublicationSnapshot(records: [], pendingPersistence: !current.isEmpty)
+            return TrustPublicationSnapshot(records: [], pendingPersistence: !retained.isEmpty)
         }
         let saved = Set(receipt.authenticationRecords)
         let eligible = current.filter { saved.contains($0) }
         return TrustPublicationSnapshot(records: eligible,
-            pendingPersistence: eligible.count != current.count)
+            pendingPersistence: retained.contains { !saved.contains($0) })
     }
 
     /// Verified state changes only. Consumers receive the current store first,
@@ -288,17 +295,21 @@ public actor TrustRepository {
     @discardableResult
     public func ingestIfNew(_ record: SignedTrustRecord) throws -> Bool {
         let key = RecordKey(issuer: record.issuer, subject: record.subject)
-        if authenticationRecordsByPair[key]?.signature == record.signature {
+        if authenticationRecordsByPair[key] == record {
             return false
         }
         var candidate = store
         do {
-            try candidate.ingest(record)
+            if record.action == .revoke, record.subject == ownerID, record.issuer != ownerID {
+                try candidate.ingestPeerWithdrawal(record, localIdentity: ownerIdentity)
+            } else {
+                try candidate.ingest(record)
+            }
         } catch TrustStoreError.nonIncreasingSequence(let issuer)
             where issuer == record.issuer
         {
-            // `TrustStore.apply` reaches this error only after validating the
-            // signature, issuer trust and pinned key. A graph catch-up may
+            // Both store paths reach this error only after validating the
+            // signature and locally known, identity-bound issuer. A graph catch-up may
             // legitimately resend a third-party edge whose effect is already
             // covered by the persisted issuer high-water, even though that
             // auxiliary proof was intentionally not retained after restart.
@@ -313,6 +324,12 @@ public actor TrustRepository {
     }
 
     private func recordAuthenticationProof(_ record: SignedTrustRecord) {
+        if record.action == .revoke, record.subject == ownerID, record.issuer != ownerID {
+            // The former positive half must not reappear after a durable reload
+            // or make an old bilateral confirmation look already committed.
+            authenticationRecordsByPair.removeValue(forKey:
+                RecordKey(issuer: ownerID, subject: record.issuer))
+        }
         if record.action == .revoke, record.issuer == ownerID {
             authenticationRecordsByPair = authenticationRecordsByPair.filter { key, _ in
                 key.issuer != record.subject && key.subject != record.subject
@@ -329,7 +346,7 @@ public actor TrustRepository {
         ] = record
     }
 
-    private static func isAuthenticationRecord(
+    private static func isRetainedRecord(
         _ record: SignedTrustRecord,
         consistentWith store: TrustStore,
         ownerIdentity: DeviceIdentity
@@ -345,9 +362,14 @@ public actor TrustRepository {
                 return !store.isTrusted(record.subject)
             }
         }
-        if record.subject == owner, record.issuer != owner, record.action == .authorize {
-            return record.subjectPublicKey == ownerKey
-                && store.trustedPublicKey(for: record.issuer) == record.issuerPublicKey
+        if record.subject == owner, record.issuer != owner {
+            guard record.subjectPublicKey == ownerKey else { return false }
+            switch record.action {
+            case .authorize:
+                return store.trustedPublicKey(for: record.issuer) == record.issuerPublicKey
+            case .revoke:
+                return store.containsPeerWithdrawal(record)
+            }
         }
         return false
     }
@@ -366,7 +388,7 @@ public actor TrustRepository {
         guard let latestSnapshot else {
             throw TrustRepositoryError.noPersistedSnapshot
         }
-        return (latestSnapshot, authenticationRecords())
+        return (latestSnapshot, retainedRecords())
     }
 
     private func removeUpdateSubscriber(_ id: UUID) {

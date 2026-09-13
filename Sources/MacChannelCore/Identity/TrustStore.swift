@@ -226,6 +226,42 @@ public struct TrustStore: Sendable {
         try apply(record)
     }
 
+    /// A known peer may withdraw its relationship with this owner. That is
+    /// negative authority over the issuer's local eligibility, never authority
+    /// to revoke the owner's identity. Keep this separate from generic ingest.
+    mutating func ingestPeerWithdrawal(
+        _ record: SignedTrustRecord,
+        localIdentity: DeviceIdentity
+    ) throws {
+        guard owner == localIdentity.id,
+              record.action == .revoke,
+              record.subject == owner,
+              record.issuer != owner
+        else { throw TrustStoreError.cannotRevokeOwner }
+        try record.validated()
+        guard record.subjectPublicKey == localIdentity.publicKey.rawRepresentation else {
+            throw TrustStoreError.invalidSignature
+        }
+        // Removed peers retain a signed snapshot high-water. Their validated,
+        // identity-bound key may only advance another negative withdrawal;
+        // this does not grant them ordinary ingestion or authorization rights.
+        guard trustedPublicKey(for: record.issuer) == record.issuerPublicKey
+            || (revokedDevices.contains(record.issuer) && issuerSequence(for: record.issuer) > 0)
+        else { throw TrustStoreError.untrustedIssuer(record.issuer) }
+        guard record.issuerSequence > issuerSequence(for: record.issuer) else {
+            throw TrustStoreError.nonIncreasingSequence(record.issuer)
+        }
+        issuerSequences[record.issuer] = record.issuerSequence
+        trustedPublicKeys.removeValue(forKey: record.issuer)
+        revokedDevices.insert(record.issuer)
+    }
+
+    func containsPeerWithdrawal(_ record: SignedTrustRecord) -> Bool {
+        revokedDevices.contains(record.issuer)
+            && record.issuerSequence > 0
+            && record.issuerSequence <= issuerSequence(for: record.issuer)
+    }
+
     public mutating func snapshot(signedBy ownerIdentity: DeviceIdentity) throws -> TrustStoreSnapshot {
         guard ownerIdentity.id == owner else {
             throw TrustStoreError.invalidSnapshotOwner

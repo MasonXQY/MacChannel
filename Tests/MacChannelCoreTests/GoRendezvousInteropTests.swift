@@ -14,6 +14,7 @@ final class GoRendezvousInteropTests: XCTestCase {
         let transport = try RendezvousPairingTransport(
             identity: identity,
             origin: httpOrigin,
+            session: URLSession(configuration: .ephemeral),
             allowInsecureForTesting: true
         )
         let _: any BilateralPairingTransport = transport
@@ -32,6 +33,7 @@ final class GoRendezvousInteropTests: XCTestCase {
         let joinerTransport = try RendezvousPairingTransport(
             identity: joinerIdentity,
             origin: httpOrigin,
+            session: URLSession(configuration: .ephemeral),
             allowInsecureForTesting: true
         )
         let lookedUp = try await joinerTransport.lookup(code: offer.code)
@@ -136,11 +138,13 @@ final class GoRendezvousInteropTests: XCTestCase {
         let hostPairingTransport = try RendezvousPairingTransport(
             identity: hostIdentity,
             origin: httpOrigin,
+            session: URLSession(configuration: .ephemeral),
             allowInsecureForTesting: true
         )
         let joiningPairingTransport = try RendezvousPairingTransport(
             identity: joiningIdentity,
             origin: httpOrigin,
+            session: URLSession(configuration: .ephemeral),
             allowInsecureForTesting: true
         )
         let hostCoordinator = try PairingCoordinator(
@@ -180,11 +184,13 @@ final class GoRendezvousInteropTests: XCTestCase {
         let rejectingHostTransport = try RendezvousPairingTransport(
             identity: rejectingHostIdentity,
             origin: httpOrigin,
+            session: URLSession(configuration: .ephemeral),
             allowInsecureForTesting: true
         )
         let rejectedJoinerTransport = try RendezvousPairingTransport(
             identity: rejectedJoinerIdentity,
             origin: httpOrigin,
+            session: URLSession(configuration: .ephemeral),
             allowInsecureForTesting: true
         )
         let rejectingHost = try PairingCoordinator(
@@ -307,6 +313,33 @@ final class GoRendezvousInteropTests: XCTestCase {
                 return state == .synchronized && first.factory.acceptedCount == 3
             }
             XCTAssertEqual(Set(first.factory.sentRecords), Set([a, b, revocation]))
+            stage = "received peer withdrawal durable catch-up"
+            try await integrationEventually("peer withdrawal ingested without retiring identity") {
+                let trust = await second.repository.currentTrustStore()
+                return trust.isTrusted(second.identity.id) && !trust.isTrusted(first.identity.id)
+            }
+            let secondState = await second.owner.state
+            XCTAssertEqual(secondState, .online)
+            let pendingWithdrawal = await second.repository.publicationSnapshot(persisted: second.store.persistedState())
+            XCTAssertTrue(pendingWithdrawal.records.isEmpty)
+            XCTAssertTrue(pendingWithdrawal.pendingPersistence)
+            // This fixture has no app persistence observer. Exercise its real
+            // checkpoint explicitly, retaining the received signature verbatim.
+            try await second.store.persistLatest(from: second.repository)
+            await second.owner.refreshTrust()
+            try await integrationEventually("received withdrawal saved without unauthorized publication") {
+                let state = await second.owner.trustSyncState
+                return state == .synchronized
+            }
+            let restoredSecond = try await second.store.load(identity: second.identity)
+            let restoredTrust = await restoredSecond.currentTrustStore()
+            let restoredProofs = await restoredSecond.authenticationRecords()
+            XCTAssertEqual(restoredTrust.trustedDeviceIDs, [second.identity.id])
+            XCTAssertTrue(restoredProofs.isEmpty)
+            let retainedSecond = await second.store.persistedState()
+            XCTAssertEqual(retainedSecond?.authenticationRecords, [revocation])
+            XCTAssertEqual(Set(second.factory.sentRecords), Set([a, b]))
+            XCTAssertEqual(second.factory.acceptedCount, 2, "A subject must not publish a peer-issued revoke")
             // AuthenticatedPresenceSession sends through Go; no raw protocol or
             // local trust filter substitutes for the server's routing decision.
             stage = "first post-revocation bridge send"
