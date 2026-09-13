@@ -33,7 +33,9 @@ public actor AuthenticatedPresenceSupervisor {
     private let sleep: @Sendable (Duration) async throws -> Void
     private let onState: @Sendable (PresenceSessionState) async -> Void
     private let onTrustSyncState: @Sendable (PresenceTrustSyncState) async -> Void
-    private let records: @Sendable () async throws -> [SignedTrustRecord]
+    private let records: @Sendable () async throws -> TrustPublicationSnapshot
+    private let persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)?
+    private var trustObservers: [Task<Void, Never>] = []
     private let deadlineSleep: @Sendable (Duration) async throws -> Void
     private var loop: Task<Void, Never>?
     private var backoff: Task<Void, Error>?
@@ -53,11 +55,14 @@ public actor AuthenticatedPresenceSupervisor {
         onState: @escaping @Sendable (PresenceSessionState) async -> Void = { _ in },
         onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
         records: (@Sendable () async throws -> [SignedTrustRecord])? = nil,
+        publication: (@Sendable () async throws -> TrustPublicationSnapshot)? = nil,
+        persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)? = nil,
         deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.init(identity: identity, repository: repository, directory: directory,
                   origin: origin, makeSocket: makeSocket, sleep: sleep, onState: onState,
-                  onTrustSyncState: onTrustSyncState, records: records, deadlineSleep: deadlineSleep,
+                  onTrustSyncState: onTrustSyncState, records: records, publication: publication,
+                  persistedUpdates: persistedUpdates, deadlineSleep: deadlineSleep,
                   makeClient: { PresenceClient(directory: $0) })
     }
 
@@ -69,6 +74,8 @@ public actor AuthenticatedPresenceSupervisor {
         onState: @escaping @Sendable (PresenceSessionState) async -> Void = { _ in },
         onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
         records: (@Sendable () async throws -> [SignedTrustRecord])? = nil,
+        publication: (@Sendable () async throws -> TrustPublicationSnapshot)? = nil,
+        persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)? = nil,
         deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         makeClient: @escaping @Sendable (DeviceDirectory) -> PresenceClient
     ) {
@@ -81,7 +88,11 @@ public actor AuthenticatedPresenceSupervisor {
         self.sleep = sleep
         self.onState = onState
         self.onTrustSyncState = onTrustSyncState
-        self.records = records ?? { await repository.authenticationRecords() }
+        self.records = publication ?? {
+            if let records { return TrustPublicationSnapshot(records: try await records()) }
+            return TrustPublicationSnapshot(records: await repository.authenticationRecords())
+        }
+        self.persistedUpdates = persistedUpdates
         self.deadlineSleep = deadlineSleep
     }
 
@@ -98,6 +109,7 @@ public actor AuthenticatedPresenceSupervisor {
         state = .stopping
         loop?.cancel()
         backoff?.cancel()
+        for observer in trustObservers { observer.cancel() }
         await synchronizer?.retire()
         await bridge.finish()
         if let current { await stopCurrentSocket(current.token) }
@@ -128,6 +140,25 @@ public actor AuthenticatedPresenceSupervisor {
     }
 
     private func runLoop() async {
+        // Production publication refresh has one joined lifecycle owner. The
+        // repository observer does not write persistence; receipt events only
+        // follow successful checkpoints, including retries at the same revision.
+        if let persistedUpdates, !stopped {
+            trustObservers = [
+                Task { [weak self, repository] in
+                    for await _ in await repository.updates() {
+                        guard !Task.isCancelled else { return }
+                        await self?.refreshTrust()
+                    }
+                },
+                Task { [weak self] in
+                    for await _ in await persistedUpdates() {
+                        guard !Task.isCancelled else { return }
+                        await self?.refreshTrust()
+                    }
+                }
+            ]
+        }
         var failures = 0
         while !stopped, !Task.isCancelled {
             guard let token = await bridge.beginSocket() else { break }
@@ -235,6 +266,9 @@ public actor AuthenticatedPresenceSupervisor {
             backoff = nil
             retryRequested = false
         }
+        for observer in trustObservers { observer.cancel() }
+        for observer in trustObservers { await observer.value }
+        trustObservers = []
         await bridge.finish()
         trustSyncState = .idle
         await onTrustSyncState(.idle)

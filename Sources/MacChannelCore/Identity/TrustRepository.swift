@@ -10,6 +10,18 @@ public protocol IssuerSequenceReserving: Sendable {
     func reserveIssuerSequence(after floor: UInt64) throws -> UInt64
 }
 
+/// Eligible proofs and a bounded indication that current proofs still await a
+/// successful local checkpoint. This is publication state, not routing rights.
+public struct TrustPublicationSnapshot: Sendable {
+    public let records: [SignedTrustRecord]
+    public let pendingPersistence: Bool
+
+    public init(records: [SignedTrustRecord], pendingPersistence: Bool = false) {
+        self.records = records
+        self.pendingPersistence = pendingPersistence
+    }
+}
+
 /// Shared, actor-isolated trust state. Every mutation also advances and signs
 /// the durable snapshot, so issuer sequences and trusted peers cannot be lost
 /// when a coordinator is replaced.
@@ -96,6 +108,24 @@ public actor TrustRepository {
             }
             return $0.issuer.rawValue.uuidString < $1.issuer.rawValue.uuidString
         }
+    }
+
+    /// Intersect one acknowledged checkpoint with current eligible records in
+    /// this actor turn. A stale receipt can never resurrect removed trust; a
+    /// newer mutation need not withhold unrelated, already saved proofs.
+    public func publicationSnapshot(persisted receipt: AuthenticatedTrustState?) -> TrustPublicationSnapshot {
+        let current = authenticationRecords()
+        guard let receipt,
+              receipt.snapshot.owner == ownerID,
+              receipt.snapshot.ownerPublicKey == ownerIdentity.publicKey.rawRepresentation,
+              receipt.snapshot.generation <= store.persistedGeneration
+        else {
+            return TrustPublicationSnapshot(records: [], pendingPersistence: !current.isEmpty)
+        }
+        let saved = Set(receipt.authenticationRecords)
+        let eligible = current.filter { saved.contains($0) }
+        return TrustPublicationSnapshot(records: eligible,
+            pendingPersistence: eligible.count != current.count)
     }
 
     /// Verified state changes only. Consumers receive the current store first,

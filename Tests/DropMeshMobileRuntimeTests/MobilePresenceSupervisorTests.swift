@@ -4,6 +4,36 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobilePresenceSupervisorTests: XCTestCase {
+    func testContextReceiptDrivesMobilePublicationAndStoppedOwnerCannotRefresh() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let context = try await MobileIdentityContext.load(layout: MobileStorageLayout(
+            applicationSupport: root.appendingPathComponent("Support"),
+            documents: root.appendingPathComponent("Documents")), secrets: PublicationSecrets())
+        let peer = try DeviceIdentity.ephemeral()
+        _ = try await context.repository.issueAuthorization(subject: peer.id,
+            subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        let socket = try SupervisorSocket(identity: context.identity)
+        let supervisor = MobilePresenceSupervisor(identity: context.identity, repository: context.repository,
+            directory: DeviceDirectory(trust: TrustStore(owner: context.identity.id)),
+            makeSocket: { socket }, sleep: { try await Task.sleep(for: $0) },
+            publication: { await context.trustPublicationSnapshot() },
+            persistedUpdates: { await context.persistedTrustUpdates() })
+        await supervisor.start()
+        try await eventually { await supervisor.trustSyncState == .pendingPersistence }
+        let initial = await socket.sentTypes
+        XCTAssertEqual(initial, ["auth"])
+        try await context.persistTrust()
+        try await eventually { await supervisor.trustSyncState == .synchronized }
+        let saved = await socket.sentTypes
+        XCTAssertEqual(saved, ["auth", "trust-update"])
+        await supervisor.stop()
+        _ = try await context.repository.revoke(peer.id)
+        try await context.persistTrust()
+        await supervisor.refreshTrust()
+        let final = await socket.sentTypes
+        XCTAssertEqual(final, saved)
+    }
     func testDiagnosticCategoryNeverIncludesErrorPayload() {
         XCTAssertEqual(MobilePresenceSupervisor.diagnosticCategory(AuthenticatedPresenceError.authenticationRejected), "authentication_rejected")
         XCTAssertEqual(MobilePresenceSupervisor.diagnosticCategory(AuthenticatedPresenceError.invalidChallenge), "invalid_challenge")
@@ -315,6 +345,17 @@ final class MobilePresenceSupervisorTests: XCTestCase {
     }
 
     private func frame(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
+}
+
+private final class PublicationSecrets: SecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    func data(for account: String, policy: KeychainPolicy) throws -> Data? {
+        lock.withLock { values[account] }
+    }
+    func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
+        lock.withLock { values[account] = data }
+    }
 }
 
 private final class ProductionOwnershipSocket: PresenceWebSocket, @unchecked Sendable {

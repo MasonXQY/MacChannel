@@ -31,11 +31,14 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
     private var advertiserReady = false
 
     init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+         publication: @escaping @Sendable () async throws -> TrustPublicationSnapshot,
+         persistedUpdates: @escaping @Sendable () async -> AsyncStream<AuthenticatedTrustState?>,
          onState: @escaping @Sendable (MobilePresenceState) async -> Void,
          onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
         let session = URLSession(configuration: .ephemeral)
         let presence = MobilePresenceSupervisor(identity: identity, repository: repository,
-            directory: directory, onState: onState)
+            directory: directory, onState: onState,
+            publication: publication, persistedUpdates: persistedUpdates)
         let signaling = RendezvousWebRTCSignaling(session: presence.bridge)
         let turn = try RendezvousTURNCredentialClient(identity: identity,
             origin: MobileRuntimeConfiguration.httpOrigin, session: session)

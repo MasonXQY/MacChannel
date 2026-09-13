@@ -3,6 +3,87 @@ import XCTest
 @testable import MacChannelCore
 
 final class TrustPersistenceReceiptTests: XCTestCase {
+    func testLegacySnapshotWithNoAuxiliaryProofNeverFabricatesPublication() async throws {
+        let f = try ReceiptFixture(); defer { f.remove() }
+        _ = try await f.authorize(try DeviceIdentity.ephemeral())
+        let snapshot = try await f.repository.latestSignedSnapshot()
+        try JSONEncoder().encode(snapshot).write(to: f.url)
+        let loaded = try await f.store.load(identity: f.identity)
+        let result = await loaded.publicationSnapshot(persisted: f.store.persistedState())
+        XCTAssertTrue(result.records.isEmpty)
+        XCTAssertFalse(result.pendingPersistence, "No unsaved current proof exists to retry")
+        let trusted = await loaded.currentTrustStore().trustedDeviceIDs
+        XCTAssertEqual(trusted.count, 2, "Loading must not erase existing trust to fabricate sync success")
+    }
+
+    func testPublicationWaitsForSuccessfulReceiptAndKeepsUnrelatedSavedProofs() async throws {
+        let f = try ReceiptFixture(); defer { f.remove() }
+        let first = try DeviceIdentity.ephemeral(), second = try DeviceIdentity.ephemeral()
+        let a = try await f.authorize(first)
+        let unsaved = await publication(f.repository, receipt: nil)
+        XCTAssertTrue(unsaved.isEmpty)
+        try await f.store.persistLatest(from: f.repository)
+        let saved = await f.store.persistedState()
+        _ = try await f.authorize(second)
+        f.secrets.failAnchor = true
+        do { try await f.store.persistLatest(from: f.repository); XCTFail("Expected failure") }
+        catch ReceiptSecrets.Failure.anchor { }
+        let partial = await publication(f.repository, receipt: saved)
+        XCTAssertEqual(partial.map(\.signature), [a.signature])
+        f.secrets.failAnchor = false
+        try await f.store.persistLatest(from: f.repository)
+        let all = await publication(f.repository, receipt: f.store.persistedState())
+        XCTAssertEqual(all.count, 2)
+    }
+
+    func testPublicationNeverRestoresRevokedProofFromOlderReceipt() async throws {
+        let f = try ReceiptFixture(); defer { f.remove() }
+        let peer = try DeviceIdentity.ephemeral()
+        _ = try await f.authorize(peer)
+        try await f.store.persistLatest(from: f.repository)
+        let older = await f.store.persistedState()
+        let revoke = try await f.repository.revoke(peer.id)
+        let pending = await publication(f.repository, receipt: older)
+        XCTAssertTrue(pending.isEmpty)
+        try await f.store.persistLatest(from: f.repository)
+        let saved = await publication(f.repository, receipt: f.store.persistedState())
+        XCTAssertEqual(saved.map(\.signature), [revoke.signature])
+        let stale = await publication(f.repository, receipt: older)
+        XCTAssertTrue(stale.isEmpty)
+    }
+
+    func testPublicationExcludesWrongOwnerFutureGenerationAndReusedSignatureContent() async throws {
+        let f = try ReceiptFixture(), other = try ReceiptFixture()
+        defer { f.remove(); other.remove() }
+        let peer = try DeviceIdentity.ephemeral()
+        let record = try await f.authorize(peer)
+        _ = try await other.authorize(peer)
+        let foreignSnapshot = try await other.repository.latestSignedSnapshot()
+        let foreign = await publication(f.repository, receipt: AuthenticatedTrustState(
+            snapshot: foreignSnapshot, authenticationRecords: [record]))
+        XCTAssertTrue(foreign.isEmpty)
+        let snapshot = try await f.repository.latestSignedSnapshot()
+        let altered = SignedTrustRecord(issuer: record.issuer, issuerPublicKey: record.issuerPublicKey,
+            subject: record.subject, subjectPublicKey: record.subjectPublicKey, action: .revoke,
+            issuerSequence: record.issuerSequence, epochMilliseconds: record.epochMilliseconds,
+            signature: record.signature)
+        let reused = await publication(f.repository, receipt: AuthenticatedTrustState(
+            snapshot: snapshot, authenticationRecords: [altered]))
+        XCTAssertTrue(reused.isEmpty)
+        let oldStore = await f.repository.currentTrustStore()
+        let olderRepository = try TrustRepository(ownerIdentity: f.identity, trustStore: oldStore,
+            persistedGeneration: oldStore.persistedGeneration, authenticationRecords: [record])
+        _ = try await f.authorize(try DeviceIdentity.ephemeral())
+        let futureSnapshot = try await f.repository.latestSignedSnapshot()
+        let future = await publication(olderRepository, receipt: AuthenticatedTrustState(
+            snapshot: futureSnapshot, authenticationRecords: [record]))
+        XCTAssertTrue(future.isEmpty)
+    }
+
+    private func publication(_ repository: TrustRepository, receipt: AuthenticatedTrustState?) async -> [SignedTrustRecord] {
+        await repository.publicationSnapshot(persisted: receipt).records
+    }
+
     func testRepeatedCheckpointRetainsExistingWriteAndFailureSemantics() async throws {
         let fixture = try ReceiptFixture()
         defer { fixture.remove() }

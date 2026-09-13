@@ -373,7 +373,9 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                         statusSource.yield(.serviceOffline(.statusServiceOffline))
                     }
                 }
-            }
+            },
+            publication: { await trustRepository.publicationSnapshot(persisted: trustStore.persistedState()) },
+            persistedUpdates: { await trustStore.persistedUpdates() }
         )
         let signalSession = publicServiceLifecycle.bridge
         cleanup.push { await publicServiceLifecycle.stop() }
@@ -425,23 +427,6 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         cleanup.push { await incoming.stop() }
         settingsService.onReceiveConfigurationChanged = { await incoming.restart() }
         pairingService.onReceiveConfigurationChanged = { await incoming.restart() }
-        let publicServiceTrustTask = Task {
-            let updates = await trustRepository.updates()
-            var isInitialSnapshot = true
-            for await _ in updates {
-                guard !Task.isCancelled else { return }
-                if isInitialSnapshot {
-                    isInitialSnapshot = false
-                    continue
-                }
-                await publicServiceLifecycle.refreshTrust()
-            }
-        }
-        cleanup.push {
-            publicServiceTrustTask.cancel()
-            await publicServiceLifecycle.stop()
-            await publicServiceTrustTask.value
-        }
         await publicServiceLifecycle.start()
         await history.start(snapshots: { await transferCoordinator.snapshots() })
         cleanup.push { await history.stop() }
@@ -473,7 +458,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             statusSource: statusSource,
             publicServiceLifecycle: publicServiceLifecycle,
             publicServiceStatusTask: nil,
-            publicServiceTrustTask: publicServiceTrustTask,
+            publicServiceTrustTask: nil,
             signalSession: signalSession,
             pairingTransport: pairingTransport,
             connectionListener: connectionListener,

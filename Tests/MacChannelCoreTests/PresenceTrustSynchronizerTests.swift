@@ -4,6 +4,81 @@ import XCTest
 @testable import MacChannelCore
 
 final class PresenceTrustSynchronizerTests: XCTestCase {
+    func testRefreshWhileStateDeliveryIsSuspendedReconsidersUnsentProof() async throws {
+        let fixture = try await SyncFixture()
+        let gate = SyncPublicationGate()
+        let sync = PresenceTrustSynchronizer(records: { await gate.publication(fixture.repository) },
+            send: { _ in await gate.sent() }, sleep: { try await Task.sleep(for: $0) },
+            onState: { if $0 == .synchronizing { await gate.hold() } }, onFailure: { })
+        await sync.refresh()
+        try await eventually { await gate.entered }
+        await gate.exclude()
+        await sync.refresh()
+        await gate.release()
+        try await Task.sleep(for: .milliseconds(50))
+        let sent = await gate.sendCount
+        XCTAssertEqual(sent, 0, "A refresh admitted before send must reconsider the old proof")
+        await sync.stop()
+    }
+    func testUnsavedProofCannotSynchronizeAndSuccessfulReceiptRefreshesWithoutMutation() async throws {
+        let fixture = try await SyncFixture()
+        let receipt = SyncReceipt()
+        let owner = fixture.makeOwner(publication: {
+            await fixture.repository.publicationSnapshot(persisted: receipt.state())
+        }, persistedUpdates: { await receipt.updates() })
+        await owner.start()
+        try await eventually { await owner.state == .online }
+        try await Task.sleep(for: .milliseconds(50))
+        let initial = await owner.trustSyncState
+        XCTAssertEqual(initial, .pendingPersistence, "Filtered current proof is waiting for local save")
+        let before = await fixture.socket.updateCount
+        XCTAssertEqual(before, 0)
+        let snapshot = try await fixture.repository.latestSignedSnapshot()
+        let records = await fixture.repository.authenticationRecords()
+        await receipt.save(AuthenticatedTrustState(snapshot: snapshot, authenticationRecords: records))
+        do { try await eventually { await fixture.socket.updateCount == 1 } }
+        catch { await owner.stop(); throw error }
+        await fixture.socket.ack("trust-ok")
+        try await eventually { await owner.trustSyncState == .synchronized }
+        // No manual refresh: the joined repository observer must notice revoke
+        // even before the successful-receipt observer has anything to publish.
+        let subject = try XCTUnwrap(records.first?.subject)
+        let revocation = try await fixture.repository.revoke(subject)
+        try await eventually { await owner.trustSyncState == .pendingPersistence }
+        let pendingCount = await fixture.socket.updateCount
+        let connected = await owner.state
+        XCTAssertEqual(pendingCount, 1)
+        XCTAssertEqual(connected, .online)
+        await receipt.save(AuthenticatedTrustState(snapshot: try await fixture.repository.latestSignedSnapshot(),
+            authenticationRecords: await fixture.repository.authenticationRecords()))
+        try await eventually { await fixture.socket.updateCount == 2 }
+        let sent = try await fixture.socket.updates()
+        XCTAssertEqual(sent.last, [revocation])
+        await fixture.socket.ack("trust-ok")
+        try await eventually { await owner.trustSyncState == .synchronized }
+        await owner.stop()
+    }
+
+    func testStopJoinsCancellationInsensitiveReceiptSubscription() async throws {
+        let fixture = try await SyncFixture()
+        let gate = SyncPublicationGate()
+        let owner = fixture.makeOwner(publication: { TrustPublicationSnapshot(records: []) },
+            persistedUpdates: {
+                await gate.hold()
+                return AsyncStream { $0.finish() }
+            })
+        await owner.start()
+        try await eventually { await gate.entered }
+        let stopping = Task { await owner.stop() }
+        try await eventually { await fixture.socket.closed }
+        let state = await owner.state
+        XCTAssertEqual(state, .stopping)
+        await gate.release()
+        await stopping.value
+        let stopped = await owner.state
+        XCTAssertEqual(stopped, .stopped)
+    }
+
     func testInvalidIdentityConfirmationNeverPublishesOnlineOrSendsTrust() async throws {
         let fixture = try await SyncFixture()
         let foreign = try DeviceIdentity.ephemeral()
@@ -307,6 +382,32 @@ final class PresenceTrustSynchronizerTests: XCTestCase {
     }
 }
 
+private actor SyncReceipt {
+    private var value: AuthenticatedTrustState?
+    private let events = AsyncStream<AuthenticatedTrustState?>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    func state() -> AuthenticatedTrustState? { value }
+    func updates() -> AsyncStream<AuthenticatedTrustState?> { events.stream }
+    func save(_ state: AuthenticatedTrustState) {
+        value = state
+        events.continuation.yield(state)
+    }
+}
+
+private actor SyncPublicationGate {
+    private(set) var entered = false
+    private(set) var sendCount = 0
+    private var excluded = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    func publication(_ repository: TrustRepository) async -> TrustPublicationSnapshot {
+        if excluded { return TrustPublicationSnapshot(records: [], pendingPersistence: true) }
+        return TrustPublicationSnapshot(records: await repository.authenticationRecords())
+    }
+    func hold() async { entered = true; await withCheckedContinuation { waiter = $0 } }
+    func exclude() { excluded = true }
+    func release() { waiter?.resume(); waiter = nil }
+    func sent() { sendCount += 1 }
+}
+
 private struct SyncAuthentication: Decodable {
     let envelope: RendezvousSignedEnvelope
     let trustRecords: [SignedTrustRecord]
@@ -333,12 +434,15 @@ private struct SyncFixture {
     }
     func makeOwner(factory: SyncFactory? = nil, clock: SyncClock? = nil,
                    records: (@Sendable () async throws -> [SignedTrustRecord])? = nil,
+                   publication: (@Sendable () async throws -> TrustPublicationSnapshot)? = nil,
+                   persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)? = nil,
                    onState: @escaping @Sendable (PresenceSessionState) async -> Void = { _ in }) -> AuthenticatedPresenceSupervisor {
         let factory = factory ?? SyncFactory([socket])
         return AuthenticatedPresenceSupervisor(identity: identity, repository: repository,
             directory: DeviceDirectory(trust: TrustStore(owner: identity.id)),
             origin: URL(string: "wss://fixture.invalid/v1/ws")!,
             makeSocket: { try await factory.next() }, sleep: { _ in }, onState: onState, records: records,
+            publication: publication, persistedUpdates: persistedUpdates,
             deadlineSleep: { if let clock { try await clock.sleep($0) } else { try await Task.sleep(for: $0) } })
     }
 }

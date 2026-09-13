@@ -40,12 +40,20 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         await channel.challenge(id)
         do { try await eventually { await channel.entered.isOpen } }
         catch { await channel.close(); await fixture.runtime.stopForeground(); throw error }
+        await fixture.persistence.blockTerminal()
         _ = try await fixture.repository.revoke(fixture.peer)
         try await fixture.runtime.refreshTrust()
         let coordinator = await fixture.probe.coordinator!
-        var stream = await coordinator.snapshots().makeAsyncIterator()
-        let snapshots = await stream.next() ?? []
-        XCTAssertTrue(snapshots.contains { $0.id == id && [.cancelling, .cancelled].contains($0.phase) })
+        await fixture.persistence.terminalEntered.wait()
+        let claimed = await coordinator.claimedPhase(for: id)
+        XCTAssertTrue(claimed == .cancelling || claimed == .cancelled)
+        // cancel() claims intent; snapshots publish only after the FIFO writer
+        // saves it. Waiting for the durable snapshot is a separate boundary.
+        await fixture.persistence.terminalRelease.open()
+        try await eventually {
+            var stream = await coordinator.snapshots().makeAsyncIterator()
+            return await stream.next()?.contains { $0.id == id && $0.phase == .cancelled } == true
+        }
         await channel.release.open()
         await fixture.runtime.stopForeground()
     }

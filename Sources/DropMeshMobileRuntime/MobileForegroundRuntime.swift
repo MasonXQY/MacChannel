@@ -99,7 +99,9 @@ public actor MobileForegroundRuntime {
         let repository = context.repository
         makeNetwork = { directory, state, discovery in
             try MobileProductionForegroundNetwork(identity: identity, repository: repository,
-                directory: directory, onState: state, onDiscovery: discovery)
+                directory: directory, publication: { await context.trustPublicationSnapshot() },
+                persistedUpdates: { await context.persistedTrustUpdates() },
+                onState: state, onDiscovery: discovery)
         }
         onRestored = { _ in }
         beforeSendAccounting = { }
@@ -390,7 +392,8 @@ public actor MobileForegroundRuntime {
                 incoming = listener; incomingPolicy = trusted
                 await listener.start()
             }
-            if desiredForeground, graphEpoch == epoch { await graph.refreshTrust() }
+            // The presence owner observes repository and successful checkpoint
+            // events directly. This path owns save retry and receive policy.
         }
         handledTrustRevision = revision
     }

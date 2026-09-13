@@ -15,7 +15,7 @@ public enum TrustRecordValidationError: Error, Equatable {
     case invalidSignature
 }
 
-public struct SignedTrustRecord: Codable, Sendable {
+public struct SignedTrustRecord: Codable, Sendable, Hashable {
     public let issuer: DeviceID
     public let issuerPublicKey: Data
     public let subject: DeviceID

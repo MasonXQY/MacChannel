@@ -1,14 +1,14 @@
 import Foundation
 
 public enum PresenceTrustSyncState: Equatable, Sendable {
-    case idle, synchronizing, synchronized, needsAttention
+    case idle, synchronizing, synchronized, pendingPersistence, needsAttention
 }
 
 /// One instance per authenticated session. Only the session's sole reader
 /// delivers results; the worker is the sole trust-update writer. No wire request
 /// identifier exists, so an expired acknowledgement retires the entire socket.
 actor PresenceTrustSynchronizer {
-    private let records: @Sendable () async throws -> [SignedTrustRecord]
+    private let records: @Sendable () async throws -> TrustPublicationSnapshot
     private let send: @Sendable (SignedTrustRecord) async throws -> Void
     private let sleep: @Sendable (Duration) async throws -> Void
     private let onState: @Sendable (PresenceTrustSyncState) async -> Void
@@ -18,12 +18,13 @@ actor PresenceTrustSynchronizer {
     private var stopped = false
     private var refreshRequested = false
     private var snapshot: [SignedTrustRecord] = []
-    private var accounted: [Data: RendezvousTrustResult] = [:]
+    private var pendingPersistence = false
+    private var accounted: [SignedTrustRecord: RendezvousTrustResult] = [:]
     private var pending: UUID?
     private var result: RendezvousTrustResult?
     private var waiter: CheckedContinuation<RendezvousTrustResult?, Never>?
 
-    init(records: @escaping @Sendable () async throws -> [SignedTrustRecord],
+    init(records: @escaping @Sendable () async throws -> TrustPublicationSnapshot,
          send: @escaping @Sendable (SignedTrustRecord) async throws -> Void,
          sleep: @escaping @Sendable (Duration) async throws -> Void,
          onState: @escaping @Sendable (PresenceTrustSyncState) async -> Void,
@@ -75,7 +76,9 @@ actor PresenceTrustSynchronizer {
             do {
                 if refreshRequested {
                     refreshRequested = false
-                    snapshot = try await records().sorted {
+                    let publication = try await records()
+                    pendingPersistence = publication.pendingPersistence
+                    snapshot = publication.records.sorted {
                         if $0.issuer != $1.issuer {
                             return $0.issuer.rawValue.uuidString < $1.issuer.rawValue.uuidString
                         }
@@ -87,15 +90,16 @@ actor PresenceTrustSynchronizer {
                 }
                 guard !stopped, !Task.isCancelled else { return }
                 if refreshRequested { continue }
-                guard let record = snapshot.first(where: { accounted[$0.signature] == nil }) else {
-                    let rejected = snapshot.contains { accounted[$0.signature] == .rejected }
-                    await onState(rejected ? .needsAttention : .synchronized)
+                guard let record = snapshot.first(where: { accounted[$0] == nil }) else {
+                    let rejected = snapshot.contains { accounted[$0] == .rejected }
+                    await onState(rejected ? .needsAttention : (pendingPersistence ? .pendingPersistence : .synchronized))
                     if refreshRequested { continue }
                     return
                 }
-                await onState(snapshot.contains { accounted[$0.signature] == .rejected }
+                await onState(snapshot.contains { accounted[$0] == .rejected }
                     ? .needsAttention : .synchronizing)
                 guard !stopped, !Task.isCancelled else { return }
+                if refreshRequested { continue }
                 let id = UUID()
                 pending = id
                 result = nil
@@ -114,7 +118,7 @@ actor PresenceTrustSynchronizer {
                 pending = nil
                 result = nil
                 guard !stopped, let confirmation else { return }
-                accounted[record.signature] = confirmation
+                accounted[record] = confirmation
             } catch {
                 await fail()
                 return

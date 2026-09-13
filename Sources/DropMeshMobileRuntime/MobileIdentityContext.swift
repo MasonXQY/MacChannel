@@ -42,6 +42,10 @@ public struct MobileIdentityContext<Secrets: SecretStore & Sendable>: Sendable {
         await snapshots.persistedState()
     }
 
+    public func trustPublicationSnapshot() async -> TrustPublicationSnapshot {
+        await repository.publicationSnapshot(persisted: snapshots.persistedState())
+    }
+
     public func persistedTrustUpdates() async -> AsyncStream<AuthenticatedTrustState?> {
         await snapshots.persistedUpdates()
     }

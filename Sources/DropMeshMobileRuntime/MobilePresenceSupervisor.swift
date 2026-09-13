@@ -13,11 +13,14 @@ struct MobilePresenceSupervisor: Sendable {
     init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
          onState: @escaping @Sendable (MobilePresenceState) async -> Void = { _ in },
          onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
-         records: (@Sendable () async throws -> [SignedTrustRecord])? = nil) {
+         records: (@Sendable () async throws -> [SignedTrustRecord])? = nil,
+         publication: (@Sendable () async throws -> TrustPublicationSnapshot)? = nil,
+         persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)? = nil) {
         self.init(identity: identity, repository: repository, directory: directory,
                   makeSocket: { try MobileRuntimeConfiguration.makePresenceSocket() },
                   sleep: { try await Task.sleep(for: $0) }, onState: onState,
-                  onTrustSyncState: onTrustSyncState, records: records)
+                  onTrustSyncState: onTrustSyncState, records: records,
+                  publication: publication, persistedUpdates: persistedUpdates)
     }
 
     init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
@@ -26,11 +29,14 @@ struct MobilePresenceSupervisor: Sendable {
          onState: @escaping @Sendable (MobilePresenceState) async -> Void = { _ in },
          onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
          records: (@Sendable () async throws -> [SignedTrustRecord])? = nil,
+         publication: (@Sendable () async throws -> TrustPublicationSnapshot)? = nil,
+         persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)? = nil,
          deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         owner = AuthenticatedPresenceSupervisor(identity: identity, repository: repository,
             directory: directory, origin: MobileRuntimeConfiguration.webSocketURL,
             makeSocket: makeSocket, sleep: sleep, onState: onState,
-            onTrustSyncState: onTrustSyncState, records: records, deadlineSleep: deadlineSleep)
+            onTrustSyncState: onTrustSyncState, records: records,
+            publication: publication, persistedUpdates: persistedUpdates, deadlineSleep: deadlineSleep)
     }
 
     func start() async { await owner.start() }
