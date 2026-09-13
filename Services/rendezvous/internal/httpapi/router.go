@@ -118,6 +118,7 @@ type Router struct {
 	signals      *signal.Hub
 	pairingTTL   time.Duration
 	connections  *connectionLimiter
+	sessions     authenticatedSessions
 	upgrader     websocket.Upgrader
 	trustWatchMu sync.Mutex
 	trustWatches int
@@ -757,7 +758,8 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	deviceID := strings.ToLower(authentication.Envelope.DeviceID)
-	releaseConnection, err := r.connections.Acquire(source, deviceID)
+	releaseConnection, err := r.sessions.acquire(request.Context(), source, deviceID,
+		func() { _ = connection.Close() }, r.connections)
 	if err != nil {
 		log.Print("websocket_auth_rejected category=capacity")
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "capacity_reached"})

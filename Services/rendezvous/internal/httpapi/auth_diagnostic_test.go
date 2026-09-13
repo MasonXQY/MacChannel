@@ -25,8 +25,13 @@ func TestWebSocketAuthenticationDiagnosticIsCoarseAndKeepsResponse(t *testing.T)
 			defer log.SetFlags(oldFlags)
 			api := newTestAPI(t)
 			if category == "capacity" {
-				existing := api.authenticatedWebSocket(t, api.identity, nil)
-				defer existing.Close()
+				// A fresh verified socket for the same identity now hands over
+				// its old session. Exhaust the source quota with distinct valid
+				// identities instead, so this remains a real capacity rejection.
+				for i := 0; i < newConnectionLimiter(connectionLimits{}).limits.PerSource; i++ {
+					existing := api.authenticatedWebSocket(t, newIdentity(t), nil)
+					defer existing.Close()
+				}
 			}
 			connection := api.dialWebSocket(t)
 			defer connection.Close()

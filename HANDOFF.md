@@ -2,6 +2,59 @@
 
 ## Current iPhone work — 2026-09-12
 
+SERVER HANDOVER DEPLOYED — 2026-09-13 17:36: user explicitly authorized
+server handover repair/deployment after cellular follow-up. New authenticated
+session gate replaces same-device old socket only after full signature, challenge,
+payload and trust validation; waits for old handler/hub cleanup before registering
+new owner. One bounded pending replacement, unchanged source/global/device caps,
+10sec drain timeout and token-guarded idempotent cleanup. Independent review passed;
+root `go test ./... -race -count=1` passed all rendezvous packages. Focused RED/GREEN
+and 10 race repetitions passed; cancellation tested, real timer-expiry branch not
+separately exercised. Capacity diagnostic fixture now exhausts source quota with
+distinct valid identities instead of relying on the intentionally changed behavior.
+Source HEAD67b1958 plus router.go/session_handover.go/session_handover_test.go/
+auth_diagnostic_test.go; staging /opt/macchannel-handover.NJfGcp (owner-only).
+Four changed-file SHA256 values matched local before image build.
+Image macchannel-handover:67b1958-fix,
+sha256:c3dcbd5b90173aaf8b857d309c3205b554d95ebd4ad77515e1e7679c360c88c5,
+running in macchannel-production-rendezvous-1; HTTPS healthz status ok.
+Only rendezvous recreated, --no-deps --pull never, one-shot image override;
+official.env unchanged (SHA256051f9403dfb78b0e0c0d286c320a25a1be6dc208c30761112d2ea121d503fdfc).
+Future compose recreation without override can revert image. Both prior diagnostic
+and original pinned images retained for rollback. No DB, pairing or Mac binaries changed.
+Temporary SSH92.96.17.75/32 re-added for deployment, removed and saved afterward;
+reloaded UI confirms original source only, Fully applied, seven rules/one resource.
+Final ordinary phone launch17:38 succeeded (.build/iphone-handover-final-launch.json),
+public healthz again status ok. Physical phone two post-deployment45second
+bounded console captures both: authentication_failed -> fresh challenge -> accepted
+-> peer_online, zero capacity_reached, no subsequent stream failures during windows.
+Initial trust rejection remains handled by installed build4's existing recovery.
+Both capture commands ended at their intentional45sec timeout, not app failure;
+sessions drained. No independent network-interface telemetry or new physical
+file-transfer acceptance. User17:28 LTE screenshot local410855FF Online,
+other7D97E253 Offline. Later Mac screenshot iPhone Online Nearby + blank-name
+offline record + Mason Offline. These do not prove the other Mac is online or
+identify the unnamed record; preserve pairings. Current directory code requires
+authenticated internet sighting and uses LAN sighting only to prefer .lan label.
+
+CELLULAR FOLLOW-UP (PRE-FIX EVIDENCE) — 2026-09-13: user reports Wi-Fi-off still Reconnecting.
+Prior connection-success claim does NOT prove seamless cellular/network-switch
+recovery. User was asked to keep Wi-Fi off/app foreground; no independent network
+interface telemetry was captured. Fresh bounded45second phone console: initial
+authentication_failed -> repeated capacity_reached -> accepted -> peer_online.
+Capture drained at intentional timeout; final ordinary launch succeeded.
+Source router.go: authenticated connection limiter permits one per device and
+rejects same identity even from a different source; existing partition regression
+rerun with race passed. Old socket pong deadline90sec/ping30sec can delay network
+handover. This matches observations, but capacity log does not distinguish device,
+source or global limit, and starting capture terminated prior process: cannot
+claim exclusive production root cause or complete cellular fix from this alone.
+At that earlier checkpoint no new code/install/server/firewall changes. Proposal: scoped server session
+handover/old-connection cleanup repair, preserve fresh signed identity validation,
+one-live-session bound, graph/revocation checks and stale-cleanup isolation. Need
+explicit production behavior-deploy authorization beyond prior diagnostic-only
+reload before deploying; do not weaken limits or reset trust as a workaround.
+
 PHONE CONNECTION RECOVERY INSTALLED — 2026-09-13: iPhone0.1.0(4), same development
 identity and data container, no pairing reset. Signed Xcode device build and deep
 strict codesign passed; devicectl install4 succeeded. Physical45second capture:
