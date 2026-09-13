@@ -170,10 +170,10 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let historySource: RuntimeHistorySource
     private let receiveEvents: RuntimeReceiveEventSource
     private let statusSource: RuntimeStatusSource
-    private let publicServiceLifecycle: PublicServiceLifecycle?
+    private let publicServiceLifecycle: AuthenticatedPresenceSupervisor?
     private let publicServiceStatusTask: Task<Void, Never>?
     private let publicServiceTrustTask: Task<Void, Never>?
-    private let signalSession: ReconnectableRendezvousSignalSession?
+    private let signalSession: PresenceSignalBridge?
     private let pairingTransport: RendezvousPairingTransport?
     private let connectionListener: WebRTCConnectionListener?
     private let incomingController: IncomingRuntimeController?
@@ -194,10 +194,10 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         historySource: RuntimeHistorySource,
         receiveEvents: RuntimeReceiveEventSource,
         statusSource: RuntimeStatusSource,
-        publicServiceLifecycle: PublicServiceLifecycle?,
+        publicServiceLifecycle: AuthenticatedPresenceSupervisor?,
         publicServiceStatusTask: Task<Void, Never>?,
         publicServiceTrustTask: Task<Void, Never>?,
-        signalSession: ReconnectableRendezvousSignalSession?,
+        signalSession: PresenceSignalBridge?,
         pairingTransport: RendezvousPairingTransport?,
         connectionListener: WebRTCConnectionListener?,
         incomingController: IncomingRuntimeController?,
@@ -357,36 +357,25 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             trustRepository: trustRepository
         )
 
-        let presenceClient = PresenceClient(directory: directory)
-        let signalSession = ReconnectableRendezvousSignalSession()
-        cleanup.push { await signalSession.finish() }
-        let publicServiceLifecycle = PublicServiceLifecycle(
-            connectionFactory: {
-                let token = UUID()
-                let socket = try URLSessionPresenceWebSocket(origin: webSocketURL)
-                let session = try AuthenticatedPresenceSession(
-                    identity: identity,
-                    origin: webSocketURL,
-                    socket: socket,
-                    client: presenceClient,
-                    trustRepository: trustRepository
-                )
-                return PublicServiceConnection(
-                    connect: {
-                        try await RuntimePresenceConnect.withTimeout(
-                            .seconds(5),
-                            session: session
-                        )
-                        await signalSession.install(session, token: token)
-                    },
-                    run: { try await session.run() },
-                    stop: {
-                        await signalSession.remove(token: token)
-                        await session.stop()
+        let publicServiceLifecycle = AuthenticatedPresenceSupervisor(
+            identity: identity, repository: trustRepository, directory: directory,
+            origin: webSocketURL,
+            makeSocket: { try URLSessionPresenceWebSocket(origin: webSocketURL) },
+            sleep: { try await Task.sleep(for: $0) },
+            onState: { state in
+                await MainActor.run {
+                    switch state {
+                    case .connecting, .reconnecting:
+                        statusSource.yield(.serviceOffline(.statusServiceRecovering))
+                    case .online:
+                        statusSource.yield(.ready)
+                    case .inactive, .stopping, .stopped:
+                        statusSource.yield(.serviceOffline(.statusServiceOffline))
                     }
-                )
+                }
             }
         )
+        let signalSession = publicServiceLifecycle.bridge
         cleanup.push { await publicServiceLifecycle.stop() }
 
         let signaling = RendezvousWebRTCSignaling(session: signalSession)
@@ -436,21 +425,6 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         cleanup.push { await incoming.stop() }
         settingsService.onReceiveConfigurationChanged = { await incoming.restart() }
         pairingService.onReceiveConfigurationChanged = { await incoming.restart() }
-        let publicServiceStatusTask = Task {
-            for await state in publicServiceLifecycle.states {
-                guard !Task.isCancelled else { return }
-                switch state {
-                case .connecting:
-                    statusSource.yield(.serviceOffline(.statusServiceRecovering))
-                case .online:
-                    statusSource.yield(.ready)
-                case .degraded:
-                    statusSource.yield(.serviceOffline(.statusServiceRetrying))
-                case .offline:
-                    statusSource.yield(.serviceOffline(.statusServiceOffline))
-                }
-            }
-        }
         let publicServiceTrustTask = Task {
             let updates = await trustRepository.updates()
             var isInitialSnapshot = true
@@ -460,21 +434,13 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                     isInitialSnapshot = false
                     continue
                 }
-                let records = await trustRepository.authenticationRecords()
-                guard !records.isEmpty else { continue }
-                do {
-                    try await signalSession.sendTrustUpdate(records)
-                } catch {
-                    await publicServiceLifecycle.reconnectNow()
-                }
+                await publicServiceLifecycle.refreshTrust()
             }
         }
         cleanup.push {
             publicServiceTrustTask.cancel()
-            publicServiceStatusTask.cancel()
             await publicServiceLifecycle.stop()
             await publicServiceTrustTask.value
-            await publicServiceStatusTask.value
         }
         await publicServiceLifecycle.start()
         await history.start(snapshots: { await transferCoordinator.snapshots() })
@@ -506,7 +472,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             receiveEvents: receiveEvents,
             statusSource: statusSource,
             publicServiceLifecycle: publicServiceLifecycle,
-            publicServiceStatusTask: publicServiceStatusTask,
+            publicServiceStatusTask: nil,
             publicServiceTrustTask: publicServiceTrustTask,
             signalSession: signalSession,
             pairingTransport: pairingTransport,
@@ -556,7 +522,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { statusSource.stream }
 
     func reconnectPublicService() async {
-        await publicServiceLifecycle?.reconnectNow()
+        await publicServiceLifecycle?.retryConnection()
         if localNetworkStarted {
             browser?.start()
             advertiser?.start()
@@ -568,27 +534,6 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         localNetworkStarted = true
         browser?.start()
         advertiser?.start()
-    }
-}
-
-enum RuntimePresenceConnect {
-    static func withTimeout(
-        _ timeout: Duration,
-        session: AuthenticatedPresenceSession
-    ) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { try await session.connect() }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                await session.stop()
-                throw AuthenticatedPresenceError.transport("connection_timeout")
-            }
-            defer { group.cancelAll() }
-            guard let first = try await group.next() else {
-                throw AuthenticatedPresenceError.transport("connection_cancelled")
-            }
-            return first
-        }
     }
 }
 
