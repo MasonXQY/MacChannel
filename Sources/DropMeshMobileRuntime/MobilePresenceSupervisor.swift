@@ -34,6 +34,8 @@ actor MobilePresenceSupervisor {
     private var backoff: Task<Void, Error>?
     private var retryRequested = false
     private var stopped = false
+    private var identityOnlyRecovery = false
+    private var recoveryAvailable = true
     private var current: (token: MobileSignalBridge.SocketToken, session: AuthenticatedPresenceSession)?
     private var retiredToken: MobileSignalBridge.SocketToken?
     private var initialStop: Task<Void, Never>?
@@ -104,8 +106,26 @@ actor MobilePresenceSupervisor {
         guard !stopped, state == .online, let current else { return }
         let records = await repository.authenticationRecords()
         guard isActive(current.token), !records.isEmpty else { return }
-        do { try await current.session.sendTrustUpdate(records) }
+        do {
+            if identityOnlyRecovery {
+                try await publishRecoveryRecords(records, through: current.session)
+            } else {
+                try await current.session.sendTrustUpdate(records)
+            }
+        }
         catch { await interrupt(current.token) }
+    }
+
+    private func publishRecoveryRecords(
+        _ records: [SignedTrustRecord], through session: AuthenticatedPresenceSession
+    ) async throws {
+        // Isolate stale proofs from valid revocations and newly approved
+        // pairings. Each record still receives the existing server validation;
+        // transport send is not confirmation and local durable state is intact.
+        for record in records {
+            try Task.checkCancellation()
+            try await session.sendTrustUpdate([record])
+        }
     }
 
     static func reconnectDelay(_ failures: Int) -> Duration {
@@ -120,6 +140,7 @@ actor MobilePresenceSupervisor {
             var forwarders: [Task<Void, Never>] = []
             var cancelled = false
             var authenticated = false
+            let identityOnlyAttempt = identityOnlyRecovery
             do {
                 let socket = try await makeSocket()
                 guard !stopped, !Task.isCancelled else { await socket.close(); break }
@@ -133,10 +154,15 @@ actor MobilePresenceSupervisor {
                 await publish(failures == 0 ? .connecting : .reconnecting)
                 try Task.checkCancellation()
                 guard isActive(token) else { throw AttemptInterrupted.retry }
-                try await attempt.connect()
+                try await attempt.connect(includeTrustRecords: !identityOnlyAttempt)
                 authenticated = true
                 guard !stopped, !Task.isCancelled else { throw CancellationError() }
                 guard isActive(token) else { throw AttemptInterrupted.retry }
+                if identityOnlyAttempt {
+                    try await publishRecoveryRecords(
+                        repository.authenticationRecords(), through: attempt)
+                    guard isActive(token) else { throw AttemptInterrupted.retry }
+                }
                 await bridge.activate(token) { payload, peer in try await attempt.sendSignal(payload, to: peer) }
                 guard !stopped, !Task.isCancelled else { throw CancellationError() }
                 guard isActive(token) else { throw AttemptInterrupted.retry }
@@ -161,6 +187,30 @@ actor MobilePresenceSupervisor {
             } catch is CancellationError {
                 cancelled = true
             } catch {
+                if !authenticated, !stopped, !Task.isCancelled, isActive(token) {
+                    if identityOnlyAttempt {
+                        // Capacity and transport failure do not reject identity.
+                        // Keep this mode through normal backoff, without granting
+                        // another proof-to-identity recovery budget.
+                        let capacity = await session?.authenticationCapacityRejected ?? false
+                        let transport: Bool
+                        if case .transport = error as? AuthenticatedPresenceError {
+                            transport = true
+                        } else {
+                            transport = error is URLError
+                        }
+                        if isActive(token), !Task.isCancelled {
+                            identityOnlyRecovery = capacity || transport
+                        }
+                    } else if recoveryAvailable,
+                        error as? AuthenticatedPresenceError == .authenticationRejected,
+                        let session, await session.trustAuthenticationRejected,
+                        isActive(token), !Task.isCancelled
+                    {
+                        recoveryAvailable = false
+                        identityOnlyRecovery = true
+                    }
+                }
                 // No peer IDs, URLs, payloads, credentials or raw transport errors
                 // enter diagnostics. The owner exposes a coarse reconnect state.
                 #if DEBUG

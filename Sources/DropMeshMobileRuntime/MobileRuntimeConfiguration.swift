@@ -13,6 +13,13 @@ enum MobileRuntimeConfiguration {
             return remaining > 600 ? "challenge_far_future" : "challenge_unexpired"
         }
         if object["type"] as? String == "auth-ok" { return "accepted" }
+        if object["type"] as? String == "presence" {
+            switch object["availability"] as? String {
+            case "internet": return "peer_online"
+            case "offline": return "peer_offline"
+            default: return "other"
+            }
+        }
         guard object["type"] as? String == "auth-error",
               let code = object["code"] as? String,
               ["authentication_failed", "capacity_reached"].contains(code)

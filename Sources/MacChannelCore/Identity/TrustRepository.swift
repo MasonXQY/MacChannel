@@ -85,7 +85,12 @@ public actor TrustRepository {
     }
 
     public func authenticationRecords() -> [SignedTrustRecord] {
-        authenticationRecordsByPair.values.sorted {
+        // Graph catch-up may retain third-party edges for ingestion idempotence,
+        // but only owner-related proofs can authenticate this presenter. Apply
+        // the same signed-store consistency rule used when restoring proofs.
+        authenticationRecordsByPair.values.filter {
+            Self.isAuthenticationRecord($0, consistentWith: store, ownerIdentity: ownerIdentity)
+        }.sorted {
             if $0.issuerSequence != $1.issuerSequence {
                 return $0.issuerSequence < $1.issuerSequence
             }

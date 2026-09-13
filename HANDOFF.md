@@ -2,6 +2,104 @@
 
 ## Current iPhone work — 2026-09-12
 
+PHONE CONNECTION RECOVERY INSTALLED — 2026-09-13: iPhone0.1.0(4), same development
+identity and data container, no pairing reset. Signed Xcode device build and deep
+strict codesign passed; devicectl install4 succeeded. Physical45second capture:
+authentication_failed -> fresh challenge -> accepted -> peer_online; no subsequent
+stream failure. A second rapid-relaunch55second capture has likewise accepted and
+peer_online with no subsequent stream failure; both bounded captures ended at
+their intentional45/55second limits and are drained. Final ordinary launch4
+succeeded, leaving app open. Logs are closed
+categories only, no peer identifiers or private proofs. Connection recovery is
+verified; no fresh physical file-transfer/iCloud-picker acceptance in this turn.
+Root147 Swift regressions passed, plus Go httpapi/auth race suites. Independent
+review caught revocation-only recovery blocking new pairs; corrected individual
+proof publication preserving sequence order and tested RED/GREEN. First installed
+build3 exposed transient capacity after relaunch consuming recovery; build4 keeps
+recovery on explicit capacity/transport, with RED/GREEN tests. Explicit identity
+rejection still exits recovery and never replenishes the one-shot budget.
+Core defaults/protocol unchanged; export filters unrelated live graph proofs with
+existing restore predicate. Mobile uses identity-only existing protocol after an
+explicit rejection of a nonempty proof batch, preserves repository/catch-up and
+submits current proofs individually. No server auth behavior or DB changes.
+Temporary SSH92.96.17.75 source removed/saved and UI Fully applied seven rules.
+Root restarted ONLY existing local Store app at its unchanged path after verifying
+no active TCP transfers; PID46510 ended normally, replacement85546. No Mac binary
+replacement, Direct/Store release, or Mac B control. App-specific CUA timed out;
+absence of an app-owned TLS socket alone does NOT establish Mac service failure.
+Evidence .build/iphone-recovery-{build4.log,install4.json,root-build4-tests.log};
+.build/mobile-identity-{recovery,transient}-*.log; diagnostic console in task.
+
+Recovery investigation — 2026-09-13: user requested continue until fixed. Temporary
+SSH92.96.17.75/32 was re-added for scoped diagnosis and removed afterward.
+Read-only production aggregates:54pairs all established/mutual, no expired or
+overdue pending; all54stored hashes match canonical+signature.49issuers,2have
+durable highwater above max surviving pair sequence. No DB changes. Isolated
+synthetic PostgreSQL test reproduces expired pending proof -> memory restore
+loses higher issuer highwater -> durable confirmation rejects. Exact phone proof
+not exported/read, so production attribution not exclusive. Client export filter
+TDD passed53related tests; subsequent implementation/physical results above.
+
+DIAGNOSTIC DEPLOY EXECUTED — 2026-09-13: diagnostic-only source8f62de7,
+root race tests httpapi/auth passed, remote source checksums match local.
+Image macchannel-auth-diag:8f62de7 / sha256:bff55eb34d3a8889b59dc1da788ec8a1158959aad48faa1a611ff727233988ac
+is running healthy in macchannel-production-rendezvous-1. Only rendezvous
+recreated using --no-deps --pull never; DB/TURN uninterrupted. Public healthz
+returned status ok after deployment and at16:51 local. No production checkout,
+official.env, schema, pairing records or auth/security behavior edits.
+Image selection was a one-shot environment override: ordinary future compose
+without override may revert to original image below. Preserve rollback image.
+Last5min fixed-token counts: persistent_confirm19, unrelated_presenter12,
+outer trust_invalid31. Aggregates include multiple clients; cannot exclusively
+attribute either category to iPhone. Fresh phone capture still authentication_failed.
+Persistent confirm can mean expired pending record, unestablished revoke or
+nonincreasing/invalid stored high-water; exact DB branch NOT proven. Do not
+weaken checks or reset records. Next: reproduce persistence rejection offline
+and discriminate these branches before any behavioral production correction.
+Final ordinary devicectl phone launch succeeded16:51, no reinstall/reset.
+Temporary92.96.17.75 SSH source removed and saved; original92.96.19.217 and
+all other rules preserved. No further management connection left open.
+Evidence: .build/server-auth-diag-{root-tests,build,deploy}.log. Recovery and
+iCloud file selection acceptance remain UNVERIFIED; do not call this fixed.
+
+Historical deployment preparation — 2026-09-13: user allows diagnostic
+authentication-service deploy/reload (brief interruption), no pairing/db/security
+rule changes, temporary single-IP SSH then removal. Re-added92.96.17.75/32 to
+cloud firewall11546024 alongside old IP; MUST REMOVE BEFORE END OF THIS RUN.
+Remote stage /opt/macchannel-auth-diag.uEbIVt contains tracked Services/rendezvous
+and Infrastructure/rendezvous archive from HEAD. Live original reference
+ghcr.io/masonxqy/macchannel-rendezvous@sha256:130d4b0da117306046d866bc6039f5e7325284d464cb6d9aba42874d3ea32abe
+must remain available for rollback. Existing config-hash9c2d78dd4a62162489a601cadc0e44630b6a066d667e548eff33f9344559d5a1
+matches compose with exact original reference and official.env/two existing files.
+Remote production checkout untouched. Child server_auth_diagnostic owns diagnostic
+Go patch/tests only; root deployment. Preparation completed as recorded above;
+all build/deploy/capture sessions drained. Preserve all records.
+
+READ-ONLY SERVER INSPECTION — 2026-09-13: user approved temporary SSH
+92.96.17.75/32 allowlist addition; added alongside old address, saved, and verified
+SSH works. Server UTC matches workstation to observation precision. Rendezvous
+image130d4b0da117 healthy12days, coturn43ca55e84a04 healthy13days, PostgreSQL17.11
+healthy13days. Actual source revision labelcf92d002 matches inspected auth handler:
+JSON decode, signed-envelope verification and trust validation all return same
+authentication_failed, without internal rejection classification. Remote checkout
+clean. Count-only PostgreSQL last15min error-line check returned0; no raw logs or
+customer data exposed. This does not identify the phone's precise rejection cause.
+No restart, deployment, configuration or database changes beyond temporary cloud
+SSH source entry. Temporary source removed and saved after read-only checks.
+Next needs explicit approval for scoped production diagnostic deployment/reload
+(brief connection interruption) and temporary management access cleanup, not
+permission to weaken auth/highwater rules or reset pairings.
+
+MANAGEMENT ACCESS CAUSE — 2026-09-13: authenticated Hetzner UI confirms project
+MacChannel15871108 / firewall11546024 fully applied, seven inbound rules.
+SSH TCP22 permits only previous workstation IPv4 92.96.19.217; current public
+IPv4 read via api.ipify.org is92.96.17.75. This explains management timeout, not
+the iPhone authentication rejection (HTTPS/WSS443 already public). No firewall
+change made. Request explicit authorization to temporarily add current /32 to
+SSH allowlist and remove after diagnosis; never open22 globally or change other
+rules. Browser tab18 at firewall rules marked handoff. No server restart/data
+access. Prior client auth findings remain unresolved.
+
 AUTH REJECTION DIAGNOSIS — 2026-09-13: user confirms same reconnect failure on
 Wi-Fi and LTE; screenshot shows Reconnecting to service, not inactive/failed.
 Installed development-only coarse diagnostics after RED/GREEN; fresh terminated

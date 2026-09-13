@@ -301,11 +301,19 @@ public actor AuthenticatedPresenceSession {
         }
     }
 
-    public func connect() async throws {
+    /// True only for an explicit service rejection of the nonempty proof batch
+    /// submitted by this attempt; ordinary identity/transport failures differ.
+    public private(set) var trustAuthenticationRejected = false
+    /// Capacity is a retryable service condition, not an identity rejection.
+    public private(set) var authenticationCapacityRejected = false
+
+    public func connect(includeTrustRecords: Bool = true) async throws {
+        trustAuthenticationRejected = false
+        authenticationCapacityRejected = false
         await client.disconnect()
         let challenge = try decodeChallenge(try await receiveFrame())
         let trustRecords =
-            if let trustRepository {
+            if includeTrustRecords, let trustRepository {
                 await trustRepository.authenticationRecords()
             } else {
                 [SignedTrustRecord]()
@@ -316,6 +324,11 @@ public actor AuthenticatedPresenceSession {
         }
         try await socket.send(auth)
         let confirmation = try decodeFrame(try await receiveFrame())
+        authenticationCapacityRejected = confirmation.type == "auth-error"
+            && confirmation.code == "capacity_reached"
+        trustAuthenticationRejected = !trustRecords.isEmpty
+            && confirmation.type == "auth-error"
+            && confirmation.code == "authentication_failed"
         guard confirmation.type == "auth-ok",
             confirmation.deviceID == identity.id.rawValue.uuidString.lowercased()
         else {
