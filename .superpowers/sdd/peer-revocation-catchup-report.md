@@ -1,10 +1,15 @@
 # Peer revocation catch-up correction
 
-Status: focused and live GREEN; full-suite/build gates and independent review pending.
+Status: implementation and all requested local verification complete; independent
+combined security/concurrency review remains with the controller.
 
 Working tree: `/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone`.
 Assigned base `39f90ef`; initial verification HEAD `523d0c1` plus owned source/tests.
 Intervening controller changes are documentation only.
+Frozen production commit: `4d093b8` (`fix(core): retain peer withdrawals
+without revoking local identity`). Final test revision: `0aa5c2b`
+(`test(mobile): preserve recovered socket after peer withdrawal`); production
+source is unchanged. Controller authorized this focused mobile test extension.
 
 ## Root cause and TDD evidence
 
@@ -74,15 +79,84 @@ proofs: the same unchanged owner-signed snapshot still excludes the peer and ret
 its sequence high-water. This is compatibility evidence against current snapshot
 decoder semantics, not executing an old installed binary.
 
-## Pending
+## Remaining acceptance
 
-Full Swift suite, both Mac products, shipping iPhone/Share unsigned compile,
-independent security/concurrency review, and final report completion.
+Independent combined security/concurrency review and whole-program installed
+acceptance remain with the controller. This report does not claim release,
+production deployment, physical network, or installed-device acceptance.
+
+## Final gate progress
+
+- Initial full `swift test --disable-automatic-resolution`, log
+  `.build/peer-revocation-full-swift.log`: exit 1, 1081 tests, 6 conditional
+  skips, 2 failures in a single test, 54.084s. The only failing test is
+  `MobileIdentityRecoveryTests.testOwnerRevocationCatchUpDrainsRecoveryWithoutRemainingOnline`:
+  it explicitly waits for `.stopped` after a valid known peer withdraws from
+  the owner, the behavior this correction intentionally changes. Raised the
+  test-only ownership extension with controller; no mobile production change.
+- `swift build --disable-automatic-resolution --product MacChannelApp`:
+  exit 0, 1.07s, `.build/peer-revocation-mac-direct.log`.
+- `swift build --disable-automatic-resolution --product DropMeshAppStore`:
+  exit 0, 0.19s, `.build/peer-revocation-mac-store.log`.
+- `xcodebuild build -project iPhone/DropMesh.xcodeproj -scheme DropMesh
+  -destination 'generic/platform=iOS Simulator'
+  -derivedDataPath .build/native-shipping-simulator
+  -clonedSourcePackagesDirPath .build/iphone-simulator/SourcePackages
+  -disableAutomaticPackageResolution CODE_SIGNING_ALLOWED=NO`:
+  exit 0, BUILD SUCCEEDED, `.build/peer-revocation-shipping-iphone.log`.
+  Shipping main app and embedded DropMeshShare extension compiled. Existing
+  AppIntents metadata warning remains. Unsigned compile, not device acceptance.
+- The sole obsolete mobile test now waits for peer removal, verifies owner
+  remains trusted and recovered socket online/open with exactly two factory
+  attempts (initial auth rejection plus recovered connection), and joins stop
+  on success/failure. No unrelated recovery expectation or production code changed.
+  `swift test --disable-automatic-resolution --filter
+  'MobileIdentityRecoveryTests|PeerWithdrawalTests'`: exit 0, 12 tests/0 failures,
+  0.069s; `.build/peer-revocation-mobile-focused.log`.
+- Final `swift test --disable-automatic-resolution` at `0aa5c2b`:
+  exit 0, 1081 tests, 6 conditional skips, 0 failures, 50.290s test time
+  (50.332s suite wall time); `.build/peer-revocation-full-swift-green.log`.
+  Skips are the separately passed live Go wrapper, three optional native image
+  captures, and two Docker ICE/relay scenarios. No native UI source changed,
+  so prior image matrices were not repeated. No Swift compiler warnings/errors;
+  expected closed-category recovery diagnostics and LAN throughput output remain.
+
+All command sessions are drained. `git diff --check` passed before source and
+test commits and final report commit. No further cache work is needed absent a
+review finding; controller resumes cache ownership after handoff.
+
+## Self-review
+
+- Repository mutation is actor-isolated and uses a candidate store. Validation
+  and signed snapshot creation precede committing state/proofs or emitting an
+  update; failure cannot partially mutate trust or advance the snapshot.
+- The dedicated withdrawal path validates signature and both identity/key
+  bindings, owner subject/key, known issuer, and increasing issuer sequence.
+  A previously removed issuer is recognized only by the owner-signed revoked
+  set plus retained issuer high-water and its validated identity-derived key.
+  That path can only remove that issuer; it grants no ordinary ingest authority.
+- Owner self-revocation and generic TrustStore owner-target revocation still
+  throw; snapshot validation still rejects a revoked owner. No catch ignores
+  cannotRevokeOwner. Unrelated peers and owner issuer sequences remain intact.
+- Exact full-record duplicate comparison prevents changed signed fields from
+  bypassing validation merely by reusing a signature. Duplicate/older proofs
+  do not change state; new negative proofs advance durable high-water. Fresh
+  bilateral higher-sequence confirmation can restore only the explicit pair.
+- Persistence and wire export are deliberately distinct while using the same
+  existing owner and snapshot v1 path. The legacy auxiliary field name remains
+  authenticationRecords; a comment in export explains the narrower wire policy.
+- Final additional adversarial assertions passed: `.build/peer-revocation-final-focused.log`,
+  same PeerWithdrawalTests command, 2 tests/0 failures, 0.014s. They verify
+  restored retention via missing-negative receipt pendingPersistence, legacy
+  dropped auxiliary safety, and rejected authorization/graph revoke from a
+  withdrawn peer without snapshot mutation.
 
 ## Boundaries and test fixture details
 
 Owned production files are only `TrustRepository.swift` and `TrustStore.swift`.
 Tests are `PeerWithdrawalTests.swift` and `GoRendezvousInteropTests.swift`.
+The controller-approved extension also updates the one obsolete expectation in
+`Tests/DropMeshMobileRuntimeTests/MobileIdentityRecoveryTests.swift`.
 Live fixture gives each of its six HTTP pairing transports a separate ephemeral
 URLSession; its existing stop closes its owned session. The previous six
 sharedSession invalidation warnings are absent from the new live output.
