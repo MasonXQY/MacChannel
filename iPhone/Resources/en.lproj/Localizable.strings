@@ -82,6 +82,7 @@
 "transfer.phase.preparing" = "Preparing";
 "transfer.phase.connecting" = "Connecting";
 "transfer.phase.transferring" = "Transferring";
+"transfer.phase.confirming" = "Confirming completion…";
 "transfer.phase.paused" = "Paused";
 "transfer.phase.verifying" = "Verifying";
 "transfer.phase.cancelling" = "Stopping";

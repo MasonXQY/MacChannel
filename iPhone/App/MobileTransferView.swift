@@ -1,6 +1,16 @@
 import MacChannelCore
 import SwiftUI
 
+enum MobileTransferStatus {
+    static func key(for snapshot: TransferSnapshot) -> String {
+        if snapshot.phase == .transferring, snapshot.totalBytes > 0,
+           snapshot.completedBytes >= snapshot.totalBytes {
+            return "transfer.phase.confirming"
+        }
+        return "transfer.phase." + snapshot.phase.rawValue
+    }
+}
+
 struct MobileTransferView: View {
     let transfer: TransferSnapshot
     @Bindable var model: MobileSendModel
@@ -10,7 +20,7 @@ struct MobileTransferView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(peerName.isEmpty ? String(localized: "devices.paired.mac") : peerName)
                 .font(.headline)
-            Text(LocalizedStringKey("transfer.phase." + transfer.phase.rawValue))
+            Text(LocalizedStringKey(MobileTransferStatus.key(for: transfer)))
                 .accessibilityIdentifier("transfer-progress-label")
             if transfer.totalBytes > 0 {
                 ProgressView(value: Double(max(0, min(transfer.completedBytes, transfer.totalBytes))),

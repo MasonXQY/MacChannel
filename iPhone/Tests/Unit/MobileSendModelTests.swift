@@ -6,6 +6,29 @@ import XCTest
 
 @MainActor
 final class MobileSendModelTests: XCTestCase {
+    func testFullByteTransferIsConfirmingNotCompleted() {
+        func snapshot(_ phase: TransferPhase, _ completed: Int64, _ total: Int64) -> TransferSnapshot {
+            TransferSnapshot(id: TransferID(rawValue: UUID()), peer: DeviceID(rawValue: UUID()),
+                phase: phase, completedBytes: completed, totalBytes: total, route: .lan)
+        }
+        XCTAssertEqual(MobileTransferStatus.key(for: snapshot(.transferring, 10, 10)), "transfer.phase.confirming")
+        XCTAssertEqual(MobileTransferStatus.key(for: snapshot(.transferring, 11, 10)), "transfer.phase.confirming")
+        XCTAssertEqual(MobileTransferStatus.key(for: snapshot(.transferring, 9, 10)), "transfer.phase.transferring")
+        XCTAssertEqual(MobileTransferStatus.key(for: snapshot(.transferring, 0, 0)), "transfer.phase.transferring")
+        for phase in [TransferPhase.preparing, .connecting, .paused, .verifying, .cancelling, .completed, .failed, .cancelled] {
+            XCTAssertEqual(MobileTransferStatus.key(for: snapshot(phase, 10, 10)), "transfer.phase." + phase.rawValue)
+        }
+    }
+
+    func testConfirmationLabelHasBothLocalizations() throws {
+        let bundle = Bundle(for: MobileFilesPicker.self)
+        for (language, expected) in [("en", "Confirming completion…"), ("zh-Hans", "正在确认完成…")] {
+            let path = try XCTUnwrap(bundle.path(forResource: language, ofType: "lproj"))
+            let localized = try XCTUnwrap(Bundle(path: path))
+            XCTAssertEqual(localized.localizedString(forKey: "transfer.phase.confirming", value: nil, table: nil), expected)
+        }
+    }
+
     func testLateAndRestoredFailuresOfferExplicitOriginalReselectionWithoutSending() async throws {
         for restored in [false, true] {
             let fixture = try SendFixture(); defer { fixture.remove() }

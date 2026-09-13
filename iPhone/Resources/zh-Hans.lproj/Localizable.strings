@@ -82,6 +82,7 @@
 "transfer.phase.preparing" = "正在准备";
 "transfer.phase.connecting" = "正在连接";
 "transfer.phase.transferring" = "正在传输";
+"transfer.phase.confirming" = "正在确认完成…";
 "transfer.phase.paused" = "已暂停";
 "transfer.phase.verifying" = "正在校验";
 "transfer.phase.cancelling" = "正在停止";
