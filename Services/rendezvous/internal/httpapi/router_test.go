@@ -59,13 +59,17 @@ func TestLiveSwiftClientPairingAndWebSocketAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("swift", "test", "--filter", "GoRendezvousInteropTests/testLiveSwiftPairingHTTPAndWebSocketAuthenticationAgainstGoRouter")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, "swift", "test", "--disable-automatic-resolution", "--filter", "GoRendezvousInteropTests/testLiveSwiftPairingHTTPAndWebSocketAuthenticationAgainstGoRouter")
+	command.WaitDelay = 5 * time.Second
 	command.Dir = repositoryRoot
 	command.Env = append(os.Environ(), "MACCHANNEL_GO_TEST_SERVER_URL="+server.URL)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Swift live integration failed: %v\n%s", err, output)
 	}
+	t.Logf("Swift live pairing and shared-owner integration:\n%s", output)
 }
 
 type testClock struct {

@@ -216,6 +216,280 @@ final class GoRendezvousInteropTests: XCTestCase {
         }
         await rejectedJoinerTransport.stop()
         await rejectingHostTransport.stop()
+
+        try await verifySharedOwners(webSocketURL: webSocketURL)
+    }
+
+    private func verifySharedOwners(webSocketURL: URL) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let firstIdentity = try DeviceIdentity.ephemeral()
+        let secondIdentity = try DeviceIdentity.ephemeral()
+        let a = try SignedTrustRecord.authorizing(secondIdentity, signedBy: firstIdentity)
+        let b = try SignedTrustRecord.authorizing(firstIdentity, signedBy: secondIdentity)
+        let first = try await IntegrationOwner(identity: firstIdentity, local: a, peer: b,
+            root: root.appendingPathComponent("first.json"), socketURL: webSocketURL)
+        let second = try await IntegrationOwner(identity: secondIdentity, local: b, peer: a,
+            root: root.appendingPathComponent("second.json"), socketURL: webSocketURL)
+        XCTAssertNotEqual(first.identity.id, second.identity.id)
+        let firstSignals = await first.owner.bridge.signalFrames()
+        let secondSignals = await second.owner.bridge.signalFrames()
+        let firstErrors = await first.owner.bridge.protocolErrors()
+        let secondErrors = await second.owner.bridge.protocolErrors()
+        let firstDevices = await first.directory.devices()
+        let secondDevices = await second.directory.devices()
+        let observations = IntegrationObservations()
+        let observers = [
+            Task { for await value in firstSignals { await observations.signal(value, side: 0) } },
+            Task { for await value in secondSignals { await observations.signal(value, side: 1) } },
+            Task { for await value in firstErrors { await observations.error(value, side: 0) } },
+            Task { for await value in secondErrors { await observations.error(value, side: 1) } },
+            Task { for await value in firstDevices { await observations.devices(value, side: 0) } },
+            Task { for await value in secondDevices { await observations.devices(value, side: 1) } }
+        ]
+        // Streams and bounded recorders exist before start, publication, or sends.
+        var stage = "identity-only authentication"
+        do {
+            await first.owner.start()
+            await second.owner.start()
+            try await integrationEventually("identity-only connections") {
+                let a = await first.owner.state
+                let b = await second.owner.state
+                return a == .online && b == .online
+            }
+            await first.owner.refreshTrust()
+            await second.owner.refreshTrust()
+            try await integrationEventually("unsaved proofs withheld") {
+                let a = await first.owner.trustSyncState
+                let b = await second.owner.trustSyncState
+                return a == .pendingPersistence && b == .pendingPersistence
+            }
+            XCTAssertEqual(first.factory.sentRecords, [])
+            XCTAssertEqual(second.factory.sentRecords, [])
+            try await first.store.persistLatest(from: first.repository)
+            try await second.store.persistLatest(from: second.repository)
+            await first.owner.refreshTrust()
+            await second.owner.refreshTrust()
+            try await integrationEventually("real bilateral trust acknowledgments and fresh presence") {
+                let a = await first.owner.trustSyncState
+                let b = await second.owner.trustSyncState
+                let visible = await observations.visible(first: first.identity.id, second: second.identity.id)
+                return a == .synchronized && b == .synchronized && visible
+            }
+            XCTAssertEqual(Set(first.factory.sentRecords), Set([a, b]))
+            XCTAssertEqual(Set(second.factory.sentRecords), Set([a, b]))
+            XCTAssertEqual(first.factory.acceptedCount, 2)
+            XCTAssertEqual(second.factory.acceptedCount, 2)
+            stage = "bilateral signal delivery"
+            let outbound = Data("synthetic shared-owner first → second\u{0}payload".utf8)
+            let inbound = Data("synthetic shared-owner second → first\u{0}payload".utf8)
+            try await first.owner.bridge.sendSignal(outbound, to: second.identity.id)
+            try await second.owner.bridge.sendSignal(inbound, to: first.identity.id)
+            try await integrationEventually("both exact bridge payloads") {
+                await observations.hasSignals(first: RendezvousSignalFrame(from: second.identity.id, payload: inbound),
+                    second: RendezvousSignalFrame(from: first.identity.id, payload: outbound))
+            }
+            stage = "revocation persistence and acknowledgment"
+            let revocation = try await first.repository.revoke(second.identity.id)
+            await first.owner.refreshTrust()
+            try await integrationEventually("revocation requires a durable receipt") {
+                await first.owner.trustSyncState == .pendingPersistence
+            }
+            XCTAssertFalse(first.factory.sentRecords.contains(revocation))
+            try await first.store.persistLatest(from: first.repository)
+            let publication = await first.repository.publicationSnapshot(persisted: first.store.persistedState())
+            XCTAssertEqual(publication.records, [revocation])
+            XCTAssertFalse(publication.pendingPersistence)
+            await first.owner.refreshTrust()
+            try await integrationEventually("real revocation acknowledgment") {
+                let state = await first.owner.trustSyncState
+                return state == .synchronized && first.factory.acceptedCount == 3
+            }
+            XCTAssertEqual(Set(first.factory.sentRecords), Set([a, b, revocation]))
+            // AuthenticatedPresenceSession sends through Go; no raw protocol or
+            // local trust filter substitutes for the server's routing decision.
+            stage = "first post-revocation bridge send"
+            try await first.owner.bridge.sendSignal(Data("post-revocation first".utf8), to: second.identity.id)
+            stage = "first Go forbidden response"
+            try await integrationEventually("first Go forbidden response") {
+                await observations.firstForbidden(device: second.identity.id)
+            }
+            stage = "second post-revocation bridge send"
+            try await second.owner.bridge.sendSignal(Data("post-revocation second".utf8), to: first.identity.id)
+            stage = "post-revocation rejection observation"
+            try await integrationEventually("Go rejects both former routes") {
+                await observations.hasForbidden(first: second.identity.id, second: first.identity.id)
+            }
+            XCTAssertEqual(first.factory.count, 1)
+            XCTAssertEqual(second.factory.count, 1)
+        } catch {
+            let states = await [first.owner.state, second.owner.state]
+            XCTFail("Live integration failed during \(stage); states=\(states); first=\(first.factory.frameTypes); second=\(second.factory.frameTypes)")
+            await stopIntegration(first, second, observers: observers)
+            throw error
+        }
+        await stopIntegration(first, second, observers: observers)
+        let receivedCounts = await observations.signalCounts
+        XCTAssertEqual(receivedCounts, [1, 1], "No post-revocation payload reached either bridge")
+        XCTAssertEqual(first.factory.receivedSignalCount, 1, "No post-revocation frame reached the first socket")
+        XCTAssertEqual(second.factory.receivedSignalCount, 1, "No post-revocation frame reached the second socket")
+        for fixture in [first, second] {
+            XCTAssertEqual(fixture.factory.authenticationRecordCounts, [0])
+            XCTAssertEqual(fixture.factory.count, 1, "Acknowledgments must not replace the socket owner")
+            XCTAssertTrue(fixture.factory.closed)
+            XCTAssertFalse(fixture.factory.overflow)
+            let state = await fixture.owner.state
+            XCTAssertEqual(state, .stopped)
+        }
+        let overflow = await observations.overflow
+        XCTAssertFalse(overflow)
+    }
+
+    private func stopIntegration(_ first: IntegrationOwner, _ second: IntegrationOwner,
+                                 observers: [Task<Void, Never>]) async {
+        async let a: Void = first.owner.stop()
+        async let b: Void = second.owner.stop()
+        _ = await (a, b)
+        for observer in observers { observer.cancel() }
+        for observer in observers { await observer.value }
+        for fixture in [first, second] {
+            let state = await fixture.owner.state
+            XCTAssertEqual(state, .stopped, "Failure cleanup must also join both owners")
+            XCTAssertTrue(fixture.factory.closed)
+        }
+    }
+
+    private func integrationEventually(_ description: String,
+        _ condition: @escaping @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for \(description)")
+        throw CancellationError()
+    }
+}
+
+private struct IntegrationOwner: Sendable {
+    let identity: DeviceIdentity
+    let repository: TrustRepository
+    let directory: DeviceDirectory
+    let store: AuthenticatedTrustSnapshotStore<IntegrationSecrets>
+    let factory: IntegrationSocketRecorder
+    let owner: AuthenticatedPresenceSupervisor
+
+    init(identity: DeviceIdentity, local: SignedTrustRecord, peer: SignedTrustRecord,
+         root: URL, socketURL: URL) async throws {
+        self.identity = identity
+        let repository = try TrustRepository(ownerIdentity: identity,
+            trustStore: TrustStore(owner: identity.id), persistedGeneration: 0)
+        self.repository = repository
+        try await repository.commitBilateralPairing(localAuthorization: local, peerAuthorization: peer)
+        let store = AuthenticatedTrustSnapshotStore(url: root, secrets: IntegrationSecrets())
+        self.store = store
+        // A fresh directory from verified local trust, with no online sightings.
+        // Proofs remain unsaved and cannot enter the identity-only handshake.
+        directory = DeviceDirectory(trust: await repository.currentTrustStore())
+        let factory = IntegrationSocketRecorder(url: socketURL)
+        self.factory = factory
+        owner = AuthenticatedPresenceSupervisor(identity: identity, repository: repository,
+            directory: directory, origin: URL(string: "wss://fixture.invalid/v1/ws")!,
+            makeSocket: { try factory.make() }, sleep: { try await Task.sleep(for: $0) },
+            publication: { await repository.publicationSnapshot(persisted: store.persistedState()) },
+            persistedUpdates: { await store.persistedUpdates() })
+    }
+}
+
+private final class IntegrationSecrets: SecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    func data(for account: String, policy: KeychainPolicy) throws -> Data? {
+        lock.withLock { values[account] }
+    }
+    func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
+        lock.withLock { values[account] = data }
+    }
+}
+
+/// Records bounded real wire traffic without altering it or introducing a reader.
+private final class IntegrationSocketRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private let url: URL
+    private var attempts = 0
+    private var sent: [Data] = []
+    private var received: [Data] = []
+    private var didClose = false
+    private var didOverflow = false
+    init(url: URL) { self.url = url }
+    var count: Int { lock.withLock { attempts } }
+    var closed: Bool { lock.withLock { didClose } }
+    var overflow: Bool { lock.withLock { didOverflow } }
+    var frameTypes: [String] { lock.withLock { received.map { Self.object($0)?["type"] as? String ?? "invalid" } } }
+    var authenticationRecordCounts: [Int] {
+        lock.withLock { sent.compactMap { data in
+            guard let frame = Self.object(data), frame["envelope"] != nil else { return nil }
+            return (frame["trustRecords"] as? [Any])?.count ?? -1
+        } }
+    }
+    var sentRecords: [SignedTrustRecord] {
+        struct Update: Decodable { let trustRecords: [SignedTrustRecord] }
+        return lock.withLock { sent.filter { Self.object($0)?["type"] as? String == "trust-update" }
+            .flatMap { (try? JSONDecoder().decode(Update.self, from: $0).trustRecords) ?? [] } }
+    }
+    var acceptedCount: Int { lock.withLock { received.filter { Self.object($0)?["type"] as? String == "trust-ok" }.count } }
+    var receivedSignalCount: Int { lock.withLock { received.filter { Self.object($0)?["type"] as? String == "signal" }.count } }
+    func make() throws -> any PresenceWebSocket {
+        try lock.withLock {
+            attempts += 1
+            guard attempts == 1 else { throw CancellationError() }
+            return IntegrationPresenceWebSocket(url: url, recorder: self)
+        }
+    }
+    func record(_ data: Data, incoming: Bool) {
+        lock.withLock {
+            if incoming {
+                if received.count < 64 { received.append(data) } else { didOverflow = true }
+            } else {
+                if sent.count < 64 { sent.append(data) } else { didOverflow = true }
+            }
+        }
+    }
+    func recordClose() { lock.withLock { didClose = true } }
+    private static func object(_ data: Data) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+}
+
+private actor IntegrationObservations {
+    private var signals: [[RendezvousSignalFrame]] = [[], []]
+    private var errors: [[RendezvousProtocolError]] = [[], []]
+    private var latestDevices: [[DeviceSummary]] = [[], []]
+    var overflow = false
+    var signalCounts: [Int] { signals.map(\.count) }
+    func signal(_ value: RendezvousSignalFrame, side: Int) {
+        guard signals[side].count < 8 else { overflow = true; return }
+        signals[side].append(value)
+    }
+    func error(_ value: RendezvousProtocolError, side: Int) {
+        guard errors[side].count < 8 else { overflow = true; return }
+        errors[side].append(value)
+    }
+    func devices(_ value: [DeviceSummary], side: Int) { latestDevices[side] = value }
+    func visible(first: DeviceID, second: DeviceID) -> Bool {
+        latestDevices[0].contains { $0.id == second && $0.availability == .internet }
+            && latestDevices[1].contains { $0.id == first && $0.availability == .internet }
+    }
+    func hasSignals(first: RendezvousSignalFrame, second: RendezvousSignalFrame) -> Bool {
+        signals == [[first], [second]]
+    }
+    func hasForbidden(first: DeviceID, second: DeviceID) -> Bool {
+        errors == [[RendezvousProtocolError(code: "forbidden", device: first)],
+                   [RendezvousProtocolError(code: "forbidden", device: second)]]
+    }
+    func firstForbidden(device: DeviceID) -> Bool {
+        errors[0] == [RendezvousProtocolError(code: "forbidden", device: device)]
     }
 }
 
@@ -244,14 +518,19 @@ private actor IntegrationPairingEndpoint: RendezvousPairingHostEndpoint {
 private final class IntegrationPresenceWebSocket: PresenceWebSocket, @unchecked Sendable {
     private let session: URLSession
     private let task: URLSessionWebSocketTask
+    private let recorder: IntegrationSocketRecorder?
 
-    init(url: URL) {
+    init(url: URL, recorder: IntegrationSocketRecorder? = nil) {
+        self.recorder = recorder
         session = URLSession(configuration: .ephemeral)
         task = session.webSocketTask(with: url, protocols: [AuthenticatedPresenceSession.subprotocol])
         task.resume()
     }
 
-    func send(_ data: Data) async throws { try await task.send(.data(data)) }
+    func send(_ data: Data) async throws {
+        recorder?.record(data, incoming: false)
+        try await task.send(.data(data))
+    }
     func ping() async throws {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, any Error>) in
@@ -265,14 +544,17 @@ private final class IntegrationPresenceWebSocket: PresenceWebSocket, @unchecked 
         }
     }
     func receive() async throws -> Data {
-        switch try await task.receive() {
+        let data: Data = switch try await task.receive() {
         case let .data(data): data
         case let .string(text): Data(text.utf8)
         @unknown default: throw AuthenticatedPresenceError.invalidFrame
         }
+        recorder?.record(data, incoming: true)
+        return data
     }
     func close() async {
         task.cancel(with: .normalClosure, reason: nil)
         session.invalidateAndCancel()
+        recorder?.recordClose()
     }
 }
