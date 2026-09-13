@@ -105,6 +105,7 @@ public actor PresenceClient {
     private var generation: UInt64 = 0
     private var acceptingEvents = true
     private var deliveries: [UUID: Task<Void, Never>] = [:]
+    private var deliveryTails: [DeviceID: (id: UUID, task: Task<Void, Never>)] = [:]
 
     public init(
         directory: DeviceDirectory,
@@ -129,13 +130,7 @@ public actor PresenceClient {
         case let .availability(device, isOnline):
             touchedDevices.insert(device)
             if isOnline { onlineDevices.insert(device) } else { onlineDevices.remove(device) }
-            // Track admitted directory work independently of the sole reader.
-            // Cleanup can join it without joining that reader (which joins us).
-            let id = UUID()
-            let delivery = Task { await applyPresence(.internet(device, online: isOnline)) }
-            deliveries[id] = delivery
-            await delivery.value
-            deliveries[id] = nil
+            await deliver(.internet(device, online: isOnline), for: device)
         }
     }
 
@@ -186,8 +181,26 @@ public actor PresenceClient {
         let currentGeneration = generation
         for device in onlineDevices {
             guard generation == currentGeneration, !Task.isCancelled else { return }
-            await applyPresence(.internet(device, online: true))
+            guard acceptingEvents, onlineDevices.contains(device) else { continue }
+            await deliver(.internet(device, online: true), for: device)
         }
+    }
+
+    /// Preserve admission order per peer across actor hops. A newer offline
+    /// event waits for an already admitted renewal, while unrelated peers can
+    /// still go offline immediately. Disconnect joins every admitted delivery.
+    private func deliver(_ event: DevicePresence, for device: DeviceID) async {
+        let id = UUID()
+        let previous = deliveryTails[device]?.task
+        let delivery = Task {
+            await previous?.value
+            await applyPresence(event)
+        }
+        deliveries[id] = delivery
+        deliveryTails[device] = (id, delivery)
+        await delivery.value
+        deliveries[id] = nil
+        if deliveryTails[device]?.id == id { deliveryTails[device] = nil }
     }
 }
 
@@ -388,6 +401,13 @@ public actor AuthenticatedPresenceSession {
     }
 
     public func run() async throws {
+        try await run(onStarted: {}, onTrustResult: nil)
+    }
+
+    /// The shared owner starts its writer only after this sole reader is active.
+    /// Internal delivery avoids competing consumers of the public result stream.
+    func run(onStarted: @Sendable () async -> Void,
+             onTrustResult: (@Sendable (RendezvousTrustResult) async -> Void)?) async throws {
         guard running else { throw AuthenticatedPresenceError.authenticationRejected }
         guard !readerActive else {
             throw AuthenticatedPresenceError.transport("reader_already_active")
@@ -399,6 +419,7 @@ public actor AuthenticatedPresenceSession {
             if !running { finishStreams() }
         }
         do {
+            await onStarted()
             while running {
                 let data = try await receiveFrame()
                 guard running, !retired else { break }
@@ -449,8 +470,10 @@ public actor AuthenticatedPresenceSession {
                     protocolErrorContinuation.yield(
                         RendezvousProtocolError(code: code, device: target)
                     )
-                case "trust-ok": trustResultContinuation.yield(.accepted)
-                case "trust-error": trustResultContinuation.yield(.rejected)
+                case "trust-ok", "trust-error":
+                    let result: RendezvousTrustResult = frame.type == "trust-ok" ? .accepted : .rejected
+                    if let onTrustResult { await onTrustResult(result) }
+                    else { trustResultContinuation.yield(result) }
                 case "protocol-error":
                     guard let code = frame.code else {
                         throw AuthenticatedPresenceError.invalidFrame

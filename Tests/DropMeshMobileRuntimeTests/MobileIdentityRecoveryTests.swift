@@ -5,7 +5,7 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileIdentityRecoveryTests: XCTestCase {
-    func testTransientIdentityRecoveryFailureRetainsEmptyBatchForFreshRetry() async throws {
+    func testTransientIdentityFailureRetainsEmptyBatchForFreshRetry() async throws {
         for response in ["capacity_reached", "transport", "raw_transport"] {
             let owner = try DeviceIdentity.ephemeral()
             let peer = try DeviceIdentity.ephemeral()
@@ -25,7 +25,7 @@ final class MobileIdentityRecoveryTests: XCTestCase {
             await supervisor.stop()
             let original = try await first.authentication()
             let recovered = try await third.authentication()
-            XCTAssertEqual(original.trustRecords.count, 1)
+            XCTAssertEqual(original.trustRecords.count, 0)
             XCTAssertTrue(recovered.trustRecords.isEmpty, response)
             XCTAssertEqual(original.envelope.deviceID, recovered.envelope.deviceID)
             XCTAssertNotEqual(original.envelope.nonce, recovered.envelope.nonce)
@@ -134,6 +134,7 @@ final class MobileIdentityRecoveryTests: XCTestCase {
         let newProof = try await repository.issueAuthorization(subject: newPeer.id,
             subjectPublicKey: newPeer.publicKey.rawRepresentation, timestamp: Date())
         await supervisor.refreshTrust()
+        try await wait { try await second.updates().contains { $0.map(\.signature) == [newProof.signature] } }
         let updates = try await second.updates()
         XCTAssertTrue(updates.contains { $0.map(\.signature) == [newProof.signature] },
             "Recovery must publish a newly approved pairing individually")
@@ -152,7 +153,7 @@ final class MobileIdentityRecoveryTests: XCTestCase {
         await supervisor.stop()
     }
 
-    func testRejectedEmptyBatchNeverEnablesRecoveryForLaterProofs() async throws {
+    func testIdentityRetryStaysProofFreeWhenLocalRecordsChange() async throws {
         let owner = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()
         let repository = try TrustRepository(ownerIdentity: owner,
@@ -170,7 +171,7 @@ final class MobileIdentityRecoveryTests: XCTestCase {
         try await wait { await supervisor.state == .online }
         await supervisor.stop()
         let auth = try await second.authentication()
-        XCTAssertEqual(auth.trustRecords.count, 1)
+        XCTAssertEqual(auth.trustRecords.count, 0)
     }
 
     func testRevocationPublishFailurePreservesDenialAndDurableProof() async throws {
@@ -196,7 +197,7 @@ final class MobileIdentityRecoveryTests: XCTestCase {
         await supervisor.stop()
     }
 
-    func testRejectedProofBatchRecoversWithFreshSignedIdentityAndIndividualRevocation() async throws {
+    func testIdentityRejectionRetriesFreshSignedIdentityAndIndividualRevocation() async throws {
         let owner = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()
         let repository = try TrustRepository(ownerIdentity: owner,
@@ -213,10 +214,11 @@ final class MobileIdentityRecoveryTests: XCTestCase {
             makeSocket: { try await factory.next() }, sleep: { _ in })
         await supervisor.start()
         try await wait { await supervisor.state == .online }
+        try await wait { await supervisor.trustSyncState == .synchronized }
         await supervisor.stop()
         let firstAuth = try await first.authentication()
         let secondAuth = try await second.authentication()
-        XCTAssertEqual(firstAuth.trustRecords.count, 1)
+        XCTAssertEqual(firstAuth.trustRecords.count, 0)
         XCTAssertTrue(secondAuth.trustRecords.isEmpty)
         XCTAssertEqual(firstAuth.envelope.deviceID, secondAuth.envelope.deviceID)
         XCTAssertNotEqual(firstAuth.envelope.nonce, secondAuth.envelope.nonce)
@@ -233,7 +235,7 @@ final class MobileIdentityRecoveryTests: XCTestCase {
         XCTAssertFalse(trusted)
     }
 
-    func testOtherAuthenticationFailuresDoNotTriggerIdentityOnlyRecovery() async throws {
+    func testEveryAuthenticationFailureRetriesIdentityOnly() async throws {
         for response in ["capacity_reached", "wrong_identity", "transport"] {
             let owner = try DeviceIdentity.ephemeral()
             let peer = try DeviceIdentity.ephemeral()
@@ -251,11 +253,11 @@ final class MobileIdentityRecoveryTests: XCTestCase {
             try await wait { await supervisor.state == .online }
             await supervisor.stop()
             let auth = try await second.authentication()
-            XCTAssertEqual(auth.trustRecords.count, 1, response)
+            XCTAssertEqual(auth.trustRecords.count, 0, response)
         }
     }
 
-    func testFailedIdentityOnlyAttemptDoesNotToggleBackIntoRecovery() async throws {
+    func testFailedIdentityAttemptNeverTogglesBackToProofAuthentication() async throws {
         let owner = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()
         let repository = try TrustRepository(ownerIdentity: owner,
@@ -273,12 +275,12 @@ final class MobileIdentityRecoveryTests: XCTestCase {
         await supervisor.stop()
         var counts: [Int] = []
         for socket in sockets { counts.append(try await socket.authentication().trustRecords.count) }
-        XCTAssertEqual(counts, [1, 0, 1, 1])
+        XCTAssertEqual(counts, [0, 0, 0, 0])
     }
 
-    private func wait(_ condition: @Sendable () async -> Bool) async throws {
+    private func wait(_ condition: @Sendable () async throws -> Bool) async throws {
         for _ in 0..<2000 {
-            if await condition() { return }
+            if try await condition() { return }
             try await Task.sleep(for: .milliseconds(1))
         }
         XCTFail("Recovery transition timed out")
@@ -336,6 +338,11 @@ private actor RecoverySocket: PresenceWebSocket {
         if transportFailure { throw AuthenticatedPresenceError.transport("fixture") }
         if failUpdate, !sent.isEmpty { throw AuthenticatedPresenceError.transport("fixture") }
         sent.append(data)
+        if sent.count > 1 {
+            let ack = Data("{\"type\":\"trust-ok\"}".utf8)
+            if let receiver { self.receiver = nil; receiver.resume(returning: ack) }
+            else { incoming.append(ack) }
+        }
     }
     func pushTrust(_ record: SignedTrustRecord) throws {
         let data = try JSONSerialization.data(withJSONObject: ["type": "trust-record", "record": [

@@ -270,7 +270,7 @@ final class MobilePresenceSupervisorTests: XCTestCase {
             return count == 2 && state == .online
         }
         let records = await second.authenticationRecordCount
-        XCTAssertEqual(records, 1)
+        XCTAssertEqual(records, 0)
         await supervisor.stop()
     }
 
@@ -387,6 +387,9 @@ private actor SupervisorSocket: PresenceWebSocket {
         if frame?["envelope"] != nil { authenticationRecordCount = (frame?["trustRecords"] as? [Any])?.count ?? 0 }
         if rejectTrustUpdate, frame?["type"] as? String == "trust-update" {
             throw AuthenticatedPresenceError.transport("fixture")
+        }
+        if frame?["type"] as? String == "trust-update" {
+            push(Data("{\"type\":\"trust-ok\"}".utf8))
         }
     }
     func ping() { }

@@ -23,6 +23,7 @@ public actor AuthenticatedPresenceSupervisor {
     private enum AttemptInterrupted: Error { case retry }
     public nonisolated let bridge = PresenceSignalBridge()
     public private(set) var state: PresenceSessionState = .inactive
+    public private(set) var trustSyncState: PresenceTrustSyncState = .idle
     private let origin: URL
     private let identity: DeviceIdentity
     private let repository: TrustRepository
@@ -31,12 +32,14 @@ public actor AuthenticatedPresenceSupervisor {
     private let makeSocket: @Sendable () async throws -> any PresenceWebSocket
     private let sleep: @Sendable (Duration) async throws -> Void
     private let onState: @Sendable (PresenceSessionState) async -> Void
+    private let onTrustSyncState: @Sendable (PresenceTrustSyncState) async -> Void
+    private let records: @Sendable () async throws -> [SignedTrustRecord]
+    private let deadlineSleep: @Sendable (Duration) async throws -> Void
     private var loop: Task<Void, Never>?
     private var backoff: Task<Void, Error>?
     private var retryRequested = false
     private var stopped = false
-    private var identityOnlyRecovery = false
-    private var recoveryAvailable = true
+    private var synchronizer: PresenceTrustSynchronizer?
     private var current: (token: PresenceSignalBridge.SocketToken, session: AuthenticatedPresenceSession)?
     private var retiredToken: PresenceSignalBridge.SocketToken?
     private var initialStop: Task<Void, Never>?
@@ -47,10 +50,14 @@ public actor AuthenticatedPresenceSupervisor {
         identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory, origin: URL,
         makeSocket: @escaping @Sendable () async throws -> any PresenceWebSocket,
         sleep: @escaping @Sendable (Duration) async throws -> Void,
-        onState: @escaping @Sendable (PresenceSessionState) async -> Void = { _ in }
+        onState: @escaping @Sendable (PresenceSessionState) async -> Void = { _ in },
+        onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
+        records: (@Sendable () async throws -> [SignedTrustRecord])? = nil,
+        deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.init(identity: identity, repository: repository, directory: directory,
                   origin: origin, makeSocket: makeSocket, sleep: sleep, onState: onState,
+                  onTrustSyncState: onTrustSyncState, records: records, deadlineSleep: deadlineSleep,
                   makeClient: { PresenceClient(directory: $0) })
     }
 
@@ -60,6 +67,9 @@ public actor AuthenticatedPresenceSupervisor {
         makeSocket: @escaping @Sendable () async throws -> any PresenceWebSocket,
         sleep: @escaping @Sendable (Duration) async throws -> Void,
         onState: @escaping @Sendable (PresenceSessionState) async -> Void = { _ in },
+        onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
+        records: (@Sendable () async throws -> [SignedTrustRecord])? = nil,
+        deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         makeClient: @escaping @Sendable (DeviceDirectory) -> PresenceClient
     ) {
         self.origin = origin
@@ -70,6 +80,9 @@ public actor AuthenticatedPresenceSupervisor {
         self.makeSocket = makeSocket
         self.sleep = sleep
         self.onState = onState
+        self.onTrustSyncState = onTrustSyncState
+        self.records = records ?? { await repository.authenticationRecords() }
+        self.deadlineSleep = deadlineSleep
     }
 
     public func start() {
@@ -85,6 +98,7 @@ public actor AuthenticatedPresenceSupervisor {
         state = .stopping
         loop?.cancel()
         backoff?.cancel()
+        await synchronizer?.retire()
         await bridge.finish()
         if let current { await stopCurrentSocket(current.token) }
         if let loop { await loop.value }
@@ -101,33 +115,12 @@ public actor AuthenticatedPresenceSupervisor {
         }
     }
 
-    /// The platform runtime persists trust and refreshes incoming policy first.
-    /// A failed update closes this attempt; the loop then reauthenticates using
-    /// current repository records. Initial connect requires no redundant update.
+    /// Coalesces current records into the session's sole acknowledged writer.
+    /// Connectivity alone never means the server accepted the local proofs.
     public func refreshTrust() async {
         guard !stopped, state == .online, let current else { return }
-        let records = await repository.authenticationRecords()
-        guard isActive(current.token), !records.isEmpty else { return }
-        do {
-            if identityOnlyRecovery {
-                try await publishRecoveryRecords(records, through: current.session)
-            } else {
-                try await current.session.sendTrustUpdate(records)
-            }
-        }
-        catch { await interrupt(current.token) }
-    }
-
-    private func publishRecoveryRecords(
-        _ records: [SignedTrustRecord], through session: AuthenticatedPresenceSession
-    ) async throws {
-        // Isolate stale proofs from valid revocations and newly approved
-        // pairings. Each record still receives the existing server validation;
-        // transport send is not confirmation and local durable state is intact.
-        for record in records {
-            try Task.checkCancellation()
-            try await session.sendTrustUpdate([record])
-        }
+        guard isActive(current.token) else { return }
+        await synchronizer?.refresh()
     }
 
     public static func reconnectDelay(_ failures: Int) -> Duration {
@@ -142,7 +135,7 @@ public actor AuthenticatedPresenceSupervisor {
             var forwarders: [Task<Void, Never>] = []
             var cancelled = false
             var authenticated = false
-            let identityOnlyAttempt = identityOnlyRecovery
+            var authenticationDeadline: Task<Void, Never>?
             do {
                 let socket = try await makeSocket()
                 guard !stopped, !Task.isCancelled else { await socket.close(); break }
@@ -156,16 +149,24 @@ public actor AuthenticatedPresenceSupervisor {
                 await publish(failures == 0 ? .connecting : .reconnecting)
                 try Task.checkCancellation()
                 guard isActive(token) else { throw AttemptInterrupted.retry }
-                try await attempt.connect(includeTrustRecords: !identityOnlyAttempt)
+                authenticationDeadline = Task {
+                    do { try await deadlineSleep(.seconds(15)); try Task.checkCancellation() }
+                    catch { return }
+                    await self.interrupt(token)
+                }
+                try await attempt.connect(includeTrustRecords: false)
+                authenticationDeadline?.cancel()
+                await authenticationDeadline?.value
+                authenticationDeadline = nil
                 authenticated = true
                 failures = 0
                 guard !stopped, !Task.isCancelled else { throw CancellationError() }
                 guard isActive(token) else { throw AttemptInterrupted.retry }
-                if identityOnlyAttempt {
-                    try await publishRecoveryRecords(
-                        repository.authenticationRecords(), through: attempt)
-                    guard isActive(token) else { throw AttemptInterrupted.retry }
-                }
+                let sync = PresenceTrustSynchronizer(records: records,
+                    send: { try await attempt.sendTrustUpdate([$0]) }, sleep: deadlineSleep,
+                    onState: { [weak self] in await self?.publishSync($0, token: token) },
+                    onFailure: { [weak self] in await self?.interrupt(token) })
+                synchronizer = sync
                 await bridge.activate(token) { payload, peer in try await attempt.sendSignal(payload, to: peer) }
                 guard !stopped, !Task.isCancelled else { throw CancellationError() }
                 guard isActive(token) else { throw AttemptInterrupted.retry }
@@ -186,34 +187,11 @@ public actor AuthenticatedPresenceSupervisor {
                 if isActive(token) { await publish(.online) }
                 try Task.checkCancellation()
                 guard isActive(token) else { throw AttemptInterrupted.retry }
-                try await attempt.run()
+                try await attempt.run(onStarted: { await sync.refresh() },
+                                      onTrustResult: { await sync.receive($0) })
             } catch is CancellationError {
                 cancelled = true
             } catch {
-                if !authenticated, !stopped, !Task.isCancelled, isActive(token) {
-                    if identityOnlyAttempt {
-                        // Capacity and transport failure do not reject identity.
-                        // Keep this mode through normal backoff, without granting
-                        // another proof-to-identity recovery budget.
-                        let capacity = await session?.authenticationCapacityRejected ?? false
-                        let transport: Bool
-                        if case .transport = error as? AuthenticatedPresenceError {
-                            transport = true
-                        } else {
-                            transport = error is URLError
-                        }
-                        if isActive(token), !Task.isCancelled {
-                            identityOnlyRecovery = capacity || transport
-                        }
-                    } else if recoveryAvailable,
-                        error as? AuthenticatedPresenceError == .authenticationRejected,
-                        let session, await session.trustAuthenticationRejected,
-                        isActive(token), !Task.isCancelled
-                    {
-                        recoveryAvailable = false
-                        identityOnlyRecovery = true
-                    }
-                }
                 // No peer IDs, URLs, payloads, credentials or raw transport errors
                 // enter diagnostics. The owner exposes a coarse reconnect state.
                 #if DEBUG
@@ -224,18 +202,23 @@ public actor AuthenticatedPresenceSupervisor {
             // connect/run above, then stop and join every forwarder before next
             // makeSocket. Signal token checks alone cannot protect presence.
             await beginDraining(token)
+            authenticationDeadline?.cancel()
+            await authenticationDeadline?.value
             for task in forwarders { task.cancel() }
             let initialStop = initialStop
+            let sync = synchronizer
             let drain = Task {
                 await initialStop?.value
                 // connect() may return after an earlier stop() and set running
                 // again. Stop once more after connect/run has actually returned.
                 await session?.stop()
+                await sync?.stop()
                 for task in forwarders { await task.value }
             }
             finalDrain = drain
             await drain.value
             current = nil
+            synchronizer = nil
             self.initialStop = nil
             finalDrain = nil
             guard !stopped, !Task.isCancelled, !cancelled else { break }
@@ -253,6 +236,8 @@ public actor AuthenticatedPresenceSupervisor {
             retryRequested = false
         }
         await bridge.finish()
+        trustSyncState = .idle
+        await onTrustSyncState(.idle)
         state = .stopped
         await onState(.stopped)
     }
@@ -262,6 +247,12 @@ public actor AuthenticatedPresenceSupervisor {
         state = value
         // Caller must also check its runtime generation inside its own actor.
         await onState(value)
+    }
+
+    private func publishSync(_ value: PresenceTrustSyncState, token: PresenceSignalBridge.SocketToken) async {
+        guard isActive(token) else { return }
+        trustSyncState = value
+        await onTrustSyncState(value)
     }
 
     private func forward(_ frame: RendezvousSignalFrame, token: PresenceSignalBridge.SocketToken) async {
@@ -290,7 +281,12 @@ public actor AuthenticatedPresenceSupervisor {
         // Retirement must be visible before bridge/callback actor hops. The
         // loop may finish this attempt while the callback is still suspended.
         retiredToken = token
+        let sync = synchronizer
         await bridge.disconnect(token)
+        await sync?.retire()
+        guard !stopped, current?.token == token else { return }
+        trustSyncState = .idle
+        await onTrustSyncState(.idle)
         guard !stopped, current?.token == token else { return }
         await publish(.reconnecting)
     }

@@ -3,6 +3,52 @@ import XCTest
 @testable import MacChannelCore
 
 final class PresenceDrainTests: XCTestCase {
+    func testRenewalRechecksOtherPeerAfterSuspendedDeliveryWithoutDisconnect() async throws {
+        let first = DeviceID(rawValue: UUID())
+        let second = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(first, second))
+        let gate = PeerRenewalGate()
+        let client = PresenceClient(heartbeatInterval: 60, applyPresence: { event in
+            if case let .internet(peer, online: true) = event { await gate.hold(peer) }
+            await directory.apply(event)
+        })
+        await client.receiveAuthenticated(.availability(device: first, isOnline: true))
+        await client.receiveAuthenticated(.availability(device: second, isOnline: true))
+        let renewal = Task { await client.renewOnlinePresence() }
+        try await eventually { await gate.blockedPeer != nil }
+        let blocked = await gate.blockedPeer
+        let other = blocked == first ? second : first
+        await client.receiveAuthenticated(.availability(device: other, isOnline: false))
+        await gate.release()
+        await renewal.value
+        let peers = await directory.snapshot()
+        XCTAssertFalse(peers.contains { $0.id == other }, "An old iterator cannot renew an offline peer")
+        await client.disconnect()
+    }
+
+    func testSamePeerOfflineIsOrderedAfterAlreadyAdmittedRenewal() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let directory = DeviceDirectory(trust: .allowing(peer))
+        let gate = RenewalGate()
+        let client = PresenceClient(heartbeatInterval: 60, applyPresence: { event in
+            if case .internet(_, online: true) = event { await gate.holdRenewal() }
+            await directory.apply(event)
+        })
+        await client.receiveAuthenticated(.availability(device: peer, isOnline: true))
+        let renewal = Task { await client.renewOnlinePresence() }
+        try await eventually { await gate.waiting }
+        let offline = Task { await client.receiveAuthenticated(.availability(device: peer, isOnline: false)) }
+        // Give the actor the offline input while the admitted online delivery
+        // remains held. Offline may enqueue, but cannot be overtaken on resume.
+        try await Task.sleep(for: .milliseconds(30))
+        await gate.release()
+        await renewal.value
+        await offline.value
+        let peers = await directory.snapshot()
+        XCTAssertTrue(peers.isEmpty, "An admitted renewal cannot overtake a newer offline input")
+        await client.disconnect()
+    }
+
     func testDisconnectJoinsReceivedPresenceAlreadyCrossingDirectoryHop() async throws {
         let peer = DeviceID(rawValue: UUID())
         let directory = DeviceDirectory(trust: .allowing(peer))
@@ -54,9 +100,9 @@ final class PresenceDrainTests: XCTestCase {
         await client.receiveAuthenticated(.availability(device: peer, isOnline: true))
         await client.startHeartbeats()
         try await eventually { await gate.waiting }
-        // Even an offline event can finish while an earlier renewal is still
-        // crossing the directory hop; cleanup must remember that touched peer.
-        await client.receiveAuthenticated(.availability(device: peer, isOnline: false))
+        // A newer offline input now queues behind the admitted renewal; cleanup
+        // must join both deliveries rather than allowing them to overtake.
+        let offline = Task { await client.receiveAuthenticated(.availability(device: peer, isOnline: false)) }
         let returned = DrainCounter()
         let first = Task { await client.disconnect(); await returned.increment() }
         let second = Task { await client.disconnect(); await returned.increment() }
@@ -64,6 +110,7 @@ final class PresenceDrainTests: XCTestCase {
         let early = await returned.count
         XCTAssertEqual(early, 0, "Disconnect must join in-flight directory delivery")
         await gate.release()
+        await offline.value
         await first.value
         await second.value
         // A replacement can now publish; the old owner must never erase or
@@ -112,6 +159,20 @@ final class PresenceDrainTests: XCTestCase {
         XCTFail("Drain fixture did not reach barrier")
         throw CancellationError()
     }
+}
+
+private actor PeerRenewalGate {
+    private var calls = 0
+    private var waiter: CheckedContinuation<Void, Never>?
+    private(set) var blockedPeer: DeviceID?
+    func hold(_ peer: DeviceID) async {
+        calls += 1
+        if calls == 3 {
+            blockedPeer = peer
+            await withCheckedContinuation { waiter = $0 }
+        }
+    }
+    func release() { waiter?.resume(); waiter = nil }
 }
 
 private actor DrainCounter {
