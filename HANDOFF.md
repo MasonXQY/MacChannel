@@ -2,6 +2,45 @@
 
 ## Current iPhone work — 2026-09-12
 
+AUTH REJECTION DIAGNOSIS — 2026-09-13: user confirms same reconnect failure on
+Wi-Fi and LTE; screenshot shows Reconnecting to service, not inactive/failed.
+Installed development-only coarse diagnostics after RED/GREEN; fresh terminated
+process repeatedly prints challenge_unexpired, authentication_failed, followed
+by stage=authentication/category=authentication_rejected. This proves phone
+reaches server and receives auth-error, not a general network failure or the
+server capacity_reached category. Challenge classification is coarse and does
+not fully rule out clock skew. No raw transport errors, frames, IDs, proofs,
+credentials, names or files logged. Mobile runtime only; core/Mac unchanged.
+14 focused tests pass (.build/iphone-presence-final-green.log); prior type-identity
+test failure corrected by wrapping only default production factory, preserving
+injected socket identity. Signed device build and deep strict codesign pass;
+in-place diagnostic install and final regular launch succeed. Build remains2.
+Capture commands were intentionally bounded at20/25seconds and timed out after
+collecting repeated failures; all sessions drained. Evidence console in task;
+build/install/final launch evidence .build/iphone-presence-{frame-build.log,
+frame-install.json,diagnostic-final-launch.json}. No recovery claimed.
+
+Read-only independent source review: stale owner/peer auth proof can reject whole
+server batch after remote higher-sequence edge, but actual phone state unproven.
+Separate live third-party proof inclusion mismatch exists, but repository reload
+filters it; therefore it does not explain observed fresh-launch initial rejection.
+Do not disable replay/highwater/revocation protections or clear pairings to bypass.
+Existing authenticated SSH administrative path to channel.zensys-tech.com:22
+timed out before auth. DNS resolves one IPv4; no proxy/nondefaultport in ssh -G.
+Need restored authorized management access to inspect precise server-side reject
+cause before production changes. No server restart/config/db/log access performed.
+
+POST-UPDATE CONNECTION REPORT — 2026-09-13: user reports service not connected
+and all previously paired Macs offline after build2. Read-only diagnostics:
+Mac-side /healthz returns status ok; unauthenticated /v1/ws responds401
+authentication_required. This does NOT prove phone connectivity or authenticated
+presence. fe10a66..c433a9c changes do not modify network/pairing endpoints or
+runtime; paired-device list alone does not prove trust on the remote peers.
+Connected iPhone is unlocked. Requested exact Home screenshot to distinguish
+inactive/reconnecting/failed state (reported wording is not exact current UI
+localization). No restart, re-pair, data access/clearing, server or source changes
+performed. Root cause and recovery unverified; preserve pairings.
+
 FILES FIX INSTALLED — 2026-09-13: user explicitly requested updating connected
 iPhone for their own testing. Source901c30a plus app/Share CFBundleVersion bump
 to2 (marketing0.1.0); no behavior edits. Both plists lint and diff-check pass.

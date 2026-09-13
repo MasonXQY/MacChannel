@@ -9,6 +9,18 @@ enum MobilePresenceState: Equatable, Sendable {
 /// stop and await its drain before replacing this owner or its DeviceDirectory.
 /// Reconnect never replaces the stable bridge, router, or transfer coordinator.
 actor MobilePresenceSupervisor {
+    // Closed vocabulary only: never interpolate raw errors or associated payloads.
+    nonisolated static func diagnosticCategory(_ error: any Error) -> String {
+        guard let error = error as? AuthenticatedPresenceError else { return "other" }
+        switch error {
+        case .authenticationRejected: return "authentication_rejected"
+        case .invalidChallenge: return "invalid_challenge"
+        case .invalidFrame: return "invalid_frame"
+        case .frameTooLarge: return "frame_too_large"
+        case .insecureOrigin: return "insecure_origin"
+        case .transport: return "transport"
+        }
+    }
     private enum AttemptInterrupted: Error { case retry }
     nonisolated let bridge = MobileSignalBridge()
     private(set) var state: MobilePresenceState = .inactive
@@ -107,6 +119,7 @@ actor MobilePresenceSupervisor {
             var session: AuthenticatedPresenceSession?
             var forwarders: [Task<Void, Never>] = []
             var cancelled = false
+            var authenticated = false
             do {
                 let socket = try await makeSocket()
                 guard !stopped, !Task.isCancelled else { await socket.close(); break }
@@ -121,6 +134,7 @@ actor MobilePresenceSupervisor {
                 try Task.checkCancellation()
                 guard isActive(token) else { throw AttemptInterrupted.retry }
                 try await attempt.connect()
+                authenticated = true
                 guard !stopped, !Task.isCancelled else { throw CancellationError() }
                 guard isActive(token) else { throw AttemptInterrupted.retry }
                 await bridge.activate(token) { payload, peer in try await attempt.sendSignal(payload, to: peer) }
@@ -149,6 +163,9 @@ actor MobilePresenceSupervisor {
             } catch {
                 // No peer IDs, URLs, payloads, credentials or raw transport errors
                 // enter diagnostics. The owner exposes a coarse reconnect state.
+                #if DEBUG
+                print("DropMeshPresence stage=\(authenticated ? "connected" : "authentication") category=\(Self.diagnosticCategory(error))")
+                #endif
             }
             // AuthenticatedPresenceSession directly mutates the directory. Join
             // connect/run above, then stop and join every forwarder before next

@@ -4,6 +4,19 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobilePresenceSupervisorTests: XCTestCase {
+    func testDiagnosticCategoryNeverIncludesErrorPayload() {
+        XCTAssertEqual(MobilePresenceSupervisor.diagnosticCategory(AuthenticatedPresenceError.authenticationRejected), "authentication_rejected")
+        XCTAssertEqual(MobilePresenceSupervisor.diagnosticCategory(AuthenticatedPresenceError.invalidChallenge), "invalid_challenge")
+        XCTAssertEqual(MobilePresenceSupervisor.diagnosticCategory(AuthenticatedPresenceError.transport("private-secret")), "transport")
+        XCTAssertEqual(MobilePresenceSupervisor.diagnosticCategory(NSError(domain: "private-secret", code: 1)), "other")
+    }
+    func testDiagnosticFrameUsesOnlyAllowlistedCodes() {
+        XCTAssertEqual(MobileRuntimeConfiguration.diagnosticFrame(Data(#"{"type":"challenge","expiresAt":0}"#.utf8)), "challenge_expired")
+        let rejected = Data(#"{"type":"auth-error","code":"authentication_failed","deviceID":"private"}"#.utf8)
+        XCTAssertEqual(MobileRuntimeConfiguration.diagnosticFrame(rejected), "authentication_failed")
+        XCTAssertEqual(MobileRuntimeConfiguration.diagnosticFrame(Data(#"{"type":"auth-error","code":"private"}"#.utf8)), "other")
+        XCTAssertEqual(MobileRuntimeConfiguration.diagnosticFrame(Data(#"{"type":"auth-ok","deviceID":"private"}"#.utf8)), "accepted")
+    }
     func testStartStopReentrancyAuthenticatesExactlyOneSocket() async throws {
         let identity = try DeviceIdentity.ephemeral()
         let socket = try SupervisorSocket(identity: identity)
