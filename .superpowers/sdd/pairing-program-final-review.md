@@ -1,5 +1,14 @@
 # Whole-program review at e88d1c2
 
+## Final closure at72671f0
+
+READY for signedcandidate. Shippingfix48f642c/UItestsfd197b7, finalartifact72671f0.
+OriginalImportantresolved; reportMinorcorrected; no actionable findings. Reviewer
+independentlychecked finalstandard2/0+AX2/0 logs andcaptures; root likewise.
+Savingtext/retryaction readablewithscrolling. Priorsecurity/cancellation/durable
+andinterop evidence remains applicable. Signedmetadata, installedidentity,
+physicalWi-Fi/LTE, oldclient andproduction remain pending separate gates.
+
 Reviewer pairing_program_final_review (gpt-6-astra), read-only, baselinef93a82a through e88d1c2d4d8d29c261fa809d7f94aa54123b19fe. Verdict: Ready for signed candidate WITH FIXES. No Critical, one Important, no additional Minor.
 
 Important: shipping iPhone omits saving state. PairingModel.swift26 has no phase;215 ignores shared saving;88 retry leaves saveFailed;233 reconciles saving as failed. PairingView.swift48,63 shows waiting/red failure during real local save. Fix explicit phase/shared mapping/immediate retry transition/bilingual local-saving progress without weakening cancellation/durable completion. Hold synthetic persistence to test first and retry saves, success/failure, no premature success/new authorization; bilingual native rendering.

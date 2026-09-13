@@ -1,5 +1,18 @@
 # DropMesh iPhone companion handoff
 
+## Latest pairing program gate — 2026-09-14
+
+FinalreviewREADY for signedcandidate at72671f0: no actionable findings. Shipping
+savingfix48f642c/UItestsfd197b7; focused13/native121/0fail, finalstandard2/0
+21.702s andlargestAX2/0 26.299s. PriorCore1081/6skips/0fail+realGo+SQLrace retained.
+Root/reviewer checkedlogs andscreenshots;16finalimages. Originalsimstalerunner
+isolated with temporaryF0862282-2DD1-41A1-8C04-826C6C6199A1 (shutdownretained);
+originalsimlarge/datauntouched. Agentsdrained/cachefree. Nextsignedcandidateparent:
+/Users/mason/Developer/DropMesh-Releases/pairing-build5.grL47J (empty owner-only).
+Phone main+Sharebuild5; plannedStore1.3.0(5), existingidentitiesunchanged.
+TemporarySSH92.96.17.75/32action-timeapprovalpending; firewallnotmodified.
+No signed/install/deploy/physicalacceptance yet, no Storeupload authorized here.
+
 ## Current iPhone work — 2026-09-12
 
 PAIRING/RECONNECT SYSTEM AUDIT — 2026-09-13, baseline f93a82a. User requests
