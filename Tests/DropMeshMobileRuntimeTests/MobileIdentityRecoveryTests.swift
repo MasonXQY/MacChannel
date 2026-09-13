@@ -35,7 +35,7 @@ final class MobileIdentityRecoveryTests: XCTestCase {
         }
     }
 
-    func testOwnerRevocationCatchUpDrainsRecoveryWithoutRemainingOnline() async throws {
+    func testPeerWithdrawalCatchUpPreservesRecoveredIdentitySocket() async throws {
         let owner = try DeviceIdentity.ephemeral()
         let peer = try DeviceIdentity.ephemeral()
         let repository = try TrustRepository(ownerIdentity: owner,
@@ -49,15 +49,28 @@ final class MobileIdentityRecoveryTests: XCTestCase {
             directory: DeviceDirectory(trust: await repository.currentTrustStore()),
             makeSocket: { try await factory.next() }, sleep: { _ in })
         await supervisor.start()
-        try await wait { await supervisor.state == .online }
-        try await second.pushTrust(SignedTrustRecord.revoking(owner.id,
-            subjectPublicKey: owner.publicKey.rawRepresentation, signedBy: peer, sequence: 1))
-        try await wait { await supervisor.state == .stopped }
-        let closed = await second.closed
-        let ownerTrusted = await repository.isTrusted(owner.id)
-        XCTAssertTrue(closed)
-        XCTAssertTrue(ownerTrusted)
+        do {
+            try await wait { await supervisor.state == .online }
+            try await second.pushTrust(SignedTrustRecord.revoking(owner.id,
+                subjectPublicKey: owner.publicKey.rawRepresentation, signedBy: peer, sequence: 1))
+            try await wait { await !repository.isTrusted(peer.id) }
+            let state = await supervisor.state
+            let closed = await second.closed
+            let ownerTrusted = await repository.isTrusted(owner.id)
+            let attempts = await factory.attempts
+            XCTAssertEqual(state, .online)
+            XCTAssertFalse(closed)
+            XCTAssertTrue(ownerTrusted)
+            XCTAssertEqual(attempts, 2, "Withdrawal must retain the recovered socket")
+        } catch {
+            await supervisor.stop()
+            throw error
+        }
         await supervisor.stop()
+        let stopped = await supervisor.state
+        let closedAfterStop = await second.closed
+        XCTAssertEqual(stopped, .stopped)
+        XCTAssertTrue(closedAfterStop)
     }
 
     func testCoreDefaultRetainsProofsAndErrorWhileRejectionFlagResetsEachConnect() async throws {
@@ -295,8 +308,10 @@ private struct RecoveryAuthentication: Decodable {
 
 private actor RecoveryFactory {
     var sockets: [RecoverySocket]
+    private(set) var attempts = 0
     init(_ sockets: [RecoverySocket]) { self.sockets = sockets }
     func next() throws -> any PresenceWebSocket {
+        attempts += 1
         guard !sockets.isEmpty else { throw CancellationError() }
         return sockets.removeFirst()
     }
