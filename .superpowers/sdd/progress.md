@@ -1,5 +1,7 @@
 # iPhone continuation ledger
 
+LATEST signedcandidatehandoff2026-09-14: source06bedd5, Mac1.3.0(5)universalStore+phone0.1.0(5)/Share signedandstrictverified; stablepairing-build5.grL47J bundles/ZIPs/hashes/VERIFICATION.md. Allsessionsdrained. No install/deploy: phone595...unavailable confirmed; temporarySSH92.96.17.75/32approvalunanswered; localoldMacPID85546retained afterCUAtimeout(no forcequit). See signed-candidates-2026-09-14.md andHANDOFF. Code/tests/reviewsdone; nextrequiresphoneconnection/unlock+specificfirewallapproval theninstalled/prodmatrix, no repeatlocalprogram.
+
 Latest2026-09-14: pairingprogramfinalreviewREADY for signedcandidate72671f0; shipping48f642c/UItestsfd197b7. Important savingphasefixed/Minorreportwordingcorrected/noremainingfindings. Focused13/native121/0fail; finalstandard2/0 21.702s+AX2/0 26.299s,16captures, root/reviewerchecked. OriginalsimstalerunnerisolatedinnewsyntheticF086... (shutdownretained); originallarge/dataunchanged. Allagentscommandsdrained/cachefree. Candidateparent /Users/mason/Developer/DropMesh-Releases/pairing-build5.grL47J preparedempty. Signing/install/deploy/physicalpending; temporarySSH92.96.17.75/32approvalpending, nofirewallwrites. Resume latestHANDOFFsection, not old completedstages.
 
 FILES BRIDGE 2026-09-13: root TDD + independent review on base c4a64f7,

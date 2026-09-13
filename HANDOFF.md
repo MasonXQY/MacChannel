@@ -2,6 +2,13 @@
 
 ## Latest pairing program gate — 2026-09-14
 
+SIGNED CANDIDATES DONE at source06bedd5: Mac1.3.0(5)universalStore and
+iPhone0.1.0(5)+Share signed, strictverificationpassed. Stableartifacts/ZIPs/manifest
+in pairing-build5.grL47J; see docs/acceptance/pairing-reconnect-signed-candidates-2026-09-14.md.
+No install/deploy. Phone nowunavailable (confirmedlistdevices); temporarySSHapproval
+unanswered. MacoldPID85546 remains; CUApathlookup timedout, noforcequit orduplicate.
+Allbuild/archive sessionsdrained. Resume externalgates, notcompletedlocaltasks.
+
 FinalreviewREADY for signedcandidate at72671f0: no actionable findings. Shipping
 savingfix48f642c/UItestsfd197b7; focused13/native121/0fail, finalstandard2/0
 21.702s andlargestAX2/0 26.299s. PriorCore1081/6skips/0fail+realGo+SQLrace retained.
