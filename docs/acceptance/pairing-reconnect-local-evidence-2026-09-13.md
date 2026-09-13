@@ -15,6 +15,18 @@ Five selected cases each repeated20times, including real local authenticated Web
 
 No production service, user pairing records or physical devices were used by these tests. This gate does not establish20physical Wi-Fi/LTE transitions, timer-expiry behavior on real networks, or file-transfer acceptance. Client cycle coverage remains to be run after the full integration.
 
+## Swift to real local Go router interoperability
+
+At995c9c1 root ran from Services/rendezvous:
+
+```sh
+MACCHANNEL_CROSS_LANGUAGE=1 go test ./internal/httpapi -run '^TestLiveSwiftClientPairingAndWebSocketAuthentication$' -count=1 -v
+```
+
+Exit0: selected live integration PASS7.68s; package8.336s. The Go httptest wrapper supplies its local server URL to the real Swift HTTP pairing/WebSocket test; this resolves the conditional cross-language skip for this revision. It exercises challenge authentication, bilateral pairing after prior revocation and rejection handling. It is not the new supervisor's full installed path and does not substitute for physical transport tests.
+
+Root inspected router.go838–859: the single read loop emits one trust-error then continues on failure, or one trust-ok after PrepareConfirmBatch returns. signal/hub.go82–95 still rejects routing unless ShareGraph is true. These unchanged-code checks resolve those task-review dependency questions; they are not claims about production's deployed image.
+
 ## Installed baseline inventory (read-only)
 
 On2026-09-13 at approximately21:27 localtime, root verified:

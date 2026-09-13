@@ -16,6 +16,7 @@
 
 Files:
 - Sources/MacChannelCore/Identity/TrustRepository.swift (atomic selection if needed)
+- Sources/MacChannelCore/Identity/TrustRecord.swift (additive exact-value equality if needed; no serialization or signature changes)
 - Sources/MacChannelCore/Identity/AuthenticatedTrustSnapshotStore.swift (existing persisted receipt interface only)
 - New focused Core durable-publication tests
 - Sources/DropMeshMobileRuntime/MobileIdentityContext.swift, MobilePresenceSupervisor.swift, MobileProductionForegroundNetwork.swift, MobileForegroundRuntime.swift
