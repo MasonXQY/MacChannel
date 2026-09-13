@@ -28,7 +28,11 @@ Read `docs/acceptance/pairing-reconnect-audit-2026-09-13.md` for approved scope 
 
 Task reports in `.superpowers/sdd/`: trust-snapshot-report.md, shared-presence-owner-report.md, identity-trust-sync-report.md, durable-pairing-surface-report.md, durable-trust-publication-report.md, presence-presentation-report.md, shared-owner-live-interop-report.md. Treat reports as claims and verify against the diff.
 
+The first real shared-owner live gate at `a03ef7c` exposed valid peer→owner revocation causing `cannotRevokeOwner` and a reconnect. Include the corrective plan `docs/superpowers/plans/2026-09-13-peer-revocation-catchup.md` and its report `.superpowers/sdd/peer-revocation-catchup-report.md`. Inspect issuer-only trust narrowing, unchanged owner identity, validation-before-mutation, replay/high-water and durable negative proof/re-pair behavior across restart. The failing integration commit is regression evidence, not an accepted gate; require the reported final passing live run.
+
 Root evidence: `docs/acceptance/pairing-reconnect-local-evidence-2026-09-13.md`; program cursor is the final section of `.superpowers/sdd/progress.md`. Earlier unrelated iPhone iteration sections are not this review's scope.
+
+Recorded remaining qualifications: existing Xcode AppIntents metadata-extraction warning; original live HTTP transport fixture warnings about shared-session invalidation unless separately corrected. Presence visual evidence has a root-inspected report `docs/acceptance/presence-presentation-visual-review-2026-09-13.md`; largest text needs native scrolling. The live test initializes verified static directory trust to avoid introducing a test observer that lacks an explicit stop/join API; this test does not establish dynamic DeviceDirectory trust-observer teardown.
 
 Inspect cross-task interactions, particularly:
 - coherent server snapshot/high-water/version recovery and concurrent mutation;
