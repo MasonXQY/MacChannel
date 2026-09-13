@@ -155,3 +155,29 @@ successful-save-only retry notification, shared refresh ownership, joined observ
 shutdown, pending status without reconnect, and preserved test provider seams.
 No remaining implementation issue identified. Actual installed cross-device and
 live shared-owner Go acceptance remain later work; independent review is required.
+
+## Independent review follow-up
+
+Review approved the implementation and requested two minor test improvements.
+Both are addressed in this test-only follow-up to `4bde8d9`:
+
+- The two fixed 50 ms waits in PresenceTrustSynchronizerTests now await observed
+  pendingPersistence. The gated refresh regression waits for that transition
+  after releasing the synchronizing callback, proving the worker reconsidered
+  its snapshot before asserting zero sends. Failure cleanup releases the gate
+  and joins the synchronizer; the initial pending-save test stops its owner if
+  the bounded transition wait fails.
+- MobileForegroundRuntimeTests now uses its existing five-second bounded
+  observable-condition helper for terminal persistence entry. Failure cleanup
+  releases terminal persistence, closes/releases the held channel, and stops the
+  runtime before propagating the failure. It retains separate claimed-intent and
+  durably published cancellation assertions.
+
+Verification from the same worktree:
+
+`swift test --filter 'PresenceTrustSynchronizerTests|MobileForegroundRuntimeTests' > .build/durable-publication-review-tests.log 2>&1`
+
+Result: 39 tests, 0 skips, 0 failures, 2.219 seconds; no compiler warnings/errors.
+`git diff --check` passed. No production changes; the previously recorded full
+suite and both product builds remain the production-source evidence. A second
+full run or rebuild was not needed for this test-only review correction.

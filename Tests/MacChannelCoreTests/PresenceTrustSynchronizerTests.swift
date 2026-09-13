@@ -9,13 +9,22 @@ final class PresenceTrustSynchronizerTests: XCTestCase {
         let gate = SyncPublicationGate()
         let sync = PresenceTrustSynchronizer(records: { await gate.publication(fixture.repository) },
             send: { _ in await gate.sent() }, sleep: { try await Task.sleep(for: $0) },
-            onState: { if $0 == .synchronizing { await gate.hold() } }, onFailure: { })
+            onState: {
+                await gate.record($0)
+                if $0 == .synchronizing { await gate.hold() }
+            }, onFailure: { })
         await sync.refresh()
-        try await eventually { await gate.entered }
-        await gate.exclude()
-        await sync.refresh()
-        await gate.release()
-        try await Task.sleep(for: .milliseconds(50))
+        do {
+            try await eventually { await gate.entered }
+            await gate.exclude()
+            await sync.refresh()
+            await gate.release()
+            try await eventually { await gate.state == .pendingPersistence }
+        } catch {
+            await gate.release()
+            await sync.stop()
+            throw error
+        }
         let sent = await gate.sendCount
         XCTAssertEqual(sent, 0, "A refresh admitted before send must reconsider the old proof")
         await sync.stop()
@@ -27,8 +36,8 @@ final class PresenceTrustSynchronizerTests: XCTestCase {
             await fixture.repository.publicationSnapshot(persisted: receipt.state())
         }, persistedUpdates: { await receipt.updates() })
         await owner.start()
-        try await eventually { await owner.state == .online }
-        try await Task.sleep(for: .milliseconds(50))
+        do { try await eventually { await owner.trustSyncState == .pendingPersistence } }
+        catch { await owner.stop(); throw error }
         let initial = await owner.trustSyncState
         XCTAssertEqual(initial, .pendingPersistence, "Filtered current proof is waiting for local save")
         let before = await fixture.socket.updateCount
@@ -396,6 +405,7 @@ private actor SyncReceipt {
 private actor SyncPublicationGate {
     private(set) var entered = false
     private(set) var sendCount = 0
+    private(set) var state: PresenceTrustSyncState = .idle
     private var excluded = false
     private var waiter: CheckedContinuation<Void, Never>?
     func publication(_ repository: TrustRepository) async -> TrustPublicationSnapshot {
@@ -406,6 +416,7 @@ private actor SyncPublicationGate {
     func exclude() { excluded = true }
     func release() { waiter?.resume(); waiter = nil }
     func sent() { sendCount += 1 }
+    func record(_ state: PresenceTrustSyncState) { self.state = state }
 }
 
 private struct SyncAuthentication: Decodable {
