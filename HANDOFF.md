@@ -2,6 +2,19 @@
 
 ## Current iPhone work — 2026-09-12
 
+PAIRING/RECONNECT SYSTEM AUDIT — 2026-09-13, baseline f93a82a. User requests
+whole-flow cleanup instead of incremental symptom patches. Read-only source review
+and two bounded independent audits complete; no additional production/device writes.
+Findings and proposed compatibility-preserving scope:
+docs/acceptance/pairing-reconnect-audit-2026-09-13.md.
+Confirmed auth/trust-sync coupling, incomplete durable highwater restoration,
+Mac/mobile lifecycle/persistence semantics differing, unknown-state mapped offline.
+Mac stale-owner/5vs10second deadline issues are source risks needing reproductions,
+not proven screenshot root causes. Existing74 focused tests pass (log linked in audit).
+Recommended shared lifecycle/trust-sync/durable pairing gates without new identity,
+pair reset, weakened authorization or transfer-protocol change. Await design direction
+approval before cross-platform implementation per brainstorming design gate.
+
 SERVER HANDOVER DEPLOYED — 2026-09-13 17:36: user explicitly authorized
 server handover repair/deployment after cellular follow-up. New authenticated
 session gate replaces same-device old socket only after full signature, challenge,
