@@ -12,8 +12,33 @@ Mac/mobile lifecycle/persistence semantics differing, unknown-state mapped offli
 Mac stale-owner/5vs10second deadline issues are source risks needing reproductions,
 not proven screenshot root causes. Existing74 focused tests pass (log linked in audit).
 Recommended shared lifecycle/trust-sync/durable pairing gates without new identity,
-pair reset, weakened authorization or transfer-protocol change. Await design direction
-approval before cross-platform implementation per brainstorming design gate.
+pair reset, weakened authorization or transfer-protocol change. User CONFIRMED this
+scope. Execution now active, not awaiting another product approval. Ordered plans
+under docs/superpowers/plans/2026-09-13-{trust-snapshot-consistency,shared-presence-owner,identity-trust-sync}.md.
+Task1 complete at9a631b7, base d23bc69; real synthetic PostgreSQL RED/GREEN,
+full Go race passed; independent review PASS after fixing metadata-only purge gap.
+No production deployment of this stage; synthetic DB stopped. Task2 shared client
+owner extraction completef90fc72,140tests/0fail,bothMacproductsbuild; independent
+review PASS after joined heartbeat/liveness/directory-delivery cleanup regressions.
+Task3 completefdcc562: identity-only authentication, ACK-gated singlewriter,
+15sec auth/exchangedeadlines, activepresencewriteordering. IndependentreviewPASS,
+1046Swift/5conditional-skips/0fail at995c9c1 plus33focusedaftertestseamfixfdcc562;
+bothMacproductsbuild. RootliveSwift-GointeropPASS7.68s. Both server20roundrace
+and client20sameownerreconnectcycles passed locally, not physicalnetworkevidence.
+Task4 durablepairinggate activebasefdcc562; prevents success-before-local-save.
+Root85 client baseline tests passed, log
+.build/pairing-cleanup-client-baseline.log. No new production/device changes.
+Next: finish durable pairing, then durable proof publication, truthful UI
+states, shared-owner live Go interoperability and signed installed cross-device verification. Detailed final procedure:
+docs/acceptance/pairing-reconnect-final-runbook-2026-09-13.md (not passed evidence).
+Focused final live interoperability requirements are in
+docs/superpowers/plans/2026-09-13-shared-owner-live-interop.md; implementation is pending.
+Read-only inventory rechecked21:27: local running Store PID85546 still
+DropMesh-review-1b4a641.app, actual1.3.0(4), source4c69c524c80226e872ea363733a4c83d0c4bb00f,
+com.zensystech.dropmesh. Physical595721D3-DBB4-5D8B-8A93-51AF0D218183 available/paired;
+devicectl targeted app query confirms com.zensystech.dropmesh.iphone.dev0.1.0(4).
+No launch/stop/install performed during inventory. Existing iPhone16 simulator
+ACEA4034-2629-4A24-A7C8-C146BD8B0688 booted iOS18.6, inert testhost running.
 
 SERVER HANDOVER DEPLOYED — 2026-09-13 17:36: user explicitly authorized
 server handover repair/deployment after cellular follow-up. New authenticated
