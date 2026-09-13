@@ -40,9 +40,11 @@ Task6 source3b88b7e adds truthful shared presence presentation, actual auth/stor
 separation and retained/drained manual save retry. Root checked full1079/4conditional
 skips/0fail,119nativeunit,bothMacproducts and unsigned shipping iPhone main/Share build.
 Finalstandard bilingual screenshots inspected: long/same/empty names remain distinct,
-sync errors do not hide unrelated online rows. FinalAX tests passed; supplemental
-framing/save-retry captures and task report/review still pending. No task acceptance yet.
-Next: finish UI review, shared-owner live Go interoperability and signed installed cross-device verification. Detailed final procedure:
+sync errors do not hide unrelated online rows. Task6 completeef669fb after f9f2814
+boundedtestfix/supplementalAX save-retry captures; independentfinalreviewApproved,
+no actionable source/testfindings. Existing AppIntentswarning retained. Root9image
+visualcheck recorded66f91cd;78captures tracked,allcommandsdrained,simlarge restored.
+Next: shared-owner live Go interoperability and signed installed cross-device verification. Detailed final procedure:
 docs/acceptance/pairing-reconnect-final-runbook-2026-09-13.md (not passed evidence).
 Focused final live interoperability requirements are in
 docs/superpowers/plans/2026-09-13-shared-owner-live-interop.md; implementation is pending.
