@@ -1,5 +1,39 @@
 # DropMesh iPhone companion handoff
 
+## TestFlight delivery requested — 2026-09-15
+
+User rejected GitHub Direct channel and explicitly requests Mac and iPhone
+TestFlight-installable builds, preserving identities. ASC login renewed.
+Live Mac TestFlight lists build4 Testing; app1.3.0 Ready for Distribution.
+Signed build6 PKG created at DropMesh-Releases/DropMesh-1.3.0-6-13cb9a1.pkg.
+Apple validation rejected 1.3.0 because its approved pre-release train is closed.
+Validation evidence: /private/tmp/dropmesh-build6-apple-validation.json.
+Next Mac candidate1.3.1(7), same source repair and identity, no upload yet.
+iPhone existing candidate is Development signed com.zensystech.dropmesh.iphone.dev;
+ASC currently has no DropMesh iPhone app record, only Mac DropMesh and unrelated
+eva secretary. No local Apple Distribution signing identity. Requested explicit
+approval to create iOS distribution credential and matching app record; pending.
+Do not touch unrelated app6748986347 or revoke any existing certificates.
+
+## Local build6 activation — 2026-09-14
+
+User approved switching this Mac to repair. No previous DropMesh process remained
+at preflight. Store-distribution build6 failed direct launch: taskgated/amfid
+reported no matching profile for team/keychain entitlements (spawn error153).
+Do not equate static codesign verification with runnable local installation.
+Existing DropMesh Mac Development 2026 profile c6673df6 matches this Mac's
+provisioning UDID and expires 2027-09-06. Made separate local copy at
+/Users/mason/Developer/DropMesh-Releases/source-access-build6-local/DropMesh.app,
+embedded that development profile and signed framework/executable/app with Apple
+Development identity 87060C7D619434B3A934ACB88B88B93EE408F57F, preserving checked-in
+Distribution/AppStore.entitlements (sandbox, team, app identity, keychain group).
+Original Store candidate unchanged. Strict deep signature verification passed.
+Launch succeeded, PID67098 still alive on subsequent check, version1.3.0 build6,
+TCP45873 listener. No recent app error/fault messages in inspected two-minute log.
+CUA exact app lookup again timed out; visible menu/service state and real Mac B
+file transfer are NOT verified. No pairings/data reset, remote Mac interaction,
+App Store upload or production change in this activation. Old binaries retained.
+
 ## Active Mac sender drag admission repair — 2026-09-14
 
 User confirms Mac B service reconnected after server deployment, but this Mac's
@@ -29,8 +63,14 @@ by clearing presenter before cancellation, then UI109/1skip/0failure1.089s
 (/private/tmp/dropmesh-send-invalidation-{red,green}.log). Native dismissible
 NSAlert modality intentionally retained for explicit failure, no nonblocking UI
 requirement added. Source-temp security review found no critical issue.
-No installed acceptance or binary update yet. Preserve user pairings, trust,
-receive files, Direct, and Mac B control. Next signed candidate Store1.3.0(6).
+Signed candidate Store1.3.0(6) built from 13cb9a1:
+/Users/mason/Developer/DropMesh-Releases/source-access-build6/DropMesh.app.
+Build log /private/tmp/dropmesh-source-fix-build6.log ends app store bundle PASS.
+Fresh codesign --verify --deep --strict passed; identity com.zensystech.dropmesh,
+CFBundleVersion 6. Old PID85546 still running, no installed acceptance or binary
+update yet. Preserve user pairings, trust, receive files, Direct, and Mac B
+control. Installation/restart remains explicit operational checkpoint; do not
+claim actual Mac B sending restored from regression tests or signed build alone.
 
 ## Latest incident deployment — 2026-09-14 09:49:55 UTC
 
