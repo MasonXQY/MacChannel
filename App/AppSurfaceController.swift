@@ -34,6 +34,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private let directorySelector: any DirectorySelecting
     private let notificationService: (any ReceiveNotificationServicing)?
     private let transferSurfacePresentation: ((TransferSurfaceSection) -> Void)?
+    private let sendFailurePresentation: ((String) -> Void)?
     private let onRetryRuntime: () -> Void
     private let onRetryPresence: () -> Void
     private let onRetryTrustSave: () -> Void
@@ -75,6 +76,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         updateService: (any SoftwareUpdateServicing)? = nil,
         notificationService: (any ReceiveNotificationServicing)? = nil,
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
+        sendFailurePresentation: ((String) -> Void)? = nil,
         onRetryRuntime: @escaping () -> Void = {},
         onRetryPresence: @escaping () -> Void = {},
         onRetryTrustSave: @escaping () -> Void = {},
@@ -93,6 +95,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         self.updateService = updateService ?? InactiveSoftwareUpdateService()
         self.notificationService = notificationService
         self.transferSurfacePresentation = transferSurfacePresentation
+        self.sendFailurePresentation = sendFailurePresentation
         self.onRetryRuntime = onRetryRuntime
         self.onRetryPresence = onRetryPresence
         self.onRetryTrustSave = onRetryTrustSave
@@ -102,6 +105,20 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     func bind(to controller: StatusItemController) {
         statusController = controller
+        controller.onSendFailure = { [weak self] message in
+            guard let self else { return }
+            if let sendFailurePresentation {
+                sendFailurePresentation(message)
+            } else {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = L10n.text(.transferFailed)
+                alert.informativeText = message
+                alert.addButton(withTitle: L10n.text(.commonClose))
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
         controller.onUseLocalNetwork = onUseLocalNetwork
         controller.updateDeviceNames(deviceNames)
         if let updates = updateService as? any SoftwareUpdateSnapshotProviding {

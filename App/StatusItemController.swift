@@ -132,6 +132,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var onDismissDeviceFan: ((StatusItemDragToken) -> Void)?
     var onTransferStarted: ((TransferID, StatusItemDragToken) -> Void)?
     var onAnnouncement: ((String) -> Void)?
+    var onSendFailure: ((String) -> Void)?
     var onShowTransfers: (() -> Void)?
     var onShowPairing: (() -> Void)?
     var onShowSettings: (() -> Void)?
@@ -408,6 +409,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func invalidate() {
+        // Teardown may complete a cancelled admission later. Never resurrect
+        // visible error UI while the owning runtime is being retired.
+        onSendFailure = nil
         deviceTask?.cancel()
         if let token = activeSelectionToken ?? currentFanToken {
             terminatePendingSelection(token)
@@ -539,6 +543,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 announce(L10n.text(.sendStartFailed))
                 state.finishTransfer(token: token)
                 renderPhase()
+                onSendFailure?(L10n.text(.sendStartFailed))
             }
         }
         sendAdmissionTasks[token] = admissionTask

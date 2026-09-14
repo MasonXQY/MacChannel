@@ -1,10 +1,43 @@
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 
 @testable import MacChannelCore
 
 final class TransferProtocolTests: XCTestCase {
+    func testManifestReadsFileWithoutWritingItsParentDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer {
+            _ = chmod(directory.path, S_IRWXU)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let source = directory.appendingPathComponent("readable.txt")
+        let bytes = Data("file access does not grant parent writes".utf8)
+        try bytes.write(to: source)
+        XCTAssertEqual(chmod(directory.path, S_IRUSR | S_IXUSR), 0)
+        XCTAssertTrue(FileManager.default.isReadableFile(atPath: source.path))
+        XCTAssertFalse(FileManager.default.isWritableFile(atPath: directory.path))
+        var before = stat()
+        XCTAssertEqual(lstat(directory.path, &before), 0)
+
+        let manifest = try TransferManifest.build(from: source)
+
+        XCTAssertEqual(manifest.entries.count, 1)
+        XCTAssertEqual(manifest.entries[0].digest, Data(SHA256.hash(data: bytes)))
+        let pinned = try XCTUnwrap(manifest.entries[0].pinnedSource)
+        XCTAssertEqual(try pinned.read(offset: 0, length: bytes.count), bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["readable.txt"])
+        var after = stat()
+        XCTAssertEqual(lstat(directory.path, &after), 0)
+        XCTAssertEqual(after.st_mtimespec.tv_sec, before.st_mtimespec.tv_sec)
+        XCTAssertEqual(after.st_mtimespec.tv_nsec, before.st_mtimespec.tv_nsec)
+        XCTAssertEqual(after.st_ctimespec.tv_sec, before.st_ctimespec.tv_sec)
+        XCTAssertEqual(after.st_ctimespec.tv_nsec, before.st_ctimespec.tv_nsec)
+    }
+
     func testReceiveResultDefaultsUnknownSourceForLegacySessions() {
         let beforeCreation = Date()
         let result = TransferReceiveResult(

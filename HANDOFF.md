@@ -1,5 +1,98 @@
 # DropMesh iPhone companion handoff
 
+## Active Mac sender drag admission repair — 2026-09-14
+
+User confirms Mac B service reconnected after server deployment, but this Mac's
+drag-target send produces no response. Do not blame gesture. Sender is still
+old Store1.3.0(4), PID85546. Screenshot says Secure service connected; socket
+snapshot alone is insufficient to contradict UI. No new rows in its container
+transfers.sqlite3. CUA exact running app lookup times out, bundle lookup ambiguous.
+
+Concrete reproducer: PinnedSource.clone creates a sibling staging directory next
+to source; file-only sandbox grants/read-only source parent cannot allow that.
+OutgoingTransferPackage.create fails before initial transfer DB row. RED real
+readable-file/nonwritable-parent test fails original mkdirat; GREEN app-private
+temporary staging with owner/mode/inode validation preserves original file and
+parent mtime/ctime. No general cross-volume/non-cloneable copy fallback added.
+
+Admission errors previously only AX-announced after fan dismissal. Dedicated
+onSendFailure now wired by AppSurfaceController to native NSAlert (injectable
+presenter tests), invoked after returning idle and releasing leases. Tests for
+failure callback and surface binding both RED before wiring, then GREEN.
+Focused260/1skip/0failure (15.534s), prior core152/0failure. Logs:
+/private/tmp/dropmesh-source-parent-{red,green}.log,
+/private/tmp/dropmesh-visible-{send,binding}-red.log,
+/private/tmp/dropmesh-drag-send-final.log. Full Swift1083/6skips/0failure50.228s
+in /private/tmp/dropmesh-source-fix-full-swift.log. Independent drag_fix_review
+found teardown alert regression; RED scheduled failure after invalidate, fixed
+by clearing presenter before cancellation, then UI109/1skip/0failure1.089s
+(/private/tmp/dropmesh-send-invalidation-{red,green}.log). Native dismissible
+NSAlert modality intentionally retained for explicit failure, no nonblocking UI
+requirement added. Source-temp security review found no critical issue.
+No installed acceptance or binary update yet. Preserve user pairings, trust,
+receive files, Direct, and Mac B control. Next signed candidate Store1.3.0(6).
+
+## Latest incident deployment — 2026-09-14 09:49:55 UTC
+
+Server repair e9ea1e0 deployed with user approval, rendezvous only. Image
+macchannel-legacy-recovery:e9ea1e0, ID
+sha256:a8fba9ad02eb4aa455e3862af33cc2004fa56d86d0f65d2abadc497e987e3e90.
+Source archive SHA256 353a78c39a3e84e58867222d1753aea543dda86d4722102d659aacd04bd80d0e.
+official.env now persists this image (previous file incorrectly pinned an older
+registry image than the running service). Config validated, --no-deps --pull never
+recreated only rendezvous. DB/TURN remain original healthy containers, no data
+reset/migration. HTTPS health and Docker health both passed. Live log at09:49:56
+and09:50:11 shows rejected legacy proof with identity_authenticated=true instead
+of websocket_auth_rejected. This is service-auth evidence, NOT Mac B UI/transfer
+acceptance. User asked to report Mac B current status; pending.
+
+Rollback on server: /root/dropmesh-rollback-e9ea1e0.jH7L28/official.env.rollback
+pins retained macchannel-handover:67b1958-fix (ID c3dcbd5b90173aaf8b857d309c3205b554d95ebd4ad77515e1e7679c360c88c5).
+Copy that file to /opt/macchannel/Infrastructure/production/official.env then use
+same compose project macchannel-production with docker-compose.yml and
+docker-compose.single-host.yml, up -d --no-deps --pull never rendezvous.
+
+Fresh final auth/httpapi race passes 9.950s/11.113s (log
+/private/tmp/dropmesh-legacy-final-race.log). Full suite NOT all green: unchanged
+local runner-lock stack-contract tests fail 30s synchronization deadlines, also
+on isolated rerun; no claim exact underlying cause. These local scripts are not
+used for production deployment. PostgreSQL opt-in fixture tests were not enabled
+in this incremental run. Prior integrated SQL evidence remains historical.
+Temporary SSH /32 removed after deployment; UI verified Fully applied with the
+original seven rules only. No Mac/iPhone binary installed and no transfer acceptance yet.
+
+## Active incident — Mac B service login, 2026-09-14
+
+Production observation: Mac B TLS/WSS upgrade succeeded, then disconnected at
+07:40:34 UTC. Authorized temporary SSH ingress 92.96.17.75/32 revealed matching
+`persistent_confirm` / `trust_invalid`; later `nonincreasing_sequence` appeared.
+Image remains `macchannel-handover:67b1958-fix`. Exact rejected record is unknown;
+do not claim SQL failure or particular device record proven. Temporary ingress
+was removed and firewall application verified. No production data/code changed.
+
+User now requests repair and prevention. Working diff against b1c0d693 repairs
+legacy nonempty-handshake poisoning: only ErrInvalidTrust permits a fresh
+nil-record registry check after the signed challenge; failed batch excluded from
+catchup exclusions. Strict pins, graph routing, capacity/rate limits remain.
+Persistent refresh failures now return ErrTrustUnavailable, not ErrInvalidTrust.
+No client identity reset, protocol change, installation, or deployment occurred.
+
+TDD: legacy stale/signature cases failed with auth-error before fix; now pass
+on same connection with unchanged storage/graph and revoked/outsider denial.
+Transient database-read regression failed with unexpected auth-ok, then fixed.
+Focused final tests pass (11.601s), including mixed-batch catchup. Logs:
+/private/tmp/dropmesh-legacy-focused.log and
+/private/tmp/dropmesh-legacy-recovery-tests.log. Full race run auth and httpapi
+passed (18.549s/20.007s); remaining turn stack-contract package still running at
+this note. Session44125 is current; older failed run57831 awaiting turn drain.
+Independent legacy_recovery_review reports no remaining Critical/Important
+source issues after refresh-error correction. It reviewed five-file diff before
+final mixed-batch catchup assertion. Recheck git diff and final race exit status.
+
+Pending: async user approval for renewed single-IP SSH during repair/deployment;
+do not assume prior removed rule is still available. Need production validation
+and Mac B actual reconnect/transfer acceptance before claiming incident fixed.
+
 ## Latest pairing program gate — 2026-09-14
 
 SIGNED CANDIDATES DONE at source06bedd5: Mac1.3.0(5)universalStore and

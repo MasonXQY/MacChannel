@@ -1384,6 +1384,26 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testInvalidatedAdmissionDoesNotPresentFailure() async throws {
+        let target = DeviceID(rawValue: UUID())
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Mac", availability: .lan)],
+            transferCoordinator: FailingTransferCoordinator(),
+            filePicker: StubStatusItemFilePicker(result: [URL(fileURLWithPath: "/tmp/a")]),
+            deviceMenuPresenter: menu
+        )
+        var failures: [String] = []
+        controller.onSendFailure = { failures.append($0) }
+        controller.performKeyboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        controller.invalidate()
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertTrue(failures.isEmpty)
+    }
+
+    @MainActor
     func testFailedSendReturnsIdleAndAnnouncesActionableError() async throws {
         let target = DeviceID(rawValue: UUID())
         let menu = RecordingStatusItemDeviceMenuPresenter()
@@ -1397,7 +1417,9 @@ final class StatusItemAppKitTests: XCTestCase {
             deviceMenuPresenter: menu
         )
         var announcements: [String] = []
+        var visibleFailures: [String] = []
         controller.onAnnouncement = { announcements.append($0) }
+        controller.onSendFailure = { visibleFailures.append($0) }
 
         controller.performKeyboardSend()
         XCTAssertTrue(try XCTUnwrap(menu.select)(target))
@@ -1407,6 +1429,7 @@ final class StatusItemAppKitTests: XCTestCase {
 
         XCTAssertEqual(controller.phase, .idle)
         XCTAssertEqual(announcements, ["无法开始传输，请检查连接和设备状态。"])
+        XCTAssertEqual(visibleFailures, announcements, "Admission failure must reach the visible error presenter, not only VoiceOver")
     }
 
     @MainActor

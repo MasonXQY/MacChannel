@@ -5,6 +5,24 @@ import XCTest
 @testable import MacChannelCore
 
 final class TransferSurfaceTests: XCTestCase {
+    @MainActor
+    func testSendAdmissionFailureIsBoundToVisiblePresentation() {
+        var messages: [String] = []
+        let surfaces = AppSurfaceController(
+            transferService: StubTransferSurfaceService(),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            sendFailurePresentation: { messages.append($0) }
+        )
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [], transferCoordinator: SurfaceTransferCoordinator()
+        )
+        surfaces.bind(to: controller)
+        controller.onSendFailure?("Visible failure")
+        XCTAssertEqual(messages, ["Visible failure"])
+    }
     override func setUp() {
         super.setUp()
         // These existing copy assertions explicitly exercise the Chinese UI.
