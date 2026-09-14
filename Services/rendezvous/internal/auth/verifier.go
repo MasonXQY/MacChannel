@@ -29,6 +29,7 @@ var (
 	ErrReplayCapacity   = errors.New("replay cache capacity reached")
 	ErrInvalidChallenge = errors.New("invalid challenge")
 	ErrInvalidTrust     = errors.New("invalid trust record")
+	ErrTrustUnavailable = errors.New("trust state unavailable")
 	ErrTrustCapacity    = errors.New("trust registry capacity reached")
 	ErrTrustRateLimit   = errors.New("trust issuer update rate reached")
 )
@@ -824,7 +825,7 @@ func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, r
 	}
 	if r.recordStore != nil && r.refreshPersistent() != nil {
 		log.Print("trust_auth_rejected category=persistent_refresh")
-		return nil, ErrInvalidTrust
+		return nil, ErrTrustUnavailable
 	}
 
 	r.mu.Lock()

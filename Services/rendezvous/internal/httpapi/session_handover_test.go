@@ -13,7 +13,10 @@ func TestAuthenticatedSameIdentityHandsOverWithoutWaitingForPongTimeout(t *testi
 	api := newTestAPI(t)
 	old := api.authenticatedWebSocket(t, api.identity, nil)
 	defer old.Close()
-	fresh := api.authenticatedWebSocket(t, api.identity, nil)
+	bad := api.identity.trustRecord(t, newIdentity(t), 1)
+	bad.Signature = []byte("invalid cached proof")
+	// A valid identity holder with rejected cached proofs may still hand over.
+	fresh := api.authenticatedWebSocket(t, api.identity, []auth.SignedTrustRecord{bad})
 	defer fresh.Close()
 	old.SetReadDeadline(time.Now().Add(time.Second))
 	if _, _, err := old.ReadMessage(); err == nil {
@@ -37,7 +40,7 @@ func TestAuthenticatedSameIdentityHandsOverWithoutWaitingForPongTimeout(t *testi
 }
 
 func TestRejectedIdentityCannotEvictAuthenticatedSession(t *testing.T) {
-	for _, invalid := range []string{"signature", "trust", "payload"} {
+	for _, invalid := range []string{"signature", "signature_and_trust", "payload"} {
 		t.Run(invalid, func(t *testing.T) {
 			api := newTestAPI(t)
 			active := api.authenticatedWebSocket(t, api.identity, nil)
@@ -50,10 +53,10 @@ func TestRejectedIdentityCannotEvictAuthenticatedSession(t *testing.T) {
 				payload = []byte("wrong-purpose")
 			}
 			message := auth.WebSocketAuthentication{Envelope: api.identity.envelope(t, api.clock.Now(), challenge.Nonce, payload)}
-			if invalid == "signature" {
+			if invalid == "signature" || invalid == "signature_and_trust" {
 				message.Envelope.Signature = []byte("invalid")
 			}
-			if invalid == "trust" {
+			if invalid == "signature_and_trust" {
 				record := api.identity.trustRecord(t, newIdentity(t), 1)
 				record.Signature = []byte("invalid")
 				message.TrustRecords = []auth.SignedTrustRecord{record}

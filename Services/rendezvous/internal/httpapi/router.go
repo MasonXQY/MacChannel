@@ -752,7 +752,19 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
 		return
 	}
-	if err := r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, authentication.TrustRecords); err != nil {
+	catchupRecords := authentication.TrustRecords
+	trustErr := r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, catchupRecords)
+	if errors.Is(trustErr, auth.ErrInvalidTrust) && len(catchupRecords) > 0 {
+		// Older clients attach cached pairing proofs to every login. Reject
+		// that atomic batch without rejecting a separately valid identity.
+		// Recheck the registry pin and persistent state; never bypass them.
+		trustErr = r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, nil)
+		catchupRecords = nil
+		if trustErr == nil {
+			log.Print("websocket_legacy_trust_rejected category=trust_invalid identity_authenticated=true")
+		}
+	}
+	if err := trustErr; err != nil {
 		log.Printf("websocket_auth_rejected category=%s", trustRejectionCategory(err))
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
 		return
@@ -797,7 +809,7 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 	if err := peer.SendJSON(map[string]string{"type": "auth-ok", "deviceID": deviceID}); err != nil {
 		return
 	}
-	for _, record := range r.registry.RecordsForGraph(deviceID, authentication.TrustRecords) {
+	for _, record := range r.registry.RecordsForGraph(deviceID, catchupRecords) {
 		if err := peer.SendJSON(map[string]any{"type": "trust-record", "record": record}); err != nil {
 			return
 		}

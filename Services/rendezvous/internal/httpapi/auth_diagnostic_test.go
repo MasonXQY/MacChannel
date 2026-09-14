@@ -72,12 +72,16 @@ func TestWebSocketAuthenticationDiagnosticIsCoarseAndKeepsResponse(t *testing.T)
 			if category == "capacity" {
 				code = "capacity_reached"
 			}
-			if len(response) != 2 || response["type"] != "auth-error" || response["code"] != code {
+			if category == "trust_invalid" {
+				if len(response) != 2 || response["type"] != "auth-ok" || response["deviceID"] != api.identity.id {
+					t.Fatalf("legacy identity recovery response: %#v", response)
+				}
+			} else if len(response) != 2 || response["type"] != "auth-error" || response["code"] != code {
 				t.Fatalf("unexpected response: %#v", response)
 			}
 			want := "websocket_auth_rejected category=" + category
 			if category == "trust_invalid" {
-				want = "trust_auth_rejected category=invalid_signed_record\n" + want
+				want = "trust_auth_rejected category=invalid_signed_record\nwebsocket_legacy_trust_rejected category=trust_invalid identity_authenticated=true"
 			}
 			if got := strings.TrimSpace(output.String()); got != want {
 				t.Fatalf("diagnostic = %q, want %q", got, want)
