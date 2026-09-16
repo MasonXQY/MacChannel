@@ -90,6 +90,37 @@ The focused suite comprises six top-level tests:
   duplicate objects in arrays, genuinely signed oversized token, and rejection
   of invalid signature before time-dependent claim evaluation.
 
+## Independent review follow-up: isolated rejection evidence
+
+Review of implementation commit `2accdbdf39c71f3543316d6b6cb5e109f7a9c9b0`
+identified overlapping failure causes in tests. No production bypass was found.
+The malformed optional-field fixtures now include all otherwise valid required
+claims. Equal/reversed timestamps now use `exp = now + 30s` and
+`iat = now + 30s / +31s`, keeping both within the valid issuance/expiry windows.
+
+Each narrow mutation below was applied independently and immediately restored
+before the next check. No mutated production code was staged or retained.
+
+| Temporarily disabled protection | Targeted command (from Services/rendezvous) | Behavioral RED |
+| --- | --- | --- |
+| `exp <= iat` rejection | `go test ./internal/accountauth -run 'TestAppleIdentityRejectClaims/(equal_times\|reversed_times)$' -count=1` | Both named subtests fail |
+| UTF-8 validation | `go test ./internal/accountauth -run 'TestAppleIdentityParserResourceBounds/invalid_utf8$' -count=1` | Named subtest fails |
+| Nesting limit (temporarily raised to 1000) | `go test ./internal/accountauth -run 'TestAppleIdentityParserResourceBounds/excessive_nesting$' -count=1` | Named subtest fails |
+| Duplicate decoded-key rejection | `go test ./internal/accountauth -run 'TestAppleIdentityParserResourceBounds/duplicate_in_array$' -count=1` | Named subtest fails |
+
+Each failure reported `invalid identity accepted: subject="apple-subject" error=<nil>`.
+After restoration, the production file diff was empty. Fresh final checks:
+
+```text
+go test ./internal/accountauth -count=1
+ok macchannel/rendezvous/internal/accountauth 0.513s
+go test -race ./internal/accountauth -count=1
+ok macchannel/rendezvous/internal/accountauth 1.849s
+```
+
+Only tests and this report changed in the follow-up. The already passing full
+suite was not repeated because production behavior and integration were unchanged.
+
 ## Limits and remaining integration work
 
 This is local cryptographic/parser acceptance only. No live Apple sign-in,

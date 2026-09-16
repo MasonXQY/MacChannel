@@ -132,7 +132,7 @@ func TestAppleIdentityRejectClaims(t *testing.T) {
 		{"issuer", "iss", "https://attacker.example"}, {"audience", "aud", "other"}, {"audience_array", "aud", []string{"com.example.dropmesh"}}, {"nonce", "nonce", "other"},
 		{"empty_subject", "sub", ""}, {"long_subject", "sub", strings.Repeat("s", 256)}, {"multibyte_subject", "sub", strings.Repeat("界", 86)}, {"numeric_subject", "sub", 42},
 		{"expired", "exp", f.now.Unix() - 1}, {"expiry_boundary", "exp", f.now.Unix()}, {"future_iat", "iat", f.now.Unix() + 61},
-		{"equal_times", "iat", f.now.Unix() + 300}, {"reversed_times", "iat", f.now.Unix() + 301}, {"zero_iat", "iat", 0}, {"negative_exp", "exp", -1},
+		{"zero_iat", "iat", 0}, {"negative_exp", "exp", -1},
 		{"fractional_iat", "iat", 1.5}, {"decimal_exp", "exp", json.Number("1800000300.0")}, {"exponent_iat", "iat", json.Number("18e8")}, {"overflow_exp", "exp", json.Number("9223372036854775808")},
 		{"string_iat", "iat", "1800000000"}, {"null_exp", "exp", nil}, {"empty_nonce", "nonce", ""},
 	}
@@ -145,6 +145,17 @@ func TestAppleIdentityRejectClaims(t *testing.T) {
 	}
 	for _, key := range []string{"iss", "aud", "sub", "nonce", "iat", "exp"} {
 		t.Run("missing_"+key, func(t *testing.T) { c := f.claims(); delete(c, key); requireRejected(t, f.v, f.token(t, c), testNonce) })
+	}
+	for _, tc := range []struct {
+		name      string
+		iatOffset int64
+	}{{"equal_times", 30}, {"reversed_times", 31}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := f.claims()
+			c["exp"] = f.now.Unix() + 30
+			c["iat"] = f.now.Unix() + tc.iatOffset
+			requireRejected(t, f.v, f.token(t, c), testNonce)
+		})
 	}
 }
 
@@ -239,12 +250,16 @@ func TestAppleIdentityConcurrentImmutableKeys(t *testing.T) {
 func TestAppleIdentityParserResourceBounds(t *testing.T) {
 	f := newIdentityFixture(t)
 	header := []byte(`{"alg":"RS256","kid":"rsa"}`)
-	for _, payload := range [][]byte{
-		[]byte(`{"extra":"` + string([]byte{0xff}) + `"}`),
-		[]byte(`{"extra":` + strings.Repeat("[", 66) + "0" + strings.Repeat("]", 66) + `}`),
-		[]byte(`{"extra":[{"x":1,"x":2}]}`),
+	validPrefix := strings.TrimSuffix(string(jsonBytes(t, f.claims())), "}")
+	for _, tc := range []struct{ name, extra string }{
+		{"invalid_utf8", `"` + string([]byte{0xff}) + `"`},
+		{"excessive_nesting", strings.Repeat("[", 66) + "0" + strings.Repeat("]", 66)},
+		{"duplicate_in_array", `[{"x":1,"x":2}]`},
 	} {
-		requireRejected(t, f.v, f.sign(t, "RS256", header, payload), testNonce)
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(validPrefix + `,"extra":` + tc.extra + `}`)
+			requireRejected(t, f.v, f.sign(t, "RS256", header, payload), testNonce)
+		})
 	}
 	claims := f.claims()
 	claims["padding"] = strings.Repeat("x", 13000)
