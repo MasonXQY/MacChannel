@@ -59,3 +59,18 @@ All commands ran in `Services/rendezvous`; keys and credentials were synthetic.
 This is locally verified server-component behavior only. No real Apple credential,
 portal operation, production request, native install, API route, account session,
 credential persistence, or device-trust authorization was exercised or added.
+
+## Review follow-up: wall-clock rollback
+
+Production `time.Now` values carry a process-local monotonic reading. Because JWT
+`iat` is wall-clock based, issuance now strips only that monotonic metadata with
+`Round(0)` before rollback comparison and storage while retaining wall-clock
+nanoseconds. This ensures a wall-clock rollback is not masked by monotonic time.
+
+Regression RED: `go test ./internal/accountauth -run '^TestAppleClientSecretStoresWallClockWithoutMonotonicReading$' -count=1`
+failed with `rollback state retained a monotonic reading` (1.209s). After the
+one-line production fix and final real-`time.Now` fixture refinement, focused GREEN
+passed in 1.728s and scoped race verification passed in 1.785s:
+
+- `go test ./internal/accountauth -run '^(TestAppleClientSecret|TestAppleLoginUsesCryptographicallyVerifiedClientSecret)' -count=1`
+- `go test -race ./internal/accountauth -run '^(TestAppleClientSecret|TestAppleLoginUsesCryptographicallyVerifiedClientSecret)' -count=1`

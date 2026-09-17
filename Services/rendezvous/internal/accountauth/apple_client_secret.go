@@ -111,7 +111,7 @@ func (p *AppleClientSecrets) ClientSecret(ctx context.Context, audience string) 
 	if ctx.Err() != nil {
 		return fail()
 	}
-	now := p.clock()
+	now := p.clock().Round(0)
 	iat := now.Unix()
 	if iat <= 0 || now.Year() < 1 || now.Year() > 9999 || iat > math.MaxInt64-300 || (p.issued && now.Before(p.lastTime)) {
 		return fail()

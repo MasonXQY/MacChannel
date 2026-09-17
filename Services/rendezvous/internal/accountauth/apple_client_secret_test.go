@@ -291,6 +291,24 @@ func TestAppleClientSecretTwoAudiencesSameClockAndConcurrentUse(t *testing.T) {
 	}
 }
 
+func TestAppleClientSecretStoresWallClockWithoutMonotonicReading(t *testing.T) {
+	provider, _, _ := newClientSecretProvider(t, []string{loginAudience})
+	now := time.Now()
+	if now.Nanosecond() == 0 {
+		now = now.Add(time.Nanosecond)
+	}
+	if now == now.Round(0) {
+		t.Fatal("time.Now fixture lacks a monotonic reading")
+	}
+	provider.clock = func() time.Time { return now }
+	if secret, err := provider.ClientSecret(context.Background(), loginAudience); err != nil || secret == "" {
+		t.Fatalf("production-clock issuance failed: %v", err)
+	}
+	if provider.lastTime != now.Round(0) || provider.lastTime.Nanosecond() != now.Nanosecond() {
+		t.Fatal("rollback state did not strip monotonic reading while retaining nanoseconds")
+	}
+}
+
 func verifyDeveloperSecret(t *testing.T, token string, key *ecdsa.PublicKey, wantSubject string) {
 	t.Helper()
 	parts := strings.Split(token, ".")
