@@ -33,3 +33,27 @@
 6. Real two-platform Apple authentication, followed separately by group membership and invitation authorization tests.
 
 The token validator is not any of these orchestration steps and must not be represented as a usable account system.
+
+## September 17 continuation: caller contract for durable challenges
+
+Read-only source verification: `auth.Verifier.VerifyHTTPFrom` validates device
+signature/derived ID, freshness and durable replay evidence. It does not establish
+an Apple identity, enforce an account-operation purpose, or bind an unsigned HTTP
+body to that purpose. The future account adapter must verify the signed payload's
+exact account-operation domain and all security-relevant request fields before
+passing its authenticated canonical device ID into the new challenge component.
+Do not pass a body-supplied device ID merely because a different envelope verified.
+
+The durable challenge component remains unreferenced by the router. It accepts
+an already authenticated device ID and an exact configured audience; its API is
+not a network authentication mechanism. A consumed stored nonce is the expected
+nonce for later Apple token validation; never substitute an incoming client field.
+Consumption before downstream Apple exchange intentionally means an interrupted
+attempt may require starting a new login, never resurrecting a consumed challenge.
+Account sessions and group authorizations still require their separate gates.
+
+Database integration tests for this phase use only a fresh owner-only local Unix
+socket PostgreSQL instance and synthetic `dropmesh_account_auth_test` database.
+No deployed migration, existing table mutation, or production route enablement is
+authorized by the local test setup. Actual instance restart acceptance is recorded
+separately after the new component is reviewed.
