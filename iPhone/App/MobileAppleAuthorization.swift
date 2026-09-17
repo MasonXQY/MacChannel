@@ -24,19 +24,26 @@ final class MobileAppleAuthorization: NSObject, MobileAppleAuthorizing, ASAuthor
     private var presentationProvider: MobileApplePresentationProvider?
     private var attempt: AccountLoginAttempt?
     private var callbackGate = MobileAppleCallbackGate()
+    private var controllerIdentity: ObjectIdentifier?
+    private(set) var resumedContinuationCountForTesting = 0
+    var hasPendingAuthorizationForTesting: Bool { continuation != nil }
 
     func authorize(attempt: AccountLoginAttempt, anchor: UIWindow) async throws -> MobileAppleCredential {
         guard controller == nil, continuation == nil, anchor.windowScene != nil,
               attempt.challenge.expiresAt > Date() else { throw MobileAppleAuthorizationError.unavailable }
-        guard callbackGate.begin() else { throw MobileAppleAuthorizationError.unavailable }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
+                guard self.callbackGate.begin() else {
+                    continuation.resume(throwing: MobileAppleAuthorizationError.unavailable)
+                    return
+                }
                 self.continuation = continuation
                 let provider = MobileApplePresentationProvider(window: anchor)
                 self.presentationProvider = provider
                 self.attempt = attempt
                 let controller = ASAuthorizationController(authorizationRequests: [Self.makeRequest(for: attempt)])
                 self.controller = controller
+                self.controllerIdentity = ObjectIdentifier(controller)
                 controller.delegate = self
                 controller.presentationContextProvider = provider
                 controller.performRequests()
@@ -53,19 +60,17 @@ final class MobileAppleAuthorization: NSObject, MobileAppleAuthorizing, ASAuthor
     }
 
     func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-        guard controller === self.controller, let attempt,
-              let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
-            if controller === self.controller { finish(.failure(MobileAppleAuthorizationError.unavailable)) }
-            return
+        let identity = ObjectIdentifier(controller)
+        guard identity == controllerIdentity else { return }
+        guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+            finish(.failure(MobileAppleAuthorizationError.unavailable)); return
         }
-        do {
-            finish(.success(try Self.credential(authorizationCode: credential.authorizationCode,
-                identityToken: credential.identityToken, state: credential.state, attempt: attempt, now: Date())))
-        } catch { finish(.failure(MobileAppleAuthorizationError.unavailable)) }
+        complete(controllerIdentity: identity, authorizationCode: credential.authorizationCode,
+            identityToken: credential.identityToken, state: credential.state, now: Date())
     }
 
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-        guard controller === self.controller else { return }
+        guard ObjectIdentifier(controller) == controllerIdentity else { return }
         if (error as? ASAuthorizationError)?.code == .canceled { finish(.failure(CancellationError())) }
         else { finish(.failure(MobileAppleAuthorizationError.unavailable)) }
     }
@@ -76,9 +81,38 @@ final class MobileAppleAuthorization: NSObject, MobileAppleAuthorizing, ASAuthor
         controller?.delegate = nil
         controller?.presentationContextProvider = nil
         controller = nil
+        controllerIdentity = nil
         presentationProvider = nil
         attempt = nil
+        resumedContinuationCountForTesting += 1
         continuation.resume(with: result)
+    }
+
+    func authorizeForTesting(attempt: AccountLoginAttempt,
+                             controllerIdentity: ObjectIdentifier) async throws -> MobileAppleCredential {
+        guard continuation == nil, callbackGate.begin() else { throw MobileAppleAuthorizationError.unavailable }
+        self.attempt = attempt
+        self.controllerIdentity = controllerIdentity
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in self.continuation = continuation }
+        } onCancel: {
+            Task { @MainActor in self.cancel() }
+        }
+    }
+
+    func completeForTesting(controllerIdentity: ObjectIdentifier, authorizationCode: Data?,
+                            identityToken: Data?, state: String?, now: Date) {
+        complete(controllerIdentity: controllerIdentity, authorizationCode: authorizationCode,
+            identityToken: identityToken, state: state, now: now)
+    }
+
+    private func complete(controllerIdentity: ObjectIdentifier, authorizationCode: Data?,
+                          identityToken: Data?, state: String?, now: Date) {
+        guard controllerIdentity == self.controllerIdentity, let attempt else { return }
+        do {
+            finish(.success(try Self.credential(authorizationCode: authorizationCode,
+                identityToken: identityToken, state: state, attempt: attempt, now: now)))
+        } catch { finish(.failure(MobileAppleAuthorizationError.unavailable)) }
     }
 
     static func makeRequest(for attempt: AccountLoginAttempt) -> ASAuthorizationAppleIDRequest {

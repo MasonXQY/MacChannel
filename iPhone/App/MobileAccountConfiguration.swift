@@ -10,7 +10,10 @@ struct MobileAccountConfiguration: Equatable, Sendable {
     }
 
     static func load(info: [String: Any], bundleIdentifier: String?) throws -> MobileAccountConfiguration? {
-        guard let raw = info["DropMeshAccountServiceOrigin"] as? String, !raw.isEmpty else { return nil }
+        guard let configured = info["DropMeshAccountServiceOrigin"] else { return nil }
+        guard let raw = configured as? String, !raw.isEmpty else {
+            throw AccountSessionControllerError.unavailable
+        }
         guard let origin = URL(string: raw), let audience = bundleIdentifier else {
             throw AccountSessionControllerError.unavailable
         }

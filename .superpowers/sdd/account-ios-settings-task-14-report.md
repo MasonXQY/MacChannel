@@ -62,3 +62,23 @@ The account UI uses system `List`, a native `ASAuthorizationAppleIDButton`, natu
 This is local source/unit/unsigned-build evidence, not phone acceptance. There is no configured backend origin, Sign in with Apple entitlement/capability, portal key, trusted TLS service, real Apple credential exchange, account deletion lifecycle, signed installation, or physical-phone login/logout/transfer evidence. Account deletion remains required before activation/release.
 
 Coordinator follow-up before commit: the root-owned iPhone 16 / iOS 18.6 UI evidence suite passed 3/3 in 42.658 seconds at `.build/account-ui-root-20260918.xcresult`; six screenshots covering English signed-out, Chinese accessibility-extra-extra-extra-large, signed-in dark mode, sign-out confirmation, and service/storage failures were inspected as unclipped. This remains simulator rendering evidence, not physical-phone acceptance.
+
+## Independent-review fixes after `08f6c85`
+
+Addressed all three Important findings without changing core account types or expanding scope:
+
+- The facade now retains the core attempt before its controlled handoff suspension. Any cancellation at that boundary awaits `cancelLogin` before applying the final snapshot, preventing a stranded `.awaitingApple` attempt and allowing an immediate retry.
+- Only an absent `DropMeshAccountServiceOrigin` disables the feature. Present empty or non-string values now fail closed as generic unavailable configuration.
+- Adapter tests now exercise `MobileAppleAuthorization` itself through a narrow callback/controller-identity seam. Production still creates and uses a real `ASAuthorizationController`. Tests cover wrong-controller rejection, explicit cancellation cleanup, duplicate completion, an old callback during a new attempt, and exactly-once continuation resumption.
+
+Review-fix RED used the same specified simulator with derived data `.build/account-ios-settings-fixes` and the three account test classes. It failed compilation because the required adapter callback seam (`authorizeForTesting`, `completeForTesting`, pending/resumption evidence) did not exist. This was the expected pre-implementation failure.
+
+Review-fix GREEN command:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests -destination 'platform=iOS Simulator,id=F0862282-2DD1-41A1-8C04-826C6C6199A1' -derivedDataPath .build/account-ios-settings-fixes CODE_SIGNING_ALLOWED=NO -only-testing:DropMeshTests/MobileAccountModelTests -only-testing:DropMeshTests/MobileAppleAuthorizationTests -only-testing:DropMeshTests/MobileAccountConfigurationTests test -quiet
+```
+
+GREEN: exit 0; 17 focused account tests passed in 1.999 seconds. Result bundle: `.build/account-ios-settings-fixes/Logs/Test/Test-DropMeshTests-2026.09.18_01-32-03-+0400.xcresult`. Output retained the same acknowledged pre-existing weak-variable and deprecated-document-picker warnings; it was not warning-pristine.
+
+Post-fix unsigned generic iOS build reran with `.build/account-ios-settings-fixes`, `CODE_SIGNING_ALLOWED=NO`, and exited 0. No portal, key, endpoint, entitlement, install, deployment, or physical-device operation was performed.

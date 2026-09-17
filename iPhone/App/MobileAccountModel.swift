@@ -13,15 +13,18 @@ final class MobileAccountModel {
     private(set) var messageKey: String?
     private let loadController: @Sendable () async throws -> AccountSessionController?
     private let apple: any MobileAppleAuthorizing
+    private let attemptHandoff: @Sendable () async -> Void
     private var controller: AccountSessionController?
     private var operation: Task<Void, Never>?
     private var operationID: UUID?
     private var attemptID: UUID?
 
     init(loadController: @escaping @Sendable () async throws -> AccountSessionController?,
-         apple: any MobileAppleAuthorizing) {
+         apple: any MobileAppleAuthorizing,
+         attemptHandoff: @escaping @Sendable () async -> Void = {}) {
         self.loadController = loadController
         self.apple = apple
+        self.attemptHandoff = attemptHandoff
     }
 
     func load() async {
@@ -62,8 +65,9 @@ final class MobileAccountModel {
         messageKey = nil
         do {
             let attempt = try await controller.beginLogin()
-            try Task.checkCancellation()
             attemptID = attempt.id
+            await attemptHandoff()
+            try Task.checkCancellation()
             apply(await controller.snapshot())
             let credential: MobileAppleCredential
             do { credential = try await apple.authorize(attempt: attempt, anchor: anchor) }
@@ -80,8 +84,10 @@ final class MobileAccountModel {
                                                identityToken: credential.identityToken)
             apply(await controller.snapshot())
         } catch is CancellationError {
+            await cancelRetainedAttempt(controller: controller)
             apply(await controller.snapshot())
         } catch {
+            if Task.isCancelled { await cancelRetainedAttempt(controller: controller) }
             let snapshot = await controller.snapshot()
             if Task.isCancelled { apply(snapshot) }
             else { fail(error, snapshot: snapshot) }
@@ -92,8 +98,6 @@ final class MobileAccountModel {
         guard phase != .signingIn, phase != .signingOut else { return }
         operation?.cancel()
         apple.cancel()
-        if let attemptID, let controller { Task { await controller.cancelLogin(attemptID: attemptID) } }
-        attemptID = nil
     }
 
     func signOut() async {
@@ -122,6 +126,12 @@ final class MobileAccountModel {
         case .unavailable: phase = .unavailable; messageKey = "account.error.unavailable"
         case .secureStorageError: phase = .secureStorageError; messageKey = "account.error.secure-store"
         }
+    }
+
+    private func cancelRetainedAttempt(controller: AccountSessionController) async {
+        guard let attemptID else { return }
+        await controller.cancelLogin(attemptID: attemptID)
+        self.attemptID = nil
     }
 
     private func fail(_ error: Error, snapshot: AccountSessionSnapshot? = nil) {

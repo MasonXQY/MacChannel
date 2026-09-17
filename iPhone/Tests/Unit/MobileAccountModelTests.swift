@@ -90,6 +90,27 @@ final class MobileAccountModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .signedOut)
     }
 
+    func testCancellationDuringAttemptHandoffCleansCoreAttemptBeforeReturning() async throws {
+        let service = GatedAccountService(gated: false)
+        let apple = RecordingAppleAuthorizer()
+        let controller = makeAccountController(service: service)
+        let handoff = AccountHandoffGate()
+        let model = MobileAccountModel(loadController: { controller }, apple: apple,
+            attemptHandoff: { await handoff.wait() })
+        await model.load()
+
+        let login = Task { await model.signIn(anchor: attachedTestWindow()) }
+        await handoff.waitUntilEntered()
+        model.cancel()
+        await handoff.release()
+        await login.value
+
+        XCTAssertEqual(apple.authorizeCount, 0)
+        XCTAssertEqual(model.phase, .signedOut)
+        let retry = try await controller.beginLogin()
+        await controller.cancelLogin(attemptID: retry.id)
+    }
+
     func testAppleCancellationReturnsSignedOutWithoutCompletingHTTP() async {
         let service = GatedAccountService(gated: false)
         let apple = RecordingAppleAuthorizer(error: CancellationError())
@@ -192,6 +213,26 @@ private actor GatedAccountService: AccountSessionService {
     func status(accessToken: String) async throws -> AccountSessionIdentity { throw AccountServiceError.unavailable }
     func refresh(refreshToken: String) async throws -> AccountSessionTokens { throw AccountServiceError.unavailable }
     func logout(accessToken: String) async throws { logoutCount += 1 }
+}
+
+private actor AccountHandoffGate {
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        entered = true
+        let waiters = enteredWaiters; enteredWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+    func release() {
+        let waiters = releaseWaiters; releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
 }
 
 private func makeAccountController(service: GatedAccountService) -> AccountSessionController {
