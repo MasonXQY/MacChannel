@@ -77,6 +77,36 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 exit 0, no output/warnings
 ```
 
+## Final origin-alias correction
+
+The follow-up review identified Darwin IPv4 aliases that strict `inet_pton`
+does not parse even though the networking stack maps them to loopback. Scoped
+IPv6 zone identifiers also needed an explicit rejection policy.
+
+Behavioral RED:
+
+```text
+swift test --filter AccountServiceClientTests/testRejectsInvalidConfigurationAndInputsBeforeTransport
+XCTAssertThrowsError failed: did not throw - Expected invalid origin: https://2130706433
+XCTAssertThrowsError failed: did not throw - Expected invalid origin: https://0x7f000001
+Executed 1 test, with 2 failures
+```
+
+The private origin validator now uses Darwin `inet_aton` for IPv4 so integer,
+hexadecimal, shortened and dotted forms are interpreted consistently with the
+platform before checking 127/8. It rejects any scoped IP zone identifier and
+keeps the existing byte-level IPv6 and IPv4-mapped-loopback checks. It performs
+no DNS resolution and introduces no insecure configuration mode.
+
+GREEN:
+
+```text
+swift test --filter AccountServiceClientTests
+Executed 8 tests, with 0 failures (0 unexpected)
+```
+
+Root owns the one subsequent live Swift-to-Go interoperability rerun.
+
 ## Remaining gates / concerns
 
 - Root must run Swift-to-Go signed-wire interoperability against the reviewed

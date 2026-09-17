@@ -95,10 +95,11 @@ final class AccountServiceClientTests: XCTestCase {
         let identity = try DeviceIdentity.ephemeral()
         let invalidOrigins = [
             "http://accounts.example.test", "https://localhost", "https://127.0.0.1",
-            "https://127.1",
+            "https://127.1", "https://2130706433", "https://0x7f000001",
             "https://localhost.", "https://service.localhost.",
             "https://[::1]", "https://[0:0:0:0:0:0:0:1]",
             "https://[0:0:0:0:0:0::1]", "https://[::ffff:127.0.0.1]",
+            "https://[::1%25lo0]",
             "https://user@example.test", "https://example.test:8443",
             "https://example.test/path", "https://example.test?query=1",
         ]

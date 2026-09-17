@@ -256,7 +256,8 @@ public struct AccountServiceClient: Sendable {
                 while host.hasSuffix(".") { host.removeLast() }
                 return host != "localhost" && !host.hasSuffix(".localhost")
                     && host != "127" && !host.hasPrefix("127.")
-                    && !host.isEmpty && !Self.isLoopbackIPAddress(host)
+                    && !host.isEmpty && !host.contains("%")
+                    && !Self.isLoopbackIPAddress(host)
             }()
         else { return false }
         return true
@@ -315,9 +316,12 @@ public struct AccountServiceClient: Sendable {
     }
 
     private static func isLoopbackIPAddress(_ host: String) -> Bool {
-        var ipv4 = [UInt8](repeating: 0, count: 4)
-        let isIPv4 = host.withCString { inet_pton(AF_INET, $0, &ipv4) == 1 }
-        if isIPv4 { return ipv4[0] == 127 }
+        var ipv4 = in_addr()
+        let isIPv4 = host.withCString { inet_aton($0, &ipv4) != 0 }
+        if isIPv4 {
+            let hostOrder = UInt32(bigEndian: ipv4.s_addr)
+            return hostOrder >> 24 == 127
+        }
 
         var ipv6 = [UInt8](repeating: 0, count: 16)
         let isIPv6 = host.withCString { inet_pton(AF_INET6, $0, &ipv6) == 1 }
