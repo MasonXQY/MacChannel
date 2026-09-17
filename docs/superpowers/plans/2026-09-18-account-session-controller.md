@@ -20,7 +20,7 @@
 
 **Owned files:** create `Sources/MacChannelCore/Accounts/AccountSessionController.swift`, `AccountSessionStorage.swift`; create `Tests/MacChannelCoreTests/AccountSessionControllerTests.swift`, `AccountSessionStorageTests.swift`; report `.superpowers/sdd/account-session-controller-task-13-report.md`. If typed public declarations warrant a third source file, request a concrete split before editing. Do not edit existing identity KeychainStore, MobileIdentityContext or native app files.
 
-One tightly scoped existing-file exception is authorized: change `AccountServiceClient.validOrigin`, `.validAudience`, `.validToken` from private to internal if needed to reuse their reviewed validators. No public API or behavioral changes in that file. `validEpochMilliseconds` is already internal. Do not duplicate these validation algorithms in session storage/controller.
+One tightly scoped existing-file exception is authorized: change `AccountServiceClient.validOrigin`, `.validAudience`, `.validToken`, `.validEpochMilliseconds` from private to internal if needed to reuse their reviewed validators. No public API or behavioral changes in that file. Do not duplicate these validation algorithms in session storage/controller. The fourth visibility change was explicitly confirmed to the Task13 implementer after its initial inspection.
 
 **Consumes Task12:** AccountServiceClient's challenge/complete/status/refresh/logout, AccountSessionIdentity, AccountSessionTokens, AccountLoginChallenge, AccountServiceError. Declare public Sendable `AccountSessionService` with those same five async signatures and conform AccountServiceClient in the new controller file. No token-generating mock in shipping code.
 
