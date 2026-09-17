@@ -299,7 +299,7 @@ func decodeAccountEnvelope(body io.Reader) (auth.Envelope, bool) {
 	if !ok {
 		return auth.Envelope{}, false
 	}
-	if len(device) != 36 || len(nonce) < 16 || len(nonce) > 64 || len(payload) > accountMaximumPayload || len(public) != 65 || len(signature) < 8 || len(signature) > 80 {
+	if len(device) != 36 || len(nonce) < 16 || len(nonce) > 64 || len(payload) > accountMaximumPayload || (len(public) != 64 && len(public) != 65) || len(signature) < 8 || len(signature) > 80 {
 		return auth.Envelope{}, false
 	}
 	return auth.Envelope{DeviceID: device, Nonce: nonce, Payload: payload, PublicKey: public, EpochMilliseconds: epoch, Signature: signature}, true
@@ -477,6 +477,10 @@ func (h *accountHTTP) writeVerifierError(w http.ResponseWriter, err error) {
 	writeAccountError(w, http.StatusUnauthorized, "authentication_failed")
 }
 func (h *accountHTTP) writeDependencyError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrAppleLoginUnavailable) {
+		writeAccountError(w, http.StatusServiceUnavailable, "service_unavailable")
+		return
+	}
 	if errors.Is(err, ErrLoginChallengeCapacity) {
 		writeAccountError(w, http.StatusTooManyRequests, "rate_limited")
 		return

@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,11 +24,13 @@ import (
 )
 
 type fakeAccountDeps struct {
-	calls     []string
-	err       error
-	tokens    *SessionTokens
-	session   *AccountSession
-	challenge *LoginChallenge
+	calls      []string
+	err        error
+	tokens     *SessionTokens
+	session    *AccountSession
+	challenge  *LoginChallenge
+	loginInput AppleLoginResult
+	order      *[]string
 }
 
 func (f *fakeAccountDeps) Issue(_ context.Context, device, audience string) (LoginChallenge, error) {
@@ -42,13 +45,23 @@ func (f *fakeAccountDeps) Issue(_ context.Context, device, audience string) (Log
 }
 func (f *fakeAccountDeps) Complete(_ context.Context, challenge, device, audience, code, identity string) (AppleLoginResult, error) {
 	f.calls = append(f.calls, "complete:"+challenge+":"+device+":"+audience+":"+code+":"+identity)
+	if f.order != nil {
+		*f.order = append(*f.order, "complete")
+	}
 	if f.err != nil {
 		return AppleLoginResult{}, f.err
 	}
 	return AppleLoginResult{Identity: AppleIdentity{Subject: "apple-subject"}, RefreshToken: "apple-refresh"}, nil
 }
-func (f *fakeAccountDeps) Login(_ context.Context, _ AppleLoginResult, device, audience string) (SessionTokens, error) {
+func (f *fakeAccountDeps) Login(_ context.Context, result AppleLoginResult, device, audience string) (SessionTokens, error) {
+	return f.loginWithResult(result, device, audience)
+}
+func (f *fakeAccountDeps) loginWithResult(result AppleLoginResult, device, audience string) (SessionTokens, error) {
 	f.calls = append(f.calls, "login:"+device+":"+audience)
+	f.loginInput = result
+	if f.order != nil {
+		*f.order = append(*f.order, "session")
+	}
 	if f.err != nil {
 		return SessionTokens{}, f.err
 	}
@@ -111,6 +124,19 @@ func newHTTPIdentity(t *testing.T) httpIdentity {
 	return httpIdentity{key: key, id: id, public: public}
 }
 
+func newHTTPIdentity64(t *testing.T) httpIdentity {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := append(key.X.FillBytes(make([]byte, 32)), key.Y.FillBytes(make([]byte, 32))...)
+	d := sha256.Sum256(public)
+	b := d[:16]
+	id := fmt.Sprintf("%s-%s-%s-%s-%s", hex.EncodeToString(b[:4]), hex.EncodeToString(b[4:6]), hex.EncodeToString(b[6:8]), hex.EncodeToString(b[8:10]), hex.EncodeToString(b[10:]))
+	return httpIdentity{key: key, id: id, public: public}
+}
+
 func (i httpIdentity) request(t *testing.T, path string, payload map[string]string, nonce byte) *http.Request {
 	t.Helper()
 	payloadBytes, err := json.Marshal(payload)
@@ -161,6 +187,41 @@ func TestAccountHTTPRejectsRouteSwap(t *testing.T) {
 	}
 }
 
+func TestAccountHTTPAcceptsSwift64ByteP256PublicKeyAndRejectsAdjacentLengths(t *testing.T) {
+	deps := &fakeAccountDeps{}
+	verifier := auth.NewVerifier(auth.VerifierConfig{Clock: func() time.Time { return testHTTPNow }})
+	h, err := NewAccountHTTP(AccountHTTPConfig{Verifier: verifier, Challenges: deps, Login: deps, Sessions: deps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := newHTTPIdentity64(t)
+	fields := map[string]string{"purpose": "dropmesh.account.login.challenge.v1", "audience": "com.example.app"}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, id.request(t, "/v1/account/login/challenge", fields, 2))
+	if w.Code != 200 {
+		t.Fatalf("64-byte status=%d body=%s", w.Code, w.Body.String())
+	}
+	for _, n := range []int{63, 66} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			bad := id
+			bad.public = append([]byte(nil), id.public...)
+			if n == 63 {
+				bad.public = bad.public[:63]
+			} else {
+				bad.public = append(bad.public, 0, 0)
+			}
+			d := sha256.Sum256(bad.public)
+			b := d[:16]
+			bad.id = fmt.Sprintf("%s-%s-%s-%s-%s", hex.EncodeToString(b[:4]), hex.EncodeToString(b[4:6]), hex.EncodeToString(b[6:8]), hex.EncodeToString(b[8:10]), hex.EncodeToString(b[10:]))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, bad.request(t, "/v1/account/login/challenge", fields, byte(n)))
+			if w.Code != 400 {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestAccountHTTPSuccessRoutesUseVerifiedInputsAndSafeWire(t *testing.T) {
 	tests := []struct {
 		name, path, purpose string
@@ -203,6 +264,28 @@ func TestAccountHTTPSuccessRoutesUseVerifiedInputsAndSafeWire(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAccountHTTPLoginCompletionPreservesExactOrderArgumentsAndResult(t *testing.T) {
+	h, deps, id := accountHTTPFixture(t)
+	order := []string{}
+	deps.order = &order
+	fields := map[string]string{"purpose": "dropmesh.account.login.complete.v1", "audience": "com.example.app", "challengeID": token43(8), "code": "exact-code", "identityToken": "exact-identity-token"}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, id.request(t, "/v1/account/login/complete", fields, 9))
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	wantComplete := "complete:" + token43(8) + ":" + id.id + ":com.example.app:exact-code:exact-identity-token"
+	if len(deps.calls) != 2 || deps.calls[0] != wantComplete || deps.calls[1] != "login:"+id.id+":com.example.app" {
+		t.Fatalf("calls=%v", deps.calls)
+	}
+	if strings.Join(order, ",") != "complete,session" {
+		t.Fatalf("order=%v", order)
+	}
+	if deps.loginInput.Identity.Subject != "apple-subject" || deps.loginInput.RefreshToken != "apple-refresh" {
+		t.Fatalf("result not propagated: %#v", deps.loginInput)
 	}
 }
 
@@ -470,4 +553,212 @@ func TestAccountHTTPSourceAdmissionRecoversAfterWindow(t *testing.T) {
 	if len(deps.calls) != accountSourceLimit+1 {
 		t.Fatalf("calls=%d", len(deps.calls))
 	}
+}
+
+type httpLoginConsumer struct{ order *[]string }
+
+func (c *httpLoginConsumer) Consume(_ context.Context, challenge, _, audience string) (ConsumedLoginChallenge, error) {
+	if c.order != nil {
+		*c.order = append(*c.order, "consume")
+	}
+	if challenge != loginChallenge || audience != loginAudience {
+		return ConsumedLoginChallenge{}, ErrLoginChallengeInvalid
+	}
+	return ConsumedLoginChallenge{Nonce: testNonce}, nil
+}
+
+func realAppleHTTPFixture(t *testing.T, exchange func(*http.Request) (*http.Response, error)) (http.Handler, *fakeAccountDeps, httpIdentity, *[]string, string) {
+	t.Helper()
+	crypto := newIdentityFixture(t)
+	token := crypto.token(t, crypto.claims())
+	order := []string{}
+	keys := newAppleKeyProvider(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		order = append(order, "key")
+		res, _ := response(`{"keys":[` + jwkRSA("rsa", &crypto.rsa.PublicKey) + `]}`)
+		return res, nil
+	}), func() time.Time { return crypto.now })
+	login, err := NewAppleLogin(&httpLoginConsumer{order: &order}, secretFunc(func(context.Context, string) (string, error) {
+		order = append(order, "secret")
+		return "developer-secret", nil
+	}), keys, []string{loginAudience})
+	if err != nil {
+		t.Fatal(err)
+	}
+	login.clock = func() time.Time { return crypto.now }
+	login.transport = roundTripFunc(func(r *http.Request) (*http.Response, error) { order = append(order, "exchange"); return exchange(r) })
+	deps := &fakeAccountDeps{order: &order}
+	identity := newHTTPIdentity64(t)
+	verifier := auth.NewVerifier(auth.VerifierConfig{Clock: func() time.Time { return testHTTPNow }})
+	handler, err := NewAccountHTTP(AccountHTTPConfig{Verifier: verifier, Challenges: deps, Login: login, Sessions: deps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler, deps, identity, &order, token
+}
+
+func TestAccountHTTPClassifiesRealAppleCoordinatorOutageAndInvalidCredential(t *testing.T) {
+	t.Run("outage", func(t *testing.T) {
+		h, deps, id, _, token := realAppleHTTPFixture(t, func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("provider developer-secret outage")
+		})
+		fields := map[string]string{"purpose": "dropmesh.account.login.complete.v1", "audience": loginAudience, "challengeID": loginChallenge, "code": "authorization-code", "identityToken": token}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, id.request(t, "/v1/account/login/complete", fields, 230))
+		if w.Code != 503 || !strings.Contains(w.Body.String(), "service_unavailable") || strings.Contains(w.Body.String(), "developer-secret") {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		if len(deps.calls) != 0 {
+			t.Fatalf("session called: %v", deps.calls)
+		}
+	})
+	t.Run("invalid credential", func(t *testing.T) {
+		h, deps, id, _, token := realAppleHTTPFixture(t, func(*http.Request) (*http.Response, error) {
+			return responseStatus(http.StatusBadRequest, `{"error":"invalid_grant"}`)
+		})
+		fields := map[string]string{"purpose": "dropmesh.account.login.complete.v1", "audience": loginAudience, "challengeID": loginChallenge, "code": "authorization-code", "identityToken": token}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, id.request(t, "/v1/account/login/complete", fields, 231))
+		if w.Code != 401 || !strings.Contains(w.Body.String(), "authentication_failed") {
+			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		}
+		if len(deps.calls) != 0 {
+			t.Fatalf("session called: %v", deps.calls)
+		}
+	})
+}
+
+type concurrencyDeps struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *concurrencyDeps) Issue(context.Context, string, string) (LoginChallenge, error) {
+	return LoginChallenge{ID: token43(1), Nonce: token43(2), ExpiresAt: testHTTPNow.Add(time.Minute)}, nil
+}
+func (d *concurrencyDeps) Complete(ctx context.Context, _, _, _, _, _ string) (AppleLoginResult, error) {
+	d.entered <- struct{}{}
+	select {
+	case <-d.release:
+		return AppleLoginResult{Identity: AppleIdentity{Subject: "subject"}, RefreshToken: "apple-refresh"}, nil
+	case <-ctx.Done():
+		return AppleLoginResult{}, ctx.Err()
+	}
+}
+func (d *concurrencyDeps) Login(_ context.Context, _ AppleLoginResult, device, audience string) (SessionTokens, error) {
+	return validTokens(device, audience), nil
+}
+func (d *concurrencyDeps) Authenticate(context.Context, string, string, string) (AccountSession, error) {
+	return AccountSession{}, ErrSessionInvalid
+}
+func (d *concurrencyDeps) Refresh(context.Context, string, string, string) (SessionTokens, error) {
+	return SessionTokens{}, ErrSessionInvalid
+}
+func (d *concurrencyDeps) Logout(context.Context, string, string, string) error {
+	return ErrSessionInvalid
+}
+
+func TestAccountHTTPGlobalConcurrencySaturatesAt16AndRecovers(t *testing.T) {
+	deps := &concurrencyDeps{entered: make(chan struct{}, accountGlobalLimit), release: make(chan struct{})}
+	h, err := NewAccountHTTP(AccountHTTPConfig{Verifier: auth.NewVerifier(auth.VerifierConfig{Clock: func() time.Time { return testHTTPNow }}), Challenges: deps, Login: deps, Sessions: deps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]string{"purpose": "dropmesh.account.login.complete.v1", "audience": "com.example.app", "challengeID": token43(8), "code": "code", "identityToken": "identity"}
+	requests := make([]*http.Request, accountGlobalLimit)
+	for i := range requests {
+		id := newHTTPIdentity64(t)
+		requests[i] = id.request(t, "/v1/account/login/complete", fields, byte(i+1))
+		requests[i].RemoteAddr = fmt.Sprintf("198.51.100.%d:9000", i+1)
+	}
+	results := make(chan int, accountGlobalLimit)
+	for _, req := range requests {
+		go func(r *http.Request) { w := httptest.NewRecorder(); h.ServeHTTP(w, r); results <- w.Code }(req)
+	}
+	for i := 0; i < accountGlobalLimit; i++ {
+		<-deps.entered
+	}
+	extraID := newHTTPIdentity64(t)
+	extra := extraID.request(t, "/v1/account/login/complete", fields, 50)
+	extra.RemoteAddr = "203.0.113.1:9000"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, extra)
+	if w.Code != 429 {
+		t.Fatalf("saturation status=%d", w.Code)
+	}
+	close(deps.release)
+	for i := 0; i < accountGlobalLimit; i++ {
+		if status := <-results; status != 200 {
+			t.Fatalf("blocked status=%d", status)
+		}
+	}
+	recoveryID := newHTTPIdentity64(t)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, recoveryID.request(t, "/v1/account/login/complete", fields, 51))
+	if w.Code != 200 {
+		t.Fatalf("recovery status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAccountHTTPSourceCapacityCleansExpiredWindows(t *testing.T) {
+	hRaw, _, _ := accountHTTPFixture(t)
+	h := hRaw.(*accountHTTP)
+	now := testHTTPNow
+	h.clock = func() time.Time { return now }
+	for i := 0; i < accountSourceCapacity; i++ {
+		if !h.admitSource(fmt.Sprintf("source-%d", i)) {
+			t.Fatalf("source %d rejected", i)
+		}
+	}
+	if h.admitSource("overflow") {
+		t.Fatal("source capacity not enforced")
+	}
+	now = now.Add(time.Minute)
+	if !h.admitSource("recovered") {
+		t.Fatal("expired source windows not reclaimed")
+	}
+	if len(h.sources) != 1 {
+		t.Fatalf("tracked sources=%d", len(h.sources))
+	}
+}
+
+func TestAccountHTTPCompletionSlotReleasesOnCancellationAndDependencyError(t *testing.T) {
+	fields := map[string]string{"purpose": "dropmesh.account.login.complete.v1", "audience": "com.example.app", "challengeID": token43(8), "code": "c", "identityToken": "i"}
+	t.Run("cancellation", func(t *testing.T) {
+		b := &blockingDeps{entered: make(chan struct{}), release: make(chan struct{})}
+		id := newHTTPIdentity64(t)
+		h, err := NewAccountHTTP(AccountHTTPConfig{Verifier: auth.NewVerifier(auth.VerifierConfig{Clock: func() time.Time { return testHTTPNow }}), Challenges: b, Login: b, Sessions: b})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		req := id.request(t, "/v1/account/login/complete", fields, 70).WithContext(ctx)
+		done := make(chan int)
+		go func() { w := httptest.NewRecorder(); h.ServeHTTP(w, req); done <- w.Code }()
+		<-b.entered
+		cancel()
+		if status := <-done; status != 503 {
+			t.Fatalf("canceled status=%d", status)
+		}
+		close(b.release)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, id.request(t, "/v1/account/login/complete", fields, 71))
+		if w.Code != 200 {
+			t.Fatalf("slot not released: %d %s", w.Code, w.Body.String())
+		}
+	})
+	t.Run("dependency error", func(t *testing.T) {
+		h, deps, id := accountHTTPFixture(t)
+		deps.err = ErrAppleLoginUnavailable
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, id.request(t, "/v1/account/login/complete", fields, 72))
+		if w.Code != 503 {
+			t.Fatalf("error status=%d", w.Code)
+		}
+		deps.err = nil
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, id.request(t, "/v1/account/login/complete", fields, 73))
+		if w.Code != 200 {
+			t.Fatalf("slot not released: %d %s", w.Code, w.Body.String())
+		}
+	})
 }

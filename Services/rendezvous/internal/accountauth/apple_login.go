@@ -15,8 +15,14 @@ import (
 	"unicode/utf8"
 )
 
-// ErrAppleLogin is deliberately identical for every completion failure.
-var ErrAppleLogin = errors.New("Apple login failed")
+// Errors remain generic and safe to expose through coarse HTTP classification.
+// Unavailable failures also match ErrAppleLogin for existing callers.
+var (
+	ErrAppleLogin             = errors.New("Apple login failed")
+	ErrAppleLoginUnavailable  = errors.New("Apple login unavailable")
+	errAppleLoginUnavailable  = errors.Join(ErrAppleLogin, ErrAppleLoginUnavailable)
+	errAppleVerifyUnavailable = errors.New("Apple identity verification unavailable")
+)
 
 type LoginChallengeConsumer interface {
 	Consume(context.Context, string, string, string) (ConsumedLoginChallenge, error)
@@ -101,8 +107,12 @@ func validLoginCredential(s string, max int) bool {
 // a new challenge and authorization code. No request in this pipeline retries.
 func (l *AppleLogin) Complete(ctx context.Context, challengeID, authenticatedDeviceID, audience, code, identityToken string) (AppleLoginResult, error) {
 	fail := func() (AppleLoginResult, error) { return AppleLoginResult{}, ErrAppleLogin }
-	if l == nil || ctx == nil || ctx.Err() != nil || l.clock == nil || l.transport == nil || nilLoginDependency(l.challenges) || nilLoginDependency(l.secrets) || l.keys == nil {
-		return fail()
+	unavailable := func() (AppleLoginResult, error) { return AppleLoginResult{}, errAppleLoginUnavailable }
+	if l == nil || ctx == nil || l.clock == nil || l.transport == nil || nilLoginDependency(l.challenges) || nilLoginDependency(l.secrets) || l.keys == nil {
+		return unavailable()
+	}
+	if ctx.Err() != nil {
+		return unavailable()
 	}
 	binding := PostgresLoginChallenges{audiences: l.audiences}
 	if !binding.validBinding(authenticatedDeviceID, audience) || !validLoginCredential(code, 4096) || len(identityToken) > maxIdentityTokenBytes {
@@ -115,41 +125,56 @@ func (l *AppleLogin) Complete(ctx context.Context, challengeID, authenticatedDev
 	defer cancel()
 	challenge, err := l.challenges.Consume(ctx, challengeID, authenticatedDeviceID, audience)
 	if err != nil || ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(err, ErrLoginChallengeUnavailable) || errors.Is(err, ErrLoginChallengeCapacity) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return unavailable()
+		}
 		return fail()
 	}
 	clientIdentity, err := l.verify(ctx, identityToken, audience, challenge.Nonce)
 	if err != nil {
+		if errors.Is(err, errAppleVerifyUnavailable) {
+			return unavailable()
+		}
 		return fail()
 	}
 	secret, err := l.secrets.ClientSecret(ctx, audience)
 	if err != nil || ctx.Err() != nil || !validLoginCredential(secret, 16384) {
-		return fail()
+		return unavailable()
 	}
 	form := url.Values{"client_id": {audience}, "client_secret": {secret}, "code": {code}, "grant_type": {"authorization_code"}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://appleid.apple.com/auth/token", strings.NewReader(form.Encode()))
 	if err != nil {
-		return fail()
+		return unavailable()
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	client := http.Client{Transport: l.transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	res, err := client.Do(req)
 	if err != nil {
-		return fail()
+		return unavailable()
 	}
 	if res.Body == nil {
-		return fail()
+		return unavailable()
 	}
 	data, readErr := io.ReadAll(io.LimitReader(res.Body, 64*1024+1))
 	closeErr := res.Body.Close()
-	if readErr != nil || closeErr != nil || res.StatusCode != http.StatusOK || len(data) > 64*1024 || ctx.Err() != nil {
-		return fail()
+	if readErr != nil || closeErr != nil || len(data) > 64*1024 || ctx.Err() != nil {
+		return unavailable()
 	}
 	object, err := strictObject(data)
 	if err != nil {
-		return fail()
+		return unavailable()
+	}
+	if res.StatusCode != http.StatusOK {
+		if (res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden) && knownAppleCredentialError(object) {
+			return fail()
+		}
+		return unavailable()
 	}
 	if _, present := object["error"]; present {
-		return fail()
+		if knownAppleCredentialError(object) {
+			return fail()
+		}
+		return unavailable()
 	}
 	access, _ := object["access_token"].(string)
 	refresh, _ := object["refresh_token"].(string)
@@ -157,13 +182,26 @@ func (l *AppleLogin) Complete(ctx context.Context, challengeID, authenticatedDev
 	returnedToken, _ := object["id_token"].(string)
 	_, validExpiry := positiveInteger(object["expires_in"])
 	if !validLoginCredential(access, 16384) || !validLoginCredential(refresh, 16384) || tokenType != "Bearer" || !validExpiry || len(returnedToken) < 1 || len(returnedToken) > maxIdentityTokenBytes {
-		return fail()
+		return unavailable()
 	}
 	returnedIdentity, err := l.verify(ctx, returnedToken, audience, challenge.Nonce)
 	if err != nil || returnedIdentity.Subject != clientIdentity.Subject || ctx.Err() != nil {
-		return fail()
+		return unavailable()
 	}
 	return AppleLoginResult{Identity: returnedIdentity, RefreshToken: refresh}, nil
+}
+
+func knownAppleCredentialError(object map[string]any) bool {
+	code, ok := object["error"].(string)
+	if !ok {
+		return false
+	}
+	switch code {
+	case "invalid_grant", "invalid_client", "invalid_request", "invalid_scope", "unauthorized_client", "unsupported_grant_type":
+		return true
+	default:
+		return false
+	}
 }
 
 // Only the strict header is parsed before trusted key lookup. Unverified claims
@@ -196,11 +234,14 @@ func (l *AppleLogin) verify(ctx context.Context, token, audience, nonce string) 
 	}
 	key, err := l.keys.Key(ctx, kid)
 	if err != nil {
-		return AppleIdentity{}, ErrAppleLogin
+		return AppleIdentity{}, errAppleVerifyUnavailable
 	}
 	validator := AppleIdentityValidator{Keys: map[string]crypto.PublicKey{kid: key}, Audience: audience, Clock: l.clock}
 	identity, err := validator.Verify(token, nonce)
 	if err != nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return AppleIdentity{}, errAppleVerifyUnavailable
+		}
 		return AppleIdentity{}, ErrAppleLogin
 	}
 	return identity, nil

@@ -37,6 +37,12 @@ type secretFunc func(context.Context, string) (string, error)
 
 func (f secretFunc) ClientSecret(ctx context.Context, a string) (string, error) { return f(ctx, a) }
 
+type challengeConsumerFunc func(context.Context, string, string, string) (ConsumedLoginChallenge, error)
+
+func (f challengeConsumerFunc) Consume(ctx context.Context, a, b, c string) (ConsumedLoginChallenge, error) {
+	return f(ctx, a, b, c)
+}
+
 type loginFixture struct {
 	login                        *AppleLogin
 	crypto                       identityFixture
@@ -92,9 +98,114 @@ func (f *loginFixture) complete() (AppleLoginResult, error) {
 }
 func rejectLogin(t *testing.T, got AppleLoginResult, err error) {
 	t.Helper()
-	if err != ErrAppleLogin || got != (AppleLoginResult{}) {
+	if !errors.Is(err, ErrAppleLogin) || got != (AppleLoginResult{}) {
 		t.Fatalf("expected zero result and sentinel; got %v / %v", got, err)
 	}
+}
+
+func rejectUnavailableLogin(t *testing.T, got AppleLoginResult, err error) {
+	t.Helper()
+	if !errors.Is(err, ErrAppleLogin) || !errors.Is(err, ErrAppleLoginUnavailable) || got != (AppleLoginResult{}) {
+		t.Fatalf("expected zero unavailable result; got %v / %v", got, err)
+	}
+}
+
+func TestAppleLoginClassifiesProviderInvalidCredentialVersusInfrastructure(t *testing.T) {
+	t.Run("invalid_grant", func(t *testing.T) {
+		f := newLoginFixture(t)
+		f.login.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return responseStatus(http.StatusBadRequest, `{"error":"invalid_grant"}`)
+		})
+		got, err := f.complete()
+		rejectLogin(t, got, err)
+		if errors.Is(err, ErrAppleLoginUnavailable) {
+			t.Fatalf("invalid credential classified unavailable: %v", err)
+		}
+	})
+	t.Run("transport", func(t *testing.T) {
+		f := newLoginFixture(t)
+		f.login.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("provider developer-secret outage")
+		})
+		got, err := f.complete()
+		rejectUnavailableLogin(t, got, err)
+		if strings.Contains(err.Error(), "developer-secret") {
+			t.Fatalf("raw provider error leaked: %v", err)
+		}
+	})
+	t.Run("unknown provider response", func(t *testing.T) {
+		f := newLoginFixture(t)
+		f.login.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return responseStatus(http.StatusBadRequest, `{"error":"future_unknown"}`)
+		})
+		got, err := f.complete()
+		rejectUnavailableLogin(t, got, err)
+	})
+}
+
+func TestAppleLoginUnavailableClassifications(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*loginFixture)
+		ctx    func() (context.Context, context.CancelFunc)
+	}{
+		{"challenge unavailable", func(f *loginFixture) {
+			f.login.challenges = challengeConsumerFunc(func(context.Context, string, string, string) (ConsumedLoginChallenge, error) {
+				return ConsumedLoginChallenge{}, ErrLoginChallengeUnavailable
+			})
+		}, nil},
+		{"secret unavailable", func(f *loginFixture) {
+			f.login.secrets = secretFunc(func(context.Context, string) (string, error) { return "", errors.New("secret backend raw") })
+		}, nil},
+		{"key unavailable", func(f *loginFixture) {
+			f.login.keys = newAppleKeyProvider(roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("key backend raw") }), f.login.clock)
+		}, nil},
+		{"rate limited", func(f *loginFixture) {
+			f.login.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return responseStatus(http.StatusTooManyRequests, `{"error":"invalid_grant"}`)
+			})
+		}, nil},
+		{"server failure", func(f *loginFixture) {
+			f.login.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return responseStatus(http.StatusBadGateway, `{"error":"invalid_grant"}`)
+			})
+		}, nil},
+		{"malformed provider response", func(f *loginFixture) {
+			f.login.transport = roundTripFunc(func(*http.Request) (*http.Response, error) { return responseStatus(http.StatusOK, `{"access_token":`) })
+		}, nil},
+		{"canceled context", func(*loginFixture) {}, func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, cancel
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLoginFixture(t)
+			tc.mutate(f)
+			ctx := context.Background()
+			cancel := func() {}
+			if tc.ctx != nil {
+				ctx, cancel = tc.ctx()
+			}
+			defer cancel()
+			got, err := f.login.Complete(ctx, loginChallenge, loginDevice, loginAudience, "authorization-code", f.token)
+			rejectUnavailableLogin(t, got, err)
+			if strings.Contains(err.Error(), "raw") {
+				t.Fatalf("raw dependency error leaked: %v", err)
+			}
+		})
+	}
+	f := newLoginFixture(t)
+	got, err := f.login.Complete(context.Background(), loginChallenge, loginDevice, loginAudience, "authorization-code", "malformed")
+	rejectLogin(t, got, err)
+	if errors.Is(err, ErrAppleLoginUnavailable) {
+		t.Fatalf("invalid client credential classified unavailable: %v", err)
+	}
+}
+
+func responseStatus(status int, body string) (*http.Response, error) {
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
 }
 func TestAppleLoginNativeCompletion(t *testing.T) {
 	f := newLoginFixture(t)
