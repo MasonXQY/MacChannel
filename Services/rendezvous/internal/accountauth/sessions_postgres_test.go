@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -49,7 +50,7 @@ func sessionDB(t *testing.T, migrate bool) *sql.DB {
 		if _, err = db.ExecContext(ctx, string(migration)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = db.ExecContext(ctx, `TRUNCATE account_session_refresh_history, account_sessions, account_session_families, account_apple_credentials, accounts CASCADE`); err != nil {
+		if _, err = db.ExecContext(ctx, `TRUNCATE account_session_refresh_history, account_sessions, account_session_token_issuance, account_session_families, account_apple_credentials, accounts CASCADE`); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -89,6 +90,18 @@ func TestAccountSessionWrongDeviceDoesNotRevoke(t *testing.T) {
 	}
 	if _, err := service.Authenticate(context.Background(), tokens.AccessToken, sessionDevice, sessionAudience); err != nil {
 		t.Fatalf("valid access after wrong binding = %v", err)
+	}
+}
+
+func TestAccountSessionWrongAudienceDoesNotRevoke(t *testing.T) {
+	db := sessionDB(t, true)
+	service := sessionService(t, db)
+	tokens := loginSession(t, service)
+	if _, err := service.Refresh(context.Background(), tokens.RefreshToken, sessionDevice, "com.example.other"); err != ErrSessionInvalid {
+		t.Fatalf("wrong-audience refresh = %v", err)
+	}
+	if _, err := service.Authenticate(context.Background(), tokens.AccessToken, sessionDevice, sessionAudience); err != nil {
+		t.Fatalf("valid access after wrong audience = %v", err)
 	}
 }
 
@@ -155,6 +168,35 @@ func TestAccountSessionEncryptedCredentialAndHashOnlyTokens(t *testing.T) {
 	}
 	if string(storedAccess) != string(accessHash[:]) || string(storedRefresh) != string(refreshHash[:]) {
 		t.Fatal("stored token hashes do not match")
+	}
+}
+
+func TestAccountSessionSubjectDeviceAudienceIsolationAndCredentialRetention(t *testing.T) {
+	db := sessionDB(t, true)
+	service := sessionService(t, db)
+	login := func(subject, device, audience, refresh string) SessionTokens {
+		t.Helper()
+		got, err := service.Login(context.Background(), AppleLoginResult{Identity: AppleIdentity{Subject: subject}, RefreshToken: refresh}, device, audience)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	a := login("subject-a", sessionDevice, sessionAudience, "refresh-a1")
+	a2 := login("subject-a", sessionOtherDevice, sessionAudience, "refresh-a2")
+	a3 := login("subject-a", sessionDevice, "com.example.other", "refresh-a3")
+	b := login("subject-b", sessionDevice, sessionAudience, "refresh-b")
+	if a.Session.AccountID != a2.Session.AccountID || a.Session.AccountID != a3.Session.AccountID || a.Session.AccountID == b.Session.AccountID {
+		t.Fatal("subject grouping/isolation failed")
+	}
+	for _, item := range []SessionTokens{a, a2, a3, b} {
+		if _, err := service.Authenticate(context.Background(), item.AccessToken, item.Session.DeviceID, item.Session.Audience); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var credentials int
+	if err := db.QueryRow(`SELECT count(*) FROM account_apple_credentials`).Scan(&credentials); err != nil || credentials != 4 {
+		t.Fatalf("retained credentials = %d, %v", credentials, err)
 	}
 }
 
@@ -302,15 +344,18 @@ func TestAccountSessionServerRestartProbe(t *testing.T) {
 		if err != nil || second.AccessToken != access2 {
 			t.Fatal("restart rotation fixture mismatch", err)
 		}
+		if _, err = service.Refresh(context.Background(), first.RefreshToken, sessionDevice, sessionAudience); err != ErrSessionInvalid {
+			t.Fatal("prepare replay did not revoke family", err)
+		}
+		if _, err = service.Authenticate(context.Background(), access2, sessionDevice, sessionAudience); err != ErrSessionInvalid {
+			t.Fatal("prepare family remained usable", err)
+		}
 	} else {
-		if _, err := service.Authenticate(context.Background(), access2, sessionDevice, sessionAudience); err != nil {
-			t.Fatal("current session lost", err)
+		if _, err := service.Authenticate(context.Background(), access2, sessionDevice, sessionAudience); err != ErrSessionInvalid {
+			t.Fatal("revoked family resurrected", err)
 		}
 		if _, err := service.Refresh(context.Background(), refresh1, sessionDevice, sessionAudience); err != ErrSessionInvalid {
 			t.Fatal("consumed refresh resurrected", err)
-		}
-		if _, err := service.Authenticate(context.Background(), access2, sessionDevice, sessionAudience); err != ErrSessionInvalid {
-			t.Fatal("replay did not revoke current session", err)
 		}
 	}
 }
@@ -347,4 +392,239 @@ func TestAccountSessionLogoutRequiresLiveAccess(t *testing.T) {
 	if err := db.QueryRow(`SELECT revoked_at IS NOT NULL FROM account_session_families`).Scan(&revoked); err != nil || revoked {
 		t.Fatalf("expired logout revoked family: %v, %v", revoked, err)
 	}
+}
+
+func TestAccountSessionRotationCapsAccessAtFamilyExpiry(t *testing.T) {
+	db := sessionDB(t, true)
+	service := sessionService(t, db)
+	tokens := loginSession(t, service)
+	if _, err := db.Exec(`WITH t AS (SELECT clock_timestamp() n) UPDATE account_session_families SET created_at=t.n-interval '90 days'+interval '2 minutes',absolute_expires_at=t.n+interval '2 minutes' FROM t; UPDATE account_sessions SET refresh_expires_at=clock_timestamp()+interval '2 minutes'`); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := service.Refresh(context.Background(), tokens.RefreshToken, sessionDevice, sessionAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var absolute time.Time
+	if err = db.QueryRow(`SELECT absolute_expires_at FROM account_session_families`).Scan(&absolute); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.AccessExpiresAt.After(absolute) {
+		t.Fatalf("access expiry %s exceeds family %s", rotated.AccessExpiresAt, absolute)
+	}
+}
+
+func TestAccountSessionExpiredFamilyRejectsAccessAndLogout(t *testing.T) {
+	db := sessionDB(t, true)
+	service := sessionService(t, db)
+	tokens := loginSession(t, service)
+	if _, err := db.Exec(`WITH t AS (SELECT clock_timestamp() n) UPDATE account_session_families SET created_at=t.n-interval '91 days',absolute_expires_at=t.n-interval '1 day' FROM t`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Authenticate(context.Background(), tokens.AccessToken, sessionDevice, sessionAudience); err != ErrSessionInvalid {
+		t.Fatalf("expired family authenticate = %v", err)
+	}
+	if err := service.Logout(context.Background(), tokens.AccessToken, sessionDevice, sessionAudience); err != ErrSessionInvalid {
+		t.Fatalf("expired family logout = %v", err)
+	}
+}
+
+func TestAccountSessionFutureFamilyRejectsRefresh(t *testing.T) {
+	db := sessionDB(t, true)
+	service := sessionService(t, db)
+	tokens := loginSession(t, service)
+	if _, err := db.Exec(`WITH t AS (SELECT clock_timestamp() n) UPDATE account_session_families SET created_at=t.n+interval '1 minute',absolute_expires_at=t.n+interval '90 days'+interval '1 minute' FROM t`); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := service.Refresh(context.Background(), tokens.RefreshToken, sessionDevice, sessionAudience); err != ErrSessionInvalid || got != (SessionTokens{}) {
+		t.Fatalf("future family refresh = %#v, %v", got, err)
+	}
+}
+
+func TestAccountSessionRefreshNeverReissuesConsumedHash(t *testing.T) {
+	db := sessionDB(t, true)
+	service := sessionService(t, db)
+	first := loginSession(t, service)
+	oldRefresh, _ := base64.RawURLEncoding.DecodeString(first.RefreshToken)
+	var entropy []byte
+	for i := byte(1); i <= 4; i++ {
+		entropy = append(entropy, bytes.Repeat([]byte{i}, 16)...)
+	}
+	entropy = append(entropy, bytes.Repeat([]byte{0x44}, 32)...)
+	entropy = append(entropy, oldRefresh...)
+	service.random = bytes.NewReader(entropy)
+	if got, err := service.Refresh(context.Background(), first.RefreshToken, sessionDevice, sessionAudience); err != ErrSessionUnavailable || got != (SessionTokens{}) {
+		t.Fatalf("self-collision refresh = %#v, %v", got, err)
+	}
+	if _, err := service.Authenticate(context.Background(), first.AccessToken, sessionDevice, sessionAudience); err != nil {
+		t.Fatalf("failed collision changed prior session: %v", err)
+	}
+}
+
+func TestAccountSessionHistoricalHashCannotIssueAcrossFamily(t *testing.T) {
+	db := sessionDB(t, true)
+	service := sessionService(t, db)
+	first := loginSession(t, service)
+	oldRefresh, _ := base64.RawURLEncoding.DecodeString(first.RefreshToken)
+	if _, err := service.Refresh(context.Background(), first.RefreshToken, sessionDevice, sessionAudience); err != nil {
+		t.Fatal(err)
+	}
+	var entropy []byte
+	for i := byte(20); i < 24; i++ {
+		entropy = append(entropy, bytes.Repeat([]byte{i}, 16)...)
+	}
+	entropy = append(entropy, bytes.Repeat([]byte{0x66}, 32)...)
+	entropy = append(entropy, oldRefresh...)
+	service.random = bytes.NewReader(entropy)
+	if got, err := service.Login(context.Background(), AppleLoginResult{Identity: AppleIdentity{Subject: "other-subject"}, RefreshToken: "other-provider-refresh"}, sessionOtherDevice, sessionAudience); err != ErrSessionUnavailable || got != (SessionTokens{}) {
+		t.Fatalf("historical cross-family collision = %#v, %v", got, err)
+	}
+}
+
+func TestAccountSessionUUIDAndTokenCollisionsFailWithoutOverwrite(t *testing.T) {
+	db := sessionDB(t, true)
+	service := sessionService(t, db)
+	chunk := func(v byte, n int) []byte { return bytes.Repeat([]byte{v}, n) }
+	sequence := func(access, refresh byte) []byte {
+		var out []byte
+		for i := byte(1); i <= 4; i++ {
+			out = append(out, chunk(i, 16)...)
+		}
+		out = append(out, chunk(access, 32)...)
+		out = append(out, chunk(refresh, 32)...)
+		return out
+	}
+	service.random = bytes.NewReader(sequence(5, 6))
+	first, err := service.Login(context.Background(), AppleLoginResult{Identity: AppleIdentity{Subject: "collision-first"}, RefreshToken: "provider-first"}, sessionDevice, sessionAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.random = bytes.NewReader(sequence(7, 8))
+	if got, err := service.Login(context.Background(), AppleLoginResult{Identity: AppleIdentity{Subject: "collision-second"}, RefreshToken: "provider-second"}, sessionOtherDevice, sessionAudience); err != ErrSessionUnavailable || got != (SessionTokens{}) {
+		t.Fatalf("UUID collision = %#v, %v", got, err)
+	}
+	if _, err = service.Authenticate(context.Background(), first.AccessToken, sessionDevice, sessionAudience); err != nil {
+		t.Fatalf("UUID collision overwrote session: %v", err)
+	}
+	// Fresh UUIDs but a previously issued access secret reused as a refresh role.
+	var tokenCollision []byte
+	for i := byte(11); i <= 14; i++ {
+		tokenCollision = append(tokenCollision, chunk(i, 16)...)
+	}
+	tokenCollision = append(tokenCollision, chunk(15, 32)...)
+	oldAccess, _ := base64.RawURLEncoding.DecodeString(first.AccessToken)
+	tokenCollision = append(tokenCollision, oldAccess...)
+	service.random = bytes.NewReader(tokenCollision)
+	if got, err := service.Login(context.Background(), AppleLoginResult{Identity: AppleIdentity{Subject: "collision-third"}, RefreshToken: "provider-third"}, sessionOtherDevice, "com.example.other"); err != ErrSessionUnavailable || got != (SessionTokens{}) {
+		t.Fatalf("token collision = %#v, %v", got, err)
+	}
+}
+
+func TestAccountSessionConcurrentCrossFamilyTokenCollision(t *testing.T) {
+	db := sessionDB(t, true)
+	otherDB := sessionDB(t, false)
+	services := []*PostgresSessions{sessionService(t, db), sessionService(t, otherDB)}
+	sharedRefresh := bytes.Repeat([]byte{0x7a}, 32)
+	for index, service := range services {
+		var entropy []byte
+		for i := 0; i < 4; i++ {
+			entropy = append(entropy, bytes.Repeat([]byte{byte(30 + index*5 + i)}, 16)...)
+		}
+		entropy = append(entropy, bytes.Repeat([]byte{byte(50 + index)}, 32)...)
+		entropy = append(entropy, sharedRefresh...)
+		service.random = bytes.NewReader(entropy)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for index, service := range services {
+		wg.Add(1)
+		go func(i int, s *PostgresSessions) {
+			defer wg.Done()
+			<-start
+			_, err := s.Login(context.Background(), AppleLoginResult{Identity: AppleIdentity{Subject: fmt.Sprintf("concurrent-subject-%d", i)}, RefreshToken: fmt.Sprintf("provider-%d", i)}, []string{sessionDevice, sessionOtherDevice}[i], sessionAudience)
+			results <- err
+		}(index, service)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if err != ErrSessionUnavailable {
+			t.Fatalf("collision error = %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent collision successes = %d", successes)
+	}
+	hash := sha256.Sum256(sharedRefresh)
+	var issued int
+	if err := db.QueryRow(`SELECT count(*) FROM account_session_token_issuance WHERE token_hash=$1`, hash[:]).Scan(&issued); err != nil || issued != 1 {
+		t.Fatalf("shared token issuances = %d, %v", issued, err)
+	}
+}
+
+func TestAccountSessionMigrationIsIdempotent(t *testing.T) {
+	db := sessionDB(t, true)
+	migration, err := os.ReadFile("../../../migrations/009_account_sessions.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(string(migration)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAccountSessionFailedCommitsReleaseNoResultAndPreserveState(t *testing.T) {
+	t.Run("login", func(t *testing.T) {
+		db := sessionDB(t, true)
+		service := sessionService(t, db)
+		if _, err := db.Exec(`CREATE TABLE session_commit_account_guard(account_id UUID PRIMARY KEY); ALTER TABLE account_session_families ADD CONSTRAINT session_commit_account_fk FOREIGN KEY(account_id) REFERENCES session_commit_account_guard(account_id) DEFERRABLE INITIALLY DEFERRED`); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Exec(`ALTER TABLE account_session_families DROP CONSTRAINT session_commit_account_fk; DROP TABLE session_commit_account_guard`)
+		got, err := service.Login(context.Background(), AppleLoginResult{Identity: AppleIdentity{Subject: "commit-login"}, RefreshToken: "provider-refresh"}, sessionDevice, sessionAudience)
+		if err != ErrSessionUnavailable || got != (SessionTokens{}) {
+			t.Fatalf("failed login commit = %#v, %v", got, err)
+		}
+		var count int
+		if err = db.QueryRow(`SELECT count(*) FROM accounts`).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("failed login persisted rows = %d, %v", count, err)
+		}
+	})
+	t.Run("refresh", func(t *testing.T) {
+		db := sessionDB(t, true)
+		service := sessionService(t, db)
+		first := loginSession(t, service)
+		if _, err := db.Exec(`CREATE TABLE session_commit_id_guard(session_id UUID PRIMARY KEY); INSERT INTO session_commit_id_guard SELECT session_id FROM account_sessions; ALTER TABLE account_sessions ADD CONSTRAINT session_commit_id_fk FOREIGN KEY(session_id) REFERENCES session_commit_id_guard(session_id) DEFERRABLE INITIALLY DEFERRED`); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Exec(`ALTER TABLE account_sessions DROP CONSTRAINT session_commit_id_fk; DROP TABLE session_commit_id_guard`)
+		got, err := service.Refresh(context.Background(), first.RefreshToken, sessionDevice, sessionAudience)
+		if err != ErrSessionUnavailable || got != (SessionTokens{}) {
+			t.Fatalf("failed refresh commit = %#v, %v", got, err)
+		}
+		if _, err = service.Authenticate(context.Background(), first.AccessToken, sessionDevice, sessionAudience); err != nil {
+			t.Fatalf("failed refresh changed prior access: %v", err)
+		}
+	})
+	t.Run("logout", func(t *testing.T) {
+		db := sessionDB(t, true)
+		service := sessionService(t, db)
+		first := loginSession(t, service)
+		_, err := db.Exec(`CREATE FUNCTION session_reject_revoked() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.revoked_at IS NOT NULL THEN RAISE EXCEPTION 'forced deferred logout failure'; END IF; RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER session_reject_revoked_trigger AFTER UPDATE ON account_session_families DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION session_reject_revoked()`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Exec(`DROP TRIGGER session_reject_revoked_trigger ON account_session_families; DROP FUNCTION session_reject_revoked()`)
+		if err = service.Logout(context.Background(), first.AccessToken, sessionDevice, sessionAudience); err != ErrSessionUnavailable {
+			t.Fatalf("failed logout commit = %v", err)
+		}
+		if _, err = service.Authenticate(context.Background(), first.AccessToken, sessionDevice, sessionAudience); err != nil {
+			t.Fatalf("failed logout revoked family: %v", err)
+		}
+	})
 }

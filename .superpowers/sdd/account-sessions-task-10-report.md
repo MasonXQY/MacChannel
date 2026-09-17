@@ -32,7 +32,7 @@ Implemented and locally verified the standalone PostgreSQL account/session compo
 - Final default full Go command (SQL acceptance intentionally skipped without its opt-in DSN):
   - `env -u DROPMESH_ACCOUNT_TEST_DATABASE_URL go test ./... -count=1`
   - PASS across all rendezvous packages; accountauth `13.270s`.
-- Fourteen top-level `TestAccountSession*` tests cover wrong-binding non-revocation, rotation/replay, concurrent replay, repeated login, logout, encrypted-only persistence and independent envelope opening, hash-only tokens, deleting/future/expired rejection, shorter-deadline lock cancellation, closed DB, entropy failure, constructor validation, redaction, stale-generation recheck, and opt-in restart prepare/verify behavior.
+- Twenty-five top-level `TestAccountSession*` tests cover wrong-binding non-revocation, rotation/replay, concurrent replay, repeated login, logout, encrypted-only persistence and independent envelope opening, hash-only tokens, deleting/future/expired rejection, shorter-deadline lock cancellation, closed DB, entropy failure, constructor validation, redaction, stale-generation recheck, and opt-in restart prepare/verify behavior.
 - `git diff --check` passed for all owned implementation/test/migration paths.
 
 ## Remaining gates and limitations
@@ -50,3 +50,26 @@ Implemented and locally verified the standalone PostgreSQL account/session compo
 - `Services/rendezvous/internal/accountauth/sessions_test.go`
 - `Services/rendezvous/internal/accountauth/sessions_postgres_test.go`
 - `.superpowers/sdd/account-sessions-task-10-report.md`
+
+## Review correction — 2026-09-17
+
+The independent review found two security-relevant gaps. Meaningful RED tests reproduced each before production changes:
+
+- `TestAccountSessionRotationCapsAccessAtFamilyExpiry` showed a near-boundary rotation returning access beyond the 90-day family boundary; `TestAccountSessionExpiredFamilyRejectsAccessAndLogout` and `TestAccountSessionFutureFamilyRejectsRefresh` showed missing family-lifetime checks.
+- `TestAccountSessionRefreshNeverReissuesConsumedHash` showed the same refresh secret could move into history and simultaneously be reissued as current because uniqueness was split across tables.
+
+GREEN changes add an immutable `account_session_token_issuance` registry whose primary key is the token hash across both roles, every generation, and every family. Login and refresh register both new hashes in the same transaction as issuance. Authenticate, refresh, and logout now enforce `family.created_at <= database clock < family.absolute_expires_at`; refresh caps both returned expiries at the absolute boundary.
+
+Additional review-requested SQL evidence covers:
+
+- deferred commit failures for Login, Refresh, and Logout, proving empty failure outputs and rollback-preserved prior state;
+- UUID collision, current/cross-role token collision, consumed historical cross-family collision, and concurrent two-connection cross-family collision;
+- successful subject/device/audience isolation and multiple independently retained credential envelopes;
+- wrong-audience non-revocation and repeat execution of migration 009;
+- restart prepare now revokes the family before shutdown, while verify proves neither its current access nor consumed refresh resurrects.
+
+Final corrected verification:
+
+- SQL/race: `DROPMESH_ACCOUNT_TEST_DATABASE_URL='postgresql:///dropmesh_account_auth_test?host=/private/tmp/dropmesh-account-db.Kc5rQR&port=55447&sslmode=disable' go test -race ./internal/accountauth -run '^TestAccountSession' -count=1` — PASS, `1.890s`.
+- Default full Go: `env -u DROPMESH_ACCOUNT_TEST_DATABASE_URL go test ./... -count=1` — PASS across all packages; accountauth `13.387s` (SQL tests skipped by default as designed).
+- Actual stop/start remains coordinator-owned; no server restart was claimed by this implementer run.

@@ -84,10 +84,14 @@ func (s *PostgresSessions) loginTx(ctx context.Context, subject, device, audienc
 	if _, err = tx.ExecContext(ctx, `INSERT INTO account_apple_credentials(credential_id,account_id,device_id,audience,encrypted_refresh,created_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6)`, g.credentialID, accountID, device, audience, envelope, now); err != nil {
 		return SessionTokens{}, isCollision(err), err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO account_session_families(family_id,account_id,device_id,audience,created_at,absolute_expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5::timestamptz,$5::timestamptz+interval '90 days')`, g.familyID, accountID, device, audience, now); err != nil {
+	var absolute time.Time
+	if err = tx.QueryRowContext(ctx, `INSERT INTO account_session_families(family_id,account_id,device_id,audience,created_at,absolute_expires_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5::timestamptz,$5::timestamptz+interval '90 days') RETURNING absolute_expires_at`, g.familyID, accountID, device, audience, now).Scan(&absolute); err != nil {
 		return SessionTokens{}, isCollision(err), err
 	}
 	ah, rh := sha256.Sum256(g.accessRaw), sha256.Sum256(g.refreshRaw)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO account_session_token_issuance(token_hash,token_role,family_id,issued_at,retain_until) VALUES($1,'access',$3::uuid,$4,$5),($2,'refresh',$3::uuid,$4,$5)`, ah[:], rh[:], g.familyID, now, absolute); err != nil {
+		return SessionTokens{}, isCollision(err), err
+	}
 	var accessExp, refreshExp time.Time
 	err = tx.QueryRowContext(ctx, `INSERT INTO account_sessions(session_id,family_id,generation,access_hash,refresh_hash,created_at,access_expires_at,refresh_expires_at) VALUES($1::uuid,$2::uuid,1,$3,$4,$5::timestamptz,$5::timestamptz+interval '15 minutes',LEAST($5::timestamptz+interval '30 days',$5::timestamptz+interval '90 days')) RETURNING access_expires_at,refresh_expires_at`, g.sessionID, g.familyID, ah[:], rh[:], now).Scan(&accessExp, &refreshExp)
 	if err != nil {
@@ -113,10 +117,10 @@ func (s *PostgresSessions) Authenticate(ctx context.Context, accessToken, device
 	}
 	defer cancel()
 	var out AccountSession
-	var created, expires, now time.Time
+	var created, expires, familyCreated, absolute, now time.Time
 	var status string
-	err = s.db.QueryRowContext(ctx, `SELECT f.account_id::text,se.session_id::text,f.device_id::text,f.audience,se.created_at,se.access_expires_at,clock_timestamp(),a.status FROM account_sessions se JOIN account_session_families f ON f.family_id=se.family_id JOIN accounts a ON a.account_id=f.account_id WHERE se.access_hash=$1 AND f.revoked_at IS NULL AND f.device_id=$2::uuid AND f.audience=$3`, hash[:], device, audience).Scan(&out.AccountID, &out.SessionID, &out.DeviceID, &out.Audience, &created, &expires, &now, &status)
-	if errors.Is(err, sql.ErrNoRows) || err == nil && (status != "active" || created.After(now) || !expires.After(now)) {
+	err = s.db.QueryRowContext(ctx, `SELECT f.account_id::text,se.session_id::text,f.device_id::text,f.audience,se.created_at,se.access_expires_at,f.created_at,f.absolute_expires_at,clock_timestamp(),a.status FROM account_sessions se JOIN account_session_families f ON f.family_id=se.family_id JOIN accounts a ON a.account_id=f.account_id WHERE se.access_hash=$1 AND f.revoked_at IS NULL AND f.device_id=$2::uuid AND f.audience=$3`, hash[:], device, audience).Scan(&out.AccountID, &out.SessionID, &out.DeviceID, &out.Audience, &created, &expires, &familyCreated, &absolute, &now, &status)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && (status != "active" || created.After(now) || !expires.After(now) || familyCreated.After(now) || !absolute.After(now)) {
 		return AccountSession{}, ErrSessionInvalid
 	}
 	if err != nil {
@@ -156,10 +160,10 @@ func (s *PostgresSessions) Refresh(ctx context.Context, refreshToken, device, au
 		return SessionTokens{}, ErrSessionUnavailable
 	}
 	var familyID, boundDevice, boundAudience string
-	var absolute, created, refreshExpires time.Time
+	var absolute, familyCreated, created, refreshExpires time.Time
 	var generation int64
 	var historical bool
-	err = tx.QueryRowContext(ctx, `SELECT f.family_id::text,f.device_id::text,f.audience,f.absolute_expires_at,se.created_at,se.refresh_expires_at,se.generation,false FROM account_sessions se JOIN account_session_families f ON f.family_id=se.family_id WHERE se.refresh_hash=$1 UNION ALL SELECT f.family_id::text,f.device_id::text,f.audience,f.absolute_expires_at,h.consumed_at,h.retain_until,0,true FROM account_session_refresh_history h JOIN account_session_families f ON f.family_id=h.family_id WHERE h.refresh_hash=$1 LIMIT 1`, hash[:]).Scan(&familyID, &boundDevice, &boundAudience, &absolute, &created, &refreshExpires, &generation, &historical)
+	err = tx.QueryRowContext(ctx, `SELECT f.family_id::text,f.device_id::text,f.audience,f.absolute_expires_at,f.created_at,se.created_at,se.refresh_expires_at,se.generation,false FROM account_sessions se JOIN account_session_families f ON f.family_id=se.family_id WHERE se.refresh_hash=$1 UNION ALL SELECT f.family_id::text,f.device_id::text,f.audience,f.absolute_expires_at,f.created_at,h.consumed_at,h.retain_until,0,true FROM account_session_refresh_history h JOIN account_session_families f ON f.family_id=h.family_id WHERE h.refresh_hash=$1 LIMIT 1`, hash[:]).Scan(&familyID, &boundDevice, &boundAudience, &absolute, &familyCreated, &created, &refreshExpires, &generation, &historical)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SessionTokens{}, ErrSessionInvalid
 	}
@@ -178,7 +182,7 @@ func (s *PostgresSessions) Refresh(ctx context.Context, refreshToken, device, au
 		return SessionTokens{}, ErrSessionUnavailable
 	}
 	if historical {
-		if absolute.After(now) && !revoked.Valid {
+		if !familyCreated.After(now) && absolute.After(now) && !revoked.Valid {
 			if _, err = tx.ExecContext(ctx, `UPDATE account_session_families SET revoked_at=$2 WHERE family_id=$1::uuid`, familyID, now); err != nil {
 				return SessionTokens{}, ErrSessionUnavailable
 			}
@@ -188,7 +192,7 @@ func (s *PostgresSessions) Refresh(ctx context.Context, refreshToken, device, au
 		}
 		return SessionTokens{}, ErrSessionInvalid
 	}
-	if status != "active" || revoked.Valid || created.After(now) || !refreshExpires.After(now) || !absolute.After(now) {
+	if status != "active" || revoked.Valid || familyCreated.After(now) || created.After(now) || !refreshExpires.After(now) || !absolute.After(now) {
 		return SessionTokens{}, ErrSessionInvalid
 	}
 	g, err := s.generate()
@@ -196,11 +200,14 @@ func (s *PostgresSessions) Refresh(ctx context.Context, refreshToken, device, au
 		return SessionTokens{}, ErrSessionUnavailable
 	}
 	ah, rh := sha256.Sum256(g.accessRaw), sha256.Sum256(g.refreshRaw)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO account_session_token_issuance(token_hash,token_role,family_id,issued_at,retain_until) VALUES($1,'access',$3::uuid,$4,$5),($2,'refresh',$3::uuid,$4,$5)`, ah[:], rh[:], familyID, now, absolute); err != nil {
+		return SessionTokens{}, ErrSessionUnavailable
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO account_session_refresh_history(refresh_hash,family_id,consumed_at,retain_until) VALUES($1,$2::uuid,$3,$4)`, hash[:], familyID, now, absolute); err != nil {
 		return SessionTokens{}, ErrSessionUnavailable
 	}
 	var accessExp, nextRefreshExp time.Time
-	err = tx.QueryRowContext(ctx, `UPDATE account_sessions SET session_id=$2::uuid,generation=$3,access_hash=$4,refresh_hash=$5,created_at=$6::timestamptz,access_expires_at=$6::timestamptz+interval '15 minutes',refresh_expires_at=LEAST($6::timestamptz+interval '30 days',$7::timestamptz) WHERE family_id=$1::uuid RETURNING access_expires_at,refresh_expires_at`, familyID, g.sessionID, generation+1, ah[:], rh[:], now, absolute).Scan(&accessExp, &nextRefreshExp)
+	err = tx.QueryRowContext(ctx, `UPDATE account_sessions SET session_id=$2::uuid,generation=$3,access_hash=$4,refresh_hash=$5,created_at=$6::timestamptz,access_expires_at=LEAST($6::timestamptz+interval '15 minutes',$7::timestamptz),refresh_expires_at=LEAST($6::timestamptz+interval '30 days',$7::timestamptz) WHERE family_id=$1::uuid RETURNING access_expires_at,refresh_expires_at`, familyID, g.sessionID, generation+1, ah[:], rh[:], now, absolute).Scan(&accessExp, &nextRefreshExp)
 	if err != nil {
 		return SessionTokens{}, ErrSessionUnavailable
 	}
@@ -241,7 +248,8 @@ func (s *PostgresSessions) Logout(ctx context.Context, accessToken, device, audi
 		return ErrSessionUnavailable
 	}
 	var revoked sql.NullTime
-	if err = tx.QueryRowContext(ctx, `SELECT revoked_at FROM account_session_families WHERE family_id=$1::uuid FOR UPDATE`, familyID).Scan(&revoked); err != nil {
+	var familyCreated, absolute time.Time
+	if err = tx.QueryRowContext(ctx, `SELECT revoked_at,created_at,absolute_expires_at FROM account_session_families WHERE family_id=$1::uuid FOR UPDATE`, familyID).Scan(&revoked, &familyCreated, &absolute); err != nil {
 		return ErrSessionUnavailable
 	}
 	if revoked.Valid {
@@ -259,7 +267,7 @@ func (s *PostgresSessions) Logout(ctx context.Context, accessToken, device, audi
 	if err = tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return ErrSessionUnavailable
 	}
-	if status != "active" || created.After(now) || !expires.After(now) {
+	if status != "active" || created.After(now) || !expires.After(now) || familyCreated.After(now) || !absolute.After(now) {
 		return ErrSessionInvalid
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE account_session_families SET revoked_at=$2 WHERE family_id=$1::uuid`, familyID, now); err != nil {

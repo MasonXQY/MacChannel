@@ -30,6 +30,20 @@ CREATE TABLE IF NOT EXISTS account_session_families (
 CREATE INDEX IF NOT EXISTS account_session_families_binding_idx
     ON account_session_families(account_id, device_id, audience);
 
+-- Immutable registry spans access/refresh roles and all generations/families.
+-- It prevents a random secret from ever being issued twice, including after a
+-- refresh hash moves from the current-session row into replay history.
+CREATE TABLE IF NOT EXISTS account_session_token_issuance (
+    token_hash BYTEA PRIMARY KEY CHECK (octet_length(token_hash) = 32),
+    token_role TEXT NOT NULL CHECK (token_role IN ('access', 'refresh')),
+    family_id UUID NOT NULL REFERENCES account_session_families(family_id),
+    issued_at TIMESTAMPTZ NOT NULL,
+    retain_until TIMESTAMPTZ NOT NULL,
+    CHECK (retain_until > issued_at)
+);
+CREATE INDEX IF NOT EXISTS account_session_token_issuance_family_idx
+    ON account_session_token_issuance(family_id);
+
 CREATE TABLE IF NOT EXISTS account_sessions (
     session_id UUID PRIMARY KEY,
     family_id UUID NOT NULL UNIQUE REFERENCES account_session_families(family_id),
