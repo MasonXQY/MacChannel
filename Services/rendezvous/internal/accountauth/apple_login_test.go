@@ -437,10 +437,19 @@ func TestAppleLoginResponseValidation(t *testing.T) {
 			rejectLogin(t, got, err)
 		})
 	}
-	f := newLoginFixture(t)
-	f.body = strings.Repeat(" ", 65537)
-	got, err := f.complete()
-	rejectLogin(t, got, err)
+	t.Run("oversized_valid_response", func(t *testing.T) {
+		f := newLoginFixture(t)
+		f.body += strings.Repeat(" ", 65537-len(f.body))
+		body := &closeReader{Reader: strings.NewReader(f.body)}
+		f.login.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+		})
+		got, err := f.complete()
+		if !body.closed.Load() {
+			t.Fatal("oversized response body was not closed")
+		}
+		rejectLogin(t, got, err)
+	})
 }
 
 type loginBadBody struct {

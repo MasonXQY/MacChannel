@@ -74,3 +74,19 @@ full account-system completion. Root independent review remains required.
 
 Protocol source supplied in task brief: [Apple token generation and validation](https://developer.apple.com/documentation/signinwithapplerestapi/generate-and-validate-tokens),
 read by coordinator on 2026-09-17. Native-only code intentionally omits redirect_uri.
+
+## Review follow-up: isolate oversized-response rejection
+
+The oversized-response fixture now contains an otherwise valid, signed response
+padded with JSON whitespace to exactly 65,537 bytes, and asserts body closure,
+empty result and the generic sentinel. This replaces an all-whitespace fixture
+that would also fail JSON parsing and therefore could mask a missing size guard.
+
+Mutation RED: temporarily removed both the response read limit and size guard;
+`go test ./internal/accountauth -run '^TestAppleLoginResponseValidation/oversized_valid_response$' -count=1`
+failed as expected (0.599s): `expected zero result and sentinel; got AppleLoginResult{redacted} / <nil>`.
+Both production lines were restored; `git diff --exit-code HEAD -- Services/rendezvous/internal/accountauth/apple_login.go`
+passed, proving production source unchanged. Focused GREEN:
+`go test ./internal/accountauth -run '^TestAppleLogin(ResponseValidation|SizeBoundariesAndBodyClose)$' -count=1`
+PASS, 3.447s. This verifies both the inclusive 65,536-byte success boundary and
+otherwise-valid 65,537-byte rejection. No production implementation changed.
