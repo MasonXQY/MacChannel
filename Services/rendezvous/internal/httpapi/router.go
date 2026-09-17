@@ -107,6 +107,7 @@ type Config struct {
 	AllowedWebSocketOrigins []string
 	TURNSharedSecret        []byte
 	TURNURLs                []string
+	AccountHandler          http.Handler
 }
 
 type Router struct {
@@ -190,6 +191,9 @@ func NewRouter(config Config) http.Handler {
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/peer-authorization/status", router.peerAuthorizationStatus)
 	mux.HandleFunc("GET /v1/ws", router.webSocket)
 	mux.HandleFunc("POST /v1/turn-credentials", router.turnCredentials)
+	if config.AccountHandler != nil {
+		mux.Handle("/v1/account/", config.AccountHandler)
+	}
 	return securityHeaders(mux)
 }
 
