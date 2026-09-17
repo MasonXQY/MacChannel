@@ -330,9 +330,12 @@ func TestAccountSessionServerRestartProbe(t *testing.T) {
 	access1 := base64.RawURLEncoding.EncodeToString(raw(5, 32))
 	refresh1 := base64.RawURLEncoding.EncodeToString(raw(6, 32))
 	access2 := base64.RawURLEncoding.EncodeToString(raw(11, 32))
+	refresh2 := base64.RawURLEncoding.EncodeToString(raw(12, 32))
+	revokedAccess := base64.RawURLEncoding.EncodeToString(raw(23, 32))
+	rotatedAccess := base64.RawURLEncoding.EncodeToString(raw(29, 32))
 	if phase == "prepare" {
 		var entropy []byte
-		for _, p := range [][]byte{raw(1, 16), raw(2, 16), raw(3, 16), raw(4, 16), raw(5, 32), raw(6, 32), raw(7, 16), raw(8, 16), raw(9, 16), raw(10, 16), raw(11, 32), raw(12, 32)} {
+		for _, p := range [][]byte{raw(1, 16), raw(2, 16), raw(3, 16), raw(4, 16), raw(5, 32), raw(6, 32), raw(7, 16), raw(8, 16), raw(9, 16), raw(10, 16), raw(11, 32), raw(12, 32), raw(13, 16), raw(14, 16), raw(15, 16), raw(16, 16), raw(17, 32), raw(18, 32), raw(19, 16), raw(20, 16), raw(21, 16), raw(22, 16), raw(23, 32), raw(24, 32)} {
 			entropy = append(entropy, p...)
 		}
 		service.random = bytes.NewReader(entropy)
@@ -344,18 +347,55 @@ func TestAccountSessionServerRestartProbe(t *testing.T) {
 		if err != nil || second.AccessToken != access2 {
 			t.Fatal("restart rotation fixture mismatch", err)
 		}
-		if _, err = service.Refresh(context.Background(), first.RefreshToken, sessionDevice, sessionAudience); err != ErrSessionInvalid {
-			t.Fatal("prepare replay did not revoke family", err)
+		if _, err = service.Authenticate(context.Background(), access2, sessionDevice, sessionAudience); err != nil {
+			t.Fatal("active fixture unusable", err)
 		}
-		if _, err = service.Authenticate(context.Background(), access2, sessionDevice, sessionAudience); err != ErrSessionInvalid {
-			t.Fatal("prepare family remained usable", err)
+		revokedFirst, err := service.Login(context.Background(), AppleLoginResult{Identity: AppleIdentity{Subject: "restart-revoked-subject"}, RefreshToken: "restart-revoked-provider"}, sessionOtherDevice, sessionAudience)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if revokedFirst.AccessToken != base64.RawURLEncoding.EncodeToString(raw(17, 32)) || revokedFirst.RefreshToken != base64.RawURLEncoding.EncodeToString(raw(18, 32)) {
+			t.Fatal("revoked login fixture mismatch")
+		}
+		revokedCurrent, err := service.Refresh(context.Background(), revokedFirst.RefreshToken, sessionOtherDevice, sessionAudience)
+		if err != nil || revokedCurrent.AccessToken != revokedAccess {
+			t.Fatal("revoked rotation fixture mismatch", err)
+		}
+		if _, err = service.Refresh(context.Background(), revokedFirst.RefreshToken, sessionOtherDevice, sessionAudience); err != ErrSessionInvalid {
+			t.Fatal("prepare replay did not revoke second family", err)
+		}
+		if _, err = service.Authenticate(context.Background(), revokedAccess, sessionOtherDevice, sessionAudience); err != ErrSessionInvalid {
+			t.Fatal("prepare revoked family remained usable", err)
+		}
+		var families, revoked int
+		if err = db.QueryRow(`SELECT count(*),count(*) FILTER (WHERE revoked_at IS NOT NULL) FROM account_session_families`).Scan(&families, &revoked); err != nil || families != 2 || revoked != 1 {
+			t.Fatalf("prepare fixture rows = families %d revoked %d: %v", families, revoked, err)
 		}
 	} else {
-		if _, err := service.Authenticate(context.Background(), access2, sessionDevice, sessionAudience); err != ErrSessionInvalid {
-			t.Fatal("revoked family resurrected", err)
+		var families, revoked int
+		if err := db.QueryRow(`SELECT count(*),count(*) FILTER (WHERE revoked_at IS NOT NULL) FROM account_session_families`).Scan(&families, &revoked); err != nil || families != 2 || revoked != 1 {
+			t.Fatalf("restart fixture rows = families %d revoked %d: %v", families, revoked, err)
 		}
-		if _, err := service.Refresh(context.Background(), refresh1, sessionDevice, sessionAudience); err != ErrSessionInvalid {
-			t.Fatal("consumed refresh resurrected", err)
+		if _, err := service.Authenticate(context.Background(), access2, sessionDevice, sessionAudience); err != nil {
+			t.Fatal("active family lost", err)
+		}
+		var entropy []byte
+		for _, p := range [][]byte{raw(25, 16), raw(26, 16), raw(27, 16), raw(28, 16), raw(29, 32), raw(30, 32)} {
+			entropy = append(entropy, p...)
+		}
+		service.random = bytes.NewReader(entropy)
+		rotated, err := service.Refresh(context.Background(), refresh2, sessionDevice, sessionAudience)
+		if err != nil || rotated.AccessToken != rotatedAccess {
+			t.Fatal("active family did not rotate", err)
+		}
+		if _, err = service.Refresh(context.Background(), refresh1, sessionDevice, sessionAudience); err != ErrSessionInvalid {
+			t.Fatal("consumed active refresh replay accepted", err)
+		}
+		if _, err = service.Authenticate(context.Background(), rotatedAccess, sessionDevice, sessionAudience); err != ErrSessionInvalid {
+			t.Fatal("active successor survived replay", err)
+		}
+		if _, err = service.Authenticate(context.Background(), revokedAccess, sessionOtherDevice, sessionAudience); err != ErrSessionInvalid {
+			t.Fatal("pre-revoked family resurrected", err)
 		}
 	}
 }

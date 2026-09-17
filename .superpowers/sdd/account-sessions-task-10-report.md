@@ -73,3 +73,20 @@ Final corrected verification:
 - SQL/race: `DROPMESH_ACCOUNT_TEST_DATABASE_URL='postgresql:///dropmesh_account_auth_test?host=/private/tmp/dropmesh-account-db.Kc5rQR&port=55447&sslmode=disable' go test -race ./internal/accountauth -run '^TestAccountSession' -count=1` — PASS, `1.890s`.
 - Default full Go: `env -u DROPMESH_ACCOUNT_TEST_DATABASE_URL go test ./... -count=1` — PASS across all packages; accountauth `13.387s` (SQL tests skipped by default as designed).
 - Actual stop/start remains coordinator-owned; no server restart was claimed by this implementer run.
+
+## Restart probe correction — 2026-09-18
+
+Re-review identified that the prior restart verifier asserted only invalid results. A missing or empty fixture could therefore pass. The corrected verifier first requires exactly two persisted families with exactly one already revoked.
+
+Focused RED against the prior weak prepared fixture:
+
+- `DROPMESH_ACCOUNT_TEST_DATABASE_URL='postgresql:///dropmesh_account_auth_test?host=/private/tmp/dropmesh-account-db.Kc5rQR&port=55447&sslmode=disable' DROPMESH_ACCOUNT_SESSION_RESTART_PHASE=verify go test ./internal/accountauth -run '^TestAccountSessionServerRestartProbe$' -count=1`
+- FAIL: `restart fixture rows = families 1 revoked 1`; the required still-active family was absent.
+
+The prepare phase now persists two deterministic independent subject/device families: one active family whose first refresh is already consumed, and a second family revoked before shutdown by replay. Verify proves the active access authenticates, its current refresh rotates successfully, replay of its consumed refresh revokes the successor, and the independently pre-revoked family remains invalid. Explicit row counts make missing tables/data fail.
+
+GREEN without claiming a server restart:
+
+- prepare PASS `1.646s`; verify PASS `0.409s` when run consecutively against the guarded Unix-socket fixture.
+- Final SQL/race session suite PASS: `go test -race ./internal/accountauth -run '^TestAccountSession' -count=1`, `2.139s`.
+- No production code or migration changed in this correction. The coordinator still owns the actual prepare/stop/start/verify run.
