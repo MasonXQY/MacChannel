@@ -1,6 +1,534 @@
 # DropMesh iPhone companion handoff
 
+## Continuous phone-account integration — 2026-09-17 (in progress)
+
+Owner requests continuous development until usable on phone. See new plan
+2026-09-17-account-phone-continuation.md and signed-http plan. Sessionstore
+Task10 implemented4af4132, security fixesc3c5e22; preserve historicaltask10report,
+use .superpowers/sdd/account-sessions-task-10-report.md. RootbaselinePASS14.849s.
+Final restart correction25bca6d independently Approved, no findings. Root actual
+PGrestart correctedprobe prepare0.587s / stop/start / verify0.367s PASS; active
+and independently revoked families checked. Final SQLaccountauthracePASS24.942s.
+Evidence docs/acceptance/account-sessions-root-20260918.md supersedes weakerprobe.
+Task11 initial8c8b74b andfixfc17ac8 independentlyApproved. Includes64-byteSwift
+keycompatibility, safeAppleunavailability503vsinvalid401, exactinput/capacity/cancel
+coverage. RootfinalSQLracePASS27.874s/3.135s; account-http-root-20260918.md evidence.
+Task12 complete8a0c3e0+67e17df+a31a10b, finalindependentreviewApproved, no findings.
+Fixed loopbackalias/timestampbounds; focused15 andunsignediOSPASS at67e17df,
+finalalias client8PASS. Sharedindexcollision67e17df includesonly4ownedfixfiles+
+rootUIplan, preservednoreset. RootwirePASS7.515s then4.075s; finala31a10b4.957sPASS.
+Task13 complete e7cfddf..4805164, independentlyApproved/no findings;33focused
+tests andunsignediOSPASS, deterministicoperationobserver approved. Finalbrief
+.superpowers/sdd/account-session-controller-task-13-final-brief.md; unique report.
+Newactor/storage/tests only + private->internal4clientvalidators allowed.
+Rootmustnotstage/commitwhileimplementeractive. Task14 initial08f6c85 passed16native
+tests andunsignediOS. Independent review requests3Important fixes: cancellation
+handoffcleanup, malformed-presentconfig, actualAppleadaptercallbacktests.
+Task14 fixed729337c;17focusedtests/unsignediOSPASS; independent rereviewApproved,
+all3Importantresolved. No activeimplementer. RootfinalUIregression running separately.
+RootnativeUI18.6 3/3, SE17.5 1/1, iOS27 1/1PASS; screenshotsinspected.
+First27testfailedambiguousnestedconfirmationselector, test-onlyfixed/retried.
+Evidence account-ios-ui-root-20260918.md; rootUItests/fixture/projectentries notyetcommitted.
+RootrealSwift-Go-SQL controllerpersistence/restore/rotation/freshlogout2testsPASS9.236s;
+account-native-wire-root-20260918.md; noApple/OSKeychain/hardwareclaim.
+Task15 Apple revocation plan9eaccad prepared, notdispatched. No phoneinstall yet.
+Nativeclient planb9d28ca refined73ef284/f43757b; contract90a85c0 includes durable
+refresh-inflight marker, noidentityreload, narrowlypreserveddirtyDI integration.
+Phone00008140-001A6CE63082201C recheckedSept18 nowUNAVAILABLE; no installattempt.
+Separate dedicatedSignInwithApplekey creation/safe-server-file approval asked
+asynchronouslySept18, pendingresponse. PortalH8AT2X2XX4 currently lacks
+SignInwithApple; specificpermissionrequested, no portalwrites yet. Existing
+main/Share entitlements shared: split before main-only loginpermission.
+Rootpreflight account-phone-integration-preflight-20260917.md. IsolatedPG
+/private/tmp/dropmesh-account-db.Kc5rQR/data STOPPED after finalwiretestSept18;
+retained owner-only for later localtests. Continue review/integratedtests/
+HTTP/deletion/native, not another component-only final. Realkeys/TLS test
+endpoint/setup remain operation-time gates; currentreviewIPA unchanged.
+
+## Credential signing and protection — 2026-09-17
+
+Plan db22597 completed locally. Signer c60abb2+clockfixc9567aa and credential
+protector2e2226d+sizefix17588dd independently reviewed Approved/no remaining
+findings. Root final combined accountauth race PASS20.265s. Full defaultGo
+implementerPASS, opt-in SQL not exercised. Source only four new accountauth
+files; no existing client/route/protocol/migration/production changes. Submitted
+IPA SHA unchanged, no phoneinstall or realkeyaccess. Root evidence:
+docs/acceptance/account-credential-primitives-root-20260917.md.
+Next protected credential persistence and revocable device-bound sessions,
+including refresh reuse/deletion/restart gates; then signed HTTP and native UI.
+Primitives do NOT constitute usable login, deployed storage or device trust.
+Keep working review version and unrelated dirty client/release files intact.
+
+## Native Apple code completion — 2026-09-17
+
+Plan fd97271, implementation d8c3f0f, test-only correction 08200d1. Independent
+review Approved with no remaining findings after correcting oversized-response
+test and demonstrating mutation RED. Root final accountauth race PASS19.034s;
+implementer full default Go PASS (opt-in SQL skipped). New standalone coordinator
+consumes challenge, verifies both Apple identities and exact subject/nonce/audience,
+then returns transient sensitive refresh token. No session or native login yet.
+See docs/acceptance/account-apple-login-root-20260917.md and native-login-preflight.
+Phone physical Mason connected, development0.1.0(6) installed and untouched.
+Submitted IPA SHA unchanged. No production/portal/install/reset/route changes.
+Next developer-client-secret provider, protected credential/session persistence,
+then signed device HTTP adapter and native integration. Preserve dirty client work.
+
+## Durable account login challenges — 2026-09-17
+
+Implemented7a1032d following pland6e1403/697d9c2; independent componentreview
+Approved, no findings. New standalone Go challenge component and additive
+migration008, no route/session/devicegrant/nativeintegration. Device/audience
+binding,5minTTL,atomicconsume,10kglobal/5devicequota and genericfailureoutputs.
+Root SQL-enabled racePASS8.568s; actual PostgreSQL16.15 restartprobe prepare0.895s,
+restart09:40:32+04,verify0.281s PASS. Usedrequestnotresurrected,pendingusableonce.
+Implementer focused14toplevel+2nested testsPASS, defaultfullGoPASS withSQLskipped
+there (SQLacceptancefromexplicitruns). Report account-login-challenges-20260917.md
+and account-login-challenges-root-20260917.md contain scope/evidence/limitations.
+Temporary /private/tmp/dropmesh-account-db.Kc5rQR/data server STOPPED; directory
+retained owner-only, no productionDBused. SubmittedIPA SHA unchanged; prior dirty
+client/releaseworkpreserved. No phoneinstall or Appleportal changes. Next Apple
+authorizationcodeexchange bound to consumednonce/subject/audience, then revocable
+device-bound sessions. RealApplelogin and nativeaccountUI remain unimplemented.
+
+## Account continuation — 2026-09-17
+
+Connected physical Mason iPhone16ProMax confirmed; installeddevelopment0.1.0(6)
+left untouched. No install/reset/launch, no portal/production/review changes.
+Current branch remains feature/dropmesh-accounts in existing isolated worktree.
+Apple key provider plan5593741, production6f26693, test repairs11da812+8375222.
+Independent final component review Approved at8375222, no remaining findings.
+Root final fresh `go test -race ./internal/accountauth -count=1` PASS3.745s;
+default `go test ./...` PASS (unchanged packages cached; accountauth1.239s).
+Only standalone accountauth provider/tests and task docs added. No old route,
+client, pairing or transfer changes. SubmittedIPA SHA unchanged from below.
+See docs/acceptance/account-apple-keys-20260917.md,
+account-apple-keys-review-20260917.md and account-phone-preflight-20260917.md.
+This is NOT installed Apple login or full account-system completion. Next:
+durable device/audience-bound one-use login challenges, code exchange and
+revocable sessions, then native capabilities/integration with action-time approval.
+
+## Account-system continuation — 2026-09-16
+
+Owner selected option1 Apple-only login after approving continued account work
+while iOS1.0(8) waits for review. Keep current review/build/production untouched.
+Design draft: docs/superpowers/specs/2026-09-16-apple-account-device-connections-design.md.
+Owner subsequently confirmed the complete security boundary. Account work is on
+feature/dropmesh-accounts in the existing linked worktree, carrying all existing
+dirty release/client files intact; those files are not part of account commits.
+f225f9f records approved design and scoped authentication-foundation plan.
+2accdbd adds standalone Apple token validator with local signed fixtures, generic
+errors, strict parsing, RS256/ES256 and claim validation. Follow-up11ad133 fixes
+masked test fixtures with four independently verified mutation-RED checks.
+Independent final scoped review Approved/no remaining findings at11ad133.
+Implementer focused/race and default Go suite pass. Not connected to routes,
+sessions, devices or real Apple login. No portal/production/client changes.
+See docs/acceptance/account-auth-validator-20260916.md and
+docs/acceptance/account-integration-boundaries-20260916.md. Submitted IPA SHA256
+rechecked unchanged. Next: finish foundation review, then trusted key retrieval,
+durable single-use challenge, code exchange and revocable device-bound sessions.
+
+## iOS first public release preparation — 2026-09-16
+
+FINAL CURRENT STATUS: iOS1.0(8) officially SUBMITTED September16 17:52 GMT+4.
+ASC shows Waiting for Review (not approved/live), Items Submitted1.
+Submission ID f22e5e04-c72d-4354-8fe9-18b11779f86a.
+https://appstoreconnect.apple.com/apps/6812051148/distribution/reviewsubmissions/details/f22e5e04-c72d-4354-8fe9-18b11779f86a
+Free first release; automatic after approval. Final missing gates resolved:
+Chinese privacy URL saved; native2064x2752 iPad screenshot uploaded1/10, UI capture
+test1/1passed. Review phone/email screenshot-verified correct and saved.
+No further upload or submission required. Older pending notes below superseded.
+
+LATEST: Production privacy audit completed with owner-authorized temporary SSH
+source 92.96.17.75/32. Temporary source REMOVED after read-only audit; Hetzner
+confirmed Fully applied, 7 rules, SSH source only original92.96.19.217.
+Privacy label published: Device ID, Other Data Types, Other Diagnostic Data;
+all App Functionality / linked / not tracking. See production privacy evidence.
+Add for Review validation found missing 13-inch iPad screenshot and Simplified
+Chinese privacy URL. Chinese URL filled with bilingual public policy; native iPad
+screenshot capture in progress. No review submission yet. These facts supersede
+the older pending-SSH/privacy notes below.
+
+Owner confirmed iOS first version FREE; Mac price unchanged. ASC6812051148
+remains Prepare for Submission, build8 uploaded but no review submission yet. Saved EN/ZH
+descriptions, subtitles, Utilities category, review notes/contact, no-sign-in,
+and EN privacy URL. Current price is AUTO_FREE and iOS-on-Mac/Vision availability
+disabled for iPhone-only scope. Age questionnaire saved: 4+ in172regions,
+Messaging/Chat Yes conservatively for direct peer communication; no broad UGC,
+web browsing, social feed, advertising, mature/medical/violence/gambling content.
+Owner explicitly confirmed content-rights attestation; Yes saved September16.
+Availability saved:174 current territories excluding France; future auto-expansion off.
+
+Three sanitized1320x2868 actual simulator screenshots uploaded to EN6.9slot;
+ASC shows3/10 and6.5inherits6.9. Originals untouched, no private names/docs uploaded.
+Files: docs/acceptance/app-store-screenshots-20260916/. Current order shown by ASC:
+Devices, History, Send. EN screenshot fallback applies to other localizations.
+
+Confirmed-only Release orphan identity recovery implemented and independently
+reviewed: retained valid nonzero generation plus definite absence of all trust,
+issuer-lock and SQLite/WAL/SHM files; partial/corrupt/symlink states fail closed.
+Explicit confirmation rechecks then clears only mobile identity Keychain service.
+Received files untouched; old pairs invalid. No real identity reset performed.
+Runtime10 focused tests, model25focused and Release simulator build passed per
+implementation evidence. Root integrated164unit tests PASS, fresh result:
+/tmp/dropmesh-release8-tests/Logs/Test/Test-DropMeshTests-2026.09.16_16-55-47-+0400.xcresult
+log /private/tmp/dropmesh-release8-tests.log. Live recovery remains untested.
+
+Pre-recovery1.0(7) archived/exported but NOT for submission. Main/share required-
+reason PrivacyInfo.xcprivacy now added; static ruby check passed; project regenerated.
+Build1.0(8) exported, final embedded manifests/signatures checked. Root Apple
+validation exit0 VERIFY SUCCEEDED17:10; upload exit0 UPLOAD SUCCEEDED17:12,
+delivery4fdedeaf-1f5a-4946-90a2-1b7ad32c9958,9942742bytes. Do not upload again.
+IPA:/Users/mason/Developer/DropMesh-Releases/iphone-appstore-1.0-8-export/DropMesh.ipa
+SHA256:436ae5d4e20db6b14539d5a6e53e2f62ad9d21a19d1f52fb5d2a87d3698f0ab9
+Bilingual privacy/support live, Pages built commit
+d30ad929e981b526a6155c8f0b8f513fbd98cb7b; root HTTPS support verified.
+Apple processing subsequently VALID/APP_STORE_ELIGIBLE; build8 selected/saved
+on iOS1.0. Exact-build encryption questionnaire standard algorithms plus FranceNo
+saved; Missing Compliance removed. This is not a no-encryption declaration.
+DeviceID and OtherDataTypes drafts AppFunctionality/linked/notTracking saved,
+not published. Current production SSH22 timeout blocks fresh privacy log/IP
+configuration confirmation; public health200, no production mutation. Read-only
+agent final IPA dependency check shows onlyWebRTC andApple frameworks, no common
+analyticsSDK found. Diagnostic logging has historicalSep14 evidence but latest
+linkage/infra practices not confirmed. Remaining: finish privacy audit/label and
+final submission gates. No review submission or live release.
+Account system follows this release.
+
+Latest continuation: Hetzner login restored. Firewall11546024 live rule permits
+SSH22 only from92.96.19.217; current workstation egress verified92.96.17.75.
+Requested owner permission for temporary92.96.17.75/32 addition and removal after
+read-only privacy audit. No firewall edits performed; awaiting that answer.
+ASC fresh page confirms build8 retained and status Prepare for Submission.
+
+## Received-folder navigation installed — 2026-09-16 14:13
+
+History's Received files folder now attempts shareddocuments navigation using the
+validated runtime receiveDirectory. Failed external dispatch opens a native
+document picker with directoryURL set to that exact folder, no copy/multiple
+selection. Selecting a file presents Quick Look with scoped access retained until
+dismissal. No file mutation. English/Chinese unavailable message added.
+
+RED tests showed missing dispatch/fallback/error; GREEN full suite 161 tests
+passed `/private/tmp/dropmesh-folder-green.log`; subsequent picker seam + final
+four focused tests passed `/private/tmp/dropmesh-folder-final.log`, result
+`/tmp/dropmesh-photo-tests/Logs/Test/Test-DropMeshTests-2026.09.16_14-12-34-+0400.xcresult`.
+Final device build succeeded `/private/tmp/dropmesh-folder-device-final.log`;
+signed bundle verified and dev app overwritten on connected Mason iPhone without
+reset/uninstall. Read-only review found no blocker. External URL scheme and picker
+directory positioning are best effort: actual Files-app folder location requires
+user visual acceptance, not inferred from URL-open completion. No TestFlight upload.
+
+## History thumbnails — 2026-09-16 13:47
+
+Approved real previews now cover sent/received individual items and up to three
+candidate items per batch, with fixed 48pt rounded presentation, stack/count,
+and type-icon fallback. Photos uses existing authorization only, network disabled;
+Files bookmarks remain scoped, reject dataless and non-current iCloud sources,
+and do not create action copies. ImageIO decoding runs in a utility task at160px;
+system Quick Look handles supported document/video thumbnails. Photos cancellation
+has a once-only continuation gate. Deleted/changed/closed model results are ignored.
+
+RED proved old model refused sent batch and UI lacked thumbnail/count; final
+158 unit +1 UI tests pass in `/private/tmp/dropmesh-thumbnail-final.log`, including
+actual image downsampling, PDF first page, passive denied Photos, invalid bookmark,
+sent batch and deletion regression. Result:
+`/tmp/dropmesh-photo-tests/Logs/Test/Test-DropMeshTests-2026.09.16_13-46-27-+0400.xcresult`.
+Visual fixture inspected at `iPhone/Tests/Evidence/HistoryThumbnails/sent-batch.png`.
+Device build passed `/private/tmp/dropmesh-thumbnail-device-final.log`.
+Signed bundle verified and overwrite-installed on connected Mason iPhone at13:47;
+launch reported production bootstrap succeeded. No reset/uninstall occurred.
+Independent review has no blocking findings. Real Photos/video/third-party provider
+acceptance remains user testing; do not claim universal provider no-download behavior.
+No protocol, Mac, TestFlight, identity, or source-payload changes.
+
+## History deletion and device-neutral pairing installed — 2026-09-16 13:27
+
+Devices now says “Pair a Device” / “配对设备”; related pairing/send/local-network
+copy no longer implies Mac-only peers. No pairing capability or protocol changed.
+History supports confirmed swipe deletion, explicit Edit selection, and clear-all
+across filters. Delete Selected sits in the list, not the bottom toolbar that was
+occluded by the tab bar during UI testing. Only terminal records are eligible.
+Mobile-only private tombstones survive relaunch, fail closed on corruption, and
+deny deleted record previews. Source-reference cleanup preserves active transfers;
+original files/photos and engine recovery rows are untouched.
+
+Verification: 153 app unit tests and 3 UI tests passed in
+`/private/tmp/dropmesh-delete-final.log`, result
+`/tmp/dropmesh-photo-tests/Logs/Test/Test-DropMeshTests-2026.09.16_13-25-52-+0400.xcresult`.
+UI covers delete/cancel/confirm, clear-all, and Devices’ exact English label.
+Backend agent also verified 6 focused SwiftPM tests using Xcode 16.4.
+Independent read-only review closed all identified deletion blockers.
+Final generic-device build passed (`/private/tmp/dropmesh-delete-device-final.log`),
+signed bundle verified, and dev app overwrite-installed on connected Mason iPhone
+UDID 00008140-001A6CE63082201C. Launch reported production bootstrap succeeded.
+No uninstall/reset, TestFlight upload, or Mac app update. Physical user deletion
+and swipe gesture acceptance remain untested; no real history was deleted for tests.
+
+## Sent original-source history installed — 2026-09-16 13:08
+
+Closed the preceding provider-reference gap for new sends: Files originals use
+iOS bookmarks captured during open-in-place import; Photos stores asset IDs from
+an explicit `.shared()` PhotosPicker. Owner chose original Photos reread with
+first-history-action authorization, not a permanent payload cache. Ordered
+references attach to each returned recipient transfer before staging cleanup.
+Preview/share creates short-lived action files and cleans them on dismissal,
+rejected/late results, failed export and startup recovery. Existing hardened
+coordinated import copying is reused for Files. Old records cannot be reconstructed.
+
+Final verification: 148 app unit tests and 4 UI tests passed, zero failures,
+`/private/tmp/dropmesh-sent-verified.log`; generic iPhone build passed
+`/private/tmp/dropmesh-sent-device-verified.log`. Signature verification passed;
+overwrite installation succeeded on Mason iPhone. Launch printed production
+bootstrap succeeded and presence accepted/peer_online. No reset or TestFlight
+upload. Final independent scoped review approved after Photos root-symlink guard.
+
+Physical original-provider/iCloud/Photos authorization+export acceptance still
+requires a new user send and preview. Do not claim the two legacy sent rows can
+recover their originals. Details: `docs/acceptance/iphone-sent-source-preview-20260916.md`.
+
+## Three-tab UX installed — 2026-09-16
+
+Implemented Send / History / Devices, compact service status, selection retention,
+direction filters/unread markers, device rename, and received batch file actions.
+App review findings closed. Runtime persistence review found byte-budget poisoning;
+fixed transactionally and re-reviewed. Verified-manifest projection includes nested
+files, no arbitrary directory enumeration. No wire-format change.
+
+Verification: 134 app unit tests + 8 UI tests passed; final frozen runtime integration
+rerun passed 134 unit tests + batch-preview UI test. Logs:
+`/private/tmp/dropmesh-tabs-final-app.log`, `/private/tmp/dropmesh-tabs-final-integration.log`.
+Runtime agent ran 8 history tests + 1 actual nested receive test with Xcode 16.4.
+Xcode 27 generic iPhone build passed (`/private/tmp/dropmesh-tabs-device-final.log`),
+strict nested signing verification passed. Overwrite install on connected Mason
+iPhone succeeded; launch printed `DropMesh production bootstrap succeeded`.
+No reset/uninstall, TestFlight upload or Mac B control performed.
+
+Evidence: `docs/acceptance/iphone-tabs-20260916.md`, runtime acceptance report,
+and `iPhone/Tests/Evidence/TabsUX/`. Remaining approved scope: durable provider
+references for sent originals are not implemented; sent imports retain metadata
+only and cannot preview after staging cleanup. Legacy missing metadata cannot be
+reconstructed. Real cross-device transfer acceptance not performed this turn.
+
+## Centered source icons and tappable sent history — 2026-09-16
+
+Explicit centered HStacks replace first-baseline Label icon alignment. Normal
+and accessibility home UI tests passed; screenshot visually confirms alignment
+(iPhone/Tests/Evidence/UserFocusedUX/en-home-icons-centered.png).
+Sent history summary now opens details, while received available files continue
+to open preview. Existing sent history has no retained source reference, so this
+does not claim original-file preview. Added outbound fixture and sent-row detail
+UI test; sent-detail and received-preview/share tests passed. Logs:
+/private/tmp/dropmesh-align-test.log and /private/tmp/dropmesh-tap-test.log.
+Final device build and strict signature verification passed.
+Overwrite-installed on Mason iPhone without reset; no TestFlight update.
+
+## Icon/history layout follow-up — 2026-09-16
+
+User screenshots exposed a missing photo icon and severe history metadata
+wrapping that the prior functional tests did not catch. Explicit titleAndIcon
+fixes automatic prominent-button label styling. Replaced the row's expanding
+NavigationLink with a bounded info button and state-driven destination; removed
+duplicate History section header; status and relative time now use separate
+lines. Screenshot comparison confirms visible photo icon and readable metadata.
+Four focused UI tests passed (normal/XXXL home, preview/share details, missing
+file feedback). Device build and strict signature verification passed.
+Logs: /private/tmp/dropmesh-layout-test.log and dropmesh-layout-device.log.
+Evidence: iPhone/Tests/Evidence/UserFocusedUX/en-home-layout-fixed.png.
+Overwrite installation on Mason iPhone succeeded; launch printed production
+bootstrap succeeded. No reset/uninstall and no TestFlight upload.
+
+## User-focused iPhone UX — 2026-09-16 (installed locally)
+
+Final verification: 61 focused unit tests and 8 UI tests passed, zero failures.
+Log: /private/tmp/dropmesh-ux-final.log; xcresult:
+/tmp/dropmesh-photo-tests/Logs/Test/Test-DropMeshTests-2026.09.16_11-41-09-+0400.xcresult.
+Final generic-device build passed (/private/tmp/dropmesh-ux-device-final.log).
+Nested components signed, strict signature verification passed, and overwrite
+installation on Mason iPhone succeeded. Launch without reset arguments printed
+`DropMesh production bootstrap succeeded`. Pairing/data were not reset.
+Screenshots: iPhone/Tests/Evidence/UserFocusedUX. Independent review findings
+were addressed. No TestFlight upload or real cross-device batch transfer claimed.
+The following paragraphs retain earlier verification checkpoints for context.
+
+Owner approved written spec `docs/superpowers/specs/2026-09-16-iphone-user-focused-ux-design.md`
+and implementation/install. Plan is in matching plans directory. Views now expose
+direct source entry, compact history/preview, device details, technical details,
+and bounded asynchronous image thumbnails. No protocol or identity reset changes.
+First UI pass exposed stale boolean/source sheet capture and Section detail sheet
+presentation problems; implementation switched to source-identified send sheets
+and navigation-based history details. Independent review requested visible home
+action errors, accessibility history reflow, and detail-local resolution errors.
+Round2 /private/tmp/dropmesh-ux-round2.log: 61 unit tests passed; UI tests ongoing.
+Updated UI tests include direct source routing, preview/share, removal confirmation,
+English/Chinese normal/XXXL layouts; missing-file detail test added for next run.
+Actual active snapshots lack filename/count; currently honest File transfer label
+is used, rather than changing protocol. New UX NOT yet installed at this checkpoint.
+
+## Photo multi-selection correction — 2026-09-16
+
+Follow-up: owner explicitly requested phone installation. Signed the rebuilt
+Debug app with the existing development profiles/identity (including nested
+debug dylibs); strict signature verification passed. Overwrite installation on
+connected Mason iPhone succeeded, then launch WITHOUT reset arguments printed
+`DropMesh production bootstrap succeeded`. No uninstall or identity reset was
+performed. This is now installed locally, not a new TestFlight build. Actual
+photo selection and cross-device batch receipt remain unverified.
+
+User reports files can be multi-selected but photos cannot. Confirmed three
+single-item assumptions: picker maxSelectionCount=1, model prefix(1), and
+single-provider import admission. Removed picker/model truncation; a single
+admission now sequentially imports all selected photo/video providers and keeps
+every owned copy until send/cleanup. Existing explicit confirmation is unchanged.
+Regression first failed with selection count 1 instead of 3. Final simulator
+run passed all 47 MobileSendModelTests/MobileImportAdapterTests, including batch
+success, second-provider failure, cancellation before next provider, selection
+clearing, and existing file-import tests. Log: /private/tmp/dropmesh-photo-green-final.log.
+Unsigned physical-iPhone Debug build passed: /private/tmp/dropmesh-photo-device.log.
+git diff --check passed. This change has NOT been installed on the phone or
+uploaded to TestFlight; real Photos picker taps and cross-device batch delivery
+remain unverified. Do not run the previous identity-reset argument again.
+
+## Authorized iPhone reinstall recovery — 2026-09-16
+
+Owner confirmed uninstalling old app before TestFlight6, approved identity reset
+and temporary overwrite installation. Read-only app container showed no trust.json
+or transfer database, empty staging. Exact underlying throw was not logged by6.
+Added DEBUG-only OwnerApprovedReinstallRecovery with explicit dated launch argument,
+requires missing trust/database/sequence-lock files, once-only marker. Clears only
+KeychainStore service com.zensystech.dropmesh.mobile.identity; no key data exported.
+Recovery check verifies approval/no-op, existing-trust refusal, once-only execution,
+file preservation. Local check and device build passed. Xcode project regenerated.
+Temporary app /private/tmp/dropmesh-recovery-device/Build/Products/Debug-iphoneos/DropMesh.app
+development signed using existing main/share profiles. First launch failed due to
+unsigned debug dylibs, before reset; signed those explicitly and reinstalled.
+On connected iPhone00008140-001A6CE63082201C console confirmed authorized reset
+completed AND production bootstrap succeeded. Relaunch WITHOUT argument also
+confirmed bootstrap succeeded; presence initially challenge_unexpired (not proof
+of network readiness). Device now has temporary DEVELOPMENT build0.1.0(6), NOT
+the TestFlight binary. Old identity/pairings invalidated; received files untouched.
+No Mac/other device state changed. Re-pairing and transfer acceptance still pending.
+Permanent consent-based reinstall recovery for Release is NOT implemented; DEBUG
+helper is excluded from Release. Console session27211 still attached read-only.
+
 ## TestFlight delivery requested — 2026-09-15
+
+Beta submission completed: build6 compliance standard encryption beyond Apple OS,
+FranceNo saved per prior scope; status Ready to Submit then Waiting for Review
+after actual Submit for Review. Main/shared code unchanged this turn.
+Created internal group c3743c64-fcca-4d0e-a9c4-f2aa29bf4884 (manual distribution),
+added build6 and existing owner qianyao.xu@icloud.com only, no role grants.
+Created external group7bcb9710-854e-49bd-a1cd-b41305a948e0, added build6 and
+xuqy87@gmail.com plus xuqy06@163.com. Fresh UI confirms2testers/1build,
+testers No Builds Available while review pending. No public link created.
+English beta description/test notes include Chinese text. Review contact uses
+previously provided email/phone and owner name; sign-in required unchecked.
+Automatically notify testers retained for reviewed build. Browser tab5 retained.
+Do not claim external installation availability until review completes.
+
+Build6 Apple validation/upload exit0, deliveryb3617182-dd27-434c-b851-f410a1a0b1d1,
+9482082bytes. Logs /private/tmp/dropmesh-ios27-build6-{validation,upload}.{json,log}.
+Fresh ASC iOS page now shows build6 Processing (Sep15 10:46PM), build5 Failed.
+Version0.1.0 still No Builds; no beta groups yet. Do not duplicate upload6.
+Status CLI session18996 still pending (read-only), log /private/tmp/dropmesh-ios-build6-status.log.
+Next: read its result or refresh after processing, then configure testers/compliance.
+
+Processing diagnosis: altool --build-status --delivery-id5eae0539-e0ee-4093-955b-54fed6cdc4e0
+in text mode reports BUILD-STATUS FAILED / IMPORT-STATUS FAILED / not on ASC,
+90683 missing NSCameraUsageDescription in main app. JSON mode crashes in altool27
+NSError serialization; use text mode. WebRTC binary contains RTCCameraVideoCapturer;
+app/core source search found no capture calls. Added truthful unused-camera SDK
+purpose string (no camera permission request or feature added), both build numbers6.
+Scripts/test-iphone-purpose-strings.sh failed before fix, passes after; plists lint.
+Build6 archive succeeded; export currently session18988. Mac7 availability email
+to authorized tester confirms ready to test as of2026-09-15. Do not retry iOS5.
+
+Delivery confirmed: opaque iPhone0.1.0(5) Apple validation exit0 and upload exit0.
+Delivery UUID5eae0539-e0ee-4093-955b-54fed6cdc4e0,9482014bytes transferred.
+Logs /private/tmp/dropmesh-ios27-opaque-{validation,upload}.{json,log}.
+Do NOT upload this build again. Fresh ASC app6812051148 TestFlight UI still says
+Submit a build to start testing immediately after upload; build not yet visible.
+Next: wait for Apple processing visibility, configure compliance and tester groups,
+then beta review as necessary. No claim of external availability or installation.
+All packaging/upload processes completed. In-app browser tab4 retained for handoff.
+
+Opaque icon update: owner approved local pixel conversion, no redesign. Original
+backed up at /private/tmp/dropmesh-icon.FFKth9/original.png; CoreGraphics flattened
+transparent corners onto matching dark background. Source icon remains1024x1024,
+sips hasAlpha=no, visually inspected. Only iPhone PNG changed besides this log.
+New archive iphone-testflight-0.1.0-5-opaque.xcarchive succeeded, export
+iphone-testflight-0.1.0-5-opaque-export/DropMesh.ipa succeeded. Both distribution
+summary entitlements include group.com.zensystech.dropmesh.iphone.dev, get-task-allow=false.
+Apple validation running session20899; logs /private/tmp/dropmesh-ios27-opaque-validation.{json,log}.
+No upload yet. Existing installed apps and bundle IDs unchanged.
+
+Latest result: both export processes completed. First unsigned-archive export
+lost application-groups entitlements. Applied ad-hoc archive signatures with
+existing Shared/DropMeshDevelopment.entitlements to main/share, then exported
+again through Xcode manual Apple Distribution signing into
+/Users/mason/Developer/DropMesh-Releases/iphone-testflight-0.1.0-5-export-groups.
+First IPA Apple validation FAILED (exit1): 90717 Invalid large app icon,
+app-icon-1024.png contains alpha. No iOS upload attempted. Need remove alpha
+without redesign, rebuild and verify both app-group entitlements and Apple
+validation before uploading. Logs /private/tmp/dropmesh-ios27-validation.{json,log}.
+No archive/export/validation processes remain active.
+
+Latest toolchain update: host macOS27.0, /Applications/Xcode.app is Xcode27.0
+(27A266a), iOS27 SDK verified. Global xcode-select remains Xcode16.4; only
+this archive/export uses explicit DEVELOPER_DIR. iPhone unsigned archive
+0.1.0(5) SUCCEEDED at /Users/mason/Developer/DropMesh-Releases/iphone-testflight-0.1.0-5.xcarchive.
+Manual export options are iphone-testflight-export-options.plist in same folder.
+Export currently running (exec session55770), log /private/tmp/dropmesh-ios27-export.log;
+codesign is pending, possible keychain authorization. SecurityAgent UI is blocked
+to automation; user asked to approve locally if prompted. No export success or
+iOS upload yet. Do not start a duplicate export while this process is running.
+
+Downloaded profiles now present and copied without overwrite to Xcode UserData
+Provisioning Profiles. cmp confirms exact copies. MainUUID3601e146-51fd-43c7-a67d-fdef12f99286,
+shareUUIDa7f170a8-b1da-44a9-93d5-f58d8c33d0c4. Decoded entitlements match exact
+main/share IDs, shared group, beta-reports-active=true,get-task-allow=false.
+Owner reports third file (Xcode) not downloaded. Official Xcode26.2 downloads
+page opened for manual download; no new Xcode installed or iOS upload yet.
+
+Certificate setup update: owner supplied distribution.cer, portalUT2BMJ8T8F.
+Certificate CSR public-key SHA256 matches 992ba8889242c7f06eff035662bd7220c5d891f8543b619a08ee9c86dfbce11f.
+Imported protected PKCS12 through existing SecPKCS12Import helper (OSStatus0).
+security find-identity confirms Apple Distribution identityFEB7EDF8F2977B6F7FC28FDF77ED55C72BB2475C,
+teamXKAZ67HN45, expires2027-09-14UTC. Existing identities retained.
+Created App Store profiles: DropMesh iPhone App Store 2026 portalRK9UY5Q99U
+and DropMesh Share App Store 2026 portalMBQUCT33N5, exact existing main/share
+bundle IDs, new distribution certificate. Both generation confirmed by UI.
+Clicked download for both; no .mobileprovision file yet found in Downloads.
+Official Xcode26.2 Apple silicon link observed and clicked, but no .xip file
+appeared. CLI unauthenticated download redirects to login. Browser download
+handoff needed (do not claim downloaded/installed). Xcode page tab24 preserved.
+No iOS archive/export/upload yet; Mac7 prior beta-review submission unchanged.
+
+Owner now approved new iOS Distribution credential and app record. Created
+DropMesh Mobile ASC app6812051148, iOS, English US, SKUdropmesh-iphone-testflight,
+existing com.zensystech.dropmesh.iphone.dev, Limited Access (no added users).
+Fresh Apps page confirms Prepare for Submission. No iOS binary uploaded yet.
+Generated new owner-only RSA2048 key and public CSR under
+/Users/mason/.codex/dropmesh-ios-distribution.fGO1hg/. Certificate creation page
+is at CSR upload; no certificate issued yet. Native file picker inaccessible:
+CUA cannot control Codex app. Asked user to choose distribution.csr (NOT key).
+Mac7 processing complete, standard-encryption/FranceNo saved consistent with
+prior approved export answers; status Ready to Submit, internal QA added.
+External QA selected, bilingual What to Test entered, auto-notify retained,
+Submit for Review completed: fresh UI shows Waiting for Review and both Internal
+QA and External QA selected. No external installation acceptance yet.
+
+Update: Mac1.3.1(7) built successfully from aa2862f, signed Store app and PKG
+/Users/mason/Developer/DropMesh-Releases/DropMesh-1.3.1-7-aa2862f.pkg.
+Apple validation and upload both exit0, no errors. Delivery UUID
+ba1d67cf-f1f3-4e5a-bccd-5ac5134985da; 19032729 bytes transferred.
+Logs /private/tmp/dropmesh-build7-apple-{validation,upload}.{json,log}.
+Do not reupload same package: processing/compliance/group assignment still pending.
+iOS requires Xcode26+ per Apple April28,2026 rule; installed versions15.4/16.4
+are insufficient. Host15.7.3 has131GiB free. Xcode26.2 supports host and iOS26.2.
+xcodes download26.2 failed immediately for missing CLI Apple login, no download
+started and no global toolchain switched. Browser Apple login is valid; CLI
+does not share it. iOS certificate/app-record authorization remains unanswered.
+Preserved browser tabs20 ASC TestFlight and21 Apple certificate creation page.
 
 User rejected GitHub Direct channel and explicitly requests Mac and iPhone
 TestFlight-installable builds, preserving identities. ASC login renewed.

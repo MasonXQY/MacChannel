@@ -52,7 +52,7 @@ func TestLiveSwiftAccountSessionLifecycle(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, "swift", "test", "--disable-automatic-resolution", "--filter", "GoAccountInteropTests/testLiveSignedAccountSessionLifecycle")
+	command := exec.CommandContext(ctx, "swift", "test", "--disable-automatic-resolution", "--filter", "GoAccountInteropTests")
 	command.WaitDelay = 5 * time.Second
 	command.Dir = root
 	command.Env = append(os.Environ(), "DROPMESH_GO_ACCOUNT_TEST_URL="+server.URL)

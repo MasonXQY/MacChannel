@@ -9,7 +9,9 @@ struct DropMeshTestHostApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if ProcessInfo.processInfo.arguments.contains("-pairing-saving-evidence") {
+            if ProcessInfo.processInfo.arguments.contains("-account-evidence") {
+                MobileAccountEvidenceHost()
+            } else if ProcessInfo.processInfo.arguments.contains("-pairing-saving-evidence") {
                 PairingSavingEvidenceHost()
             } else if ProcessInfo.processInfo.arguments.contains("-share-evidence") {
                 MobileShareEvidenceHost(extensionOnly: false)

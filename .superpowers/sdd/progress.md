@@ -1,5 +1,74 @@
 # iPhone continuation ledger
 
+Continuous phone-account implementation 2026-09-17: user explicitly requests
+continue until phone usable. Plan7056942 amended7d6cd18/f938de2; Task10 sessions
+complete25bca6d, independent reviewApproved; root actual PGrestart0.587s/0.367s
+and fresh SQLaccountauthrace24.942s PASS. Evidence account-sessions-root-20260918.md.
+Task11 initial8c8b74b+fixfc17ac8 Approved; rootfinalSQLrace27.874s/3.135sPASS.
+Task12 complete fc17ac8..a31a10b, reviewclean; fix67e17df+a31a10b. Focused15/
+unsignediOSPASS, finalclient8PASS. Rootwire7.515s/4.075s/final4.957sPASS.
+Task13 complete e7cfddf..4805164, reviewclean/Approved, nofindings;33focused
+PASS andunsignediOSPASS. Deterministicobserver authorized, no publicAPIchange.
+Task14 initial08f6c85 native16PASS/unsignediOSPASS, reviewNeedsfixes3Important;
+Task14 fixes729337c17focusedPASS/unsignediOSPASS; independentrereviewApproved.
+RootfinalUIregression running; accountproject44insertions selectivelystaged,
+72unrelatedprojectinsertions preservedunstaged.
+Root UI18.6 3/3, SE17.5 1/1, iOS27 1/1PASS; account-ios-ui-root-20260918.md.
+RootcontrollerrealSwift-Go-SQL2PASS9.236s; noApple/hardwareclaim.
+rootnoGitstage/commitwhileimplementeractive(sharedindexcoordination).
+Task15 Apple revocation plan9eaccad prepared, notdispatched. No install yet.
+Historical task-10-report preserved. Root baseline accountauthPASS14.849s.
+Physical Mason00008140-001A6CE63082201C nowUNAVAILABLE onSept18 recheck.
+DedicatedSiWAkeycreate+safe-server-storage approvalquestion askedpending.
+Apple AppIDH8AT2X2XX4
+SignInwithApple unchecked; action-time enabling/development-signing approval
+requested, pending. No portal change or install. Isolated PG socket
+/private/tmp/dropmesh-account-db.Kc5rQR:55447 STOPPED after finalwiretest.
+Next sessioncontrollerreview, nativeSettings/AppleUI, deletion/config and
+realphoneacceptance; do not stop at modulecompletion.
+
+Account credential primitives Task1 complete db22597..c9567aa, implementation
+c60abb2 and wallclockfixc9567aa. IndependentreviewApproved/no remaining findings.
+Monotonic clock metadata removed before rollback comparison; realtime.Now RED/GREEN
+proven. Root initialscopedrace2.503sPASS; implementer finalscopedrace1.785sPASS.
+Task2 complete c9567aa..17588dd, source2e2226d plus exactsizebound17588dd;
+independentfinalreviewApproved/no remaining findings. Root finalcombinedrace
+PASS20.265s, fullGoimplementerPASS withSQLskips. Two meaningful regressionfixes
+verifiedRED/GREEN. No realcredential, route, persistence, production or phone
+changes. Rootreport account-credential-primitives-root-20260917.md. Nextprotected
+credentialpersistence/revocabledeviceboundsessions, then HTTP/native integration.
+
+Account Apple code completion2026-09-17 complete fd97271..08200d1:
+productiond8c3f0f, testfix08200d1; independent reviewApproved/no remaining findings.
+Root finalrace19.034sPASS, fullGo implementerPASS withSQLskips explicit. Oversize
+test mutationRED proven; sourceunchanged byfix. Phoneconnected dev0.1.0(6) left
+untouched; submittedIPA unchanged. No route/session/native/production changes.
+Next developerclientsecret signing and protected credential/session storage.
+Reports account-apple-login-20260917.md and account-apple-login-root-20260917.md.
+
+Account durable challenges2026-09-17 complete d6e1403..7a1032d, reviewApproved
+no findings. RootSQLrace8.568sPASS, actualPostgresrestartprepare0.895s/verify0.281s
+PASS; temporary /private/tmp/dropmesh-account-db.Kc5rQR/data nowSTOPPED (status
+noserverrunning). Newaccountchallengefiles/migration008/docs only, noexisting
+route/client/productionchanged. SubmittedIPA SHA unchanged, no phoneinstall.
+Reportsaccount-login-challenges-20260917.md + account-login-challenges-root-20260917.md.
+NextApplecodeexchange plus revocabledevicebound sessions, notusableloginyet.
+
+Account Apple keys2026-09-17 complete: plan5593741, phone preflighta3edbcf,
+implementation6f26693, testfixes11da812+8375222. Independent final componentreview
+Approved/no remaining findings. Root fresh finalrace3.745s PASS; defaultfullGo
+PASS (unchangedpackagescached). Only newprovider/tests/docs, no oldroutes changed.
+SubmittedIPA SHA unchanged. Mason phoneconnected0.1.0(6), noinstall/reset.
+Reports account-apple-keys-20260917.md and account-apple-keys-review-20260917.md.
+Next durableloginchallenge/codeexchange/sessions; not usable Applelogin yet.
+
+Account foundation2026-09-16 Task1+2 complete(f225f9f..11ad133, review Approved).
+Branch feature/dropmesh-accounts; account validator only. Four masking-test findings
+resolved by isolated mutationRED; root finalrace2.528s PASS. Full defaultGo suite
+passed; no SQL/liveApple/session/device-account evidence. Docs f1fd97c. Next trusted
+JWKS retrieval and durable one-use login orchestration; no production/portal/client
+change. Existing dirty release work preserved. SubmittedIPA SHA unchanged.
+
 LATEST signedcandidatehandoff2026-09-14: source06bedd5, Mac1.3.0(5)universalStore+phone0.1.0(5)/Share signedandstrictverified; stablepairing-build5.grL47J bundles/ZIPs/hashes/VERIFICATION.md. Allsessionsdrained. No install/deploy: phone595...unavailable confirmed; temporarySSH92.96.17.75/32approvalunanswered; localoldMacPID85546retained afterCUAtimeout(no forcequit). See signed-candidates-2026-09-14.md andHANDOFF. Code/tests/reviewsdone; nextrequiresphoneconnection/unlock+specificfirewallapproval theninstalled/prodmatrix, no repeatlocalprogram.
 
 Latest2026-09-14: pairingprogramfinalreviewREADY for signedcandidate72671f0; shipping48f642c/UItestsfd197b7. Important savingphasefixed/Minorreportwordingcorrected/noremainingfindings. Focused13/native121/0fail; finalstandard2/0 21.702s+AX2/0 26.299s,16captures, root/reviewerchecked. OriginalsimstalerunnerisolatedinnewsyntheticF086... (shutdownretained); originallarge/dataunchanged. Allagentscommandsdrained/cachefree. Candidateparent /Users/mason/Developer/DropMesh-Releases/pairing-build5.grL47J preparedempty. Signing/install/deploy/physicalpending; temporarySSH92.96.17.75/32approvalpending, nofirewallwrites. Resume latestHANDOFFsection, not old completedstages.
