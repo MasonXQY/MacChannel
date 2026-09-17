@@ -95,6 +95,9 @@ func (p *AppleCredentialProtector) Open(ctx context.Context, binding AppleCreden
 	if keyIDLength < 1 || keyIDLength > 64 || len(envelope) < 2+keyIDLength+28+1 {
 		return fail()
 	}
+	if len(envelope) > 2+keyIDLength+28+appleCredentialMaxTokenBytes {
+		return fail()
+	}
 	keyID := string(envelope[2 : 2+keyIDLength])
 	if !validAppleCredentialKeyID(keyID) {
 		return fail()

@@ -158,7 +158,7 @@ func TestAppleCredentialProtectorRejectsInvalidDecryptedToken(t *testing.T) {
 }
 
 func TestAppleCredentialProtectorRejectsStructurallyValidOversizeEnvelope(t *testing.T) {
-	keyID := strings.Repeat("k", 64)
+	keyID := "k"
 	key := credentialKey(0x54)
 	block, _ := aes.NewCipher(key)
 	aead, _ := cipher.NewGCMWithRandomNonce(block)
@@ -166,7 +166,22 @@ func TestAppleCredentialProtectorRejectsStructurallyValidOversizeEnvelope(t *tes
 	envelope := append([]byte{1, byte(len(keyID))}, keyID...)
 	envelope = append(envelope, aead.Seal(nil, nil, bytes.Repeat([]byte{'x'}, 16385), aad)...)
 	p := newTestCredentialProtector(t, keyID, map[string][]byte{keyID: key})
+	counter := &countingCredentialAEAD{AEAD: p.keys[keyID]}
+	p.keys[keyID] = counter
 	assertOpenFailure(t, p, testCredentialBinding, envelope)
+	if counter.openCalls != 0 {
+		t.Fatalf("oversize envelope reached AEAD.Open %d time(s)", counter.openCalls)
+	}
+}
+
+type countingCredentialAEAD struct {
+	cipher.AEAD
+	openCalls int
+}
+
+func (a *countingCredentialAEAD) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
+	a.openCalls++
+	return a.AEAD.Open(dst, nonce, ciphertext, additionalData)
 }
 
 func TestAppleCredentialProtectorCopiesConfigurationAndRotates(t *testing.T) {

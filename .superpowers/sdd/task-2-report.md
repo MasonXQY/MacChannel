@@ -87,3 +87,27 @@ size bounds precede decryption, no caller nonce or algorithm is exposed, no key
 bytes enter the envelope/AAD, UUIDs are independent canonical values, every
 failure returns nil/empty output with the same sentinel, and existing dirty files
 remain untouched. No remaining implementation concern found.
+
+## Approved-review hardening follow-up
+
+The independent review approved the component with one minor request: apply the
+exact envelope upper bound derived from the parsed key-ID length before key lookup
+or decryption. A test-first regression replaced the earlier 64-byte-key oversized
+case with an independently encrypted 16,385-byte token using a one-byte key ID and
+a test-only counting wrapper around the real standard-library AEAD.
+
+RED command:
+
+`go test ./internal/accountauth -run '^TestAppleCredentialProtectorRejectsStructurallyValidOversizeEnvelope$' -count=1`
+
+Expected failure: `oversize envelope reached AEAD.Open 1 time(s)`.
+
+The implementation now rejects lengths above
+`2 + parsed key-ID length + 28 + 16384` before looking up the key or
+calling `AEAD.Open`. Final amended evidence:
+
+- `go test ./internal/accountauth -run 'AppleCredential' -count=1` — PASS,
+  accountauth `0.386s`.
+- `go test -race ./internal/accountauth -run 'AppleCredential' -count=1` — PASS,
+  accountauth `1.423s`.
+- `git diff --check` on the four owned files — PASS.

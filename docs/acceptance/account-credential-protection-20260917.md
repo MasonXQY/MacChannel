@@ -17,6 +17,11 @@ and every binding mismatch through the same generic error with no plaintext or
 partial output. Constructor inputs are copied into immutable cipher instances,
 and ordinary formatting is redacted.
 
+After parsing the bounded key-ID length, `Open` applies the exact per-envelope
+upper bound (`2 + key-ID length + 28 + 16384`) before key lookup or AEAD
+decryption. Thus an independently encrypted oversized token with a short key ID
+fails without invoking `AEAD.Open`.
+
 ## Verification boundary
 
 Tests use synthetic 32-byte keys and token strings only. They cover a real
