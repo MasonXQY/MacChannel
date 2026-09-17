@@ -87,3 +87,43 @@ exit 0, no output/warnings
 - Real Apple login, real TLS endpoint behavior, signed/installed phone behavior,
   deployment, and production operation were intentionally not tested here.
 - These library/unit/build results do not mean account login works on a phone.
+
+## Independent-review correction wave
+
+Review status was **Needs fixes** for loopback-origin aliases and unsafe
+floating-point-to-`Int64` timestamp boundaries, plus requested test-depth gaps.
+The correction remains within the existing client and test files.
+
+Additional RED:
+
+```text
+swift test --filter AccountServiceClientTests
+error: type 'AccountServiceClient' has no member 'validEpochMilliseconds'
+```
+
+The new behavioral tests were written before the safe conversion helper. The
+correction now normalizes trailing DNS dots, parses IPv4/IPv6 bytes, rejects
+expanded/compressed IPv6 loopback, IPv4-mapped loopback and shortened 127/8
+forms, and uses `Int64(exactly:)` after truncation for request dates and exact
+conversion for response expiries. This rejects zero/sub-millisecond and rounded
+upper-bound values instead of permitting a trapping conversion.
+
+Coverage now also rejects wrong device/audience bindings, zero/noncanonical
+UUIDs, equal/noncanonical tokens, reversed/expired/unrepresentable expiries,
+wrong JSON field types, and missing/unsupported JSON content types. Transport
+coverage deterministically cancels before URL loading begins and synchronizes a
+completion-versus-cancellation race to exercise one-shot continuation handling.
+
+Fresh correction verification:
+
+```text
+swift test --filter 'AccountService(Client|Transport)Tests'
+Executed 15 tests, with 0 failures (0 unexpected)
+
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  xcodebuild -project iPhone/DropMesh.xcodeproj -scheme DropMesh \
+  -configuration Debug -destination 'generic/platform=iOS' \
+  -derivedDataPath .build/account-native-client \
+  CODE_SIGNING_ALLOWED=NO build -quiet
+exit 0, no output/warnings
+```

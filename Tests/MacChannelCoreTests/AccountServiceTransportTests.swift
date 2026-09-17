@@ -107,15 +107,64 @@ final class AccountServiceTransportTests: XCTestCase {
     func testCancellationBeforeStartRemainsCancellationError() async throws {
         let transport = makeTransport()
         let outbound = request()
-        let task = Task { try await transport.send(outbound) }
+        let entered = expectation(description: "task is held before transport")
+        let release = AccountTransportAsyncGate()
+        let task = Task.detached {
+            entered.fulfill()
+            await release.wait()
+            return try await transport.send(outbound)
+        }
+        await fulfillment(of: [entered], timeout: 2)
         task.cancel()
+        await release.release()
         do {
             _ = try await task.value
             XCTFail("Expected cancellation")
         } catch {
             XCTAssertTrue(error is CancellationError)
         }
-        XCTAssertLessThanOrEqual(AccountTransportURLProtocol.controller.startedURLs.count, 1)
+        XCTAssertEqual(AccountTransportURLProtocol.controller.startedURLs, [])
+    }
+
+    func testCompletionAndCancellationRaceFinishesContinuationOnce() async throws {
+        let bodyReady = expectation(description: "response body ready")
+        let releaseCompletion = DispatchSemaphore(value: 0)
+        AccountTransportURLProtocol.controller.action = { protocolInstance in
+            let response = HTTPURLResponse(
+                url: protocolInstance.request.url!, statusCode: 200,
+                httpVersion: "HTTP/1.1", headerFields: nil)!
+            protocolInstance.client?.urlProtocol(
+                protocolInstance, didReceive: response, cacheStoragePolicy: .notAllowed)
+            protocolInstance.client?.urlProtocol(protocolInstance, didLoad: Data("ok".utf8))
+            bodyReady.fulfill()
+            releaseCompletion.wait()
+            protocolInstance.client?.urlProtocolDidFinishLoading(protocolInstance)
+        }
+        let transport = makeTransport()
+        let outbound = request()
+        let task = Task { try await transport.send(outbound) }
+        await fulfillment(of: [bodyReady], timeout: 2)
+
+        let startRace = AccountTransportAsyncGate()
+        async let cancel: Void = {
+            await startRace.wait()
+            task.cancel()
+        }()
+        async let complete: Void = {
+            await startRace.wait()
+            releaseCompletion.signal()
+        }()
+        await startRace.release()
+        _ = await (cancel, complete)
+
+        do {
+            let result = try await task.value
+            XCTAssertEqual(result.0, Data("ok".utf8))
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(AccountTransportURLProtocol.controller.startedURLs.count, 1)
+        XCTAssertLessThanOrEqual(AccountTransportURLProtocol.controller.stopCount, 1)
     }
 
     func testEphemeralTransportDoesNotSendStoredCookies() async throws {
@@ -157,6 +206,23 @@ final class AccountServiceTransportTests: XCTestCase {
         request.httpBody = Data("{}".utf8)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
+    }
+}
+
+private actor AccountTransportAsyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
     }
 }
 

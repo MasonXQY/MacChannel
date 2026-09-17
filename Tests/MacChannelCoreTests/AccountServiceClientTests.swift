@@ -95,7 +95,11 @@ final class AccountServiceClientTests: XCTestCase {
         let identity = try DeviceIdentity.ephemeral()
         let invalidOrigins = [
             "http://accounts.example.test", "https://localhost", "https://127.0.0.1",
-            "https://[::1]", "https://user@example.test", "https://example.test:8443",
+            "https://127.1",
+            "https://localhost.", "https://service.localhost.",
+            "https://[::1]", "https://[0:0:0:0:0:0:0:1]",
+            "https://[0:0:0:0:0:0::1]", "https://[::ffff:127.0.0.1]",
+            "https://user@example.test", "https://example.test:8443",
             "https://example.test/path", "https://example.test?query=1",
         ]
         for value in invalidOrigins {
@@ -195,6 +199,73 @@ final class AccountServiceClientTests: XCTestCase {
         catch { XCTAssertEqual(error as? AccountServiceError, .transport) }
     }
 
+    func testRejectsSubMillisecondAndUnrepresentableRequestDates() async throws {
+        let transport = CapturingAccountTransport(responses: [])
+        let identity = try identity()
+        let invalidDates = [
+            Date(timeIntervalSince1970: 0.000_1),
+            Date(timeIntervalSince1970: Double(Int64.max) / 1_000),
+        ]
+        for invalidDate in invalidDates {
+            let client = try AccountServiceClient(
+                identity: identity, origin: URL(string: "https://accounts.example.test")!,
+                audience: audience, transport: transport, now: { invalidDate },
+                nonce: { Data(repeating: 1, count: 32) })
+            do { _ = try await client.challenge(); XCTFail("Expected invalid clock") }
+            catch { XCTAssertEqual(error as? AccountServiceError, .invalidRequest) }
+        }
+        let requestCount = await transport.requests.count
+        XCTAssertEqual(requestCount, 0)
+    }
+
+    func testRejectsMalformedOrUnboundSessionResponses() async throws {
+        let identity = try identity()
+        let account = "aaaaaaaa-1111-1111-1111-111111111111"
+        let session = "22222222-2222-2222-2222-222222222222"
+        let device = identity.id.rawValue.uuidString.lowercased()
+        let access = rawToken(31)
+        let refresh = rawToken(32)
+        let valid = "\"accountID\":\"\(account)\",\"sessionID\":\"\(session)\",\"deviceID\":\"\(device)\",\"audience\":\"\(audience)\""
+        let malformed = [
+            "{\"accountID\":\"00000000-0000-0000-0000-000000000000\",\"sessionID\":\"\(session)\",\"deviceID\":\"\(device)\",\"audience\":\"\(audience)\"}",
+            "{\"accountID\":\"\(account.uppercased())\",\"sessionID\":\"\(session)\",\"deviceID\":\"\(device)\",\"audience\":\"\(audience)\"}",
+            "{\"accountID\":\"\(account)\",\"sessionID\":\"\(session)\",\"deviceID\":\"33333333-3333-3333-3333-333333333333\",\"audience\":\"\(audience)\"}",
+            "{\"accountID\":\"\(account)\",\"sessionID\":\"\(session)\",\"deviceID\":\"\(device)\",\"audience\":\"other\"}",
+            "{\"accountID\":1,\"sessionID\":\"\(session)\",\"deviceID\":\"\(device)\",\"audience\":\"\(audience)\"}",
+        ]
+        for body in malformed {
+            let transport = CapturingAccountTransport(responses: [(Data(body.utf8), response(status: 200))])
+            let client = try accountClient(identity: identity, transport: transport)
+            do { _ = try await client.status(accessToken: access); XCTFail("Expected invalid status") }
+            catch { XCTAssertEqual(error as? AccountServiceError, .invalidResponse) }
+        }
+
+        let invalidTokens = [
+            "{\(valid),\"accessToken\":\"\(access)\",\"refreshToken\":\"\(access)\",\"accessExpiresAt\":1800000060000,\"refreshExpiresAt\":1800000120000}",
+            "{\(valid),\"accessToken\":\"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\",\"refreshToken\":\"\(refresh)\",\"accessExpiresAt\":1800000060000,\"refreshExpiresAt\":1800000120000}",
+            "{\(valid),\"accessToken\":\"\(access)\",\"refreshToken\":\"\(refresh)\",\"accessExpiresAt\":1800000120000,\"refreshExpiresAt\":1800000060000}",
+            "{\(valid),\"accessToken\":\"\(access)\",\"refreshToken\":\"\(refresh)\",\"accessExpiresAt\":1799999999999,\"refreshExpiresAt\":1800000120000}",
+            "{\(valid),\"accessToken\":\"\(access)\",\"refreshToken\":\"\(refresh)\",\"accessExpiresAt\":9223372036854776000,\"refreshExpiresAt\":9223372036854776000}",
+        ]
+        for body in invalidTokens {
+            let transport = CapturingAccountTransport(responses: [(Data(body.utf8), response(status: 200))])
+            let client = try accountClient(identity: identity, transport: transport)
+            do { _ = try await client.refresh(refreshToken: refresh); XCTFail("Expected invalid tokens") }
+            catch { XCTAssertEqual(error as? AccountServiceError, .invalidResponse) }
+        }
+    }
+
+    func testRejectsMissingOrUnsupportedJSONContentType() async throws {
+        let body = Data("{\"signedOut\":true}".utf8)
+        for contentType in [nil, "text/json", "application/json; charset=latin1"] as [String?] {
+            let transport = CapturingAccountTransport(responses: [(
+                body, response(status: 200, contentType: contentType))])
+            let client = try accountClient(identity: identity(), transport: transport)
+            do { try await client.logout(accessToken: rawToken(44)); XCTFail("Expected invalid type") }
+            catch { XCTAssertEqual(error as? AccountServiceError, .invalidResponse) }
+        }
+    }
+
     private func identity() throws -> DeviceIdentity { try DeviceIdentity.ephemeral() }
 
     private func testClient(
@@ -207,6 +278,17 @@ final class AccountServiceClientTests: XCTestCase {
             audience: audience, transport: transport, now: { fixedNow },
             nonce: { Data(repeating: 7, count: 32) }
         )
+    }
+
+    private func accountClient(
+        identity: DeviceIdentity,
+        transport: CapturingAccountTransport
+    ) throws -> AccountServiceClient {
+        let fixedNow = now
+        return try AccountServiceClient(
+            identity: identity, origin: URL(string: "https://accounts.example.test")!,
+            audience: audience, transport: transport, now: { fixedNow },
+            nonce: { Data(repeating: 8, count: 32) })
     }
 
     private func payload(_ request: URLRequest) throws -> [String: String] {
@@ -292,11 +374,13 @@ private func rawToken(_ byte: UInt8) -> String {
         .replacingOccurrences(of: "=", with: "")
 }
 
-private func response(status: Int) -> HTTPURLResponse {
-    HTTPURLResponse(
+private func response(status: Int, contentType: String? = "application/json; charset=utf-8") -> HTTPURLResponse {
+    var headers: [String: String] = [:]
+    if let contentType { headers["Content-Type"] = contentType }
+    return HTTPURLResponse(
         url: URL(string: "https://accounts.example.test")!,
         statusCode: status,
         httpVersion: "HTTP/1.1",
-        headerFields: ["Content-Type": "application/json; charset=utf-8"]
+        headerFields: headers
     )!
 }

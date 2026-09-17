@@ -51,6 +51,18 @@ Use concise localized copy: optional explanation “You can continue transferrin
 - [ ] **Step2 implement wiring/model/adapter/view:** follow the exact contracts above. Use small test seams for native request construction and callback extraction; real ASAuthorizationController still used in production. Cover state/nonce matching, cancellation and duplicate delegates, not just a fake successful adapter.
 - [ ] **Step3 tests:** configured login/status/logout; absent/invalid endpoint; double tap one challenge; cancelled challenge no sheet; cancelled Apple no completion; stale state no HTTP; secure-storage/service failure leaves transfers independent; cancelled/inactive window no crash. Verify en/zh keys and no debug token logging. Controlled gates, no timing sleeps.
 - [ ] **Step4 native verification:** regenerate project only with existing XcodeGen procedure, preserve existing project/source changes; run new native unit tests on an available simulator and unsigned generic iOS build using explicit Xcode. Record exact destinations and commands. Coordinator will obtain rendered screenshot/VoiceOver checks and do signed phone acceptance after configuration approval; unit tests don't prove Apple sheet works on hardware.
+
+Root verified `xcodegen` is `/opt/homebrew/bin/xcodegen`; generate with `xcodegen generate --spec iPhone/project.yml`. Current compatible isolated test simulator is `F0862282-2DD1-41A1-8C04-826C6C6199A1` (iPhone16/iOS18.6); do not erase it. Native test command:
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+  -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests \
+  -destination 'platform=iOS Simulator,id=F0862282-2DD1-41A1-8C04-826C6C6199A1' \
+  -derivedDataPath .build/account-ios-settings CODE_SIGNING_ALLOWED=NO \
+  -only-testing:DropMeshTests/MobileAccountModelTests \
+  -only-testing:DropMeshTests/MobileAppleAuthorizationTests \
+  -only-testing:DropMeshTests/MobileAccountConfigurationTests test -quiet
+```
+The installed SDK headers confirm ASAuthorizationController.cancel is available since iOS16, request nonce/state and returned Apple credential state are supported. Use those actual APIs; no private APIs or custom browser login flow. Later coordinator visual checks also cover iPhoneSE/iOS17.5 and iPhone18ProMax/iOS27 destinations.
 - [ ] **Step5 scoped report/commit:** report public interface names and UI paths, exact RED/GREEN, signing/config/deletion/phone limitations. Keep independent diffs for dirty files for coordinator staging review. No keys, portal, production or install operations.
 
 ## Current official references

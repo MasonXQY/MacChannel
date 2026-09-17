@@ -137,11 +137,9 @@ public struct AccountServiceClient: Sendable {
         let nonce: Data
         do { nonce = try self.nonce() } catch { throw AccountServiceError.transport }
         guard nonce.count == 32 else { throw AccountServiceError.transport }
-        let millisecondsDouble = requestDate.timeIntervalSince1970 * 1_000
-        guard millisecondsDouble.isFinite, millisecondsDouble > 0,
-            millisecondsDouble <= Double(Int64.max)
-        else { throw AccountServiceError.invalidRequest }
-        let milliseconds = Int64(millisecondsDouble)
+        guard let milliseconds = Self.validEpochMilliseconds(requestDate) else {
+            throw AccountServiceError.invalidRequest
+        }
         let unsigned = RendezvousSignedEnvelope(
             deviceID: identity.id.rawValue.uuidString.lowercased(), nonce: nonce,
             payload: payload, publicKey: identity.publicKey.rawRepresentation,
@@ -254,10 +252,11 @@ public struct AccountServiceClient: Sendable {
             components.path.isEmpty || components.path == "/",
             components.port == nil || components.port == 443,
             {
-                let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                var host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                while host.hasSuffix(".") { host.removeLast() }
                 return host != "localhost" && !host.hasSuffix(".localhost")
-                    && !host.hasPrefix("127.") && host != "::1"
-                    && host != "0:0:0:0:0:0:0:1"
+                    && host != "127" && !host.hasPrefix("127.")
+                    && !host.isEmpty && !Self.isLoopbackIPAddress(host)
             }()
         else { return false }
         return true
@@ -305,11 +304,28 @@ public struct AccountServiceClient: Sendable {
     }
 
     private static func date(milliseconds: Double) -> Date? {
-        guard milliseconds.isFinite, milliseconds > 0,
-            milliseconds.rounded(.towardZero) == milliseconds,
-            milliseconds <= Double(Int64.max)
-        else { return nil }
-        return Date(timeIntervalSince1970: milliseconds / 1_000)
+        guard let value = Int64(exactly: milliseconds), value > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(value) / 1_000)
+    }
+
+    private static func validEpochMilliseconds(_ date: Date) -> Int64? {
+        let milliseconds = (date.timeIntervalSince1970 * 1_000).rounded(.towardZero)
+        guard let value = Int64(exactly: milliseconds), value > 0 else { return nil }
+        return value
+    }
+
+    private static func isLoopbackIPAddress(_ host: String) -> Bool {
+        var ipv4 = [UInt8](repeating: 0, count: 4)
+        let isIPv4 = host.withCString { inet_pton(AF_INET, $0, &ipv4) == 1 }
+        if isIPv4 { return ipv4[0] == 127 }
+
+        var ipv6 = [UInt8](repeating: 0, count: 16)
+        let isIPv6 = host.withCString { inet_pton(AF_INET6, $0, &ipv6) == 1 }
+        guard isIPv6 else { return false }
+        let loopback = ipv6.dropLast() == Array(repeating: 0, count: 15) && ipv6[15] == 1
+        let mappedIPv4Loopback = ipv6.prefix(10).allSatisfy { $0 == 0 }
+            && ipv6[10] == 0xff && ipv6[11] == 0xff && ipv6[12] == 127
+        return loopback || mappedIPv4Loopback
     }
 
     private static let zeroUUID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
