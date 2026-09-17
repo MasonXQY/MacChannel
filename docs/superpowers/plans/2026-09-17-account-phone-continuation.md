@@ -31,7 +31,7 @@
 
 ## Task 10: Protected login persistence and revocable device-bound sessions
 
-**Files (ownership):** create `Services/rendezvous/internal/accountauth/sessions.go`, `sessions_postgres.go`, `sessions_postgres_test.go`, `sessions_test.go`; create `Services/migrations/009_account_sessions.sql`; report `.superpowers/sdd/task-10-report.md`. No routes, main wiring, native code or old migration edits.
+**Files (ownership):** create `Services/rendezvous/internal/accountauth/sessions.go`, `sessions_postgres.go`, `sessions_postgres_test.go`, `sessions_test.go`; create `Services/migrations/009_account_sessions.sql`; report `.superpowers/sdd/account-sessions-task-10-report.md`. Preserve historical task-10-report.md. No routes, main wiring, native code or old migration edits.
 
 **Interfaces consumed:** `AppleLoginResult{Identity AppleIdentity{Subject string}, RefreshToken string}` comes only from successful `AppleLogin.Complete`; `AppleCredentialProtector.Seal/Open(ctx, AppleCredentialBinding{Subject,Audience,DeviceID,CredentialID}, ...)`; reuse existing canonical binding and token validation rather than another inconsistent implementation.
 
