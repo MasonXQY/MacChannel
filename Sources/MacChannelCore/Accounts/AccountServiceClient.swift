@@ -243,7 +243,7 @@ public struct AccountServiceClient: Sendable {
         return Data(bytes)
     }
 
-    private static func validOrigin(_ value: URL) -> Bool {
+    static func validOrigin(_ value: URL) -> Bool {
         guard let components = URLComponents(url: value, resolvingAgainstBaseURL: false),
             components.scheme?.lowercased() == "https",
             let rawHost = components.host?.lowercased(), !rawHost.isEmpty,
@@ -263,7 +263,7 @@ public struct AccountServiceClient: Sendable {
         return true
     }
 
-    private static func validAudience(_ value: String) -> Bool {
+    static func validAudience(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 255 && value.unicodeScalars.allSatisfy {
             !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0)
         }
@@ -275,7 +275,7 @@ public struct AccountServiceClient: Sendable {
         }
     }
 
-    private static func validToken(_ value: String) -> Bool {
+    static func validToken(_ value: String) -> Bool {
         guard value.utf8.count == 43, value.unicodeScalars.allSatisfy({
             $0.isASCII && !$0.properties.isWhitespace
                 && !CharacterSet.controlCharacters.contains($0)
@@ -309,7 +309,7 @@ public struct AccountServiceClient: Sendable {
         return Date(timeIntervalSince1970: Double(value) / 1_000)
     }
 
-    private static func validEpochMilliseconds(_ date: Date) -> Int64? {
+    static func validEpochMilliseconds(_ date: Date) -> Int64? {
         let milliseconds = (date.timeIntervalSince1970 * 1_000).rounded(.towardZero)
         guard let value = Int64(exactly: milliseconds), value > 0 else { return nil }
         return value
