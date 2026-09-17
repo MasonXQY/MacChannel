@@ -36,4 +36,9 @@ protocol MobileAppSession: Sendable {
     func history(limit: Int) async throws -> [MobileHistoryEntry]
     func availableReceivedURL(for id: TransferID) async -> URL?
     func setLocalDiscoveryEnabled(_ enabled: Bool) async throws
+    func accountController() async throws -> AccountSessionController?
+}
+
+extension MobileAppSession {
+    func accountController() async throws -> AccountSessionController? { nil }
 }

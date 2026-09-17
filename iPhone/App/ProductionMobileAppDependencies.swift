@@ -11,6 +11,7 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     private let durableTrust: MobileDurableTrust
     private let discoveryPreference: MobileDiscoveryPreference
     private var discoveryEnabled: Bool
+    private var cachedAccountController: AccountSessionController?
 
     static func load() async throws -> ProductionMobileAppDependencies {
         let manager = FileManager.default
@@ -95,6 +96,18 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         try discoveryPreference.save(enabled)
         discoveryEnabled = enabled
         await runtime.setLocalDiscoveryEnabled(enabled)
+    }
+    func accountController() async throws -> AccountSessionController? {
+        if let cachedAccountController { return cachedAccountController }
+        guard let configuration = try MobileAccountConfiguration.load() else { return nil }
+        let service = try AccountServiceClient(identity: context.identity, origin: configuration.origin,
+                                               audience: configuration.audience)
+        let binding = try AccountSessionBinding(deviceID: context.identity.id.rawValue,
+            audience: configuration.audience, origin: configuration.origin)
+        let controller = AccountSessionController(service: service,
+            storage: KeychainAccountSessionStorage(), binding: binding)
+        cachedAccountController = controller
+        return controller
     }
     func revoke(_ id: DeviceID) async throws { try await context.repository.revoke(id) }
     func persistTrust() async throws { try await context.persistTrust() }

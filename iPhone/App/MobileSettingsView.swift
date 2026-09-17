@@ -4,6 +4,20 @@ struct MobileSettingsView: View {
     let model: MobileSettingsModel
     var body: some View {
         List {
+            if model.accountRowVisible {
+                Section("account.section") {
+                    NavigationLink {
+                        MobileAccountView(model: model.account)
+                    } label: {
+                        HStack {
+                            Label("account.title", systemImage: "person.crop.circle")
+                            Spacer()
+                            accountSummary
+                        }
+                    }
+                    .accessibilityIdentifier("account-row")
+                }
+            }
             Section("settings.discovery.title") {
                 Toggle("settings.discovery.toggle", isOn: Binding(
                     get: { model.discoveryEnabled },
@@ -27,5 +41,15 @@ struct MobileSettingsView: View {
             }
         }
         .navigationTitle("settings.title")
+        .task { await model.account.load() }
+    }
+
+    @ViewBuilder private var accountSummary: some View {
+        switch model.account.phase {
+        case .signedIn: Text("account.status.signed-in").foregroundStyle(.secondary)
+        case .unavailable, .secureStorageError:
+            Image(systemName: "exclamationmark.circle").foregroundStyle(.secondary)
+        default: EmptyView()
+        }
     }
 }

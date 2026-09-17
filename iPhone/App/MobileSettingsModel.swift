@@ -1,4 +1,5 @@
 import Foundation
+import MacChannelCore
 import Observation
 
 /// This file lives inside the application's private state directory, never an app group.
@@ -22,13 +23,20 @@ final class MobileSettingsModel {
     private(set) var saveFailed = false
     let version: String
     private let session: any MobileAppSession
+    let account: MobileAccountModel
     // This retained model is the sole writer. Once a write completes, an older
     // in-flight observation cannot replace that durably acknowledged choice.
     private var hasSavedChoice = false
-    init(session: any MobileAppSession, bundle: Bundle = .main) {
+    init(session: any MobileAppSession, bundle: Bundle = .main,
+         accountAuthorizer: (any MobileAppleAuthorizing)? = nil,
+         loadAccountController: (@Sendable () async throws -> AccountSessionController?)? = nil) {
         self.session = session
+        let loader = loadAccountController ?? { try await session.accountController() }
+        account = MobileAccountModel(loadController: loader,
+            apple: accountAuthorizer ?? MobileAppleAuthorization())
         version = Self.versionDescription(info: bundle.infoDictionary ?? [:])
     }
+    var accountRowVisible: Bool { account.phase != .disabled }
     static func versionDescription(info: [String: Any]) -> String {
         guard let version = info["CFBundleShortVersionString"] as? String,
               let build = info["CFBundleVersion"] as? String else { return "—" }
