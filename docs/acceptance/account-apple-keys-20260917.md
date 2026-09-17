@@ -12,7 +12,7 @@ The public constructor has no endpoint or request customization. Requests are
 pinned to exactly `https://appleid.apple.com/auth/keys`, use the default TLS
 transport, refuse redirects, and have a five-second total client timeout.
 
-## Behavioral RED
+## Initial compile RED and behavioral evidence
 
 The test was written before production code.
 
@@ -22,13 +22,25 @@ Command from `Services/rendezvous`:
 go test ./internal/accountauth -run TestAppleKeyProvider -count=1
 ```
 
-Observed result: FAIL at compile time because `AppleKeyProvider`,
+Observed result: compile FAIL because `AppleKeyProvider`,
 `NewAppleKeyProvider`, and the private fixture constructor did not exist. This
-was the expected behavioral RED for the new API. The first implementation run
-then exposed and preserved a meaningful concurrency failure: timestamps sampled
+established that the new API was absent; it was not a behavioral assertion. The
+first implementation run then exposed a behavioral concurrency RED: timestamps sampled
 before acquiring the cache mutex were incorrectly treated as clock rollback by
-concurrent waiters. Sampling under the mutex fixed the cause; the test was not
-weakened.
+concurrent waiters. `TestAppleKeyProviderCoalescesAndWaitersCancel` failed with
+`Apple verification keys unavailable`. Sampling under the mutex fixed the cause;
+the test was not weakened.
+
+After review identified fixture masking, two focused mutation RED checks were
+run with `go test ./internal/accountauth -run
+'TestAppleKeyProviderRejectsUnsafeJWKS/(bad_EC_alg|bad_curve|short_x)'
+-count=1`. Temporarily bypassing all EC validation made all three cases fail with
+“malformed supported EC key did not reject the complete set.” The `short_x`
+fixture contains an actual 31 decoded bytes. Temporarily ignoring `Body.Close`
+errors and running `go test ./internal/accountauth -run
+'TestAppleKeyProviderTransportBoundsAndSafeConfiguration/close' -count=1` made
+the close-only case fail with `unsafe error: <nil>`. Both mutations were removed
+before GREEN verification; no mutation was committed.
 
 ## Implemented boundaries
 
@@ -70,10 +82,10 @@ All commands ran from `Services/rendezvous` after the final change:
 
 ```text
 go test ./internal/accountauth -count=1
-ok macchannel/rendezvous/internal/accountauth
+ok macchannel/rendezvous/internal/accountauth 1.197s
 
 go test -race ./internal/accountauth -count=1
-ok macchannel/rendezvous/internal/accountauth
+ok macchannel/rendezvous/internal/accountauth 3.129s
 
 go test ./...
 all rendezvous packages passed; runner-lock has no test files
@@ -84,9 +96,10 @@ Apple-claim tokens, injected transports, injected clocks, and channels rather
 than sleeps. It covers fixed URL, redirect refusal, HTTP/transport/read/close and
 oversize failures, strict/trailing/duplicate/private/malformed key documents,
 unsupported rotation mix, validator integration with a real local signature,
-TTL boundary, rotation, failure throttle/recovery, many unknown kids,
-coalescing, waiter and leader cancellation, returned-key mutation, and clock
-rollback.
+TTL boundary, rotation with explicit removed-kid rejection, failure
+throttle/recovery, failed unknown refresh preserving a fresh known key, many
+unknown kids, coalescing, waiter and leader cancellation, returned-key mutation,
+and clock rollback.
 
 ## Limitations and remaining login dependencies
 

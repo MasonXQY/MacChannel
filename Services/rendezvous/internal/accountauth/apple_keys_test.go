@@ -134,6 +134,7 @@ func TestAppleKeyProviderRejectsUnsafeJWKS(t *testing.T) {
 	}
 	validRSA := jwkRSA("rsa", &r.PublicKey)
 	validEC := jwkEC("ec", &e.PublicKey)
+	shortX := make([]byte, 31)
 	cases := map[string]string{
 		"not object": `[]`, "missing keys": `{}`, "empty": `{"keys":[]}`, "too many": `{"keys":[` + strings.Repeat(`{"kty":"oct","kid":"x"},`, 16) + `{"kty":"oct","kid":"y"}]}`,
 		"duplicate json": `{"keys":[` + validRSA + `],"keys":[]}`, "nested duplicate": `{"keys":[` + strings.TrimSuffix(validRSA, `}`) + `,"extra":{"x":1,"x":2}}]}`,
@@ -143,11 +144,8 @@ func TestAppleKeyProviderRejectsUnsafeJWKS(t *testing.T) {
 		"private EC": `{"keys":[` + strings.TrimSuffix(validEC, `}`) + `,"d":"AQ"}]}`, "bad use": `{"keys":[` + strings.Replace(validRSA, `"use":"sig"`, `"use":"enc"`, 1) + `]}`,
 		"bad ops":        `{"keys":[` + strings.Replace(validRSA, `"key_ops":["verify"]`, `"key_ops":["verify","sign"]`, 1) + `]}`,
 		"bad RSA alg":    `{"keys":[` + strings.Replace(validRSA, `"alg":"RS256"`, `"alg":"ES256"`, 1) + `]}`,
-		"bad EC alg":     `{"keys":[` + strings.Replace(validEC, `"alg":"ES256"`, `"alg":"RS256"`, 1) + `]}`,
 		"padded n":       `{"keys":[` + strings.Replace(validRSA, `"n":"`, `"n":"AA`, 1) + `]}`,
 		"noncanonical e": `{"keys":[` + strings.Replace(validRSA, `"e":"AQAB"`, `"e":"AAEAAQ"`, 1) + `]}`,
-		"bad curve":      `{"keys":[` + strings.Replace(validEC, `"P-256"`, `"P-384"`, 1) + `]}`,
-		"short x":        `{"keys":[` + strings.Replace(validEC, `"x":"`, `"x":"AQ`, 1) + `]}`,
 	}
 	for name, doc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -156,6 +154,20 @@ func TestAppleKeyProviderRejectsUnsafeJWKS(t *testing.T) {
 				t.Fatal("unsafe JWKS accepted")
 			} else if strings.Contains(err.Error(), "rsa") || strings.Contains(err.Error(), "appleid") {
 				t.Fatalf("unbounded error: %v", err)
+			}
+		})
+	}
+	ecCases := map[string]string{
+		"bad EC alg": strings.Replace(validEC, `"alg":"ES256"`, `"alg":"RS256"`, 1),
+		"bad curve":  strings.Replace(validEC, `"P-256"`, `"P-384"`, 1),
+		"short x": strings.Replace(validEC,
+			base64.RawURLEncoding.EncodeToString(e.X.FillBytes(make([]byte, 32))),
+			base64.RawURLEncoding.EncodeToString(shortX), 1),
+	}
+	for name, badEC := range ecCases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseAppleJWKS([]byte(`{"keys":[` + validRSA + `,` + badEC + `]}`)); err == nil {
+				t.Fatal("malformed supported EC key did not reject the complete set")
 			}
 		})
 	}
@@ -183,6 +195,12 @@ func TestAppleKeyProviderTransportBoundsAndSafeConfiguration(t *testing.T) {
 			t.Fatal("invalid kid accepted")
 		}
 	}
+	readBody := &readFailureBody{Reader: strings.NewReader("ignored")}
+	closeKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeBody := &closeFailureBody{Reader: strings.NewReader(`{"keys":[` + jwkRSA("x", &closeKey.PublicKey) + `]}`)}
 	for name, rt := range map[string]http.RoundTripper{
 		"transport": roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("secret https://bad.example") }),
 		"http": roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -191,7 +209,10 @@ func TestAppleKeyProviderTransportBoundsAndSafeConfiguration(t *testing.T) {
 			return res, nil
 		}),
 		"read": roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 200, Body: &failingBody{}}, nil
+			return &http.Response{StatusCode: 200, Body: readBody}, nil
+		}),
+		"close": roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: closeBody}, nil
 		}),
 		"oversize": roundTripFunc(func(*http.Request) (*http.Response, error) {
 			res, _ := response(strings.Repeat("x", 64*1024+1))
@@ -204,14 +225,30 @@ func TestAppleKeyProviderTransportBoundsAndSafeConfiguration(t *testing.T) {
 			if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "http") {
 				t.Fatalf("unsafe error: %v", err)
 			}
+			if name == "read" && !readBody.closed.Load() {
+				t.Fatal("read-failure response body was not closed")
+			}
+			if name == "close" && !closeBody.closed.Load() {
+				t.Fatal("close-failure response body did not execute Close")
+			}
 		})
 	}
 }
 
-type failingBody struct{}
+type readFailureBody struct {
+	io.Reader
+	closed atomic.Bool
+}
 
-func (*failingBody) Read([]byte) (int, error) { return 0, errors.New("secret read") }
-func (*failingBody) Close() error             { return errors.New("secret close") }
+func (*readFailureBody) Read([]byte) (int, error) { return 0, errors.New("secret read") }
+func (b *readFailureBody) Close() error           { b.closed.Store(true); return nil }
+
+type closeFailureBody struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (b *closeFailureBody) Close() error { b.closed.Store(true); return errors.New("secret close") }
 
 func TestAppleKeyProviderCacheRotationThrottleAndRollback(t *testing.T) {
 	r1, _ := rsa.GenerateKey(rand.Reader, 2048)
@@ -275,6 +312,56 @@ func TestAppleKeyProviderCacheRotationThrottleAndRollback(t *testing.T) {
 	}
 }
 
+func TestAppleKeyProviderRotationRemovesOldKid(t *testing.T) {
+	r1, _ := rsa.GenerateKey(rand.Reader, 2048)
+	r2, _ := rsa.GenerateKey(rand.Reader, 2048)
+	now := time.Unix(1_800_000_000, 0)
+	calls := 0
+	p := newAppleKeyProvider(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		key, kid := r1, "old"
+		if calls == 2 {
+			key, kid = r2, "new"
+		}
+		res, _ := response(`{"keys":[` + jwkRSA(kid, &key.PublicKey) + `]}`)
+		return res, nil
+	}), func() time.Time { return now })
+	if _, err := p.Key(context.Background(), "old"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if _, err := p.Key(context.Background(), "new"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Key(context.Background(), "old"); err == nil {
+		t.Fatal("removed key survived atomic refresh")
+	}
+}
+
+func TestAppleKeyProviderFailedUnknownRefreshKeepsFreshKnownKey(t *testing.T) {
+	r, _ := rsa.GenerateKey(rand.Reader, 2048)
+	now := time.Unix(1_800_000_000, 0)
+	calls := 0
+	p := newAppleKeyProvider(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls > 1 {
+			return nil, errors.New("down")
+		}
+		res, _ := response(`{"keys":[` + jwkRSA("known", &r.PublicKey) + `]}`)
+		return res, nil
+	}), func() time.Time { return now })
+	if _, err := p.Key(context.Background(), "known"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if _, err := p.Key(context.Background(), "unknown"); err == nil {
+		t.Fatal("failed refresh accepted unknown key")
+	}
+	if key, err := p.Key(context.Background(), "known"); err != nil || key.(*rsa.PublicKey).N.Cmp(r.N) != 0 {
+		t.Fatalf("failed unknown refresh discarded fresh known key: %v", err)
+	}
+}
+
 func TestAppleKeyProviderDoesNotFollowRedirects(t *testing.T) {
 	var calls int
 	p := newAppleKeyProvider(roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -293,6 +380,7 @@ func TestAppleKeyProviderCoalescesAndWaitersCancel(t *testing.T) {
 	r, _ := rsa.GenerateKey(rand.Reader, 2048)
 	started := make(chan struct{})
 	release := make(chan struct{})
+	entered := make(chan struct{}, 64)
 	var calls atomic.Int32
 	p := newAppleKeyProvider(roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
@@ -304,13 +392,15 @@ func TestAppleKeyProviderCoalescesAndWaitersCancel(t *testing.T) {
 		}
 		res, _ := response(`{"keys":[` + jwkRSA("rsa", &r.PublicKey) + `]}`)
 		return res, nil
-	}), time.Now)
+	}), func() time.Time { entered <- struct{}{}; return time.Now() })
 	leader := make(chan error, 1)
 	go func() { _, err := p.Key(context.Background(), "rsa"); leader <- err }()
 	<-started
+	<-entered
 	ctx, cancel := context.WithCancel(context.Background())
 	waiter := make(chan error, 1)
 	go func() { _, err := p.Key(ctx, "rsa"); waiter <- err }()
+	<-entered
 	cancel()
 	if err := <-waiter; !errors.Is(err, context.Canceled) {
 		t.Fatalf("waiter cancellation=%v", err)
@@ -321,6 +411,9 @@ func TestAppleKeyProviderCoalescesAndWaitersCancel(t *testing.T) {
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() { defer wg.Done(); _, err := p.Key(context.Background(), "rsa"); errs <- err }()
+	}
+	for i := 0; i < n; i++ {
+		<-entered
 	}
 	close(release)
 	if err := <-leader; err != nil {
