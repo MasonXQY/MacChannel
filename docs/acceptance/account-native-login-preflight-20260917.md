@@ -3,6 +3,7 @@
 ## Observed this continuation
 
 - `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun devicectl list devices` reports physical Mason iPhone 16 Pro Max connected, identifier `00008140-001A6CE63082201C`.
+- A scoped `devicectl device info apps` query for bundle identifiers containing `dropmesh` confirms `com.zensystech.dropmesh.iphone.dev`, version 0.1.0 build 6 installed. No unrelated app inventory collected.
 - Existing linked worktree and `feature/dropmesh-accounts` branch confirmed; prior dirty client/release files remain intact.
 - Accountauth baseline `go test ./internal/accountauth -count=1` passes in 2.552s. This default run does not exercise opt-in PostgreSQL tests.
 - `iPhone/Shared/DropMeshDevelopment.entitlements` contains the existing application group only. No Sign in with Apple entitlement or APNs capability was found in the scoped iPhone source search. This is source evidence, not a portal capability claim.
