@@ -58,3 +58,20 @@ SQL fixtures were not run because they are opt-in and this adapter has no SQL bo
 ## Remaining integration requirements
 
 Durable authorized deletion, protected credential loading/deletion, provider retry orchestration, signed HTTP authorization, native delete UI, real Apple capability/key/TLS service, and phone installation remain separate work. The currently unavailable phone and absence of those integrations mean this component is locally verified only, not a usable installed account-deletion flow.
+
+## Review follow-up
+
+The provider-scope review was Approved with no Critical or Important findings. Two Minor test-strength gaps were closed without changing production code:
+
+- The oversized response fixture now contains 131,072 bytes and counts bytes actually consumed. With `io.LimitReader` temporarily removed, the targeted test failed with `read 131072 response bytes, want at most 65537`. The production read limit was restored.
+- The cancellation reader now cancels the caller from its `Read` method and returns a successful empty EOF. With the final `operationCtx.Err()` check temporarily removed, the targeted test failed because revocation incorrectly returned nil. The production context check was restored.
+
+After both restorations, `git diff --exit-code HEAD -- Services/rendezvous/internal/accountauth/apple_revocation.go` passed, confirming no production change. Fresh scoped verification:
+
+```text
+$ cd Services/rendezvous
+$ go test -race ./internal/accountauth -run '^TestAppleRevocation' -count=1
+ok  macchannel/rendezvous/internal/accountauth  1.444s
+```
+
+The full default Go suite was not repeated because production code was unchanged, as requested. No real Apple or other network request was made.

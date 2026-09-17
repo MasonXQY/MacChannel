@@ -30,6 +30,26 @@ type failingRevocationReader struct{ err error }
 
 func (r failingRevocationReader) Read([]byte) (int, error) { return 0, r.err }
 
+type countingRevocationReader struct {
+	reader io.Reader
+	read   int
+}
+
+func (r *countingRevocationReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.read += n
+	return n, err
+}
+
+type cancellingRevocationReader struct {
+	cancel context.CancelFunc
+}
+
+func (r cancellingRevocationReader) Read([]byte) (int, error) {
+	r.cancel()
+	return 0, io.EOF
+}
+
 func newRevoker(t *testing.T, secret string) *AppleRevoker {
 	t.Helper()
 	r, err := NewAppleRevoker(secretFunc(func(context.Context, string) (string, error) { return secret, nil }), []string{revocationAudience})
@@ -256,7 +276,7 @@ func TestAppleRevocationRejectsEveryNonEmptyOrFailedResponseAndClosesBody(t *tes
 		{"redirect", http.StatusFound, strings.NewReader(""), nil}, {"bad request", 400, strings.NewReader(`{"error":"invalid_grant"}`), nil},
 		{"unauthorized", 401, strings.NewReader(""), nil}, {"rate limited", 429, strings.NewReader(""), nil}, {"server", 500, strings.NewReader(""), nil},
 		{"json error 200", 200, strings.NewReader(`{"error":"invalid_grant"}`), nil}, {"body 200", 200, strings.NewReader("x"), nil},
-		{"oversize", 200, strings.NewReader(strings.Repeat("x", 64*1024+1)), nil}, {"read error", 200, failingRevocationReader{errors.New("read leaked")}, nil},
+		{"read error", 200, failingRevocationReader{errors.New("read leaked")}, nil},
 		{"close error", 200, strings.NewReader(""), errors.New("close leaked")},
 	}
 	for _, tc := range cases {
@@ -285,6 +305,22 @@ func TestAppleRevocationRejectsEveryNonEmptyOrFailedResponseAndClosesBody(t *tes
 	}
 }
 
+func TestAppleRevocationBoundsOversizedResponseRead(t *testing.T) {
+	r := newRevoker(t, "secret")
+	reader := &countingRevocationReader{reader: strings.NewReader(strings.Repeat("x", 128*1024))}
+	body := &revocationBody{reader: reader}
+	r.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
+	})
+	rejectRevocation(t, r.Revoke(context.Background(), revocationAudience, "refresh"))
+	if reader.read > 64*1024+1 {
+		t.Fatalf("read %d response bytes, want at most %d", reader.read, 64*1024+1)
+	}
+	if !body.closed.Load() {
+		t.Fatal("oversized response body not closed")
+	}
+}
+
 func TestAppleRevocationClosesBodyWhenTransportReturnsResponseAndError(t *testing.T) {
 	r := newRevoker(t, "secret")
 	body := &revocationBody{reader: strings.NewReader("")}
@@ -300,9 +336,8 @@ func TestAppleRevocationClosesBodyWhenTransportReturnsResponseAndError(t *testin
 func TestAppleRevocationCancellationDuringBodyReadFailsAndCloses(t *testing.T) {
 	r := newRevoker(t, "secret")
 	ctx, cancel := context.WithCancel(context.Background())
-	body := &revocationBody{reader: failingRevocationReader{err: context.Canceled}}
+	body := &revocationBody{reader: cancellingRevocationReader{cancel: cancel}}
 	r.transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
-		cancel()
 		return &http.Response{StatusCode: 200, Body: body, Header: make(http.Header)}, nil
 	})
 	rejectRevocation(t, r.Revoke(ctx, revocationAudience, "refresh"))
