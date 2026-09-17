@@ -25,13 +25,18 @@ Rootmustnotstage/commitwhileimplementeractive. Task14 initial08f6c85 passed16nat
 tests andunsignediOS. Independent review requests3Important fixes: cancellation
 handoffcleanup, malformed-presentconfig, actualAppleadaptercallbacktests.
 Task14 fixed729337c;17focusedtests/unsignediOSPASS; independent rereviewApproved,
-all3Importantresolved. No activeimplementer. RootfinalUIregression running separately.
+all3Importantresolved. RootfinalUI3/3PASS after test-only nativeChinese-label whitespace
+normalization; failedrunpreserved, diagnosticcollectorPID44515terminatedonlyaftertestsended.
+Rootaccountintegration/evidence37b661d;44projectinsertionsstaged,72unrelatedpreserved.
 RootnativeUI18.6 3/3, SE17.5 1/1, iOS27 1/1PASS; screenshotsinspected.
 First27testfailedambiguousnestedconfirmationselector, test-onlyfixed/retried.
 Evidence account-ios-ui-root-20260918.md; rootUItests/fixture/projectentries notyetcommitted.
 RootrealSwift-Go-SQL controllerpersistence/restore/rotation/freshlogout2testsPASS9.236s;
 account-native-wire-root-20260918.md; noApple/OSKeychain/hardwareclaim.
-Task15 Apple revocation plan9eaccad prepared, notdispatched. No phoneinstall yet.
+Task15 fixed-originprovider3c7dfc3, reviewApproved/noCriticalImportant;
+twoMinortestgaps fixedf7ef812 with meaningfulmutationRED/finalrace1.444sPASS,
+finalrereviewApproved/no remainingfindings. Rootfreshinitialrace2.045sPASS, fullGoagentPASS.
+No phoneinstall; readinesscheck account-phone-readiness-20260918.md listsrealgates.
 Nativeclient planb9d28ca refined73ef284/f43757b; contract90a85c0 includes durable
 refresh-inflight marker, noidentityreload, narrowlypreserveddirtyDI integration.
 Phone00008140-001A6CE63082201C recheckedSept18 nowUNAVAILABLE; no installattempt.

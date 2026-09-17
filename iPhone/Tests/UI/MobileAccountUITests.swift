@@ -11,7 +11,9 @@ final class MobileAccountUITests: XCTestCase {
             reveal(signIn, in: app)
             XCTAssertTrue(signIn.isHittable)
             XCTAssertGreaterThanOrEqual(signIn.frame.height, 44)
-            XCTAssertEqual(signIn.label, language == "en" ? "Sign in with Apple" : "通过 Apple 登录")
+            // Apple's native Chinese accessibility label varies only in spacing by OS.
+            let normalizedLabel = signIn.label.filter { !$0.isWhitespace }
+            XCTAssertEqual(normalizedLabel, language == "en" ? "SigninwithApple" : "通过Apple登录")
             try capture(app, name: "\(language)-SignedOut")
             // The test adapter cancels; cancellation must leave a usable button.
             signIn.tap()

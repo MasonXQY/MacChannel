@@ -11,12 +11,13 @@ Task13 complete e7cfddf..4805164, reviewclean/Approved, nofindings;33focused
 PASS andunsignediOSPASS. Deterministicobserver authorized, no publicAPIchange.
 Task14 initial08f6c85 native16PASS/unsignediOSPASS, reviewNeedsfixes3Important;
 Task14 fixes729337c17focusedPASS/unsignediOSPASS; independentrereviewApproved.
-RootfinalUIregression running; accountproject44insertions selectivelystaged,
-72unrelatedprojectinsertions preservedunstaged.
+RootfinalUI3/3PASS aftertest-only nativeChinese-label whitespace normalization;
+rootintegration37b661d44accountprojectinsertions,72unrelatedpreservedunstaged.
 Root UI18.6 3/3, SE17.5 1/1, iOS27 1/1PASS; account-ios-ui-root-20260918.md.
 RootcontrollerrealSwift-Go-SQL2PASS9.236s; noApple/hardwareclaim.
 rootnoGitstage/commitwhileimplementeractive(sharedindexcoordination).
-Task15 Apple revocation plan9eaccad prepared, notdispatched. No install yet.
+Task15 provider3c7dfc3 Approved/noCriticalImportant;twoMinorfixesf7ef812 mutationRED+
+finalrace1.444sPASS,rereviewApproved/no findings. Rootfreshinitialrace2.045sPASS. No install yet.
 Historical task-10-report preserved. Root baseline accountauthPASS14.849s.
 Physical Mason00008140-001A6CE63082201C nowUNAVAILABLE onSept18 recheck.
 DedicatedSiWAkeycreate+safe-server-storage approvalquestion askedpending.
