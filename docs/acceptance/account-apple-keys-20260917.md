@@ -42,6 +42,14 @@ errors and running `go test ./internal/accountauth -run
 the close-only case fail with `unsafe error: <nil>`. Both mutations were removed
 before GREEN verification; no mutation was committed.
 
+A final fixture-isolation audit found the original private-EC case also requested
+an absent RSA kid. It now shares the mixed valid-RSA plus malformed-EC parser
+matrix. A focused mutation that skipped private-material rejection only for EC
+(while retaining RSA private rejection) made
+`TestAppleKeyProviderRejectsUnsafeJWKS/private_EC` fail with “malformed
+supported EC key did not reject the complete set.” The mutation was removed
+before the final focused and race runs.
+
 ## Implemented boundaries
 
 - Accepts only usable RSA/RS256 and P-256 EC/ES256 verification keys. Missing

@@ -141,7 +141,7 @@ func TestAppleKeyProviderRejectsUnsafeJWKS(t *testing.T) {
 		"trailing": `{"keys":[` + validRSA + `]} {}`, "duplicate kid": `{"keys":[` + validRSA + `,{"kty":"oct","kid":"rsa"}]}`,
 		"missing kid": `{"keys":[{"kty":"oct"}]}`, "empty kid": `{"keys":[{"kty":"oct","kid":""}]}`, "long kid": `{"keys":[{"kty":"oct","kid":"` + strings.Repeat("k", 256) + `"}]}`,
 		"no usable": `{"keys":[{"kty":"oct","kid":"x"}]}`, "private RSA": `{"keys":[` + strings.TrimSuffix(validRSA, `}`) + `,"d":"AQ"}]}`,
-		"private EC": `{"keys":[` + strings.TrimSuffix(validEC, `}`) + `,"d":"AQ"}]}`, "bad use": `{"keys":[` + strings.Replace(validRSA, `"use":"sig"`, `"use":"enc"`, 1) + `]}`,
+		"bad use":        `{"keys":[` + strings.Replace(validRSA, `"use":"sig"`, `"use":"enc"`, 1) + `]}`,
 		"bad ops":        `{"keys":[` + strings.Replace(validRSA, `"key_ops":["verify"]`, `"key_ops":["verify","sign"]`, 1) + `]}`,
 		"bad RSA alg":    `{"keys":[` + strings.Replace(validRSA, `"alg":"RS256"`, `"alg":"ES256"`, 1) + `]}`,
 		"padded n":       `{"keys":[` + strings.Replace(validRSA, `"n":"`, `"n":"AA`, 1) + `]}`,
@@ -158,6 +158,7 @@ func TestAppleKeyProviderRejectsUnsafeJWKS(t *testing.T) {
 		})
 	}
 	ecCases := map[string]string{
+		"private EC": strings.TrimSuffix(validEC, `}`) + `,"d":"AQ"}`,
 		"bad EC alg": strings.Replace(validEC, `"alg":"ES256"`, `"alg":"RS256"`, 1),
 		"bad curve":  strings.Replace(validEC, `"P-256"`, `"P-384"`, 1),
 		"short x": strings.Replace(validEC,
