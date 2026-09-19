@@ -1,0 +1,12 @@
+# Group membership reducer report
+- Status: implemented and locally verified in the isolated accountgroup package.
+- Scope: new `state.go` and `state_test.go` only; no HTTP, database, legacy trust, native, deployment, or phone changes.
+- Trust boundary: `NewState` requires an independently pinned exact account, group, generation, and anchor digest; a server bootstrap cannot choose its own pin.
+- Admission: validated owned event copy, exact chain binding, active actor/key, current+1 sequence, previous hash, cap 64, and exact subject membership/key rules.
+- Replay/removal: bootstrap replay, stale/repeated events, removed actors, and competing same-head events are rejected without mutation; fresh dual-signed rejoin remains possible.
+- Safety: zero/nil state is inert, snapshots are sorted/deep-copied, retained keys are owned, and Apply/Snapshot are mutex protected.
+- RED: `go test ./internal/accountgroup -run 'TestNewStateRequiresIndependentExactPinAndOwnsBuffers' -count=1` failed with undefined State/NewState/ErrInvalidTransition.
+- Focused: `go test -race ./internal/accountgroup -count=1` PASS (`ok`, 1.651s final run).
+- Full Go: `go test ./... -count=1` PASS across rendezvous packages (slowest stack-secrets 28.746s).
+- SQL qualification: no SQL/storage code exists in this slice, so no SQL-enabled or PostgreSQL integration test was applicable.
+- Limit: authenticated account/session transaction semantics and durable deduplication/persistence remain later integration layers.
