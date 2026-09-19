@@ -77,6 +77,22 @@ func TestNewStateRequiresIndependentExactPinAndOwnsBuffers(t *testing.T) {
 	}
 }
 
+func TestNewStateRejectsUnsignedBootstrapWithExactPinnedValues(t *testing.T) {
+	owner := fixtureKey(t, true)
+	event := baseEvent(owner, owner, ActionBootstrap)
+	event.Sequence, event.PreviousHash = 1, nil
+	signActor(t, &event, owner.private)
+	hash, err := event.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Signature = nil
+
+	if _, err := NewState(event, event.AccountID, event.GroupID, event.Generation, hash); err != ErrInvalidTransition {
+		t.Fatalf("unsigned bootstrap error = %v, want ErrInvalidTransition", err)
+	}
+}
+
 func TestStateMembershipChainAndRemovedActor(t *testing.T) {
 	a, b, c, d := fixtureKey(t, true), fixtureKey(t, false), fixtureKey(t, true), fixtureKey(t, true)
 	state, _ := bootstrapState(t, a)
@@ -116,6 +132,34 @@ func TestRemoveAndFreshRejoinWithNewConsent(t *testing.T) {
 	}
 	if err := state.Apply(nextEvent(t, state, a, b, ActionApprove)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRemovedMemberRejectsOriginalApprovalReplayBeforeFreshChainedRejoin(t *testing.T) {
+	a, b := fixtureKey(t, true), fixtureKey(t, false)
+	state, _ := bootstrapState(t, a)
+	originalApproval := nextEvent(t, state, a, b, ActionApprove)
+	if err := state.Apply(originalApproval); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Apply(nextEvent(t, state, a, b, ActionRemove)); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeReplay := state.Snapshot()
+	if err := state.Apply(originalApproval); err != ErrInvalidTransition {
+		t.Fatalf("stale approval replay error = %v, want ErrInvalidTransition", err)
+	}
+	if afterReplay := state.Snapshot(); !snapshotsEqual(beforeReplay, afterReplay) {
+		t.Fatalf("stale approval replay mutated state: %#v -> %#v", beforeReplay, afterReplay)
+	}
+
+	freshApproval := nextEvent(t, state, a, b, ActionApprove)
+	if err := state.Apply(freshApproval); err != nil {
+		t.Fatalf("fresh chained rejoin: %v", err)
+	}
+	if got := state.Snapshot(); got.Sequence != beforeReplay.Sequence+1 || len(got.Members) != 2 {
+		t.Fatalf("fresh chained rejoin snapshot = %#v", got)
 	}
 }
 

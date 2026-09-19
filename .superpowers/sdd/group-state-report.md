@@ -10,3 +10,5 @@
 - Full Go: `go test ./... -count=1` PASS across rendezvous packages (slowest stack-secrets 28.746s).
 - SQL qualification: no SQL/storage code exists in this slice, so no SQL-enabled or PostgreSQL integration test was applicable.
 - Limit: authenticated account/session transaction semantics and durable deduplication/persistence remain later integration layers.
+- Review follow-up: added exact-pin unsigned-bootstrap rejection and approve/remove/stale-replay/unchanged-state/fresh-rejoin coverage; production unchanged.
+- Follow-up focused race: `go test -race ./internal/accountgroup -count=1` PASS (`ok`, 1.424s).
