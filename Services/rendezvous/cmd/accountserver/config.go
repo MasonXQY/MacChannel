@@ -67,9 +67,8 @@ func validLoopbackAddress(address string) bool {
 	if err != nil {
 		return false
 	}
-	ip := net.ParseIP(host)
 	port, err := strconv.Atoi(portText)
-	return err == nil && port > 0 && port <= 65535 && ip != nil && (ip.Equal(net.ParseIP("127.0.0.1")) || ip.Equal(net.ParseIP("::1")))
+	return err == nil && port > 0 && port <= 65535 && (host == "127.0.0.1" || host == "::1")
 }
 
 func readSecureFile(path string, maximum int) ([]byte, error) {

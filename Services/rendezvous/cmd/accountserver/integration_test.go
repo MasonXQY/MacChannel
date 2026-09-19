@@ -46,7 +46,7 @@ func TestIsolatedSQLAssemblyDurablyRejectsSignedEnvelopeReplay(t *testing.T) {
 		t.Fatal("build first assembly")
 	}
 	body := signedChallengeRequest(t, cfg.audience)
-	request := func(handler http.Handler) *httptest.ResponseRecorder {
+	request := func(handler http.Handler, body []byte) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodPost, "/v1/account/login/challenge", bytes.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 		r.RemoteAddr = "127.0.0.1:41234"
@@ -54,7 +54,7 @@ func TestIsolatedSQLAssemblyDurablyRejectsSignedEnvelopeReplay(t *testing.T) {
 		handler.ServeHTTP(w, r)
 		return w
 	}
-	if w := request(h); w.Code != http.StatusOK {
+	if w := request(h, body); w.Code != http.StatusOK {
 		closeFirst()
 		t.Fatalf("first status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -64,8 +64,11 @@ func TestIsolatedSQLAssemblyDurablyRejectsSignedEnvelopeReplay(t *testing.T) {
 		t.Fatal("build restarted assembly")
 	}
 	defer closeSecond()
-	if w := request(h); w.Code == http.StatusOK {
-		t.Fatal("replayed signed envelope accepted after assembly restart")
+	if w := request(h, body); w.Code != http.StatusUnauthorized || w.Body.String() != "{\"error\":\"authentication_failed\"}\n" {
+		t.Fatalf("replay response = %d body=%q", w.Code, w.Body.String())
+	}
+	if w := request(h, signedChallengeRequest(t, cfg.audience)); w.Code != http.StatusOK {
+		t.Fatalf("fresh request after replay = %d body=%s", w.Code, w.Body.String())
 	}
 }
 

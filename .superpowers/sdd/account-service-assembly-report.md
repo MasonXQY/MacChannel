@@ -48,3 +48,12 @@ The preserved synthetic fixture initially contained migrations 008/009 only. Exi
 ## Remaining gates
 
 Native account deletion is not wired. This is locally verified development assembly evidence, not deployment or production acceptance. Public activation remains blocked pending separately approved deployment architecture, trusted HTTPS termination and source handling; real Apple credential/login acceptance and physical-phone acceptance also remain separate gates.
+
+## Scoped review fixes — 2026-09-19
+
+- Strengthened restart replay acceptance to require the exact `401` response body `{"error":"authentication_failed"}\n`, then submit an independently signed fresh nonce/body and require `200` to prove the reconstructed service and database remain usable. The original first challenge must still return `200`.
+- Meaningful replay mutation RED: while leaving the exact `401` assertion unchanged, a test-only mutation substituted actual recorder status `503`; the test failed with `replay response = 503 body="{\"error\":\"authentication_failed\"}\\n"`. The mutation was restored before GREEN and commit.
+- Restricted listener hosts after `net.SplitHostPort` to exact text `127.0.0.1` or `::1`. Added rejection coverage for IPv4-mapped loopback `[::ffff:127.0.0.1]:8080` and expanded IPv6 `[0:0:0:0:0:0:0:1]:8080`; exact IPv4/IPv6 acceptance and existing nonzero-port rejection remain covered.
+- Meaningful listener RED: `go test ./cmd/accountserver -run '^TestListenerMustBeExplicitLoopbackAndNonzeroPort$' -count=1` failed because `[::ffff:127.0.0.1]:8080` was accepted.
+- GREEN: `go test ./cmd/accountserver -run '^TestListenerMustBeExplicitLoopbackAndNonzeroPort$' -count=1` passed (`0.362s`).
+- Focused SQL/race GREEN: with the guarded Unix-socket DSN, `go test -race ./cmd/accountserver -count=1` passed in the final restored state (`1.365s`). Before the run, `pg_isready` confirmed the named synthetic database over `/private/tmp/dropmesh-account-db.Kc5rQR`; `lsof -nP -iTCP:55447 -sTCP:LISTEN` returned no listener. After the run, `pg_ctl` stopped the fixture and `pg_ctl status` reported no server running.

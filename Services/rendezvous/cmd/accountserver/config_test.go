@@ -51,7 +51,7 @@ func TestEnabledConfigRequiresEverySetting(t *testing.T) {
 
 func TestListenerMustBeExplicitLoopbackAndNonzeroPort(t *testing.T) {
 	base := validEnvironment(t)
-	for _, addr := range []string{"", "localhost:8080", "0.0.0.0:8080", "192.168.1.2:8080", "127.0.0.1:0", "[::]:8080"} {
+	for _, addr := range []string{"", "localhost:8080", "0.0.0.0:8080", "192.168.1.2:8080", "127.0.0.1:0", "[::]:8080", "[::ffff:127.0.0.1]:8080", "[0:0:0:0:0:0:0:1]:8080"} {
 		env := cloneEnvironment(base)
 		env["DROPMESH_ACCOUNT_ADDR"] = addr
 		if _, err := loadConfig(mapGetter(env)); err == nil {
