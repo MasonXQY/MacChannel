@@ -32,6 +32,10 @@ func main() {
 }
 
 func run() error {
+	listeners, err := configuredListeners()
+	if err != nil {
+		return err
+	}
 	clock := time.Now
 	pairingStore, registry, verifier, closeDatabase, err := configuredStores(clock)
 	if err != nil {
@@ -42,12 +46,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	listeners, err := configuredListeners()
-	if err != nil {
-		return err
-	}
-
-	handler := httpapi.NewRouter(httpapi.Config{
+	handler := listeners.Ingress.Wrap(httpapi.NewRouter(httpapi.Config{
 		Clock:                   clock,
 		Verifier:                verifier,
 		Registry:                registry,
@@ -58,7 +57,7 @@ func run() error {
 		AllowedWebSocketOrigins: splitCommaSeparated(os.Getenv("MACCHANNEL_ALLOWED_WS_ORIGINS")),
 		TURNSharedSecret:        turnSecret,
 		TURNURLs:                turnURLs,
-	})
+	}))
 	servers := []configuredServer{{server: hardenedHTTPServer(listeners.HTTPAddress, handler)}}
 	if listeners.TLSAddress != "" {
 		servers = append(servers, configuredServer{

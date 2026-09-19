@@ -11,11 +11,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"macchannel/rendezvous/internal/ingress"
 )
 
 const maximumSecretFileSize = 4 * 1024
 
 type listenerConfiguration struct {
+	Ingress     ingress.Adapter
 	HTTPAddress string
 	TLSAddress  string
 	TLSCertFile string
@@ -23,7 +26,12 @@ type listenerConfiguration struct {
 }
 
 func configuredListeners() (listenerConfiguration, error) {
+	adapter, err := ingress.Parse(os.Getenv("RENDEZVOUS_TRUSTED_PROXY_IP"))
+	if err != nil {
+		return listenerConfiguration{}, err
+	}
 	result := listenerConfiguration{
+		Ingress:     adapter,
 		HTTPAddress: strings.TrimSpace(os.Getenv("RENDEZVOUS_ADDR")),
 		TLSAddress:  strings.TrimSpace(os.Getenv("RENDEZVOUS_TLS_ADDR")),
 		TLSCertFile: strings.TrimSpace(os.Getenv("RENDEZVOUS_TLS_CERT_FILE")),
