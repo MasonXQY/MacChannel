@@ -14,7 +14,9 @@ Secret files must not be group/world accessible. Secrets are intentionally unava
 
 Migrations 001 through 009 must already exist in a dedicated isolated database. Startup only pings PostgreSQL and checks the required replay, challenge, and session tables. The pool is capped at eight connections.
 
-The listener is plaintext loopback only. It is suitable only behind separately approved trusted HTTPS termination. Do not expose it directly to a LAN or public network. The handler deliberately derives callers from `RemoteAddr`; it does not trust forwarded headers. Consequently a loopback reverse proxy aggregates per-source rate limiting unless a future deployment design introduces a reviewed authenticated source mechanism.
+The listener is plaintext loopback only. It is suitable only behind separately approved trusted HTTPS termination. Do not expose it directly to a LAN or public network. By default the handler derives callers from the socket `RemoteAddr` and ignores forwarded headers, so a loopback reverse proxy aggregates per-source rate limiting.
+
+Optionally set `DROPMESH_ACCOUNT_TRUSTED_PROXY_IP` to one exact canonical proxy IP to enable the strict ingress adapter. It requires that socket peer and exactly one valid `X-DropMesh-Client-IP` header, then restores the client source before account authentication and rate limiting. The proxy must overwrite this header from its socket peer address; private backend exposure remains mandatory. The same requirements apply to `/healthz`. See the [trusted ingress configuration and deployment constraints](../../README.md#optional-trusted-https-ingress) before enabling it.
 
 Routes are limited to the five `/v1/account/...` endpoints provided by the existing account handler and `GET /healthz`. Health errors, startup errors, and HTTP server diagnostics do not include database strings, token bodies, or key material.
 
