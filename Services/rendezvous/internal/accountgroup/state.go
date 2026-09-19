@@ -46,11 +46,12 @@ type State struct {
 // values: doing so would turn signature validity into membership authority.
 func NewState(anchor Event, expectedAccountID, expectedGroupID string, expectedGeneration uint64, expectedAnchorHash [32]byte) (*State, error) {
 	owned := copyStateEvent(anchor)
-	if owned.Validate() != nil || owned.Action != ActionBootstrap || owned.Sequence != 1 ||
+	if owned.Action != ActionBootstrap || owned.Sequence != 1 ||
 		owned.AccountID != expectedAccountID || owned.GroupID != expectedGroupID ||
 		owned.Generation != expectedGeneration {
 		return nil, ErrInvalidTransition
 	}
+	// Digest performs complete structure and signature validation itself.
 	digest, err := owned.Digest()
 	if err != nil || digest != expectedAnchorHash {
 		return nil, ErrInvalidTransition
@@ -74,9 +75,7 @@ func (s *State) Apply(event Event) error {
 		return ErrInvalidTransition
 	}
 	owned := copyStateEvent(event)
-	if owned.Validate() != nil {
-		return ErrInvalidTransition
-	}
+	// Digest validates the owned proof before any state access or mutation.
 	digest, err := owned.Digest()
 	if err != nil {
 		return ErrInvalidTransition
