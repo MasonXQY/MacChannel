@@ -73,7 +73,7 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 	if err != nil {
 		return fail()
 	}
-	return newServiceMux(accountHandler, database.PingContext), closeDatabase, nil
+	return cfg.ingress.Wrap(newServiceMux(accountHandler, database.PingContext)), closeDatabase, nil
 }
 
 func checkSchema(ctx context.Context, database *sql.DB) error {

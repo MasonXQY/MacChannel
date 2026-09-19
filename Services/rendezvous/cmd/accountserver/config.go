@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"macchannel/rendezvous/internal/ingress"
 )
 
 var errConfiguration = errors.New("account service configuration is invalid")
@@ -20,6 +22,7 @@ var requiredEnvironment = []string{
 }
 
 type config struct {
+	ingress                                    ingress.Adapter
 	enabled                                    bool
 	teamID, keyID, audience, addr, databaseDSN string
 	applePrivateKey, credentialKey             []byte
@@ -31,6 +34,10 @@ func (c config) GoString() string { return c.String() }
 func loadConfig(getenv func(string) string) (config, error) {
 	if getenv("DROPMESH_ACCOUNT_ENABLED") != "1" {
 		return config{}, nil
+	}
+	adapter, err := ingress.Parse(getenv("DROPMESH_ACCOUNT_TRUSTED_PROXY_IP"))
+	if err != nil {
+		return config{}, errConfiguration
 	}
 	values := make(map[string]string, len(requiredEnvironment))
 	for _, key := range requiredEnvironment {
@@ -58,7 +65,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if dsn == "" {
 		return config{}, errConfiguration
 	}
-	return config{enabled: true, teamID: values[requiredEnvironment[0]], keyID: values[requiredEnvironment[1]], audience: values[requiredEnvironment[2]],
+	return config{enabled: true, ingress: adapter, teamID: values[requiredEnvironment[0]], keyID: values[requiredEnvironment[1]], audience: values[requiredEnvironment[2]],
 		addr: values["DROPMESH_ACCOUNT_ADDR"], databaseDSN: dsn, applePrivateKey: p8, credentialKey: credential}, nil
 }
 
