@@ -1,5 +1,57 @@
 # DropMesh iPhone companion handoff
 
+## Enrollment continuation — 2026-09-20
+
+Owner reports installed iPad account login normal. This is user-reported provider
+acceptance, not group/invitation acceptance. Explicit request continues automatic
+pairing, device approvals and invitations. Enrollment discovery/bootstrap API
+implemented86c9238, independently approved. Report .superpowers/sdd/group-enrollment-entry-report.md
+and plan2026-09-20-group-enrollment-entry.md. Root reproduced/fixed test-only
+subprocess Close/Fd race; focused count10 passes, null-wire fixture corrected.
+Full actual PostgreSQL group/auth race PASS31.612s/21.326s, log
+/tmp/dropmesh-enrollment-root-race.log. Follow-up review Approved/no findings.
+Isolated Unix-socket fixture /private/tmp/dropmesh-group-db.igBdYS STOPPED and verified.
+Next native discovery/explicit first-device consent, then pending countersigned
+approval/atomic commit. Read-only architecture check captured in
+.superpowers/sdd/pending-join-integration-notes.md. No native group UI, invitations,
+new deployment or iPad update delivered by this slice; existing transfer untouched.
+
+## iPad mini testing authorized — 2026-09-20
+
+INSTALLED: owner approved registering iPad and updating development profiles.
+Apple device registration KVKCKP8V2H completed for00008130-001A1C5134D1001C;
+manual main profile AAL5WXBMSJ updated with iPad while retaining iPhone. Xcode
+automatic development signing refreshed main/share team profiles; both installed
+artifact profiles contain iPad/iPhone/existingMac. No distribution profile edits.
+Fresh signed build from current worktree succeeds with Xcode16.4, isolated path
+/Users/mason/Developer/DropMesh-Releases/account-ipad-20260920/DerivedData.
+Second build uses separate AccountInfo.plist with account-dev HTTPS origin and
+target-specific INFOPLIST_FILE command-line macro, no project/source plist edit.
+Logs /tmp/dropmesh-ipad-build-20260920.log and
+/tmp/dropmesh-ipad-account-build-20260920.log. Strict deep codesign PASS, main
+Apple Default entitlement verified. devicectl install and launch succeed; installed
+com.zensystech.dropmesh.iphone.dev1.0(8). Screenshot ipad-first-launch.png in above
+release parent visibly shows Settings and Account entry on physical iPad.
+No Apple login or file-transfer result asserted; owner login still next. Group
+approval/automatic routing/invites not yet UI-integrated. Existing files not reset.
+
+After owner enabled Developer Mode, fresh details show Enabled(1), wired paired,
+preparedness7; application inventory succeeds and finds no DropMesh bundle.
+Existing account-phone-live development artifact profile authorizes only iPhone
+00008140-001A6CE63082201C, not connected iPad00008130-001A1C5134D1001C.
+No install attempted with an ineligible profile. Adding iPad to Apple development
+device registration and refreshing relevant development profiles requires explicit
+operation approval; no submitted Store build or distribution profiles need change.
+
+Owner explicitly permits testing on connected iPad mini. Fresh devicectl details
+confirm physical iPad mini (A17 Pro), wired and paired, iPadOS26.6.1, but Developer
+Mode Disabled. App inventory fails with CoreDevice12040 / image mount restricted
+because Developer Mode is not enabled. No install, launch, reset or file changes
+on device. Owner must enable Settings > Privacy & Security > Developer Mode,
+restart and confirm on device; then recheck readiness and signing eligibility
+before installing a development candidate. Prior iPhone target restriction is
+superseded only for this explicitly authorized iPad testing.
+
 ## Connected phone continuation — 2026-09-20
 
 LATEST: real Go/Swift group-read gate f7fd86d plus cleanup fix6de531c accepted;

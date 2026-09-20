@@ -33,4 +33,18 @@ SQL tests cover true absence, persistence after store reconstruction, account is
 
 ## Acceptance limits
 
-No installed enrollment, native consent UI, pending joining-device approval/countersigning, invitations, account routing, automatic file trust, server assembly enablement, production DSN, live keys, deployed API acceptance or physical-device acceptance. Root must independently review and resolve the unrelated full-race gate before calling this bounded slice accepted. The overall grouping product remains unfinished.
+### Root integration follow-up
+
+Independent enrollment review: spec compliant, quality Approved; one Minor
+null-wire test correction now resolved by unique-key null replacement. Focused
+`go test -race ./internal/accountauth -run '^TestEnrollment' -count=1` PASS2.417s.
+Root reproduced the unrelated subprocess race with count10, then moved parent
+pipe close after command completion channel receive and before EOF assertion.
+Focused count10 race GREEN1.973s. Full named Unix-socket PostgreSQL-enabled race
+gate rerun PASS: accountgroup31.612s, accountauth21.326s; log
+`/tmp/dropmesh-enrollment-root-race.log`. Independent reviewer rechecked both
+test diffs and approved without remaining findings. This resolves the earlier
+full-race gate, not any installed/deployed product gate. Fixture stopped and
+`pg_ctl status` confirmed no server running.
+
+No installed enrollment, native consent UI, pending joining-device approval/countersigning, invitations, account routing, automatic file trust, server assembly enablement, production DSN, live keys, deployed API acceptance or physical-device acceptance. The bounded backend slice is accepted after root verification and independent review above. The overall grouping product remains unfinished.

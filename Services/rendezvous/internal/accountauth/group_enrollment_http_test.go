@@ -171,7 +171,17 @@ func TestEnrollmentStrictInputs(t *testing.T) {
 						suffix = `,"payload":"x"}`
 					}
 					if kind == "wire null" {
-						suffix = `,"signature":null}`
+						var wire map[string]any
+						if err := json.Unmarshal(b, &wire); err != nil {
+							t.Fatal(err)
+						}
+						wire["signature"] = nil
+						b, err := json.Marshal(wire)
+						if err != nil {
+							t.Fatal(err)
+						}
+						m["event"] = base64.StdEncoding.EncodeToString(b)
+						break
 					}
 					m["event"] = base64.StdEncoding.EncodeToString(append(b[:len(b)-1], suffix...))
 				}

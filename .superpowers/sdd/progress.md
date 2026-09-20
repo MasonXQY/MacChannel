@@ -1,5 +1,17 @@
 # iPhone continuation ledger
 
+2026-09-20 enrollment API task complete: source86c9238 from1948be3; independent
+spec/quality Approved, Minor null fixture corrected and re-reviewed Approved.
+Root fixed separately reproduced subprocess test Close/Fd race by channel-joined
+close; focused count10 PASS1.973s, enrollment race PASS2.417s. Full named local
+Postgres group/auth race PASS31.612s/21.326s; log /tmp/dropmesh-enrollment-root-race.log.
+Fixture /private/tmp/dropmesh-group-db.igBdYS STOPPED, status verified.
+No native enrollment, approval/invitation UI, deployment or transfer trust added.
+NEXT native discovery/explicit first-device consent, then pending approval with
+both-device consent and atomic journal commit; integration notes in
+pending-join-integration-notes.md. Never redispatch completed discovery backend.
+Owner reports installed iPad login normal, not new grouping acceptance.
+
 COMPLETE group read interop f7fd86d + cleanup6de531c. Independent focused
 re-review Approved/no remaining findings. Root fresh combined cleanup+interop
 Go PASS4.063s; Swift1/1 no skips/failures, log /tmp/native-group-read-root-final.log.

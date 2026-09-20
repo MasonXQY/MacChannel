@@ -205,9 +205,6 @@ func TestNativeGroupReadCommandKillsDescendantOnCancellation(t *testing.T) {
 			_ = descendant.Kill() // Emergency cleanup for the intentional RED path.
 		}
 	}()
-	if err := writePipe.Close(); err != nil {
-		t.Fatal(err)
-	}
 	cancel()
 	select {
 	case completed := <-result:
@@ -216,6 +213,11 @@ func TestNativeGroupReadCommandKillsDescendantOnCancellation(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("cancelled command did not return within WaitDelay")
+	}
+	// Receiving the result synchronizes with Cmd.Start's reads of ExtraFiles.
+	// Child readiness alone does not establish a Go happens-before relationship.
+	if err := writePipe.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	eof := make(chan error, 1)
