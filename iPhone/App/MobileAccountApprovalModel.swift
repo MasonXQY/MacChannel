@@ -37,12 +37,15 @@ final class MobileAccountApprovalModel {
     private(set) var actionPresentationID: UUID?
     private(set) var readScope: MobileAccountApprovalReadScope = .ownRequests
     private let controller: AccountSessionController
+    private let refreshAccount: @Sendable () async -> Void
     private var operation: Task<Void, Never>?
     private var generation = UUID()
     private var invalidated = false
     private var presentationOwner: UUID?
     var isBusy: Bool { operation != nil }
-    init(controller: AccountSessionController) { self.controller = controller }
+    init(controller: AccountSessionController, refreshAccount: @escaping @Sendable () async -> Void = {}) {
+        self.controller = controller; self.refreshAccount = refreshAccount
+    }
 
     func refresh() async {
         guard !invalidated, operation == nil, confirmation == nil else { return }
@@ -118,6 +121,7 @@ final class MobileAccountApprovalModel {
                 case .confirmJoin, .verifyCommitted: value = try await controller.confirmDeviceJoinConfirmation(ticketID: ticket.id)
                 }
             }
+            await refreshAccount()
             guard current(generation) else { return }
             selectedRequestID = value.summary.requestID; detail = value; phase = .ready
         }
@@ -133,6 +137,7 @@ final class MobileAccountApprovalModel {
         guard !invalidated, operation == nil, confirmation == nil, let selectedRequestID else { return }
         await start(presentResult: true, presentError: true) { [self] id in
             let value = try await controller.resumeDeviceApproval(requestID: selectedRequestID)
+            await refreshAccount()
             guard current(id) else { return }; detail = value; phase = .ready
         }.value
     }

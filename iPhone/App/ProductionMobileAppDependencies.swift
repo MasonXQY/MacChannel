@@ -12,6 +12,8 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     private let discoveryPreference: MobileDiscoveryPreference
     private var discoveryEnabled: Bool
     private var cachedAccountController: AccountSessionController?
+    private var cachedAccountLifecycle: AccountForegroundLifecycle?
+    private var accountForegroundRequested = false
 
     static func load() async throws -> ProductionMobileAppDependencies {
         let manager = FileManager.default
@@ -73,8 +75,20 @@ actor ProductionMobileAppDependencies: MobileAppSession {
             await group.waitForAll()
         }
     }
-    func startForeground() async throws { try await runtime.startForeground() }
-    func stopForeground() async { await runtime.stopForeground() }
+    func startForeground() async throws {
+        accountForegroundRequested = true
+        try await runtime.startForeground()
+        guard accountForegroundRequested else { return }
+        // Account configuration failure must not disable the manual plane.
+        if let lifecycle = try? await accountLifecycle(), accountForegroundRequested {
+            await lifecycle.start()
+        }
+    }
+    func stopForeground() async {
+        accountForegroundRequested = false
+        await cachedAccountLifecycle?.stop()
+        await runtime.stopForeground()
+    }
     func refreshTrust() async throws { try await runtime.refreshTrust() }
     func retryConnection() async { await runtime.retryConnection() }
     func send(items: [URL], to device: DeviceID) async throws -> TransferID {
@@ -104,6 +118,19 @@ actor ProductionMobileAppDependencies: MobileAppSession {
                                                audience: configuration.audience)
         let binding = try AccountSessionBinding(deviceID: context.identity.id.rawValue,
             audience: configuration.audience, origin: configuration.origin)
+        if configuration.groupsEnabled {
+            let controller = try AccountSessionController(service: service,
+                storage: KeychainAccountSessionStorage(), binding: binding,
+                groupVerifier: AccountGroupHistoryVerifier(storage: KeychainAccountGroupCheckpointStorage()),
+                peerAuthorization: AccountPeerAuthorization(owner: context.authorizationOwner,
+                    identity: context.identity, binding: binding, freshness: 300),
+                firstDeviceEnrollment: AccountFirstDeviceEnrollment(identity: context.identity),
+                deviceApproval: AccountDeviceApproval(identity: context.identity))
+            // Both objects are cached before this actor reaches any suspension.
+            cachedAccountController = controller
+            cachedAccountLifecycle = AccountForegroundLifecycle(controller: controller)
+            return controller
+        }
         let controller = AccountSessionController(service: service,
             storage: KeychainAccountSessionStorage(), binding: binding,
             groupVerifier: configuration.groupsEnabled
@@ -112,6 +139,10 @@ actor ProductionMobileAppDependencies: MobileAppSession {
                 ? AccountFirstDeviceEnrollment(identity: context.identity) : nil)
         cachedAccountController = controller
         return controller
+    }
+    func accountLifecycle() async throws -> AccountForegroundLifecycle? {
+        _ = try await accountController()
+        return cachedAccountLifecycle
     }
     func revoke(_ id: DeviceID) async throws { try await context.repository.revoke(id) }
     func persistTrust() async throws { try await context.persistTrust() }

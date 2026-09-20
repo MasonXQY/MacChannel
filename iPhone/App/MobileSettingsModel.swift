@@ -33,7 +33,8 @@ final class MobileSettingsModel {
         self.session = session
         let loader = loadAccountController ?? { try await session.accountController() }
         account = MobileAccountModel(loadController: loader,
-            apple: accountAuthorizer ?? MobileAppleAuthorization())
+            apple: accountAuthorizer ?? MobileAppleAuthorization(),
+            loadLifecycle: { try await session.accountLifecycle() })
         version = Self.versionDescription(info: bundle.infoDictionary ?? [:])
     }
     var accountRowVisible: Bool { account.phase != .disabled }

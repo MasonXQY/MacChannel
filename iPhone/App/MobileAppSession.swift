@@ -37,8 +37,10 @@ protocol MobileAppSession: Sendable {
     func availableReceivedURL(for id: TransferID) async -> URL?
     func setLocalDiscoveryEnabled(_ enabled: Bool) async throws
     func accountController() async throws -> AccountSessionController?
+    func accountLifecycle() async throws -> AccountForegroundLifecycle?
 }
 
 extension MobileAppSession {
     func accountController() async throws -> AccountSessionController? { nil }
+    func accountLifecycle() async throws -> AccountForegroundLifecycle? { nil }
 }

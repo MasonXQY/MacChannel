@@ -6,6 +6,45 @@ import XCTest
 
 @MainActor
 final class MobileAccountGroupModelTests: XCTestCase {
+    func testRoutineForegroundDiscoveryDoesNotInvalidateExplicitJoinTicket() async throws {
+        let f = try AccountGroupEvidenceFixture()
+        let controller = f.controller()
+        let lifecycle = AccountForegroundLifecycle(controller: controller)
+        await lifecycle.start()
+        _ = await lifecycle.requestRefresh()
+        let ticket = try await controller.prepareFirstDeviceJoin()
+        _ = await lifecycle.requestRefresh()
+        let joined = try await controller.confirmFirstDeviceJoin(attemptID: ticket)
+        XCTAssertEqual(joined.members.count, 1)
+        await lifecycle.stop()
+    }
+
+    func testDismissedSettingsDoesNotCancelForegroundOwnedVerification() async throws {
+        let f = try AccountGroupEvidenceFixture()
+        let event = try f.event()
+        try await f.seed([event], pinned: true)
+        await f.service.setHistory([event, try f.event(previous: event)])
+        let controller = f.controller()
+        let lifecycle = AccountForegroundLifecycle(controller: controller)
+        let gate = GroupEvidenceGate()
+        await f.service.gate(gate, at: "history")
+        await lifecycle.start()
+        await entered(gate)
+        let model = MobileAccountGroupModel(controller: controller, lifecycle: lifecycle)
+        let loading = Task { await model.load() }
+        for _ in 0..<30 { await Task.yield() }
+        model.cancel()
+        await gate.release()
+        await loading.value
+        XCTAssertEqual(model.phase, .idle)
+        let pins = await f.checkpoints.writes
+        XCTAssertEqual(pins, 2, "core sync persists verification despite dismissed presentation")
+        let reopened = MobileAccountGroupModel(controller: controller, lifecycle: lifecycle)
+        await reopened.load()
+        XCTAssertEqual(reopened.phase, .removed)
+        await lifecycle.stop()
+    }
+
     func testMissingCapabilityNeverDiscovers() async throws {
         let f = try AccountGroupEvidenceFixture()
         let c = f.controller(enabled: false); await c.restore()

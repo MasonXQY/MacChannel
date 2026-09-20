@@ -12,11 +12,14 @@ final class MobileAccountGroupModel {
     private(set) var phase: MobileAccountGroupPhase = .disabled
     private(set) var messageKey: String?
     private let controller: AccountSessionController
+    private let lifecycle: AccountForegroundLifecycle?
     private var operation: Task<Void, Never>?
     private var generation = UUID()
     private var ticket: UUID?
 
-    init(controller: AccountSessionController) { self.controller = controller }
+    init(controller: AccountSessionController, lifecycle: AccountForegroundLifecycle? = nil) {
+        self.controller = controller; self.lifecycle = lifecycle
+    }
     var isBusy: Bool { operation != nil }
     var confirmationID: UUID? { phase == .awaitingConfirmation ? ticket : nil }
 
@@ -28,6 +31,19 @@ final class MobileAccountGroupModel {
             guard generation == id, !Task.isCancelled else { throw CancellationError() }
             guard supported else { return .disabled }
             phase = .checking
+            if let lifecycle {
+                switch await lifecycle.requestRefresh() {
+                case .verified(let group): return try await membership(group)
+                case .absent: return .ready
+                case .approvalRequired:
+                    _ = try await controller.prepareFirstDeviceJoin()
+                    return .ready
+                case .signedOut: throw AccountSessionControllerError.needsSignIn
+                case .secureStorageError: throw AccountSessionControllerError.secureStorage
+                case .unavailable: throw AccountSessionControllerError.unavailable
+                case .idle: return .idle
+                }
+            }
             switch try await controller.discoverAccountGroup() {
             case .absent: return .ready
             case .present(let metadata):
@@ -64,7 +80,9 @@ final class MobileAccountGroupModel {
         if let attemptID, attemptID != ticket { return nil }
         self.ticket = nil
         return start(phase: .joining) { [self] in
-            try await membership(controller.confirmFirstDeviceJoin(attemptID: ticket))
+            let group = try await controller.confirmFirstDeviceJoin(attemptID: ticket)
+            _ = await lifecycle?.requestRefresh()
+            return try await membership(group)
         }
     }
 

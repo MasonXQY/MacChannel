@@ -17,6 +17,8 @@ final class MobileAccountModel {
     private let loadController: @Sendable () async throws -> AccountSessionController?
     private let apple: any MobileAppleAuthorizing
     private let attemptHandoff: @Sendable () async -> Void
+    private let loadLifecycle: @Sendable () async throws -> AccountForegroundLifecycle?
+    private var lifecycle: AccountForegroundLifecycle?
     private var controller: AccountSessionController?
     private var operation: Task<Void, Never>?
     private var operationID: UUID?
@@ -24,10 +26,12 @@ final class MobileAccountModel {
 
     init(loadController: @escaping @Sendable () async throws -> AccountSessionController?,
          apple: any MobileAppleAuthorizing,
-         attemptHandoff: @escaping @Sendable () async -> Void = {}) {
+         attemptHandoff: @escaping @Sendable () async -> Void = {},
+         loadLifecycle: @escaping @Sendable () async throws -> AccountForegroundLifecycle? = { nil }) {
         self.loadController = loadController
         self.apple = apple
         self.attemptHandoff = attemptHandoff
+        self.loadLifecycle = loadLifecycle
     }
 
     func load() async {
@@ -47,6 +51,7 @@ final class MobileAccountModel {
             guard let loaded else { group?.cancel(); group = nil; clearApprovals(); controller = nil; phase = .disabled; return }
             if controller !== loaded { group?.cancel(); group = nil; clearApprovals() }
             controller = loaded
+            lifecycle = try await loadLifecycle()
             await loaded.restore()
             apply(await loaded.snapshot())
         } catch { fail(error) }
@@ -123,10 +128,13 @@ final class MobileAccountModel {
     private func apply(_ snapshot: AccountSessionSnapshot) {
         messageKey = nil
         if snapshot.phase == .signedIn, let controller {
-            if group == nil { group = MobileAccountGroupModel(controller: controller) }
+            if group == nil { group = MobileAccountGroupModel(controller: controller, lifecycle: lifecycle) }
             if approvalAccountID != snapshot.identity?.accountID { clearApprovals() }
             if approvals == nil {
-                approvals = MobileAccountApprovalModel(controller: controller)
+                let lifecycle = lifecycle
+                approvals = MobileAccountApprovalModel(controller: controller, refreshAccount: {
+                    _ = await lifecycle?.requestRefresh()
+                })
                 approvalAccountID = snapshot.identity?.accountID
             }
         } else { group?.cancel(); group = nil; clearApprovals() }

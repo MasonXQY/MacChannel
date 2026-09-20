@@ -148,6 +148,19 @@ public actor AccountSessionController {
     /// perform their own authoritative checks after every suspension.
     public func isAccountRouteReady() -> Bool { (try? requireRouteContext()) != nil }
 
+    /// Keep early refresh policy with the credential owner. Foreground callers
+    /// receive no token or expiry value and must still verify group history.
+    public func prepareAccountForegroundSync() async throws {
+        try Task.checkCancellation()
+        guard !busyForLogin else { throw AccountSessionControllerError.busy }
+        guard state.phase == .signedIn, let current else { throw AccountSessionControllerError.needsSignIn }
+        if current.tokens.accessExpiresAt <= (try validNow()).addingTimeInterval(60) { try await refresh() }
+    }
+
+    // Routine discovery failures withdraw evidence without pretending the app
+    // entered background or invalidating a separately confirmed UI ticket.
+    func withdrawAccountForegroundEvidence() { withdrawPeerAccount() }
+
     public func attachAccountRoute(to session: AuthenticatedPresenceSession) async throws -> AccountRouteAttachment {
         let context = try requireRouteContext()
         if let socket = routeSocket, socket.session === session, socket.contextID == context.id {
@@ -769,8 +782,12 @@ public actor AccountSessionController {
             } catch {
                 // Presentation/consent supersession only fences this attempt.
                 // Current verification failure or explicit cancellation is fail-closed.
+                let sessionWasCurrent = (try? requireCurrentSession()) != nil
                 if peerEpoch == epoch, Task.isCancelled || operationRevision == revision { withdrawPeerAccount() }
-                try requireCurrentSession()
+                // Withdrawal intentionally clears peerEpoch. Do not misreport
+                // a current missing checkpoint as a signed-out session solely
+                // because this failure just withdrew its account evidence.
+                if !sessionWasCurrent { try requireCurrentSession() }
                 throw error
             }
         } onCancel: {
