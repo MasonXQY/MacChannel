@@ -1,5 +1,23 @@
 # iPhone continuation ledger
 
+Native channel e4730ce independently Approved/no findings; root read production
+diff, source hashes, actual158/0/0skip log. Root Xcode27 unsigned shippingmain+Share
+BUILD SUCCEEDED exit0 (/tmp/native-channel-ios-shipping-build.log), embeddedprivacy
+PASS. Reviewer corrected stale line mappings against frozen source. No consumer
+activation/install/deploy. Next soleimplementation mobile_adapter_regression_review
+owns Go router brief with exactsocket nonce/coherent owner-policy corrections.
+Root started SQL55461 Unix-only group fixture; baseline1account/1group/0pending;
+no schemareset/productionDB. Cache qIjA8g assigned; root owns shutdown after gates.
+
+2026-09-20 continuation: user explicitly APPROVED isolated candidate deployment
+on existing host, preserving production. SSH22 read-only preflight timed out;
+source92.96.17.75 verified and Hetzner project UI signed in. No remote/firewall writes.
+Native channel authorization brief dispatched to account_route_admission, sole
+implementation/Swift cache owner. mobile_adapter_regression_review read-only
+server router next-slice audit. Root operational preparation/docs; do not reopen
+SSH until reviewed candidate is deployable. Older unanswered-approval notes below
+are superseded, not new permission requests.
+
 Copy40f4a0e+b528ba2 final independentApproved/no findings;32focused/0 andXcode27
 shippingmain/Sharecompilepass. Literal-comparison finding retracted after actual
 associated-value lexerinspection+wronglabeltest passed unmodifiedauditor.

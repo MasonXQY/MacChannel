@@ -2,7 +2,23 @@
 
 ## Current mainline decision — 2026-09-20
 
-CURRENT: no implementation or test process active; all caches/index released.
+CURRENT: user explicitly approved isolated candidate deployment on the existing
+host, preserving production. Native channel e4730ce is independently Approved
+with no findings, actual focused158/0/0skip; root Xcode27 unsigned shipping main
+and Share BUILD SUCCEEDED plus embedded privacy check PASS. No app/runtime calls
+the new overload. Root checked source hashes and actual logs; report/review are
+native-channel-authorization-{report,review}.md. Known full-suite OCR failure remains.
+
+mobile_adapter_regression_review now owns the sole implementation: default-off
+Go router integration per account-route-router-next-brief.md (socket-local nonce
+ownership and coherent owner/policy constructor corrections included). It owns
+isolated Go cache qIjA8g. SQL55461 started by root, Unix-only exact group test DB,
+baseline accounts1/groups1/pending0 preserved. No other implementation active.
+Root owns operational preparation and database shutdown after tests/review.
+Read-only SSH preflight to 178.105.165.209:22 timed out; current source IP verified
+92.96.17.75. Hetzner project page is signed in. No firewall or remote changes made.
+Do not open temporary SSH until a deployable reviewed candidate is ready.
+
 Copy40f4a0e+b528ba2 independently Approved/no findings, focused32/0, actual UIKit
 shipping compile passed. Reviewer withdrew incorrect literal-comparison finding;
 wrong-label coverage confirmed existing correct behavior, no auditor change.
@@ -16,9 +32,9 @@ Native producer integration0426d47 complete and independently Approved,
 Root Xcode27 unsigned Release shipping main/Share build succeeded; this is not
 signed installation. Native transport consumption audit is complete and revised
 to preserve legacy APIs, explicit freshness and check-time admission boundaries.
-Root owns docs/review coordination. SQL55461 STOPPED,
-fixture data retained. Next bounded brief native-channel-authorization-brief.md
-is prepared but NOT dispatched or activated.
+Root owns docs/review coordination. Native channel consumption is locally complete
+but NOT activated in application composition. Provider attempts/listener wiring
+and actual mobile runtime composition remain subsequent integration work.
 
 Completed/reviewed: routeauth owner e627179; actual two-controller signed HTTP/SQL
 interop5fdd896; exact SQL group count supplement095591a; real subject-list409 UI
@@ -29,9 +45,8 @@ still not live transport authority. Earlier mobile six-digit host/recovery local
 gates remain complete; no physical install or Store update in this continuation.
 
 Physical read-only check: iPad mini connected, installed1.0(8); iPhone unavailable.
-Optional async reconnect request sent. A separate async request asks authorization
-for an isolated candidate transfer deployment preserving existing production; no
-answer or deployment yet. User wants current development mainline as future Store
+Optional async reconnect request sent. Isolated candidate transfer deployment is
+now authorized; no candidate deployment yet. User wants current development mainline as future Store
 update, iOS free. Do not imply accounts/invitations/end-to-end transfer are finished.
 Fresh-agent thread limit requires explicit reuse, recorded in progress.md.
 Older chronological entries below are history, not active owner instructions.
