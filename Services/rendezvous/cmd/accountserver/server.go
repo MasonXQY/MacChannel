@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -15,6 +16,10 @@ import (
 	"macchannel/rendezvous/internal/accountauth"
 	"macchannel/rendezvous/internal/accountgroup"
 	"macchannel/rendezvous/internal/auth"
+	"macchannel/rendezvous/internal/httpapi"
+	"macchannel/rendezvous/internal/presence"
+	"macchannel/rendezvous/internal/routeauth"
+	"macchannel/rendezvous/internal/signal"
 )
 
 var errStartup = errors.New("account service startup failed")
@@ -30,12 +35,15 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 	if err != nil {
 		return nil, nil, errStartup
 	}
-	closed := false
+	var closeOnce sync.Once
+	var routes *routeauth.ConnectionRouter
 	closeDatabase := func() {
-		if !closed {
-			closed = true
+		closeOnce.Do(func() {
+			if routes != nil {
+				routes.Shutdown()
+			}
 			_ = database.Close()
-		}
+		})
 	}
 	fail := func() (http.Handler, func(), error) { closeDatabase(); return nil, nil, errStartup }
 	database.SetMaxOpenConns(8)
@@ -76,8 +84,9 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 	}
 	verifier := auth.NewVerifier(auth.VerifierConfig{ReplayStore: auth.NewPostgresReplayStore(database)})
 	httpConfig := accountauth.AccountHTTPConfig{Verifier: verifier, Challenges: challenges, Login: login, Sessions: sessions}
+	var groups *accountgroup.PostgresStore
 	if cfg.groupsEnabled {
-		groups, err := accountgroup.NewPostgresStore(database)
+		groups, err = accountgroup.NewPostgresStore(database)
 		if err != nil {
 			return fail()
 		}
@@ -85,12 +94,39 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 		httpConfig.Enrollment = groups
 		httpConfig.Pending = groups
 	}
+	if cfg.transferEnabled {
+		if groups == nil {
+			return fail()
+		}
+		httpConfig.TURN = &accountauth.AccountTURNConfig{Issuer: groups, SharedSecret: cfg.turnSecret, URLs: cfg.turnURLs}
+	}
 	accountHandler, err := accountauth.NewAccountHTTP(httpConfig)
 	if err != nil {
 		return fail()
 	}
-	return cfg.ingress.Wrap(newServiceMux(accountHandler, database.PingContext, cfg.groupsEnabled)), closeDatabase, nil
+	var transfer http.Handler
+	if cfg.transferEnabled {
+		graph := accountOnlyGraph{}
+		hub := presence.NewHub(graph)
+		routes, err = routeauth.NewCompositeConnectionRouterWithPresence(16, graph, routeauth.NewPostgresAccountGate(groups), routeauth.AccountPresenceConfig{
+			Hub: hub, Projection: groups, CandidatesPerTurn: 8, WorkTimeout: 5 * time.Second, RefreshInterval: 30 * time.Second,
+		})
+		if err != nil {
+			return fail()
+		}
+		transfer = httpapi.NewRouter(httpapi.Config{Verifier: verifier, Presence: hub, Signals: signal.NewHub(graph),
+			AccountRoutes: &httpapi.AccountRouteConfig{Routes: routes, Sessions: sessions},
+		})
+	}
+	return cfg.ingress.Wrap(newServiceMuxWithTransfer(accountHandler, database.PingContext, cfg.groupsEnabled, transfer)), closeDatabase, nil
 }
+
+// Candidate trust is exclusively checked by SQL route admission. Uploaded
+// manual proofs cannot authorize this plane, even when identity auth accepts them.
+type accountOnlyGraph struct{}
+
+func (accountOnlyGraph) ShareGraph(string, string) bool { return false }
+func (accountOnlyGraph) DevicesInGraph(string) []string { return nil }
 
 func checkSchema(ctx context.Context, database *sql.DB) error {
 	return checkTables(ctx, database, requiredTables)
@@ -107,7 +143,15 @@ func checkTables(ctx context.Context, database *sql.DB, tables []string) error {
 }
 
 func newServiceMux(account http.Handler, health func(context.Context) error, groupsEnabled bool) http.Handler {
+	return newServiceMuxWithTransfer(account, health, groupsEnabled, nil)
+}
+
+func newServiceMuxWithTransfer(account http.Handler, health func(context.Context) error, groupsEnabled bool, transfer http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	if transfer != nil {
+		mux.Handle("/v1/ws", transfer)
+		mux.Handle("/v1/account/turn-credentials", account)
+	}
 	for _, path := range []string{"/v1/account/login/challenge", "/v1/account/login/complete", "/v1/account/session/status", "/v1/account/session/refresh", "/v1/account/session/logout"} {
 		mux.Handle(path, account)
 	}

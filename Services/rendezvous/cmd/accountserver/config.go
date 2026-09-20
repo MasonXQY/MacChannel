@@ -24,6 +24,9 @@ var requiredEnvironment = []string{
 type config struct {
 	ingress                                    ingress.Adapter
 	enabled, groupsEnabled                     bool
+	transferEnabled                            bool
+	turnSecret                                 []byte
+	turnURLs                                   []string
 	teamID, keyID, audience, addr, databaseDSN string
 	applePrivateKey, credentialKey             []byte
 }
@@ -38,6 +41,28 @@ func loadConfig(getenv func(string) string) (config, error) {
 	groupsEnabled, err := groupCapability(getenv("DROPMESH_ACCOUNT_GROUPS_ENABLED"))
 	if err != nil {
 		return config{}, errConfiguration
+	}
+	transferEnabled, err := groupCapability(getenv("DROPMESH_ACCOUNT_TRANSFER_ENABLED"))
+	if err != nil || (transferEnabled && !groupsEnabled) {
+		return config{}, errConfiguration
+	}
+	var turnSecret []byte
+	var turnURLs []string
+	if transferEnabled {
+		turnSecret, err = readSecureFile(getenv("DROPMESH_ACCOUNT_TURN_SECRET_FILE"), 4096)
+		if err != nil || len(turnSecret) < 32 {
+			return config{}, errConfiguration
+		}
+		turnURLs = strings.Split(getenv("DROPMESH_ACCOUNT_TURN_URLS"), ",")
+		if len(turnURLs) > 8 {
+			return config{}, errConfiguration
+		}
+		for _, value := range turnURLs {
+			if value == "" || strings.TrimSpace(value) != value || len(value) > 2048 {
+				return config{}, errConfiguration
+			}
+		}
+		// AccountHTTP performs the definitive TURN URL validation before listen.
 	}
 	adapter, err := ingress.Parse(getenv("DROPMESH_ACCOUNT_TRUSTED_PROXY_IP"))
 	if err != nil {
@@ -69,7 +94,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if dsn == "" {
 		return config{}, errConfiguration
 	}
-	return config{enabled: true, groupsEnabled: groupsEnabled, ingress: adapter, teamID: values[requiredEnvironment[0]], keyID: values[requiredEnvironment[1]], audience: values[requiredEnvironment[2]],
+	return config{enabled: true, groupsEnabled: groupsEnabled, transferEnabled: transferEnabled, turnSecret: turnSecret, turnURLs: turnURLs, ingress: adapter, teamID: values[requiredEnvironment[0]], keyID: values[requiredEnvironment[1]], audience: values[requiredEnvironment[2]],
 		addr: values["DROPMESH_ACCOUNT_ADDR"], databaseDSN: dsn, applePrivateKey: p8, credentialKey: credential}, nil
 }
 
