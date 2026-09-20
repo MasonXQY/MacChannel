@@ -1,0 +1,224 @@
+--- a/iPhone/App/ProductionMobileAppDependencies.swift
++++ b/iPhone/App/ProductionMobileAppDependencies.swift
+@@ -178,7 +178,9 @@
+             groupVerifier: configuration.groupsEnabled
+                 ? AccountGroupHistoryVerifier(storage: KeychainAccountGroupCheckpointStorage()) : nil,
+             firstDeviceEnrollment: configuration.groupsEnabled
+-                ? AccountFirstDeviceEnrollment(identity: context.identity) : nil)
++                ? AccountFirstDeviceEnrollment(identity: context.identity) : nil,
++            deviceApproval: configuration.groupsEnabled
++                ? AccountDeviceApproval(identity: context.identity) : nil)
+         cachedAccountController = controller
+         return controller
+     }
+--- a/iPhone/DropMesh.xcodeproj/project.pbxproj
++++ b/iPhone/DropMesh.xcodeproj/project.pbxproj
+@@ -7,6 +7,14 @@
+ 	objects = {
+ 
+ /* Begin PBXBuildFile section */
++		AADD00000000000000000006 /* MobileAccountApprovalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AADD00000000000000000015; };
++		AADD00000000000000000008 /* MobileAccountApprovalDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AADD00000000000000000015; };
++		AADD00000000000000000005 /* MobileAccountApprovalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AADD00000000000000000014; };
++		AADD00000000000000000007 /* MobileAccountApprovalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AADD00000000000000000014; };
++		AADD00000000000000000003 /* MobileAccountApprovalModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AADD00000000000000000013; };
++		AADD00000000000000000004 /* MobileAccountApprovalModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AADD00000000000000000013; };
++		AADD00000000000000000001 /* AccountApprovalEvidenceFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = AADD00000000000000000011; };
++		AADD00000000000000000002 /* MobileAccountApprovalModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AADD00000000000000000012; };
+ 		AACC00000000000000000005 /* MobileAccountGroupSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000014 /* MobileAccountGroupSection.swift */; };
+ 		AACC00000000000000000006 /* MobileAccountGroupSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000014 /* MobileAccountGroupSection.swift */; };
+ 		AACC00000000000000000003 /* MobileAccountGroupModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000013 /* MobileAccountGroupModel.swift */; };
+@@ -170,6 +178,11 @@
+ /* End PBXCopyFilesBuildPhase section */
+ 
+ /* Begin PBXFileReference section */
++		AADD00000000000000000015 /* MobileAccountApprovalDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountApprovalDetailView.swift; sourceTree = "<group>"; };
++		AADD00000000000000000014 /* MobileAccountApprovalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountApprovalView.swift; sourceTree = "<group>"; };
++		AADD00000000000000000013 /* MobileAccountApprovalModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountApprovalModel.swift; sourceTree = "<group>"; };
++		AADD00000000000000000011 /* AccountApprovalEvidenceFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountApprovalEvidenceFixture.swift; sourceTree = "<group>"; };
++		AADD00000000000000000012 /* MobileAccountApprovalModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountApprovalModelTests.swift; sourceTree = "<group>"; };
+ 		AACC00000000000000000014 /* MobileAccountGroupSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountGroupSection.swift; sourceTree = "<group>"; };
+ 		AACC00000000000000000013 /* MobileAccountGroupModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountGroupModel.swift; sourceTree = "<group>"; };
+ 		AACC00000000000000000011 /* AccountGroupEvidenceFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountGroupEvidenceFixture.swift; sourceTree = "<group>"; };
+@@ -336,6 +349,7 @@
+ 				9E3E1B0829229AE158713DE8 /* InertMobileSession.swift */,
+ 				4AED8A868C374E1E4B76F08A /* MobileAccountEvidenceHost.swift */,
+ 				AACC00000000000000000011 /* AccountGroupEvidenceFixture.swift */,
++				AADD00000000000000000011 /* AccountApprovalEvidenceFixture.swift */,
+ 				0C901B8A5C15A0EFA153DE2C /* MobileSendEvidenceHost.swift */,
+ 				FF61613CBA096998676453B5 /* MobileShareEvidenceHost.swift */,
+ 			);
+@@ -359,6 +373,7 @@
+ 				81188DB21EB24FF02F4CA32D /* MobileAccountConfigurationTests.swift */,
+ 				BAEA71CF681C4AE0661C22FE /* MobileAccountModelTests.swift */,
+ 				AACC00000000000000000012 /* MobileAccountGroupModelTests.swift */,
++				AADD00000000000000000012 /* MobileAccountApprovalModelTests.swift */,
+ 				FE2D42DBF1B282C2BECB8EDC /* MobileAppleAuthorizationTests.swift */,
+ 				D1CE3FC3CBFF98252640663E /* MobileAppModelTests.swift */,
+ 				0D830D4E4878EAB29F83D454 /* MobileDurableTrustTests.swift */,
+@@ -404,6 +419,9 @@
+ 				FC3655A3AFE863787840E786 /* MobileAccountConfiguration.swift */,
+ 				415111FE526C1B2127C1B5B1 /* MobileAccountModel.swift */,
+ 				AACC00000000000000000013 /* MobileAccountGroupModel.swift */,
++				AADD00000000000000000015 /* MobileAccountApprovalDetailView.swift */,
++				AADD00000000000000000014 /* MobileAccountApprovalView.swift */,
++				AADD00000000000000000013 /* MobileAccountApprovalModel.swift */,
+ 				C37739B28C549DF82BFD6C83 /* MobileAccountView.swift */,
+ 				AACC00000000000000000014 /* MobileAccountGroupSection.swift */,
+ 				6CD0D43C24BBDF5C8ADBFB2F /* MobileAppleAuthorization.swift */,
+@@ -641,6 +659,9 @@
+ 				86D38CAF883B9C43550F499F /* MobileAccountConfiguration.swift in Sources */,
+ 				5EADA2ACEE3CF6E45AB09EED /* MobileAccountModel.swift in Sources */,
+ 				AACC00000000000000000003 /* MobileAccountGroupModel.swift in Sources */,
++				AADD00000000000000000006 /* MobileAccountApprovalDetailView.swift in Sources */,
++				AADD00000000000000000005 /* MobileAccountApprovalView.swift in Sources */,
++				AADD00000000000000000003 /* MobileAccountApprovalModel.swift in Sources */,
+ 				BF1CF04A5B0185731F29D9C3 /* MobileAccountView.swift in Sources */,
+ 				AACC00000000000000000005 /* MobileAccountGroupSection.swift in Sources */,
+ 				5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */,
+@@ -681,6 +702,7 @@
+ 				BC6723426B9285A2249A8F11 /* MobileAccountConfigurationTests.swift in Sources */,
+ 				6A45A465B325A24D7F7025B8 /* MobileAccountModelTests.swift in Sources */,
+ 				AACC00000000000000000002 /* MobileAccountGroupModelTests.swift in Sources */,
++				AADD00000000000000000002 /* MobileAccountApprovalModelTests.swift in Sources */,
+ 				CFAEEAE1A060A1F3F7C7B176 /* MobileAppModelTests.swift in Sources */,
+ 				F603D0F550604955E6F0A300 /* MobileAppleAuthorizationTests.swift in Sources */,
+ 				814B96CE1865C30E735D2BBB /* MobileDurableTrustTests.swift in Sources */,
+@@ -712,8 +734,12 @@
+ 				6971AE59DDB11A917A76100F /* MobileAccountConfiguration.swift in Sources */,
+ 				1E08A6B9EA026DD0B219B406 /* MobileAccountEvidenceHost.swift in Sources */,
+ 				AACC00000000000000000001 /* AccountGroupEvidenceFixture.swift in Sources */,
++				AADD00000000000000000001 /* AccountApprovalEvidenceFixture.swift in Sources */,
+ 				EC91FD8DBEEA61D8A6169FC4 /* MobileAccountModel.swift in Sources */,
+ 				AACC00000000000000000004 /* MobileAccountGroupModel.swift in Sources */,
++				AADD00000000000000000008 /* MobileAccountApprovalDetailView.swift in Sources */,
++				AADD00000000000000000007 /* MobileAccountApprovalView.swift in Sources */,
++				AADD00000000000000000004 /* MobileAccountApprovalModel.swift in Sources */,
+ 				02DF26D41EF56898A3EA7E58 /* MobileAccountView.swift in Sources */,
+ 				AACC00000000000000000006 /* MobileAccountGroupSection.swift in Sources */,
+ 				D2B45C770C12B8ED96E26B1D /* MobileAppModel.swift in Sources */,
+--- a/iPhone/Resources/en.lproj/Localizable.strings
++++ b/iPhone/Resources/en.lproj/Localizable.strings
+@@ -246,3 +246,59 @@
+ "history.legacy.files" = "This older record does not include a file list. Original files cannot be recovered from this record.";
+ "history.sent.unavailable.short" = "Original file unavailable";
+ "history.source.unavailable" = "The original could not be read. It may have been moved, deleted, or access is not allowed. For photos, check DropMesh’s Photos access in Settings.";
++
++/* Native device approval */
++"approval.title" = "Device requests";
++"approval.previous" = "Previous requests";
++"approval.previous.open" = "Review a previous request";
++"approval.previous.help" = "Open to inspect its status. Membership still requires independent verification.";
++"approval.detail.title" = "Device approval";
++"approval.loading" = "Checking request…";
++"approval.empty" = "No pending device requests.";
++"approval.unavailable" = "Device approval is unavailable.";
++"approval.signed-out" = "Sign in again to view device requests.";
++"approval.device.unverified" = "Unverified device identifier";
++"approval.request.title" = "Request to join";
++"approval.request.help" = "Ask a trusted device in your account to approve this device. You will compare codes independently.";
++"approval.request.title.help" = "Create a request for this device? This does not approve membership or enable file transfers.";
++"approval.approve.title" = "Approve device";
++"approval.approve.title.help" = "Approve only if the complete code came independently from the device you intend to add. The other device must also confirm.";
++"approval.confirm.title" = "Confirm this device";
++"approval.confirm.title.help" = "Confirm the independently received verification code and this device's addition to the group. The approving device still needs to finish.";
++"approval.verify.title" = "Verify existing approval";
++"approval.verify.title.help" = "Verify the existing committed approval using this independently received code. This does not create a new join request.";
++"approval.cancel.title" = "Cancel request";
++"approval.cancel.title.help" = "Cancel this device's pending request? Going back without confirming keeps the request active.";
++"approval.reject.title" = "Reject request";
++"approval.reject.title.help" = "Reject this device's request to join your group?";
++"approval.expires" = "Request expires";
++"approval.request-code" = "Request comparison code";
++"approval.request-code.help" = "Send this complete code independently to an existing trusted device. Never approve an unexpected request.";
++"approval.member-code" = "Member verification code";
++"approval.member-code.help" = "Send this complete verification code independently to the joining device.";
++"approval.enter-request-code" = "Code from the joining device";
++"approval.enter-member-code" = "Code from the approving device";
++"approval.independent.help" = "Enter or explicitly paste the complete code received from the other device through an independent channel.";
++"approval.review" = "Review confirmation";
++"approval.copy" = "Copy complete code";
++"approval.refresh" = "Refresh status";
++"approval.resume" = "Resume request";
++"approval.technical" = "Device details";
++"approval.fingerprint" = "Device fingerprint";
++"approval.not-transfer" = "Approved for the device group. File transfer through this account is not enabled yet.";
++"approval.error.comparison" = "The complete codes do not match. Obtain the code independently and try again.";
++"approval.error.expired" = "This confirmation expired. Refresh and review a fresh confirmation.";
++"approval.error.changed" = "The request or verified history changed. Refresh before continuing.";
++"approval.error.retry" = "The operation was interrupted. Refresh to check its status, or choose Resume request to continue.";
++"approval.state.waiting-member" = "Waiting for a trusted member to review this request.";
++"approval.state.member-verification" = "Compare the joining device's independent code before approving.";
++"approval.state.waiting-subject" = "Waiting for the joining device to confirm.";
++"approval.state.subject-confirmation" = "Enter the approving device's independent verification code.";
++"approval.state.waiting-actor" = "Waiting for the approving device to finish.";
++"approval.state.verifying-history" = "An approval was committed. Independently verify its history before treating this device as a member.";
++"approval.state.joined" = "This device is approved for the device group.";
++"approval.state.removed" = "This device was removed from the group.";
++"approval.state.rejected" = "This request was rejected.";
++"approval.state.cancelled" = "This request was cancelled.";
++"approval.state.expired" = "This request expired.";
++"approval.state.invalidated" = "This request is no longer valid.";
+--- a/iPhone/Resources/zh-Hans.lproj/Localizable.strings
++++ b/iPhone/Resources/zh-Hans.lproj/Localizable.strings
+@@ -246,3 +246,59 @@
+ "history.legacy.files" = "这条旧记录未保存文件清单，无法从记录中恢复原文件。";
+ "history.sent.unavailable.short" = "原文件不可用";
+ "history.source.unavailable" = "无法读取原文件：文件可能已移动、删除，或未获访问授权。照片请检查系统设置中 DropMesh 的相册访问权限。";
++
++/* Native device approval */
++"approval.title" = "设备请求";
++"approval.previous" = "以前的请求";
++"approval.previous.open" = "查看以前的请求";
++"approval.previous.help" = "打开以查看状态。成员资格仍需独立验证。";
++"approval.detail.title" = "设备批准";
++"approval.loading" = "正在检查请求…";
++"approval.empty" = "暂无待处理的设备请求。";
++"approval.unavailable" = "设备批准暂不可用。";
++"approval.signed-out" = "请重新登录以查看设备请求。";
++"approval.device.unverified" = "未经验证的设备标识";
++"approval.request.title" = "请求加入";
++"approval.request.help" = "请让账户中受信任的设备批准此设备。你需要通过独立渠道核对验证码。";
++"approval.request.title.help" = "为此设备创建请求？此操作不会批准设备组成员资格或启用文件传输。";
++"approval.approve.title" = "批准设备";
++"approval.approve.title.help" = "仅当完整验证码通过独立渠道来自你想添加的设备时才批准。另一台设备也必须确认。";
++"approval.confirm.title" = "确认此设备";
++"approval.confirm.title.help" = "确认通过独立渠道收到的验证码，并同意将此设备加入设备组。批准设备仍需完成后续操作。";
++"approval.verify.title" = "验证现有批准";
++"approval.verify.title.help" = "使用通过独立渠道收到的验证码验证已提交的批准。此操作不会创建新的加入请求。";
++"approval.cancel.title" = "取消请求";
++"approval.cancel.title.help" = "取消此设备的待处理请求？直接返回不会取消请求。";
++"approval.reject.title" = "拒绝请求";
++"approval.reject.title.help" = "拒绝此设备加入设备组的请求？";
++"approval.expires" = "请求到期时间";
++"approval.request-code" = "请求核对码";
++"approval.request-code.help" = "通过独立渠道将完整验证码发送给现有的受信任设备。不要批准意料之外的请求。";
++"approval.member-code" = "成员验证码";
++"approval.member-code.help" = "通过独立渠道将完整验证码发送给请求加入的设备。";
++"approval.enter-request-code" = "请求加入设备的验证码";
++"approval.enter-member-code" = "批准设备的验证码";
++"approval.independent.help" = "输入或主动粘贴通过独立渠道从另一台设备收到的完整验证码。";
++"approval.review" = "查看确认信息";
++"approval.copy" = "复制完整验证码";
++"approval.refresh" = "刷新状态";
++"approval.resume" = "继续处理请求";
++"approval.technical" = "设备详情";
++"approval.fingerprint" = "设备指纹";
++"approval.not-transfer" = "已获准加入设备组。通过此账户传输文件尚未启用。";
++"approval.error.comparison" = "完整验证码不匹配。请通过独立渠道获取验证码后重试。";
++"approval.error.expired" = "此确认已过期。请刷新并查看新的确认信息。";
++"approval.error.changed" = "请求或已验证的历史记录发生变化。请先刷新再继续。";
++"approval.error.retry" = "操作中断。请刷新查看状态，或选择继续处理请求。";
++"approval.state.waiting-member" = "等待受信任的成员查看此请求。";
++"approval.state.member-verification" = "批准前请核对请求加入设备通过独立渠道提供的验证码。";
++"approval.state.waiting-subject" = "等待请求加入的设备确认。";
++"approval.state.subject-confirmation" = "请输入批准设备通过独立渠道提供的验证码。";
++"approval.state.waiting-actor" = "等待批准设备完成操作。";
++"approval.state.verifying-history" = "批准已提交。将此设备视为成员前，仍需独立验证其历史记录。";
++"approval.state.joined" = "此设备已获准加入设备组。";
++"approval.state.removed" = "此设备已从设备组移除。";
++"approval.state.rejected" = "此请求已被拒绝。";
++"approval.state.cancelled" = "此请求已取消。";
++"approval.state.expired" = "此请求已过期。";
++"approval.state.invalidated" = "此请求已失效。";
+

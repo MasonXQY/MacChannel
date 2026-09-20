@@ -3,6 +3,33 @@ import XCTest
 @testable import MacChannelCore
 
 final class AccountDeviceApprovalControllerTests: XCTestCase, @unchecked Sendable {
+    func testRetainedDiscoveryAfterCommittedRestartIsReadOnlyAndStorageFailureIsNotEmpty() async throws {
+        let pair = try await completedPair()
+        let f = pair.subject
+        f.clock.advance(301)
+        let restarted = f.reconstructed(); await restarted.restore()
+        let calls = await f.service.calls, writes = f.secret.writes, pins = f.pins.writes
+        let ids = try await restarted.retainedDeviceApprovalRequestIDs()
+        XCTAssertEqual(ids, [pair.receipt.summary.requestID])
+        let after = await f.service.calls
+        XCTAssertEqual(after, calls); XCTAssertEqual(f.secret.writes, writes); XCTAssertEqual(f.pins.writes, pins)
+        let read = try await restarted.deviceApproval(requestID: ids[0])
+        XCTAssertEqual(read.phase, .verifyingHistory); XCTAssertNil(read.snapshot)
+        f.secret.failReads(true)
+        do { _ = try await restarted.retainedDeviceApprovalRequestIDs(); XCTFail("Protected storage appeared empty") }
+        catch { XCTAssertEqual(error as? AccountDeviceApprovalValueError, .secureStorage) }
+        XCTAssertEqual(f.secret.writes, writes); XCTAssertEqual(f.pins.writes, pins)
+    }
+
+    func testRetainedDiscoveryRejectsForeignAndOverCapacityStorageResponses() async throws {
+        let pair = try await completedPair()
+        let foreign = try await pair.actor.intents.list(binding: pair.actor.binding, accountID: groupAccount)
+        await pair.subject.intents.overrideList(foreign)
+        await approvalFailure(.secureStorage) { try await pair.subject.controller.retainedDeviceApprovalRequestIDs() }
+        await pair.subject.intents.overrideList(Array(repeating: foreign[0], count: 33))
+        await approvalFailure(.secureStorage) { try await pair.subject.controller.retainedDeviceApprovalRequestIDs() }
+    }
+
     func testReceiptExpiryKnownSubjectTimesCannotBeSubstitutedBeforeSigning() async throws {
         for delta: Int64 in [-300_001, -1_000, 1_000] {
             let f = try await approvalAwaitingSubject()

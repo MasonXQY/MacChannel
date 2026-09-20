@@ -12,6 +12,8 @@ final class MobileAccountModel {
     private(set) var phase: MobileAccountViewPhase = .disabled
     private(set) var messageKey: String?
     private(set) var group: MobileAccountGroupModel?
+    private(set) var approvals: MobileAccountApprovalModel?
+    private var approvalAccountID: UUID?
     private let loadController: @Sendable () async throws -> AccountSessionController?
     private let apple: any MobileAppleAuthorizing
     private let attemptHandoff: @Sendable () async -> Void
@@ -42,8 +44,8 @@ final class MobileAccountModel {
         phase = .loading; messageKey = nil
         do {
             let loaded = try await loadController()
-            guard let loaded else { group?.cancel(); group = nil; controller = nil; phase = .disabled; return }
-            if controller !== loaded { group?.cancel(); group = nil }
+            guard let loaded else { group?.cancel(); group = nil; clearApprovals(); controller = nil; phase = .disabled; return }
+            if controller !== loaded { group?.cancel(); group = nil; clearApprovals() }
             controller = loaded
             await loaded.restore()
             apply(await loaded.snapshot())
@@ -105,7 +107,7 @@ final class MobileAccountModel {
 
     func signOut() async {
         guard operation == nil, let controller else { return }
-        group?.cancel(); group = nil
+        group?.cancel(); group = nil; clearApprovals()
         let id = UUID()
         let task = Task {
             phase = .signingOut; messageKey = nil
@@ -122,7 +124,12 @@ final class MobileAccountModel {
         messageKey = nil
         if snapshot.phase == .signedIn, let controller {
             if group == nil { group = MobileAccountGroupModel(controller: controller) }
-        } else { group?.cancel(); group = nil }
+            if approvalAccountID != snapshot.identity?.accountID { clearApprovals() }
+            if approvals == nil {
+                approvals = MobileAccountApprovalModel(controller: controller)
+                approvalAccountID = snapshot.identity?.accountID
+            }
+        } else { group?.cancel(); group = nil; clearApprovals() }
         switch snapshot.phase {
         case .signedOut, .needsSignIn: phase = .signedOut
         case .restoring, .preparingLogin, .refreshing: phase = .loading
@@ -139,6 +146,10 @@ final class MobileAccountModel {
         guard let attemptID else { return }
         await controller.cancelLogin(attemptID: attemptID)
         self.attemptID = nil
+    }
+
+    private func clearApprovals() {
+        approvals?.invalidate(); approvals = nil; approvalAccountID = nil
     }
 
     private func fail(_ error: Error, snapshot: AccountSessionSnapshot? = nil) {

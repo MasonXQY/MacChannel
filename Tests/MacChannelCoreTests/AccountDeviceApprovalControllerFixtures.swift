@@ -50,6 +50,8 @@ struct ApprovalControllerFixture: Sendable {
 actor ApprovalIntentStorage: AccountGroupApprovalIntentStorage {
     let base: KeychainAccountGroupApprovalIntentStorage
     var gates: [String: ApprovalGate] = [:]
+    var listOverride: [AccountGroupApprovalIntent]?
+    func overrideList(_ records: [AccountGroupApprovalIntent]) { listOverride = records }
     init(store: CheckpointSecretStore) { base = .init(store: store) }
     func gate(_ operation: String, _ gate: ApprovalGate) { gates[operation] = gate }
     func pause(_ operation: String) async { if let gate = gates.removeValue(forKey: operation) { await gate.block() } }
@@ -57,6 +59,7 @@ actor ApprovalIntentStorage: AccountGroupApprovalIntentStorage {
         await pause("load"); return try await base.load(scope: scope)
     }
     func list(binding: AccountSessionBinding, accountID: String) async throws -> [AccountGroupApprovalIntent] {
+        if let listOverride { return listOverride }
         await pause("list"); return try await base.list(binding: binding, accountID: accountID)
     }
     func insert(_ intent: AccountGroupApprovalIntent) async throws { await pause("insert"); try await base.insert(intent) }

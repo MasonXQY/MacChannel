@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MobileAccountGroupSection: View {
     let model: MobileAccountGroupModel
+    var approvals: MobileAccountApprovalModel? = nil
 
     var body: some View {
         Group {
@@ -52,9 +53,11 @@ struct MobileAccountGroupSection: View {
                 .disabled(model.phase == .awaitingConfirmation)
         case .joined:
             Text("account.group.joined").accessibilityIdentifier("account-group-joined")
+            approvalLink(canRequest: false)
             refresh
         case .approvalRequired:
             Text("account.group.approval-required").accessibilityIdentifier("account-group-approval")
+            approvalLink(canRequest: true)
             refresh
         case .removed:
             Text("account.group.removed").accessibilityIdentifier("account-group-removed")
@@ -66,6 +69,16 @@ struct MobileAccountGroupSection: View {
 
     private var refresh: some View {
         action("account.group.refresh", id: "account-group-refresh") { await model.load() }
+    }
+
+    @ViewBuilder private func approvalLink(canRequest: Bool) -> some View {
+        if let approvals {
+            NavigationLink {
+                MobileAccountApprovalView(model: approvals, canRequest: canRequest)
+            } label: {
+                Text(canRequest ? "approval.request.title" : "approval.title").frame(minHeight: 44)
+            }.accessibilityIdentifier("account-device-requests")
+        }
     }
 
     private func action(_ title: String, id: String, perform: @escaping @MainActor () async -> Void) -> some View {

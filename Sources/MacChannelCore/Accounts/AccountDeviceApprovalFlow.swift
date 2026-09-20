@@ -104,6 +104,20 @@ struct AccountDeviceApprovalFlow: Sendable {
               values.allSatisfy({ $0.status.active }) else { throw AccountServiceError.invalidResponse }
         return try values.map(validated)
     }
+    func retainedRequestIDs() async throws -> [String] {
+        let records = try await storage { try await configuration.intentStorage.list(binding: binding, accountID: account) }
+        guard records.count <= 32 else { throw AccountDeviceApprovalError.secureStorage }
+        var scopes = Set<String>()
+        for record in records {
+            do { try validate(record) } catch { throw AccountDeviceApprovalError.secureStorage }
+            guard scopes.insert(record.scope.requestID + ":" + record.scope.role.rawValue).inserted else {
+                throw AccountDeviceApprovalError.secureStorage
+            }
+        }
+        // Original-session mutation consent is deliberately not resumed. Historical
+        // requests remain discoverable under this account's current session.
+        return Array(Set(records.map { $0.scope.requestID })).sorted()
+    }
     func history(_ group: String) async throws -> [AccountGroupEvent] {
         try await call { try await historyService.groupHistory(accessToken: token, groupID: group) }
     }

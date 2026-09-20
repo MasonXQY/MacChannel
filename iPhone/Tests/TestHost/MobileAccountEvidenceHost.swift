@@ -12,6 +12,14 @@ struct MobileAccountEvidenceHost: View {
         let state = arguments.firstIndex(of: "-account-evidence-state")
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil } ?? "signed-out"
         let loader: @Sendable () async throws -> AccountSessionController? = {
+            if state.hasPrefix("approval-") {
+                if state == "approval-member" || state == "approval-proposed" {
+                    return try await AccountApprovalEvidenceFixture.memberEvidence(proposed: state == "approval-proposed").controller
+                }
+                let fixture = try AccountApprovalEvidenceFixture()
+                if state == "approval-storage" { await fixture.intents.failNextRead() }
+                return fixture.controller
+            }
             if state.hasPrefix("group-") {
                 let fixture = try AccountGroupEvidenceFixture()
                 switch state {

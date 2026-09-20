@@ -21,7 +21,7 @@ struct MobileAccountView: View {
                 }
             }
             if model.phase == .signedIn, let group = model.group {
-                MobileAccountGroupSection(model: group)
+                MobileAccountGroupSection(model: group, approvals: model.approvals)
             }
         }
         .navigationTitle("account.title")

@@ -173,6 +173,10 @@ public actor AccountSessionController {
     public func pendingDeviceApprovals() async throws -> [AccountGroupPendingSummary] {
         try await withApproval { try await $0.list() }.0
     }
+    /// Read-only recovery discovery. Returns no credentials, proofs, consent or membership.
+    public func retainedDeviceApprovalRequestIDs() async throws -> [String] {
+        try await withApproval { try await $0.retainedRequestIDs() }.0
+    }
     public func deviceApproval(requestID: String) async throws -> AccountDeviceApprovalView {
         try await withApproval { try await $0.read(requestID) }.0
     }
