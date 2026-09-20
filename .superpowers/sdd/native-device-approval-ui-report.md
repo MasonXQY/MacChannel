@@ -1,6 +1,9 @@
 # Native account device approval UI
 
 Status: implementation and bounded verification complete; awaiting independent review.
+Source/evidence commit: `1dfc4dc` (Add native device approval and explicit recovery
+screens), plus the protected task-only patch described below. Its parent contains
+the independently committed Go route work; that Go delta is not part of this task.
 No activation, installation, signing,
 archive, upload, credential operation, identity reset, Go or SQL work in this task.
 The current development mainline and existing application identity are preserved.
