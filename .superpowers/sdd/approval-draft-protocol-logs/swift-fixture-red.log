@@ -1,0 +1,24 @@
+Building for debugging...
+[0/7] Write sources
+[1/7] Write swift-version-239F2A40393FBBF.txt
+[3/5] Emitting module MacChannelCoreTests
+[4/5] Compiling MacChannelCoreTests AccountGroupApprovalDraftTests.swift
+[4/6] Write Objects.LinkFileList
+[5/6] Linking MacChannelPackageTests
+Build complete! (3.37s)
+Test Suite 'Selected tests' started at 2026-09-20 15:34:30.861.
+Test Suite 'MacChannelPackageTests.xctest' started at 2026-09-20 15:34:30.862.
+Test Suite 'AccountGroupApprovalDraftTests' started at 2026-09-20 15:34:30.862.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testSyntheticCrossLanguageFixture]' started.
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:43: error: -[MacChannelCoreTests.AccountGroupApprovalDraftTests testSyntheticCrossLanguageFixture] : failed: caught error: "Error Domain=NSCocoaErrorDomain Code=260 "The file “account-group-approval-v1.json” couldn’t be opened because there is no such file." UserInfo={NSFilePath=/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Fixtures/account-group-approval-v1.json, NSURL=file:///Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Fixtures/account-group-approval-v1.json, NSUnderlyingError=0x7845844ea0 {Error Domain=NSPOSIXErrorDomain Code=2 "No such file or directory"}}"
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testSyntheticCrossLanguageFixture]' failed (0.256 seconds).
+Test Suite 'AccountGroupApprovalDraftTests' failed at 2026-09-20 15:34:31.118.
+	 Executed 1 test, with 1 failure (1 unexpected) in 0.256 (0.256) seconds
+Test Suite 'MacChannelPackageTests.xctest' failed at 2026-09-20 15:34:31.118.
+	 Executed 1 test, with 1 failure (1 unexpected) in 0.256 (0.256) seconds
+Test Suite 'Selected tests' failed at 2026-09-20 15:34:31.118.
+	 Executed 1 test, with 1 failure (1 unexpected) in 0.256 (0.257) seconds
+◇ Test run started.
+↳ Testing Library Version: 124.4
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests passed after 0.001 seconds.

@@ -1,0 +1,25 @@
+Building for debugging...
+[0/8] Write sources
+[1/8] Write swift-version-239F2A40393FBBF.txt
+[3/8] Compiling MacChannelCoreTests AccountGroupBootstrapIntentTests.swift
+[4/8] Compiling MacChannelCoreTests AccountFirstDeviceEnrollmentTests.swift
+[5/8] Compiling MacChannelCoreTests AccountGroupApprovalDraftTests.swift
+[6/8] Emitting module MacChannelCoreTests
+[6/8] Write Objects.LinkFileList
+[7/8] Linking MacChannelPackageTests
+Build complete! (3.22s)
+Test Suite 'Selected tests' started at 2026-09-20 15:31:45.287.
+Test Suite 'MacChannelPackageTests.xctest' started at 2026-09-20 15:31:45.288.
+Test Suite 'AccountGroupApprovalDraftTests' started at 2026-09-20 15:31:45.288.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testActorOnlyDraftFinalizesExactPayloadAndRejectsInvalidProof]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testActorOnlyDraftFinalizesExactPayloadAndRejectsInvalidProof]' passed (0.016 seconds).
+Test Suite 'AccountGroupApprovalDraftTests' passed at 2026-09-20 15:31:45.304.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.016 (0.016) seconds
+Test Suite 'MacChannelPackageTests.xctest' passed at 2026-09-20 15:31:45.304.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.016 (0.016) seconds
+Test Suite 'Selected tests' passed at 2026-09-20 15:31:45.304.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.016 (0.017) seconds
+◇ Test run started.
+↳ Testing Library Version: 124.4
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests passed after 0.001 seconds.

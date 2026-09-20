@@ -1,0 +1,110 @@
+=== RUN   TestApprovalDraftRequiresActorOnlyAndFinalizesExactBytes
+--- PASS: TestApprovalDraftRequiresActorOnlyAndFinalizesExactBytes (0.01s)
+=== RUN   TestApprovalDraftSyntheticCrossLanguageFixture
+=== RUN   TestApprovalDraftSyntheticCrossLanguageFixture/actor64-subject65
+=== RUN   TestApprovalDraftSyntheticCrossLanguageFixture/actor65-subject64
+--- PASS: TestApprovalDraftSyntheticCrossLanguageFixture (0.00s)
+    --- PASS: TestApprovalDraftSyntheticCrossLanguageFixture/actor64-subject65 (0.00s)
+    --- PASS: TestApprovalDraftSyntheticCrossLanguageFixture/actor65-subject64 (0.00s)
+=== RUN   TestApprovalDraftStrictRawJSONAndCanonicalPayload
+--- PASS: TestApprovalDraftStrictRawJSONAndCanonicalPayload (0.00s)
+=== RUN   TestApprovalDraftRejectsStructureAndRepresentationSubstitution
+--- PASS: TestApprovalDraftRejectsStructureAndRepresentationSubstitution (0.00s)
+=== RUN   TestApprovalDraftOwnsEveryBuffer
+--- PASS: TestApprovalDraftOwnsEveryBuffer (0.00s)
+=== RUN   TestCanonicalPayloadExactAndAllowsUnsignedConstruction
+--- PASS: TestCanonicalPayloadExactAndAllowsUnsignedConstruction (0.00s)
+=== RUN   TestValidEventsAndSignatureIndependentDigest
+=== RUN   TestValidEventsAndSignatureIndependentDigest/bootstrap_raw64_true
+=== RUN   TestValidEventsAndSignatureIndependentDigest/bootstrap_raw64_false
+--- PASS: TestValidEventsAndSignatureIndependentDigest (0.00s)
+    --- PASS: TestValidEventsAndSignatureIndependentDigest/bootstrap_raw64_true (0.00s)
+    --- PASS: TestValidEventsAndSignatureIndependentDigest/bootstrap_raw64_false (0.00s)
+=== RUN   TestApproveValidityDoesNotImplyMembershipAuthorization
+--- PASS: TestApproveValidityDoesNotImplyMembershipAuthorization (0.00s)
+=== RUN   TestInvalidEventsReturnOnlySentinel
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_account
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_group
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_generation
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_sequence
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_previous_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_action
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_actor_ID
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_actor_key
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_subject_ID
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_subject_key
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_timestamp
+=== RUN   TestInvalidEventsReturnOnlySentinel/missing_actor_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/wrong_actor_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/oversized_actor_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/missing_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/wrong_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/oversized_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/alternate_actor_identity
+=== RUN   TestInvalidEventsReturnOnlySentinel/bad_actor_point
+=== RUN   TestInvalidEventsReturnOnlySentinel/bad_subject_point
+=== RUN   TestInvalidEventsReturnOnlySentinel/uppercase_account_UUID
+=== RUN   TestInvalidEventsReturnOnlySentinel/uppercase_group_UUID
+=== RUN   TestInvalidEventsReturnOnlySentinel/extra_remove_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/invalid_action
+=== RUN   TestInvalidEventsReturnOnlySentinel/zero_sequence
+=== RUN   TestInvalidEventsReturnOnlySentinel/overflow_sequence
+=== RUN   TestInvalidEventsReturnOnlySentinel/zero_generation
+=== RUN   TestInvalidEventsReturnOnlySentinel/overflow_generation
+=== RUN   TestInvalidEventsReturnOnlySentinel/zero_timestamp
+=== RUN   TestInvalidEventsReturnOnlySentinel/negative_timestamp
+=== RUN   TestInvalidEventsReturnOnlySentinel/bootstrap_sequence
+=== RUN   TestInvalidEventsReturnOnlySentinel/bootstrap_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/bootstrap_different_subject
+=== RUN   TestInvalidEventsReturnOnlySentinel/bootstrap_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/approve_missing_prior_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/approve_non32_prior_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/remove_non32_prior_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/self_approve
+--- PASS: TestInvalidEventsReturnOnlySentinel (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_account (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_group (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_generation (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_sequence (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_previous_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_action (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_actor_ID (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_actor_key (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_subject_ID (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_subject_key (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_timestamp (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/missing_actor_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/wrong_actor_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/oversized_actor_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/missing_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/wrong_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/oversized_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/alternate_actor_identity (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bad_actor_point (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bad_subject_point (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/uppercase_account_UUID (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/uppercase_group_UUID (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/extra_remove_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/invalid_action (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/zero_sequence (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/overflow_sequence (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/zero_generation (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/overflow_generation (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/zero_timestamp (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/negative_timestamp (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bootstrap_sequence (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bootstrap_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bootstrap_different_subject (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bootstrap_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/approve_missing_prior_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/approve_non32_prior_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/remove_non32_prior_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/self_approve (0.00s)
+=== RUN   TestCanonicalPayloadRejectsStructuralErrorsButNotMissingSignatures
+--- PASS: TestCanonicalPayloadRejectsStructuralErrorsButNotMissingSignatures (0.00s)
+=== RUN   TestWireRoundtrip
+--- PASS: TestWireRoundtrip (0.01s)
+=== RUN   TestWireRejectMalformed
+--- PASS: TestWireRejectMalformed (0.00s)
+PASS
+ok  	macchannel/rendezvous/internal/accountgroup	1.153s

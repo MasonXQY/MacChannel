@@ -1,0 +1,18 @@
+Building for debugging...
+[0/6] Write swift-version-239F2A40393FBBF.txt
+Build complete! (0.20s)
+error: Exited with unexpected signal code 5
+Test Suite 'Selected tests' started at 2026-09-20 15:35:40.502.
+Test Suite 'MacChannelPackageTests.xctest' started at 2026-09-20 15:35:40.503.
+Test Suite 'AccountGroupApprovalDraftTests' started at 2026-09-20 15:35:40.503.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testActorOnlyDraftFinalizesExactPayloadAndRejectsInvalidProof]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testActorOnlyDraftFinalizesExactPayloadAndRejectsInvalidProof]' passed (0.015 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testMalformedCanonicalBytesRemainRejectedEvenWhenActorResigns]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testMalformedCanonicalBytesRemainRejectedEvenWhenActorResigns]' passed (0.005 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStrictRawJSONAndBase64]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStrictRawJSONAndBase64]' passed (0.003 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStructureRepresentationAndHistoryCannotBeBypassed]' started.
+◇ Test run started.
+↳ Testing Library Version: 124.4
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests passed after 0.001 seconds.

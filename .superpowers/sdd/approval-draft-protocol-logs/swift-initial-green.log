@@ -1,0 +1,208 @@
+[0/1] Planning build
+Building for debugging...
+[0/10] Write sources
+[1/10] Write swift-version-239F2A40393FBBF.txt
+[3/13] Compiling MacChannelCore AccountGroupEvent.swift
+[4/13] Compiling MacChannelCore AccountGroupApprovalDraft.swift
+[5/13] Emitting module MacChannelCore
+[6/21] Compiling MacChannelCore AccountGroupState.swift
+[7/21] Compiling MacChannelCore AccountGroupBootstrapIntentStorage.swift
+[8/21] Compiling MacChannelCore AccountGroupHistoryVerifier.swift
+[9/21] Compiling MacChannelCore AccountGroupService.swift
+[10/21] Compiling MacChannelCore AccountGroupPage.swift
+[11/21] Compiling MacChannelCore AccountGroupEnrollmentService.swift
+[12/21] Compiling MacChannelCore AccountSessionController.swift
+[13/21] Compiling MacChannelCore AccountGroupBootstrapIntent.swift
+[14/66] Compiling MacChannelAppKit UpdateInstallationGate.swift
+[15/67] Compiling DropMeshMobileRuntime MobileTransferHistory.swift
+[16/67] Compiling DropMeshMobileRuntime MobileSignalBridge.swift
+[17/67] Compiling DropMeshMobileRuntime MobileForegroundRuntime.swift
+[18/67] Compiling DropMeshMobileRuntime MobileImportStager.swift
+[19/67] Compiling DropMeshMobileRuntime MobileRuntimeConfiguration.swift
+[20/67] Compiling DropMeshMobileRuntime MobileProductionForegroundNetwork.swift
+[21/67] Compiling DropMeshMobileRuntime MobileHistoryItemsIndex.swift
+[22/67] Compiling DropMeshMobileRuntime MobilePairingSession.swift
+[23/67] Compiling DropMeshMobileRuntime MobilePresenceSupervisor.swift
+[24/67] Compiling DropMeshMobileRuntime MobileIdentityContext.swift
+[25/67] Compiling DropMeshMobileRuntime MobileImportCopy.swift
+[26/67] Compiling DropMeshMobileRuntime MobileForegroundConnector.swift
+[27/67] Compiling DropMeshMobileRuntime MobileHistoryDeletionStore.swift
+[28/67] Emitting module DropMeshMobileRuntime
+[29/67] Compiling DropMeshMobileRuntime MobileReceivedOutputIndex.swift
+[30/67] Compiling MacChannelAppKit UserSelectedSourceAccess.swift
+[31/67] Compiling MacChannelAppKit TransferPopover.swift
+[32/81] Compiling MacChannelAppKit StatusItemKeyboardFlow.swift
+[33/81] Compiling MacChannelAppKit StatusItemController.swift
+[34/81] Compiling MacChannelAppKit AppSurfaceController.swift
+[35/81] Compiling MacChannelAppKit ClipboardTransferSource.swift
+[36/81] Compiling MacChannelAppKit RecentReceiveStore.swift
+[37/81] Compiling MacChannelAppKit RuntimeNamespace.swift
+[38/81] Compiling MacChannelAppKit StatusItemButton.swift
+[39/81] Compiling MacChannelAppKit RuntimeOutputLocator.swift
+[40/81] Compiling MacChannelAppKit ReceiveNotificationController.swift
+[41/81] Compiling MacChannelAppKit ProductionAppRuntime.swift
+[42/81] Compiling MacChannelAppKit SecurityScopedDirectoryStore.swift
+[43/81] Compiling MacChannelAppKit SoftwareUpdateModel.swift
+[44/81] Compiling MacChannelAppKit SettingsView.swift
+[45/81] Compiling MacChannelAppKit OnboardingView.swift
+[46/81] Compiling MacChannelAppKit DistributionChannel.swift
+[47/81] Compiling MacChannelAppKit LocalNetworkPermissionModel.swift
+[48/81] Compiling MacChannelAppKit PairingView.swift
+[49/81] Compiling MacChannelAppKit PublicServiceLifecycle.swift
+[50/81] Compiling MacChannelAppKit ReceiveEventSource.swift
+[51/81] Compiling MacChannelAppKit ConcurrentDistributionGuard.swift
+[52/81] Compiling MacChannelAppKit DeviceFanPanel.swift
+[53/81] Compiling MacChannelAppKit DeviceFanView.swift
+[54/81] Compiling MacChannelAppKit DeviceSummary+Presentation.swift
+[55/81] Emitting module MacChannelAppKit
+[56/81] Compiling MacChannelAppKit AppContainer.swift
+[57/81] Compiling MacChannelAppKit AppRuntime.swift
+[58/81] Compiling MacChannelAppKit Localization.swift
+[59/81] Compiling MacChannelAppKit MacChannelApp.swift
+[60/81] Compiling DropMeshMobileRuntimeTests MobileTransferHistoryTests.swift
+[61/92] Compiling DropMeshMobileRuntimeTests MobilePresenceRecoveryDiagnosticTests.swift
+[62/92] Compiling DropMeshMobileRuntimeTests MobileProviderImportTests.swift
+[63/92] Compiling DropMeshMobileRuntimeTests MobileReceivedOutputIndexTests.swift
+[64/92] Compiling DropMeshMobileRuntimeTests MobileSignalBridgeTests.swift
+[65/92] Compiling DropMeshMobileRuntimeTests MobileForegroundConnectorTests.swift
+[66/92] Compiling DropMeshMobileRuntimeTests MobileIdentityContextTests.swift
+[67/92] Compiling DropMeshMobileRuntimeTests MobileProductionForegroundNetworkTests.swift
+[68/92] Compiling DropMeshMobileRuntimeTests MobilePairingSessionTests.swift
+[69/92] Compiling DropMeshMobileRuntimeTests MobileImportStagerTests.swift
+[70/92] Compiling DropMeshMobileRuntimeTests MobilePresenceSupervisorTests.swift
+[71/92] Compiling DropMeshMobileRuntimeTests MobileIdentityRecoveryTests.swift
+[72/92] Compiling DropMeshMobileRuntimeTests MobileForegroundRuntimeTests.swift
+[73/92] Emitting module DropMeshMobileRuntimeTests
+[74/92] Compiling DropMeshAppStoreDistribution AppStoreDistribution.swift
+[75/92] Emitting module DropMeshAppStoreDistribution
+[76/92] Compiling DropMeshAppStoreDistribution AppStoreUpdateController.swift
+[76/92] Write Objects.LinkFileList
+[78/92] Compiling MacChannelDirectDistribution DirectDistribution.swift
+[79/92] Emitting module MacChannelDirectDistribution
+[80/92] Compiling MacChannelDirectDistribution SparkleUpdateController.swift
+[81/126] Emitting module MacChannelApp
+[82/126] Compiling MacChannelApp MacChannelAppEntry.swift
+[82/142] Write Objects.LinkFileList
+[83/164] Linking DropMeshAppStore
+[84/164] Applying DropMeshAppStore
+[86/164] Compiling MacChannelCoreTests PeerConnectionPresentationTests.swift
+[87/164] Compiling MacChannelCoreTests PeerWithdrawalTests.swift
+[88/164] Compiling MacChannelCoreTests PersonalMeshRuntimeTests.swift
+[89/166] Compiling MacChannelCoreTests DropIntentTests.swift
+[90/166] Compiling MacChannelCoreTests DurablePairingSessionTests.swift
+[91/166] Compiling MacChannelCoreTests GoAccountInteropTests.swift
+[91/166] Linking MacChannelApp
+[92/166] Applying MacChannelApp
+[94/166] Compiling MacChannelCoreTests SecurityScopedDirectoryStoreTests.swift
+[95/166] Compiling MacChannelCoreTests SharedPresenceOwnerTests.swift
+[96/166] Compiling MacChannelCoreTests SignedEnvelopeCanonicalTests.swift
+[97/166] Compiling MacChannelCoreTests MeshConnectionListenerTests.swift
+[98/166] Compiling MacChannelCoreTests MeshPairingTests.swift
+[99/166] Compiling MacChannelCoreTests MeshPeerDirectoryTests.swift
+error: emit-module command failed with exit code 1 (use -v to see invocation)
+[100/166] Emitting module MacChannelCoreTests
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:19:58: error: call can throw but is not marked with 'try'
+17 |             let final = try decoded.finalize(subjectSignature: full.subjectSignature)
+18 |             XCTAssertEqual(final, full)
+19 |             XCTAssertEqual(try final.canonicalPayload(), partial.canonicalPayload())
+   |                                                          |- error: call can throw but is not marked with 'try'
+   |                                                          |- note: did you mean to use 'try'?
+   |                                                          |- note: did you mean to handle error as optional value?
+   |                                                          `- note: did you mean to disable error propagation?
+20 |             XCTAssertEqual(final.signature, partial.signature)
+21 |             XCTAssertEqual(final.actorPublicKey.count, raw65 ? 65 : 64)
+[101/166] Compiling MacChannelCoreTests MeshSecureChannelTests.swift
+[102/166] Compiling MacChannelCoreTests MeshTransferOrchestrationTests.swift
+[103/166] Compiling MacChannelCoreTests MeshWireProtocolTests.swift
+[104/166] Compiling MacChannelCoreTests DomainTests.swift
+[105/166] Compiling MacChannelCoreTests DownloadDirectoryPlatformTests.swift
+[106/166] Compiling MacChannelCoreTests DragRegionSessionTests.swift
+[107/166] Compiling MacChannelCoreTests AccountFirstDeviceEnrollmentTests.swift
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:19:58: error: call can throw but is not marked with 'try'
+17 |             let final = try decoded.finalize(subjectSignature: full.subjectSignature)
+18 |             XCTAssertEqual(final, full)
+19 |             XCTAssertEqual(try final.canonicalPayload(), partial.canonicalPayload())
+   |                                                          |- error: call can throw but is not marked with 'try'
+   |                                                          |- note: did you mean to use 'try'?
+   |                                                          |- note: did you mean to handle error as optional value?
+   |                                                          `- note: did you mean to disable error propagation?
+20 |             XCTAssertEqual(final.signature, partial.signature)
+21 |             XCTAssertEqual(final.actorPublicKey.count, raw65 ? 65 : 64)
+[108/166] Compiling MacChannelCoreTests AccountGroupApprovalDraftTests.swift
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:19:58: error: call can throw but is not marked with 'try'
+17 |             let final = try decoded.finalize(subjectSignature: full.subjectSignature)
+18 |             XCTAssertEqual(final, full)
+19 |             XCTAssertEqual(try final.canonicalPayload(), partial.canonicalPayload())
+   |                                                          |- error: call can throw but is not marked with 'try'
+   |                                                          |- note: did you mean to use 'try'?
+   |                                                          |- note: did you mean to handle error as optional value?
+   |                                                          `- note: did you mean to disable error propagation?
+20 |             XCTAssertEqual(final.signature, partial.signature)
+21 |             XCTAssertEqual(final.actorPublicKey.count, raw65 ? 65 : 64)
+[109/166] Compiling MacChannelCoreTests AccountGroupBootstrapIntentTests.swift
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:19:58: error: call can throw but is not marked with 'try'
+17 |             let final = try decoded.finalize(subjectSignature: full.subjectSignature)
+18 |             XCTAssertEqual(final, full)
+19 |             XCTAssertEqual(try final.canonicalPayload(), partial.canonicalPayload())
+   |                                                          |- error: call can throw but is not marked with 'try'
+   |                                                          |- note: did you mean to use 'try'?
+   |                                                          |- note: did you mean to handle error as optional value?
+   |                                                          `- note: did you mean to disable error propagation?
+20 |             XCTAssertEqual(final.signature, partial.signature)
+21 |             XCTAssertEqual(final.actorPublicKey.count, raw65 ? 65 : 64)
+[110/166] Compiling MacChannelCoreTests GoGroupEnrollmentInteropTests.swift
+[111/166] Compiling MacChannelCoreTests GoGroupReadInteropTests.swift
+[112/166] Compiling MacChannelCoreTests GoRendezvousInteropTests.swift
+[113/166] Compiling MacChannelCoreTests PresenceDrainTests.swift
+[114/166] Compiling MacChannelCoreTests PresenceTrustSynchronizerTests.swift
+[115/166] Compiling MacChannelCoreTests ReceiveEventSourceTests.swift
+[116/166] Compiling MacChannelCoreTests OnboardingTests.swift
+[117/166] Compiling MacChannelCoreTests PairingInputLayoutTests.swift
+[118/166] Compiling MacChannelCoreTests PairingTests.swift
+[119/166] Compiling MacChannelCoreTests ClipboardTransferSourceTests.swift
+[120/166] Compiling MacChannelCoreTests ConcurrentDistributionGuardTests.swift
+[121/166] Compiling MacChannelCoreTests ConnectionCoordinatorTests.swift
+[122/166] Compiling MacChannelCoreTests UserSelectedSourceAccessTests.swift
+[123/166] Compiling MacChannelCoreTests WebRTCLoopbackTests.swift
+[124/166] Compiling MacChannelIntegrationTests TransferIntegrationTests.swift
+[125/166] Compiling MacChannelIntegrationTests PersonalMeshIntegrationTests.swift
+[126/166] Emitting module MacChannelIntegrationTests
+[127/166] Compiling MacChannelIntegrationTests TwoClientHarness.swift
+[128/166] Compiling MacChannelIntegrationTests ServerReflexiveCandidateProbe.swift
+[129/166] Compiling MacChannelCoreTests DeviceDirectoryTests.swift
+[130/166] Compiling MacChannelCoreTests DeviceFanLayoutTests.swift
+[131/166] Compiling MacChannelCoreTests DistributionChannelTests.swift
+[132/166] Compiling MacChannelCoreTests TransferSurfaceTests.swift
+[133/166] Compiling MacChannelCoreTests TrustAuthenticationExportTests.swift
+[134/166] Compiling MacChannelCoreTests TrustPersistenceReceiptTests.swift
+[135/166] Compiling MacChannelCoreTests AccountGroupInteropTests.swift
+[136/166] Compiling MacChannelCoreTests AccountGroupProofTests.swift
+[137/166] Compiling MacChannelCoreTests AccountGroupServiceTests.swift
+[138/166] Compiling MacChannelCoreTests RendezvousPairingShutdownTests.swift
+[139/166] Compiling MacChannelCoreTests RendezvousTURNCredentialClientTests.swift
+[140/166] Compiling MacChannelCoreTests RuntimePresencePresentationTests.swift
+[141/166] Compiling MacChannelCoreTests ReceiveNotificationControllerTests.swift
+[142/166] Compiling MacChannelCoreTests ReceiveStoreTests.swift
+[143/166] Compiling MacChannelCoreTests RecentReceiveStoreTests.swift
+[144/166] Compiling MacChannelCoreTests SoftwareUpdateTests.swift
+[145/166] Compiling MacChannelCoreTests StagedFileTests.swift
+[146/166] Compiling MacChannelCoreTests StatusItemAppKitTests.swift
+[147/166] Compiling MacChannelCoreTests SwiftPasteboardSourceAuditor.swift
+[148/166] Compiling MacChannelCoreTests TailscaleCommandClientTests.swift
+[149/166] Compiling MacChannelCoreTests TailscaleServeConfiguratorTests.swift
+[150/166] Compiling MacChannelCoreTests ICEConfigurationProviderTests.swift
+[151/166] Compiling MacChannelCoreTests IdentityTests.swift
+[152/166] Compiling MacChannelCoreTests LocalizationTests.swift
+[153/166] Compiling MacChannelCoreTests AccountSessionGroupTests.swift
+[154/166] Compiling MacChannelCoreTests AccountSessionStorageTests.swift
+[155/166] Compiling MacChannelCoreTests AppRuntimeTests.swift
+[156/166] Compiling MacChannelCoreTests AccountServiceClientTests.swift
+[157/166] Compiling MacChannelCoreTests AccountServiceTransportTests.swift
+[158/166] Compiling MacChannelCoreTests AccountSessionControllerTests.swift
+[159/166] Compiling MacChannelCoreTests AccountGroupCheckpointTests.swift
+[160/166] Compiling MacChannelCoreTests AccountGroupEnrollmentServiceTests.swift
+[161/166] Compiling MacChannelCoreTests AccountGroupHistoryVerifierTests.swift
+[162/166] Compiling MacChannelCoreTests TransferCoordinatorTests.swift
+[163/166] Compiling MacChannelCoreTests TransferDatabaseLifecycleTests.swift
+[164/166] Compiling MacChannelCoreTests TransferProtocolTests.swift
+error: fatalError

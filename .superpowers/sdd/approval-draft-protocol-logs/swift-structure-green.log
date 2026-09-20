@@ -1,0 +1,23 @@
+Building for debugging...
+[0/7] Write sources
+[1/7] Write swift-version-239F2A40393FBBF.txt
+[3/5] Emitting module MacChannelCoreTests
+[4/5] Compiling MacChannelCoreTests AccountGroupApprovalDraftTests.swift
+[4/6] Write Objects.LinkFileList
+[5/6] Linking MacChannelPackageTests
+Build complete! (3.23s)
+Test Suite 'Selected tests' started at 2026-09-20 15:36:45.661.
+Test Suite 'MacChannelPackageTests.xctest' started at 2026-09-20 15:36:45.662.
+Test Suite 'AccountGroupApprovalDraftTests' started at 2026-09-20 15:36:45.662.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStructureRepresentationAndHistoryCannotBeBypassed]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStructureRepresentationAndHistoryCannotBeBypassed]' passed (0.010 seconds).
+Test Suite 'AccountGroupApprovalDraftTests' passed at 2026-09-20 15:36:45.672.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.010 (0.010) seconds
+Test Suite 'MacChannelPackageTests.xctest' passed at 2026-09-20 15:36:45.672.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.010 (0.010) seconds
+Test Suite 'Selected tests' passed at 2026-09-20 15:36:45.672.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+◇ Test run started.
+↳ Testing Library Version: 124.4
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests passed after 0.001 seconds.

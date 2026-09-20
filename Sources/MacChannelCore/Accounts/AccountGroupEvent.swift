@@ -33,11 +33,16 @@ public struct AccountGroupWireEvent: Codable, Equatable, Sendable {
     /// Required at untrusted raw JSON boundaries. Foundation's keyed Decoder
     /// loses duplicate keys; Codable alone cannot enforce their absence.
     public static func decodeJSON(_ data: Data) throws -> Self {
-        do { return try decodeStrictJSON(data) }
+        do {
+            _ = try AccountGroupWireJSON.fields(data, keys: ["payload", "signature", "subjectSignature"])
+            return try JSONDecoder().decode(Self.self, from: data)
+        }
         catch { throw AccountGroupProofError.invalidEvent }
     }
+}
 
-    private static func decodeStrictJSON(_ data: Data) throws -> Self {
+enum AccountGroupWireJSON {
+    static func fields(_ data: Data, keys: Set<String>) throws -> [String: String] {
         guard data.count <= 8192 else { throw AccountGroupProofError.invalidEvent }
         let bytes = Array(data)
         var i = 0
@@ -63,10 +68,10 @@ public struct AccountGroupWireEvent: Codable, Equatable, Sendable {
         }
         try token(123)
         var fields: [String: String] = [:]
-        for index in 0..<3 {
+        for index in 0..<keys.count {
             if index > 0 { try token(44) }
             let key = try string()
-            guard ["payload", "signature", "subjectSignature"].contains(key), fields[key] == nil else {
+            guard keys.contains(key), fields[key] == nil else {
                 throw AccountGroupProofError.invalidEvent
             }
             try token(58)
@@ -75,7 +80,7 @@ public struct AccountGroupWireEvent: Codable, Equatable, Sendable {
         try token(125)
         whitespace()
         guard i == bytes.count else { throw AccountGroupProofError.invalidEvent }
-        return try JSONDecoder().decode(Self.self, from: data)
+        return fields
     }
 }
 
@@ -112,17 +117,22 @@ public struct AccountGroupEvent: Equatable, Sendable {
         return Data(("{\"accountID\":\"\(accountID)\",\"action\":\"\(action)\",\"actorDeviceID\":\"\(actorDeviceID)\",\"actorPublicKey\":\"\(actorPublicKey.base64EncodedString())\",\"epochMilliseconds\":\(epochMilliseconds),\"generation\":\(generation),\"groupID\":\"\(groupID)\",\"previousHash\":\"\(previousHash.base64EncodedString())\",\"purpose\":\"dropmesh.account.group.event.v1\",\"sequence\":\(sequence),\"subjectDeviceID\":\"\(subjectDeviceID)\",\"subjectPublicKey\":\"\(subjectPublicKey.base64EncodedString())\"}").utf8)
     }
     public func validate() throws {
-        let payload = try canonicalPayload()
-        func verify(_ signature: Data, _ key: Data) throws {
-            guard !signature.isEmpty, signature.count <= 80,
-                  let sig = try? P256.Signing.ECDSASignature(derRepresentation: signature),
-                  try Self.publicKey(key).isValidSignature(sig, for: payload) else {
-                throw AccountGroupProofError.invalidEvent
-            }
-        }
-        try verify(signature, actorPublicKey)
-        if action == "approve" { try verify(subjectSignature, subjectPublicKey) }
+        let payload = try validateActorProof()
+        if action == "approve" { try Self.verify(subjectSignature, key: subjectPublicKey, payload: payload) }
         else if !subjectSignature.isEmpty { throw AccountGroupProofError.invalidEvent }
+    }
+    // Internal actor-only seam; finalized validation never skips joining proof.
+    func validateActorProof() throws -> Data {
+        let payload = try canonicalPayload()
+        try Self.verify(signature, key: actorPublicKey, payload: payload)
+        return payload
+    }
+    private static func verify(_ signature: Data, key: Data, payload: Data) throws {
+        guard !signature.isEmpty, signature.count <= 80,
+              let sig = try? P256.Signing.ECDSASignature(derRepresentation: signature),
+              try Self.publicKey(key).isValidSignature(sig, for: payload) else {
+            throw AccountGroupProofError.invalidEvent
+        }
     }
     public func digest() throws -> Data {
         try validate()
@@ -134,27 +144,34 @@ public struct AccountGroupEvent: Equatable, Sendable {
             signature: signature.base64EncodedString(), subjectSignature: subjectSignature.base64EncodedString())
     }
     public init(wire: AccountGroupWireEvent) throws {
+        do {
+            try self.init(canonicalPayload: Self.wireBase64(wire.payload, bound: 4096),
+                signature: Self.wireBase64(wire.signature, bound: 108),
+                subjectSignature: Self.wireBase64(wire.subjectSignature, bound: 108))
+            try validate()
+        } catch { throw AccountGroupProofError.invalidEvent }
+    }
+    static func wireBase64(_ value: String, bound: Int) throws -> Data {
+        guard value.utf8.count <= bound, let result = Data(base64Encoded: value),
+              result.base64EncodedString() == value else { throw AccountGroupProofError.invalidEvent }
+        return result
+    }
+    // Exact canonical parser shared by separate draft and finalized envelopes.
+    init(canonicalPayload bytes: Data, signature: Data, subjectSignature: Data) throws {
         struct Payload: Decodable {
             let accountID: String, action: String, actorDeviceID: String, actorPublicKey: String
             let epochMilliseconds: Int64, generation: UInt64, groupID: String, previousHash: String
             let purpose: String, sequence: UInt64, subjectDeviceID: String, subjectPublicKey: String
         }
-        func base64(_ value: String, _ bound: Int) throws -> Data {
-            guard value.utf8.count <= bound, let result = Data(base64Encoded: value),
-                  result.base64EncodedString() == value else { throw AccountGroupProofError.invalidEvent }
-            return result
-        }
         do {
-            let bytes = try base64(wire.payload, 4096)
             let p = try JSONDecoder().decode(Payload.self, from: bytes)
             guard p.purpose == "dropmesh.account.group.event.v1" else { throw AccountGroupProofError.invalidEvent }
             try self.init(accountID: p.accountID, groupID: p.groupID, generation: p.generation, sequence: p.sequence,
-                previousHash: base64(p.previousHash, 44), action: p.action, actorDeviceID: p.actorDeviceID,
-                actorPublicKey: base64(p.actorPublicKey, 88), subjectDeviceID: p.subjectDeviceID,
-                subjectPublicKey: base64(p.subjectPublicKey, 88), epochMilliseconds: p.epochMilliseconds,
-                signature: base64(wire.signature, 108), subjectSignature: base64(wire.subjectSignature, 108))
+                previousHash: Self.wireBase64(p.previousHash, bound: 44), action: p.action, actorDeviceID: p.actorDeviceID,
+                actorPublicKey: Self.wireBase64(p.actorPublicKey, bound: 88), subjectDeviceID: p.subjectDeviceID,
+                subjectPublicKey: Self.wireBase64(p.subjectPublicKey, bound: 88), epochMilliseconds: p.epochMilliseconds,
+                signature: signature, subjectSignature: subjectSignature)
             guard try canonicalPayload() == bytes else { throw AccountGroupProofError.invalidEvent }
-            try validate()
         } catch { throw AccountGroupProofError.invalidEvent }
     }
     private static func publicKey(_ bytes: Data) throws -> P256.Signing.PublicKey {

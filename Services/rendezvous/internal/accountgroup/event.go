@@ -81,19 +81,8 @@ func (e Event) CanonicalPayload() ([]byte, error) {
 // owner confirmation; accept approve only after fingerprint confirmation and
 // fresh joining-device consent; and scope removed-member events correctly.
 func (e Event) Validate() error {
-	payload, err := e.CanonicalPayload()
+	digest, err := e.validateActorProof()
 	if err != nil {
-		return ErrInvalidEvent
-	}
-	if len(e.Signature) == 0 || len(e.Signature) > 80 {
-		return ErrInvalidEvent
-	}
-	actor, err := parsePublicKey(e.ActorPublicKey)
-	if err != nil {
-		return ErrInvalidEvent
-	}
-	digest := sha256.Sum256(payload)
-	if !ecdsa.VerifyASN1(actor, digest[:], e.Signature) {
 		return ErrInvalidEvent
 	}
 	if e.Action == ActionApprove {
@@ -108,6 +97,26 @@ func (e Event) Validate() error {
 		return ErrInvalidEvent
 	}
 	return nil
+}
+
+// Internal actor-only seam; finalized Validate always checks both approval proofs.
+func (e Event) validateActorProof() ([32]byte, error) {
+	payload, err := e.CanonicalPayload()
+	if err != nil {
+		return [32]byte{}, ErrInvalidEvent
+	}
+	if len(e.Signature) == 0 || len(e.Signature) > 80 {
+		return [32]byte{}, ErrInvalidEvent
+	}
+	actor, err := parsePublicKey(e.ActorPublicKey)
+	if err != nil {
+		return [32]byte{}, ErrInvalidEvent
+	}
+	digest := sha256.Sum256(payload)
+	if !ecdsa.VerifyASN1(actor, digest[:], e.Signature) {
+		return [32]byte{}, ErrInvalidEvent
+	}
+	return digest, nil
 }
 
 // Digest identifies a validated event by its signature-independent canonical

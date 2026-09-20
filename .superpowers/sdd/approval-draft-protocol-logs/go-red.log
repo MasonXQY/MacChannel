@@ -1,0 +1,14 @@
+# macchannel/rendezvous/internal/accountgroup [macchannel/rendezvous/internal/accountgroup.test]
+internal/accountgroup/approval_draft_test.go:14:10: undefined: NewApprovalDraft
+internal/accountgroup/approval_draft_test.go:16:10: undefined: EncodeWireApprovalDraft
+internal/accountgroup/approval_draft_test.go:17:15: undefined: DecodeWireApprovalDraft
+internal/accountgroup/approval_draft_test.go:23:43: undefined: DecodeWireApprovalDraftJSON
+internal/accountgroup/approval_draft_test.go:25:44: undefined: NewApprovalDraft
+internal/accountgroup/approval_draft_test.go:28:11: undefined: ApprovalDraft
+internal/accountgroup/approval_draft_test.go:29:12: undefined: EncodeWireApprovalDraft
+internal/accountgroup/approval_draft_test.go:37:9: undefined: NewApprovalDraft
+internal/accountgroup/approval_draft_test.go:38:10: undefined: EncodeWireApprovalDraft
+internal/accountgroup/approval_draft_test.go:43:11: undefined: EncodeWireApprovalDraft
+internal/accountgroup/approval_draft_test.go:43:11: too many errors
+FAIL	macchannel/rendezvous/internal/accountgroup [build failed]
+FAIL

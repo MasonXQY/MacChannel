@@ -42,6 +42,19 @@ func DecodeWireEvent(w WireEvent) (Event, error) {
 	if !ok {
 		return Event{}, ErrInvalidEvent
 	}
+	e, err := decodeCanonicalPayload(payload)
+	if err != nil {
+		return Event{}, ErrInvalidEvent
+	}
+	e.Signature, e.SubjectSignature = signature, subjectSignature
+	if e.Validate() != nil {
+		return Event{}, ErrInvalidEvent
+	}
+	return e, nil
+}
+
+// Structure and exact canonical bytes only; each envelope checks its own proofs.
+func decodeCanonicalPayload(payload []byte) (Event, error) {
 	var p struct {
 		AccountID         string `json:"accountID"`
 		Action            Action `json:"action"`
@@ -71,9 +84,9 @@ func DecodeWireEvent(w WireEvent) (Event, error) {
 	if !ok {
 		return Event{}, ErrInvalidEvent
 	}
-	e := Event{AccountID: p.AccountID, GroupID: p.GroupID, Generation: p.Generation, Sequence: p.Sequence, PreviousHash: previous, Action: p.Action, ActorDeviceID: p.ActorDeviceID, ActorPublicKey: actor, SubjectDeviceID: p.SubjectDeviceID, SubjectPublicKey: subject, EpochMilliseconds: p.EpochMilliseconds, Signature: signature, SubjectSignature: subjectSignature}
+	e := Event{AccountID: p.AccountID, GroupID: p.GroupID, Generation: p.Generation, Sequence: p.Sequence, PreviousHash: previous, Action: p.Action, ActorDeviceID: p.ActorDeviceID, ActorPublicKey: actor, SubjectDeviceID: p.SubjectDeviceID, SubjectPublicKey: subject, EpochMilliseconds: p.EpochMilliseconds}
 	canonical, err := e.CanonicalPayload()
-	if err != nil || !bytes.Equal(payload, canonical) || e.Validate() != nil {
+	if err != nil || !bytes.Equal(payload, canonical) {
 		return Event{}, ErrInvalidEvent
 	}
 	return e, nil

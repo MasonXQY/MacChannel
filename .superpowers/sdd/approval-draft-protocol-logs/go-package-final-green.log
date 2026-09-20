@@ -1,0 +1,342 @@
+=== RUN   TestApprovalDraftRequiresActorOnlyAndFinalizesExactBytes
+--- PASS: TestApprovalDraftRequiresActorOnlyAndFinalizesExactBytes (0.01s)
+=== RUN   TestApprovalDraftSyntheticCrossLanguageFixture
+=== RUN   TestApprovalDraftSyntheticCrossLanguageFixture/actor64-subject65
+=== RUN   TestApprovalDraftSyntheticCrossLanguageFixture/actor65-subject64
+--- PASS: TestApprovalDraftSyntheticCrossLanguageFixture (0.00s)
+    --- PASS: TestApprovalDraftSyntheticCrossLanguageFixture/actor64-subject65 (0.00s)
+    --- PASS: TestApprovalDraftSyntheticCrossLanguageFixture/actor65-subject64 (0.00s)
+=== RUN   TestApprovalDraftStrictRawJSONAndCanonicalPayload
+--- PASS: TestApprovalDraftStrictRawJSONAndCanonicalPayload (0.01s)
+=== RUN   TestApprovalDraftRejectsStructureAndRepresentationSubstitution
+--- PASS: TestApprovalDraftRejectsStructureAndRepresentationSubstitution (0.00s)
+=== RUN   TestApprovalDraftOwnsEveryBuffer
+--- PASS: TestApprovalDraftOwnsEveryBuffer (0.00s)
+=== RUN   TestPostgresDiscovery
+=== RUN   TestPostgresDiscovery/absent
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresDiscovery/persisted
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresDiscovery/missing
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresDiscovery/deleting
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresDiscovery/foreign
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresDiscovery/malformed
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresDiscovery/empty_journal
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresDiscovery/terminal
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresDiscovery/cancelled
+    discovery_test.go:11: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- PASS: TestPostgresDiscovery (0.00s)
+    --- SKIP: TestPostgresDiscovery/absent (0.00s)
+    --- SKIP: TestPostgresDiscovery/persisted (0.00s)
+    --- SKIP: TestPostgresDiscovery/missing (0.00s)
+    --- SKIP: TestPostgresDiscovery/deleting (0.00s)
+    --- SKIP: TestPostgresDiscovery/foreign (0.00s)
+    --- SKIP: TestPostgresDiscovery/malformed (0.00s)
+    --- SKIP: TestPostgresDiscovery/empty_journal (0.00s)
+    --- SKIP: TestPostgresDiscovery/terminal (0.00s)
+    --- SKIP: TestPostgresDiscovery/cancelled (0.00s)
+=== RUN   TestDiscoveryReadiness
+    discovery_test.go:88: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestDiscoveryReadiness (0.00s)
+=== RUN   TestCanonicalPayloadExactAndAllowsUnsignedConstruction
+--- PASS: TestCanonicalPayloadExactAndAllowsUnsignedConstruction (0.00s)
+=== RUN   TestValidEventsAndSignatureIndependentDigest
+=== RUN   TestValidEventsAndSignatureIndependentDigest/bootstrap_raw64_true
+=== RUN   TestValidEventsAndSignatureIndependentDigest/bootstrap_raw64_false
+--- PASS: TestValidEventsAndSignatureIndependentDigest (0.00s)
+    --- PASS: TestValidEventsAndSignatureIndependentDigest/bootstrap_raw64_true (0.00s)
+    --- PASS: TestValidEventsAndSignatureIndependentDigest/bootstrap_raw64_false (0.00s)
+=== RUN   TestApproveValidityDoesNotImplyMembershipAuthorization
+--- PASS: TestApproveValidityDoesNotImplyMembershipAuthorization (0.00s)
+=== RUN   TestInvalidEventsReturnOnlySentinel
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_account
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_group
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_generation
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_sequence
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_previous_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_action
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_actor_ID
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_actor_key
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_subject_ID
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_subject_key
+=== RUN   TestInvalidEventsReturnOnlySentinel/tampered_timestamp
+=== RUN   TestInvalidEventsReturnOnlySentinel/missing_actor_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/wrong_actor_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/oversized_actor_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/missing_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/wrong_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/oversized_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/alternate_actor_identity
+=== RUN   TestInvalidEventsReturnOnlySentinel/bad_actor_point
+=== RUN   TestInvalidEventsReturnOnlySentinel/bad_subject_point
+=== RUN   TestInvalidEventsReturnOnlySentinel/uppercase_account_UUID
+=== RUN   TestInvalidEventsReturnOnlySentinel/uppercase_group_UUID
+=== RUN   TestInvalidEventsReturnOnlySentinel/extra_remove_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/invalid_action
+=== RUN   TestInvalidEventsReturnOnlySentinel/zero_sequence
+=== RUN   TestInvalidEventsReturnOnlySentinel/overflow_sequence
+=== RUN   TestInvalidEventsReturnOnlySentinel/zero_generation
+=== RUN   TestInvalidEventsReturnOnlySentinel/overflow_generation
+=== RUN   TestInvalidEventsReturnOnlySentinel/zero_timestamp
+=== RUN   TestInvalidEventsReturnOnlySentinel/negative_timestamp
+=== RUN   TestInvalidEventsReturnOnlySentinel/bootstrap_sequence
+=== RUN   TestInvalidEventsReturnOnlySentinel/bootstrap_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/bootstrap_different_subject
+=== RUN   TestInvalidEventsReturnOnlySentinel/bootstrap_subject_signature
+=== RUN   TestInvalidEventsReturnOnlySentinel/approve_missing_prior_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/approve_non32_prior_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/remove_non32_prior_hash
+=== RUN   TestInvalidEventsReturnOnlySentinel/self_approve
+--- PASS: TestInvalidEventsReturnOnlySentinel (0.01s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_account (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_group (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_generation (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_sequence (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_previous_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_action (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_actor_ID (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_actor_key (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_subject_ID (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_subject_key (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/tampered_timestamp (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/missing_actor_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/wrong_actor_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/oversized_actor_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/missing_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/wrong_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/oversized_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/alternate_actor_identity (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bad_actor_point (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bad_subject_point (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/uppercase_account_UUID (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/uppercase_group_UUID (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/extra_remove_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/invalid_action (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/zero_sequence (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/overflow_sequence (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/zero_generation (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/overflow_generation (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/zero_timestamp (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/negative_timestamp (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bootstrap_sequence (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bootstrap_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bootstrap_different_subject (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/bootstrap_subject_signature (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/approve_missing_prior_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/approve_non32_prior_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/remove_non32_prior_hash (0.00s)
+    --- PASS: TestInvalidEventsReturnOnlySentinel/self_approve (0.00s)
+=== RUN   TestCanonicalPayloadRejectsStructuralErrorsButNotMissingSignatures
+--- PASS: TestCanonicalPayloadRejectsStructuralErrorsButNotMissingSignatures (0.00s)
+=== RUN   TestMethodsDoNotMutateInputBuffers
+--- PASS: TestMethodsDoNotMutateInputBuffers (0.00s)
+=== RUN   TestNativeGroupInterop
+    native_interop_test.go:47: opt-in native cryptographic interoperability
+--- SKIP: TestNativeGroupInterop (0.00s)
+=== RUN   TestNativeGroupInteropDirectorySafety
+--- PASS: TestNativeGroupInteropDirectorySafety (0.00s)
+=== RUN   TestPostgresGroupBindingsAndAvailability
+    postgres_test.go:49: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupBindingsAndAvailability (0.00s)
+=== RUN   TestPostgresGroupConcurrentPools
+    postgres_test.go:107: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupConcurrentPools (0.00s)
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput/malformed
+    postgres_test.go:164: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput/unknown
+    postgres_test.go:164: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput/trailing
+    postgres_test.go:164: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput/gap
+    postgres_test.go:164: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput/hash
+    postgres_test.go:164: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput/key
+    postgres_test.go:164: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput/pin
+    postgres_test.go:164: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestPostgresGroupCorruptionNoPartialOutput/empty
+    postgres_test.go:164: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- PASS: TestPostgresGroupCorruptionNoPartialOutput (0.00s)
+    --- SKIP: TestPostgresGroupCorruptionNoPartialOutput/malformed (0.00s)
+    --- SKIP: TestPostgresGroupCorruptionNoPartialOutput/unknown (0.00s)
+    --- SKIP: TestPostgresGroupCorruptionNoPartialOutput/trailing (0.00s)
+    --- SKIP: TestPostgresGroupCorruptionNoPartialOutput/gap (0.00s)
+    --- SKIP: TestPostgresGroupCorruptionNoPartialOutput/hash (0.00s)
+    --- SKIP: TestPostgresGroupCorruptionNoPartialOutput/key (0.00s)
+    --- SKIP: TestPostgresGroupCorruptionNoPartialOutput/pin (0.00s)
+    --- SKIP: TestPostgresGroupCorruptionNoPartialOutput/empty (0.00s)
+=== RUN   TestPostgresGroupDeferredCommitFailure
+    postgres_test.go:224: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupDeferredCommitFailure (0.00s)
+=== RUN   TestPostgresGroupReadCommitFailureReturnsNoEvents
+    postgres_test.go:310: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupReadCommitFailureReturnsNoEvents (0.00s)
+=== RUN   TestPostgresGroupNilAndCancelled
+    postgres_test.go:360: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupNilAndCancelled (0.00s)
+=== RUN   TestPostgresGroupLockDeadline
+    postgres_test.go:401: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupLockDeadline (0.00s)
+=== RUN   TestPostgresGroupMigratedConstraints
+    postgres_test.go:440: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupMigratedConstraints (0.00s)
+=== RUN   TestPostgresGroupCap
+    postgres_test.go:475: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupCap (0.00s)
+=== RUN   TestPostgresGroupReplayTiming
+    postgres_test.go:551: opt-in read-only replay diagnosis
+--- SKIP: TestPostgresGroupReplayTiming (0.00s)
+=== RUN   TestPostgresGroupRestart
+    postgres_test.go:577: set restart mode prepare or verify
+--- SKIP: TestPostgresGroupRestart (0.00s)
+=== RUN   TestPostgresGroupRoundTrip
+    postgres_test.go:652: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestPostgresGroupRoundTrip (0.00s)
+=== RUN   TestAuthenticatedBootstrapRetainedSession
+=== RUN   TestAuthenticatedBootstrapRetainedSession/live
+    session_mutation_test.go:42: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapRetainedSession/revoked
+    session_mutation_test.go:42: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- PASS: TestAuthenticatedBootstrapRetainedSession (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapRetainedSession/live (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapRetainedSession/revoked (0.00s)
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/wrong_account
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/wrong_device
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/wrong_audience
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/wrong_session
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/missing_session
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/rotated_session
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/deleting_account
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/missing_account
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/access_expiry
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/family_expiry
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/future_session
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/future_family
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/historical_revoked
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapBindingsAndLifecycle/valid_retry
+    session_mutation_test.go:70: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- PASS: TestAuthenticatedBootstrapBindingsAndLifecycle (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/wrong_account (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/wrong_device (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/wrong_audience (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/wrong_session (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/missing_session (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/rotated_session (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/deleting_account (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/missing_account (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/access_expiry (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/family_expiry (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/future_session (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/future_family (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/historical_revoked (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapBindingsAndLifecycle/valid_retry (0.00s)
+=== RUN   TestAuthenticatedBootstrapStrictActor
+    session_mutation_test.go:132: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestAuthenticatedBootstrapStrictActor (0.00s)
+=== RUN   TestAuthenticatedBootstrapUnavailable
+    session_mutation_test.go:170: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestAuthenticatedBootstrapUnavailable (0.00s)
+=== RUN   TestAuthenticatedBootstrapLifecycleWins
+=== RUN   TestAuthenticatedBootstrapLifecycleWins/revoke
+    session_mutation_test.go:272: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapLifecycleWins/rotate
+    session_mutation_test.go:272: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapLifecycleWins/delete
+    session_mutation_test.go:272: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapLifecycleWins/expire
+    session_mutation_test.go:272: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapLifecycleWins/expires_while_waiting
+    session_mutation_test.go:272: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- PASS: TestAuthenticatedBootstrapLifecycleWins (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapLifecycleWins/revoke (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapLifecycleWins/rotate (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapLifecycleWins/delete (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapLifecycleWins/expire (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapLifecycleWins/expires_while_waiting (0.00s)
+=== RUN   TestAuthenticatedBootstrapMutationWins
+    session_mutation_test.go:346: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestAuthenticatedBootstrapMutationWins (0.00s)
+=== RUN   TestAuthenticatedBootstrapExpiryBeforeCommit
+=== RUN   TestAuthenticatedBootstrapExpiryBeforeCommit/access
+    session_mutation_test.go:400: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapExpiryBeforeCommit/family
+    session_mutation_test.go:400: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+=== RUN   TestAuthenticatedBootstrapExpiryBeforeCommit/historical_retry
+    session_mutation_test.go:400: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- PASS: TestAuthenticatedBootstrapExpiryBeforeCommit (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapExpiryBeforeCommit/access (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapExpiryBeforeCommit/family (0.00s)
+    --- SKIP: TestAuthenticatedBootstrapExpiryBeforeCommit/historical_retry (0.00s)
+=== RUN   TestAuthenticatedBootstrapInsertDeadlineRollsBack
+    session_mutation_test.go:452: DROPMESH_GROUP_TEST_DATABASE_URL absent; isolated PostgreSQL required
+--- SKIP: TestAuthenticatedBootstrapInsertDeadlineRollsBack (0.00s)
+=== RUN   TestNewStateRequiresIndependentExactPinAndOwnsBuffers
+=== RUN   TestNewStateRequiresIndependentExactPinAndOwnsBuffers/account
+=== RUN   TestNewStateRequiresIndependentExactPinAndOwnsBuffers/group
+=== RUN   TestNewStateRequiresIndependentExactPinAndOwnsBuffers/generation
+=== RUN   TestNewStateRequiresIndependentExactPinAndOwnsBuffers/digest
+--- PASS: TestNewStateRequiresIndependentExactPinAndOwnsBuffers (0.00s)
+    --- PASS: TestNewStateRequiresIndependentExactPinAndOwnsBuffers/account (0.00s)
+    --- PASS: TestNewStateRequiresIndependentExactPinAndOwnsBuffers/group (0.00s)
+    --- PASS: TestNewStateRequiresIndependentExactPinAndOwnsBuffers/generation (0.00s)
+    --- PASS: TestNewStateRequiresIndependentExactPinAndOwnsBuffers/digest (0.00s)
+=== RUN   TestNewStateRejectsUnsignedBootstrapWithExactPinnedValues
+--- PASS: TestNewStateRejectsUnsignedBootstrapWithExactPinnedValues (0.00s)
+=== RUN   TestStateMembershipChainAndRemovedActor
+--- PASS: TestStateMembershipChainAndRemovedActor (0.00s)
+=== RUN   TestRemoveAndFreshRejoinWithNewConsent
+--- PASS: TestRemoveAndFreshRejoinWithNewConsent (0.00s)
+=== RUN   TestRemovedMemberRejectsOriginalApprovalReplayBeforeFreshChainedRejoin
+--- PASS: TestRemovedMemberRejectsOriginalApprovalReplayBeforeFreshChainedRejoin (0.00s)
+=== RUN   TestInvalidTransitionsDoNotMutateState
+=== RUN   TestInvalidTransitionsDoNotMutateState/bad_signature
+=== RUN   TestInvalidTransitionsDoNotMutateState/account
+=== RUN   TestInvalidTransitionsDoNotMutateState/group
+=== RUN   TestInvalidTransitionsDoNotMutateState/generation
+=== RUN   TestInvalidTransitionsDoNotMutateState/hash
+=== RUN   TestInvalidTransitionsDoNotMutateState/gap
+=== RUN   TestInvalidTransitionsDoNotMutateState/inactive_actor
+=== RUN   TestInvalidTransitionsDoNotMutateState/actor_key_mismatch
+=== RUN   TestInvalidTransitionsDoNotMutateState/bootstrap
+--- PASS: TestInvalidTransitionsDoNotMutateState (0.01s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/bad_signature (0.00s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/account (0.00s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/group (0.00s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/generation (0.00s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/hash (0.00s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/gap (0.00s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/inactive_actor (0.00s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/actor_key_mismatch (0.00s)
+    --- PASS: TestInvalidTransitionsDoNotMutateState/bootstrap (0.00s)
+=== RUN   TestSubjectKeyExactnessTerminalZeroAndNilSafety
+--- PASS: TestSubjectKeyExactnessTerminalZeroAndNilSafety (0.00s)
+=== RUN   TestMemberCapOverflowAndConcurrentSameHead
+--- PASS: TestMemberCapOverflowAndConcurrentSameHead (0.00s)
+=== RUN   TestWireRoundtrip
+--- PASS: TestWireRoundtrip (0.01s)
+=== RUN   TestWireRejectMalformed
+--- PASS: TestWireRejectMalformed (0.00s)
+PASS
+ok  	macchannel/rendezvous/internal/accountgroup	1.479s
