@@ -1,7 +1,8 @@
 # Native device approval: actual Swift / HTTP / PostgreSQL
 
 Status: bounded controller interoperability PASS; a real native UI integration
-defect was discovered and is pending separately scoped repair. No production
+defect was discovered and subsequently repaired in separately scoped e636542,
+awaiting focused independent re-review. This test-only task changed no production
 source, protocol, server permission, personal Keychain, live service, installation,
 Apple credential or Store change was made by this task.
 
@@ -10,7 +11,7 @@ Apple credential or Store change was made by this task.
 Only new `Services/rendezvous/internal/accountauth/native_device_approval_interop_test.go`
 and `Tests/MacChannelCoreTests/GoDeviceApprovalInteropTests.swift`, plus this report.
 Task baseline40d0683; subsequent shared HEAD peer/report commits are not this delta.
-The commit containing these files is the exact tested source; hashes before commit:
+Initial interop source commit5fdd896; hashes at that commit:
 
 - Go fixture: `af36d6a247f7d0fd086634e4c8c79b1af963bfbdf96d8ec6e35170b0937e4d2e`
 - Swift test: `a1139977cb33e67e6d276bc3fdfa3bec20ff8eadf6543023c09f7be89a7f9eee`
@@ -143,3 +144,25 @@ or storage failures as ready, treat discovery as membership, or relax the server
 Independent review remains required. This proves local cross-language controller
 integration, not physical Apple login, real Keychain, remote TLS, live deployment,
 account transfer routing, invitations, full application acceptance or release readiness.
+
+## Independent review supplement
+
+Independent interop review was Approved/spec-compliant with one Minor: explicitly
+count account-scoped groups rather than relying on one returned row (and the SQL
+account primary key). Added `SELECT count(*) FROM account_groups WHERE account_id=$1`
+and an exact1 assertion; no runtime/production change.
+
+After all UI tests ended, root restarted the same guarded socket fixture. Ran the
+same Go command above with only `-run '^TestNativeDeviceApprovalInterop$'`, not the
+already-passing cleanup regression again. `.build/account-approval-interop-count-review.log`
+records Go1/0, actual XCTest1/0, no skipped cases, exit0 and no warnings. The final
+Go source SHA256 is `95abf20963c3c751cdd877013944529c86119af21c163624819adefa8dc119d4`;
+log SHA256 `cea4dcea657f9be24cea3269732aec599d82d05c5329ae054d6986955b410015`.
+The commit containing this supplement and count assertion identifies its exact source.
+
+Post-run SQL counts again1account/2sessions/2families/1group/2events/0pending/0owned
+fixture accounts. Root receives SQL ownership for shutdown. Swift/Xcode, isolated
+Go and SQL ownership have all been RELEASED, with no further test/build commands
+scheduled. Native scope repair e636542 separately records model13/0, UI2/0 and
+actual unsigned shipping main+Share success. It preserves member-only server
+permission, uses explicit own/member read scope and does not swallow409 errors.

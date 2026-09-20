@@ -280,6 +280,10 @@ func TestNativeDeviceApprovalInterop(t *testing.T) {
 	}
 	var group string
 	var generation uint64
+	var groups int
+	if err = db.QueryRow(`SELECT count(*) FROM account_groups WHERE account_id=$1`, f.account).Scan(&groups); err != nil || groups != 1 {
+		t.Fatalf("SQL group count=%d error=%v", groups, err)
+	}
 	if db.QueryRow(`SELECT group_id,generation FROM account_groups WHERE account_id=$1`, f.account).Scan(&group, &generation) != nil {
 		t.Fatal("missing group")
 	}
