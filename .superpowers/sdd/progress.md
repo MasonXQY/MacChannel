@@ -1,5 +1,31 @@
 # iPhone continuation ledger
 
+Task own-request UI repair complete (5fdd896..e636542, independent Approved/no
+findings). InteropMinor exactSQLgroupcount closed095591a, independent rereviewclean.
+Actual13model/2UI/0 and shipping main+Share gates; interopcount1Go/1XCTest/0.
+SQL55461 STOPPED after rerun. Root source packaging/privacy/purpose/entitlement
+scripts pass. account_route_admission now explicitly reassigned nativeproducer
+implementation, soleSwift/cache owner, per account-native-producer-brief.md including
+attachment/freshness decisions. No other implementers active; UI/report/indexreleased.
+Live account-dev health read returnsok; not evidence of group/transfer activation.
+
+Interop5fdd896 independent spec compliant/Approved, saved review. Minor account
+group count assertion assigned for focused strengthening after UI test. Root
+verified RED/final log hashes and actual XCTest1/0+Go2/0; no test children. SQL55461
+STOPPED cleanly with data preserved; restart only for scoped interop supplement.
+Read-only device check: physical iPad mini connected; iPhone unavailable. Optional
+async reconnect request sent; development continues. Native producer brief prepared,
+route agent read-only API preparation only, no source/cache handoff yet.
+
+Task route connection owner complete (0e05ab2..e627179, independent spec compliant/
+Approved/no findings). Review account-route-owner-review.md. Root verified actual
+focused log. SQL/native transport composition still required; package unwired.
+Two-controller HTTP/SQL interop GREEN uncovered real UI subject-list409 gap;
+interop agent now finalizes test/report then owns narrow read-scope fix with RED.
+Own-request presentation must not call member-only list; server permissions stay.
+Swift cache remains native_device_approval_ui; root owns SQL shutdown/index after
+agent scoped interop commit. No physical installation or production activation.
+
 Task native approval UI complete incl40d0683 review repair; independent rereview
 Approved/no findings, both issues resolved (actual short-code impact clarified).
 native_device_approval_ui now explicitly reassigned TWO-CONTROLLER INTEROP task

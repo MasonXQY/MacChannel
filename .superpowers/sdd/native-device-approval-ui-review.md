@@ -43,3 +43,13 @@ reject and rejected phase. Prior finding is correctly classified as latent gener
 helper semantics, not a defect reached by currently generated request codes.
 Root read actual final1model+1UI/0 and shipping BUILD SUCCEEDED logs; manifest66
 hashes/47PNGs and protected delta unchanged. Cross-service/physical gates remain.
+# Real-server own-request read scope rereview
+
+2026-09-20, frozen5fdd896..e636542. Independent reviewer
+mobile_adapter_regression_review: Spec compliant; Task quality Approved;
+no Critical/Important/Minor findings. Own scope skips member-only list but retains
+explicit create/detail/restart recovery; gated group entry selects scope, list and
+detail propagate it, and owner/scope changes invalidate stale tasks and reset scope.
+Member409/network/storage errors remain visible. Strict fixture uses verified exact
+membership/key; UI scope never grants authority. Root inspected actual13model/0,
+2native/0 and shipping main+Share success report; no redundant reruns.
