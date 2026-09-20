@@ -21,6 +21,7 @@ var (
 // native UI must actually obtain that confirmation before calling this API.
 type DeletionRequest struct {
 	AccessToken, Receipt, DeviceID, Audience string
+	AccountID                                string // Recovery: original persisted account incarnation, never an upsert key.
 	ChallengeID, Code, IdentityToken         string
 	Confirmation                             bool
 }
@@ -34,6 +35,7 @@ type DeletionStatus struct {
 
 type AccountDeletion interface {
 	Begin(context.Context, DeletionRequest) (DeletionStatus, error)
+	Recover(context.Context, DeletionRequest) (DeletionStatus, error)
 	Status(context.Context, string, string, string) (DeletionStatus, error)
 	CompleteLogin(context.Context, string, string, string, string, string) (SessionTokens, error)
 }
@@ -133,7 +135,60 @@ func (d *PostgresDeletion) Begin(ctx context.Context, r DeletionRequest) (Deleti
 	}
 	persist, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer persistCancel()
-	return d.beginVerified(persist, r, session, verified, h, exchangeID)
+	return d.beginVerified(persist, r, session, verified, h, exchangeID, false)
+}
+
+// Recover resumes an uncertain begin after ordinary sessions are gone. Fresh
+// Apple proof authorizes deletion only of the exact original account ID retained
+// by the native receipt. It never signs in, creates an account, or restores trust.
+func (d *PostgresDeletion) Recover(ctx context.Context, r DeletionRequest) (DeletionStatus, error) {
+	status, err := d.recover(ctx, r)
+	// Another confirmed request may have committed between the initial receipt
+	// lookup and account/admission checks. Recover only this exact bound receipt.
+	if err != nil && r.Confirmation && validUUID(r.AccountID) {
+		if existing, e := d.Status(ctx, r.Receipt, r.DeviceID, r.Audience); e == nil {
+			return existing, nil
+		}
+	}
+	return status, err
+}
+
+func (d *PostgresDeletion) recover(ctx context.Context, r DeletionRequest) (DeletionStatus, error) {
+	if d == nil || d.sessions == nil || ctx == nil || ctx.Err() != nil {
+		return DeletionStatus{}, ErrDeletionUnavailable
+	}
+	h, ok := deletionReceipt(r.Receipt, r.DeviceID, r.Audience)
+	if !ok || !r.Confirmation || !validUUID(r.AccountID) || !d.sessions.validBinding(r.DeviceID, r.Audience) {
+		return DeletionStatus{}, ErrDeletionInvalid
+	}
+	if status, err := d.Status(ctx, r.Receipt, r.DeviceID, r.Audience); err == nil {
+		return status, nil
+	} else if !errors.Is(err, ErrDeletionInvalid) {
+		return DeletionStatus{}, err
+	}
+	if !validToken(r.ChallengeID) || !validLoginCredential(r.Code, 4096) || !validLoginCredential(r.IdentityToken, maxIdentityTokenBytes) {
+		return DeletionStatus{}, ErrDeletionInvalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	var subject string
+	err := d.sessions.db.QueryRowContext(ctx, `SELECT apple_subject FROM accounts WHERE account_id=$1::uuid AND status='active'`, r.AccountID).Scan(&subject)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeletionStatus{}, ErrDeletionInvalid
+	}
+	if err != nil {
+		return DeletionStatus{}, ErrDeletionUnavailable
+	}
+	verified, exchangeID, err := d.exchange(ctx, r.ChallengeID, r.DeviceID, r.Audience, r.Code, r.IdentityToken, subject)
+	if err != nil {
+		if errors.Is(err, ErrAppleLoginUnavailable) || errors.Is(err, ErrDeletionUnavailable) {
+			return DeletionStatus{}, ErrDeletionUnavailable
+		}
+		return DeletionStatus{}, ErrDeletionInvalid
+	}
+	persist, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer persistCancel()
+	return d.beginVerified(persist, r, AccountSession{AccountID: r.AccountID, DeviceID: r.DeviceID, Audience: r.Audience}, verified, h, exchangeID, true)
 }
 
 func deletionSessionError(err error) error {
@@ -143,7 +198,7 @@ func deletionSessionError(err error) error {
 	return ErrDeletionUnavailable
 }
 
-func (d *PostgresDeletion) beginVerified(ctx context.Context, r DeletionRequest, session AccountSession, verified AppleLoginResult, receipt []byte, exchangeID string) (DeletionStatus, error) {
+func (d *PostgresDeletion) beginVerified(ctx context.Context, r DeletionRequest, session AccountSession, verified AppleLoginResult, receipt []byte, exchangeID string, recovery bool) (DeletionStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	tx, err := d.sessions.db.BeginTx(ctx, nil)
@@ -181,14 +236,16 @@ func (d *PostgresDeletion) beginVerified(ctx context.Context, r DeletionRequest,
 		return DeletionStatus{}, ErrDeletionInvalid
 	}
 	// Account lock excludes refresh/logout/login and group/route/TURN admission.
-	access, _ := tokenHash(r.AccessToken)
-	var live bool
-	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM account_sessions s JOIN account_session_families f USING(family_id) WHERE f.account_id=$1::uuid AND s.session_id=$2::uuid AND s.access_hash=$3 AND f.device_id=$4::uuid AND f.audience=$5 AND f.revoked_at IS NULL AND s.created_at<=clock_timestamp() AND s.access_expires_at>clock_timestamp() AND f.created_at<=clock_timestamp() AND f.absolute_expires_at>clock_timestamp())`, session.AccountID, session.SessionID, access[:], r.DeviceID, r.Audience).Scan(&live)
-	if err != nil {
-		return DeletionStatus{}, ErrDeletionUnavailable
-	}
-	if !live {
-		return DeletionStatus{}, ErrDeletionInvalid
+	if !recovery {
+		access, _ := tokenHash(r.AccessToken)
+		var live bool
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM account_sessions s JOIN account_session_families f USING(family_id) WHERE f.account_id=$1::uuid AND s.session_id=$2::uuid AND s.access_hash=$3 AND f.device_id=$4::uuid AND f.audience=$5 AND f.revoked_at IS NULL AND s.created_at<=clock_timestamp() AND s.access_expires_at>clock_timestamp() AND f.created_at<=clock_timestamp() AND f.absolute_expires_at>clock_timestamp())`, session.AccountID, session.SessionID, access[:], r.DeviceID, r.Audience).Scan(&live)
+		if err != nil {
+			return DeletionStatus{}, ErrDeletionUnavailable
+		}
+		if !live {
+			return DeletionStatus{}, ErrDeletionInvalid
+		}
 	}
 	raw := make([]byte, 16)
 	if _, err = rand.Read(raw); err != nil {

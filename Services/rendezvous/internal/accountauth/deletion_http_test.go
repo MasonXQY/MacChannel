@@ -10,7 +10,7 @@ import (
 )
 
 func TestAccountDeletionPurposeIsolation(t *testing.T) {
-	for _, op := range []string{"begin", "status"} {
+	for _, op := range []string{"begin", "status", "recover"} {
 		got, ok := accountPurpose("/v1/account/deletion/" + op)
 		if !ok || got != "dropmesh.account.deletion."+op+".v1" {
 			t.Fatalf("deletion operation %s is not isolated", op)
@@ -34,6 +34,9 @@ func (f *deletionHTTPFake) Begin(_ context.Context, r DeletionRequest) (Deletion
 	f.calls++
 	f.request = r
 	return DeletionStatus{f.status}, f.err
+}
+func (f *deletionHTTPFake) Recover(ctx context.Context, r DeletionRequest) (DeletionStatus, error) {
+	return f.Begin(ctx, r)
 }
 func (f *deletionHTTPFake) Status(_ context.Context, receipt, device, audience string) (DeletionStatus, error) {
 	f.calls++
@@ -232,5 +235,50 @@ func TestAccountDeletionHTTPLoginCannotBypassAdmission(t *testing.T) {
 	h.ServeHTTP(w, id.requestBytes(t, "/v1/account/deletion/status", raw, 2))
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "completed_manual_revocation_required") {
 		t.Fatal("manual fallback not preserved")
+	}
+}
+
+func TestAccountDeletionHTTPRecoveryUsesOriginalAccountWithoutAccessToken(t *testing.T) {
+	for _, kind := range []string{"success", "missing-account", "invalid-account", "session-field", "false-confirmation", "wrong-purpose"} {
+		t.Run(kind, func(t *testing.T) {
+			h, _, id := accountHTTPFixture(t)
+			f := &deletionHTTPFake{status: "pending"}
+			h.(*accountHTTP).deletion = f
+			fields := deletionFields()
+			delete(fields, "accessToken")
+			fields["accountID"] = validTokens(id.id, "com.example.app").Session.AccountID
+			fields["purpose"] = "dropmesh.account.deletion.recover.v1"
+			want := 200
+			switch kind {
+			case "missing-account":
+				delete(fields, "accountID")
+				want = 400
+			case "invalid-account":
+				fields["accountID"] = "bad"
+				want = 401
+			case "session-field":
+				fields["accessToken"] = token43(8)
+				want = 400
+			case "false-confirmation":
+				fields["confirmation"] = false
+				want = 401
+			case "wrong-purpose":
+				fields["purpose"] = "dropmesh.account.deletion.begin.v1"
+				want = 401
+			}
+			payload, _ := json.Marshal(fields)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, id.requestBytes(t, "/v1/account/deletion/recover", payload, 1))
+			if w.Code != want {
+				t.Fatalf("status=%d expected=%d", w.Code, want)
+			}
+			if want == 200 {
+				if f.request.AccessToken != "" || f.request.AccountID != fields["accountID"] || f.request.DeviceID != id.id {
+					t.Fatal("recovery binding changed")
+				}
+			} else if f.calls != 0 {
+				t.Fatal("invalid recovery dispatched")
+			}
+		})
 	}
 }

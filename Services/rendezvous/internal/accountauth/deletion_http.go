@@ -11,6 +11,8 @@ func deletionOperation(path string) (string, bool) {
 		return "begin", true
 	case "/v1/account/deletion/status":
 		return "status", true
+	case "/v1/account/deletion/recover":
+		return "recover", true
 	}
 	return "", false
 }
@@ -20,6 +22,8 @@ func (h *accountHTTP) serveDeletion(w http.ResponseWriter, r *http.Request, devi
 	keys := []string{"purpose", "audience", "receipt"}
 	if op == "begin" {
 		keys = append(keys, "accessToken", "challengeID", "code", "identityToken", "confirmation")
+	} else if op == "recover" {
+		keys = append(keys, "accountID", "challengeID", "code", "identityToken", "confirmation")
 	}
 	if err != nil || !exactKeys(o, keys...) {
 		writeAccountError(w, 400, "invalid_request")
@@ -42,9 +46,9 @@ func (h *accountHTTP) serveDeletion(w http.ResponseWriter, r *http.Request, devi
 		return
 	}
 	var out DeletionStatus
-	if op == "begin" {
+	if op == "begin" || op == "recover" {
 		confirmation, ok := o["confirmation"].(bool)
-		if !ok || !confirmation || !validToken(f["accessToken"]) || !validToken(f["challengeID"]) || !validCredential(f["code"], 4096) || !validCredential(f["identityToken"], maxIdentityTokenBytes) {
+		if !ok || !confirmation || (op == "begin" && !validToken(f["accessToken"])) || (op == "recover" && !validUUID(f["accountID"])) || !validToken(f["challengeID"]) || !validCredential(f["code"], 4096) || !validCredential(f["identityToken"], maxIdentityTokenBytes) {
 			writeAccountError(w, 401, "authentication_failed")
 			return
 		}
@@ -53,7 +57,12 @@ func (h *accountHTTP) serveDeletion(w http.ResponseWriter, r *http.Request, devi
 			return
 		}
 		defer h.releaseCompletion(device)
-		out, err = h.deletion.Begin(r.Context(), DeletionRequest{AccessToken: f["accessToken"], Receipt: f["receipt"], DeviceID: device, Audience: f["audience"], ChallengeID: f["challengeID"], Code: f["code"], IdentityToken: f["identityToken"], Confirmation: confirmation})
+		input := DeletionRequest{AccessToken: f["accessToken"], Receipt: f["receipt"], DeviceID: device, Audience: f["audience"], AccountID: f["accountID"], ChallengeID: f["challengeID"], Code: f["code"], IdentityToken: f["identityToken"], Confirmation: confirmation}
+		if op == "recover" {
+			out, err = h.deletion.Recover(r.Context(), input)
+		} else {
+			out, err = h.deletion.Begin(r.Context(), input)
+		}
 	} else {
 		out, err = h.deletion.Status(r.Context(), f["receipt"], device, f["audience"])
 	}
