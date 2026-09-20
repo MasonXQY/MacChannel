@@ -16,18 +16,21 @@ public enum MobileIdentityPolicy {
 public struct MobileIdentityContext<Secrets: SecretStore & Sendable>: Sendable {
     public let identity: DeviceIdentity
     public let repository: TrustRepository
+    public let authorizationOwner: PeerAuthorizationOwner
     public let layout: MobileStorageLayout
     private let snapshots: AuthenticatedTrustSnapshotStore<Secrets>
 
     public static func load(layout: MobileStorageLayout, secrets: Secrets) async throws -> Self {
         try layout.prepare()
         let identity = try DeviceIdentity.loadOrCreate(keychain: secrets, policy: MobileIdentityPolicy.policy)
+        let authorizationOwner = PeerAuthorizationOwner.live(identity: identity)
         let snapshots = AuthenticatedTrustSnapshotStore(
             url: layout.trustFile, secrets: secrets, policy: MobileIdentityPolicy.policy
         )
         // Trust or keychain errors propagate. Never repair corruption by resetting identity.
-        let repository = try await snapshots.load(identity: identity)
-        return Self(identity: identity, repository: repository, layout: layout, snapshots: snapshots)
+        let repository = try await snapshots.load(identity: identity, authorizationOwner: authorizationOwner)
+        return Self(identity: identity, repository: repository, authorizationOwner: authorizationOwner,
+            layout: layout, snapshots: snapshots)
     }
 
     public func persistTrust() async throws {

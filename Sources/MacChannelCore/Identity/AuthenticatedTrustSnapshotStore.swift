@@ -122,7 +122,7 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
         )
     }
 
-    public func load(identity: DeviceIdentity) throws -> TrustRepository {
+    public func load(identity: DeviceIdentity, authorizationOwner: PeerAuthorizationOwner? = nil) throws -> TrustRepository {
         let generation = try storedGeneration()
         if FileManager.default.fileExists(atPath: url.path) {
             let data = try Data(contentsOf: url)
@@ -149,7 +149,8 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
                 trustStore: store,
                 persistedGeneration: snapshot.generation,
                 authenticationRecords: decoded?.authenticationRecords ?? [],
-                issuerSequenceReserver: issuerSequenceReserver
+                issuerSequenceReserver: issuerSequenceReserver,
+                authorizationOwner: authorizationOwner
             )
             publish(AuthenticatedTrustState(snapshot: snapshot,
                 authenticationRecords: decoded?.authenticationRecords ?? []))
@@ -162,7 +163,8 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
             ownerIdentity: identity,
             trustStore: TrustStore(owner: identity.id),
             persistedGeneration: 0,
-            issuerSequenceReserver: issuerSequenceReserver
+            issuerSequenceReserver: issuerSequenceReserver,
+            authorizationOwner: authorizationOwner
         )
     }
 
