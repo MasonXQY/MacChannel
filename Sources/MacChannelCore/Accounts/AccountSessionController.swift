@@ -44,6 +44,9 @@ public actor AccountSessionController {
     private let service: any AccountSessionService
     private let storage: any AccountSessionStorage
     private let binding: AccountSessionBinding
+    private let groupVerifier: AccountGroupHistoryVerifier?
+    private var groupSyncInProgress = false
+    private var operationRevision = UUID()
     private let now: @Sendable () -> Date
     private let operationObserver: (@Sendable (AccountSessionOperation) -> Void)?
     private var state = AccountSessionSnapshot(phase: .signedOut, identity: nil)
@@ -57,25 +60,67 @@ public actor AccountSessionController {
     private var didRestore = false
     private var acknowledgedLogout = false
 
-    public init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding) {
+    public init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
+                groupVerifier: AccountGroupHistoryVerifier? = nil) {
         self.service = service; self.storage = storage; self.binding = binding
+        self.groupVerifier = groupVerifier
         now = Date.init
         operationObserver = nil
     }
 
     init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
+         groupVerifier: AccountGroupHistoryVerifier? = nil,
          now: @escaping @Sendable () -> Date,
          operationObserver: (@Sendable (AccountSessionOperation) -> Void)? = nil) {
         self.service = service; self.storage = storage; self.binding = binding; self.now = now
+        self.groupVerifier = groupVerifier
         self.operationObserver = operationObserver
     }
 
     public func snapshot() -> AccountSessionSnapshot { state }
 
+    /// Reads a known independently pinned group. Credentials remain actor-private;
+    /// the returned membership still requires explicit transfer consent.
+    public func syncGroup(groupID: String) async throws -> AccountGroupSnapshot {
+        try Task.checkCancellation()
+        guard let groupVerifier, let groupService = service as? any AccountGroupService else {
+            throw AccountSessionControllerError.unavailable
+        }
+        guard !groupSyncInProgress, !busyForLogin else { throw AccountSessionControllerError.busy }
+        guard state.phase == .signedIn, let initial = current, initial.phase == .active else {
+            throw AccountSessionControllerError.needsSignIn
+        }
+        groupSyncInProgress = true
+        defer { groupSyncInProgress = false }
+        if initial.tokens.accessExpiresAt <= (try validNow()) { try await refresh() }
+        try Task.checkCancellation()
+        guard !busyForLogin else { throw AccountSessionControllerError.busy }
+        guard state.phase == .signedIn, let record = current, record.phase == .active,
+              record.binding == binding else { throw AccountSessionControllerError.needsSignIn }
+        let revision = operationRevision
+        func requireCurrentSession() throws {
+            try Task.checkCancellation()
+            guard operationRevision == revision, !busyForLogin, state.phase == .signedIn,
+                  let active = current, active.phase == .active, active.binding == record.binding,
+                  active.tokens.identity == record.tokens.identity,
+                  active.tokens.accessExpiresAt > (try validNow()) else { throw AccountSessionControllerError.needsSignIn }
+        }
+        do {
+            try requireCurrentSession()
+            let history = try await groupService.groupHistory(accessToken: record.tokens.accessToken, groupID: groupID)
+            try requireCurrentSession()
+            let snapshot = try await groupVerifier.accept(history: history, binding: record.binding,
+                accountID: record.tokens.identity.accountID.uuidString.lowercased(), groupID: groupID)
+            try requireCurrentSession()
+            return snapshot
+        } catch { try requireCurrentSession(); throw error }
+    }
+
     public func restore() async {
         if let task = restoreTask { operationObserver?(.restoreJoined); await task.value; return }
         guard refreshTask == nil, logoutTask == nil, preparingID == nil, attempt == nil, !completing else { return }
         guard !didRestore || state.phase == .unavailable || state.phase == .secureStorageError else { return }
+        operationRevision = UUID()
         let task = Task { await self.runRestore() }
         restoreTask = task
         await task.value
@@ -207,6 +252,7 @@ public actor AccountSessionController {
 
     private func sharedRefresh() async throws {
         if let task = refreshTask { try await task.value; return }
+        operationRevision = UUID()
         let task = Task { try await self.runRefresh() }
         refreshTask = task
         try await task.value
@@ -243,6 +289,7 @@ public actor AccountSessionController {
         guard restoreTask == nil, preparingID == nil, attempt == nil, !completing else { throw AccountSessionControllerError.busy }
         // Install intent before suspension. Refresh/login cannot overtake this operation.
         let pendingRefresh = refreshTask
+        operationRevision = UUID()
         let task = Task { try await self.runLogout(waitingFor: pendingRefresh) }
         logoutTask = task
         operationObserver?(.logoutStarted)
@@ -304,6 +351,7 @@ public actor AccountSessionController {
     }
 
     private func publish(_ phase: AccountSessionPhase, identity: AccountSessionIdentity? = nil) {
+        operationRevision = UUID()
         state = AccountSessionSnapshot(phase: phase, identity: identity)
     }
 

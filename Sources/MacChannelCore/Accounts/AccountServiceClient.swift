@@ -5,7 +5,7 @@ import Security
 public struct AccountServiceClient: Sendable {
     private let identity: DeviceIdentity
     private let origin: URL
-    private let audience: String
+    let audience: String
     private let transport: any AccountServiceTransport
     private let now: @Sendable () -> Date
     private let nonce: @Sendable () throws -> Data
@@ -122,7 +122,7 @@ public struct AccountServiceClient: Sendable {
         guard value.signedOut else { throw AccountServiceError.invalidResponse }
     }
 
-    private func send(
+    func send(
         path: String,
         fields: [String: String],
         requestDate: Date
@@ -173,6 +173,10 @@ public struct AccountServiceClient: Sendable {
         catch is CancellationError { throw CancellationError() }
         catch let error as AccountServiceError { throw error }
         catch { throw AccountServiceError.transport }
+        if path == "/v1/account/group/events" {
+            if result.1.statusCode == 404 { throw AccountServiceError.unavailable }
+            if result.1.statusCode == 409 { throw AccountGroupServiceError.changedHead }
+        }
         switch result.1.statusCode {
         case 200: break
         case 400: throw AccountServiceError.invalidRequest
@@ -227,7 +231,7 @@ public struct AccountServiceClient: Sendable {
         catch { throw AccountServiceError.invalidResponse }
     }
 
-    private func requestDate() throws -> Date {
+    func requestDate() throws -> Date {
         let value = now()
         guard value.timeIntervalSince1970.isFinite, value.timeIntervalSince1970 > 0 else {
             throw AccountServiceError.invalidRequest
