@@ -3,7 +3,7 @@ import Foundation
 import Security
 
 public struct AccountServiceClient: Sendable {
-    private let identity: DeviceIdentity
+    let identity: DeviceIdentity
     private let origin: URL
     let audience: String
     private let transport: any AccountServiceTransport
@@ -168,6 +168,8 @@ public struct AccountServiceClient: Sendable {
         request.httpBody = body
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let enrollment = path == "/v1/account/group/discover" || path == "/v1/account/group/bootstrap"
+        if enrollment { try Task.checkCancellation() }
         let result: (Data, HTTPURLResponse)
         do { result = try await transport.send(request) }
         catch is CancellationError { throw CancellationError() }
@@ -176,6 +178,10 @@ public struct AccountServiceClient: Sendable {
         if path == "/v1/account/group/events" {
             if result.1.statusCode == 404 { throw AccountServiceError.unavailable }
             if result.1.statusCode == 409 { throw AccountGroupServiceError.changedHead }
+        }
+        if enrollment {
+            if result.1.statusCode == 404 { throw AccountServiceError.unavailable }
+            if result.1.statusCode == 409 { throw AccountGroupEnrollmentError.conflict }
         }
         switch result.1.statusCode {
         case 200: break

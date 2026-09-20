@@ -31,7 +31,8 @@ struct AccountGroupPage {
     }
 }
 
-private struct PageParser {
+// Shared only by the bounded group page and enrollment schemas.
+struct PageParser {
     let bytes: [UInt8]
     var i = 0
     init(data: Data) { bytes = Array(data) }
@@ -80,23 +81,24 @@ private struct PageParser {
         if i < bytes.count, bytes[i] == 93 { i += 1; return values }
         while true {
             guard values.count < 16 else { throw AccountServiceError.invalidResponse }
-            whitespace()
-            let start = i
-            try token(123)
-            // Wire events have exactly three string members. The existing raw
-            // codec validates their names, uniqueness, bounds and proofs.
-            for member in 0..<3 {
-                if member > 0 { try token(44) }
-                _ = try string(); try token(58); _ = try string()
-            }
-            try token(125)
-            let wire = try AccountGroupWireEvent.decodeJSON(Data(bytes[start..<i]))
-            values.append(try AccountGroupEvent(wire: wire))
+            values.append(try event())
             whitespace()
             guard i < bytes.count else { throw AccountServiceError.invalidResponse }
             if bytes[i] == 93 { i += 1; return values }
             try token(44)
         }
+    }
+    mutating func event() throws -> AccountGroupEvent {
+        whitespace()
+        let start = i
+        try token(123)
+        // The existing strict wire codec owns key uniqueness, bounds and proofs.
+        for member in 0..<3 {
+            if member > 0 { try token(44) }
+            _ = try string(); try token(58); _ = try string()
+        }
+        try token(125)
+        return try AccountGroupEvent(wire: AccountGroupWireEvent.decodeJSON(Data(bytes[start..<i])))
     }
     mutating func parse() throws -> AccountGroupPage {
         guard bytes.count <= 65_536 else { throw AccountServiceError.invalidResponse }
