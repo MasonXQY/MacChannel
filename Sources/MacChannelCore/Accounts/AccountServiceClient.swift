@@ -168,7 +168,9 @@ public struct AccountServiceClient: Sendable {
         request.httpBody = body
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let enrollment = path == "/v1/account/group/discover" || path == "/v1/account/group/bootstrap"
+        let pending = ["create", "get", "list", "propose", "countersign", "commit", "cancel", "reject"]
+            .contains { path == "/v1/account/group/join/\($0)" }
+        let enrollment = path == "/v1/account/group/discover" || path == "/v1/account/group/bootstrap" || pending
         if enrollment { try Task.checkCancellation() }
         let result: (Data, HTTPURLResponse)
         do { result = try await transport.send(request) }
