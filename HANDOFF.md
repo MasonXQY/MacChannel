@@ -2,6 +2,22 @@
 
 ## Current mainline decision — 2026-09-20
 
+LATEST VERIFIED: mobile runtime authorization03b93b2 independently Approved/no
+findings; report/review mobile-runtime-authorization-{report,review}.md. Root
+checked actual final170/0/0skip4.471s and all four source/test hashes. Xcode27
+unsigned Release shipping main/Share BUILD SUCCEEDED exit0 at
+/tmp/mobile-runtime-authorization-ios-shipping-build.log; embeddedprivacyPASS.
+Production runtime now shares context owner across directory/Bonjour, outgoing
+attempts, incoming listener, receive policy and cancellation/accounting. Separate
+authorization revision avoids rewriting manual persistence on provider events.
+Only manual producer currently attached: account producer/control-plane and
+server presence/TURN/candidate deployment still required before physical test.
+All agents/cache/index released. No install/deploy/Store update. Do not rerun
+completed bootstrap/runtime slices. Fresh device check: phone available/paired,
+iPad connected. Next: reviewed account socket binding + bounded presence/TURN
+composition, explicit candidate endpoint and refresh lifecycle, then isolated
+deployment and signed physical acceptance. Preserve legacy production/manual pairs.
+
 LATEST: shared mobile authorization bootstrap bb8930a independently Approved,
 no findings (mobile-authorization-bootstrap-review.md). Root checked actual
 85tests/0fail/0skip, RED3tests/6failures and exact source hashes; prior dirty

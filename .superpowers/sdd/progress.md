@@ -2,6 +2,13 @@
 
 ## Active continuation — shared mobile authorization
 
+Runtime consumer completebb8930a..03b93b2, independent mobile_runtime_review
+Approved/no findings. Root actual170/0/0skip+fourhashes checked; Xcode27 unsigned
+main/Share shipping build and embeddedprivacyPASS. Allagents/cache/indexreleased.
+No account producer/endpoint activated, no install/deploy/Store update. Continue
+at account socket/control-plane and server candidate presence/TURN integration,
+not these completed native slices. Bootstrap and runtime scopes both reviewed.
+
 Bootstrap complete8583fff..bb8930a; independent bootstrap_review Approved, no
 findings. Root checked actual85/0/0skip, RED3/6 and source hashes/preserved delta.
 Runtime consumer integration dispatched atbb8930a to mobile_runtime_authorization;
