@@ -2,6 +2,15 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+CURRENT controller implementation active from 80e183a; native_device_approval_controller
+owns scoped core files/tests and Swift cache. Intent e163302 independent review is
+Approved with no findings. Root prepares native UI continuation only; no overlapping
+source/build work. Both SQL fixtures remain stopped; no live/install changes.
+Requirements: .superpowers/sdd/native-device-approval-controller-brief.md. Report:
+.superpowers/sdd/native-device-approval-controller-report.md. Fresh verification-only
+committed recovery is distinct from expired mutation consent. Next gate is independent
+controller review, then native approval UI and actual interoperability/device checks.
+
 LATEST native intent e163302 DONE; native_approval_intent_review active on frozen
 bf8d4e2..e163302 (includes root docs a67fb22). Root read full report and actual
 17/0 intent/bootstrap log + 6/0 checkpoint regression log. Plan's mistaken
