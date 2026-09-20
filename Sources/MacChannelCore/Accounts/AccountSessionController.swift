@@ -58,6 +58,7 @@ public actor AccountSessionController {
         willSet {
             groupVerificationAuthorization?.invalidate()
             deviceApprovalTicket = nil
+            invalidateRouteContext()
         }
     }
     private let now: @Sendable () -> Date
@@ -75,6 +76,45 @@ public actor AccountSessionController {
     private var peerAuthorization: AccountPeerAuthorization?
     private var peerSource: PeerSourceAttachment?
     private var peerEpoch: PeerAccountEpoch?
+    private struct RouteContext {
+        let id: UUID
+        let lifetime: AccountRouteLifetime
+        let revision: UUID
+        let epoch: PeerAccountEpoch
+        let identity: AccountSessionIdentity
+        let snapshot: AccountGroupSnapshot
+        let freshUntil: Date
+    }
+    private struct RouteSocket {
+        let attachment: AccountRouteAttachment
+        let session: AuthenticatedPresenceSession
+        let contextID: UUID
+        var operation: Task<Void, Error>?
+        var bound = false
+    }
+    private var routeContext: RouteContext?
+    private var routeSocket: RouteSocket?
+    private var routeAttachmentRequest = UUID()
+    private var routeRetirement: Task<Void, Never>?
+    private var routeRetirementID = UUID()
+    private var routeExpiry: Task<Void, Never>?
+    private var routeExpiryID = UUID()
+    private var runtimeObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
+
+    deinit {
+        routeContext?.lifetime.invalidate()
+        routeExpiry?.cancel()
+        for observer in runtimeObservers.values { observer.finish() }
+        if let old = routeSocket {
+            old.operation?.cancel()
+            let prior = routeRetirement
+            Task {
+                await prior?.value
+                await old.session.stop()
+                _ = try? await old.operation?.value
+            }
+        }
+    }
 
     public init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
                 groupVerifier: AccountGroupHistoryVerifier? = nil,
@@ -103,6 +143,183 @@ public actor AccountSessionController {
 
     public func snapshot() -> AccountSessionSnapshot { state }
 
+    public func attachAccountRoute(to session: AuthenticatedPresenceSession) async throws -> AccountRouteAttachment {
+        let context = try requireRouteContext()
+        if let socket = routeSocket, socket.session === session, socket.contextID == context.id {
+            return socket.attachment
+        }
+        retireRouteSocket()
+        let request = UUID()
+        routeAttachmentRequest = request
+        // A cancellation-insensitive send must finish on its exact retired socket
+        // before a replacement can acquire credentials or start a wire operation.
+        await routeRetirement?.value
+        try Task.checkCancellation()
+        guard routeAttachmentRequest == request, try requireRouteContext().id == context.id else {
+            throw AccountRouteBindingError.invalidAttachment
+        }
+        let attachment = AccountRouteAttachment()
+        routeSocket = RouteSocket(attachment: attachment, session: session, contextID: context.id)
+        return attachment
+    }
+
+    /// Tokens never leave this controller except as input to the account-plane
+    /// socket primitive. A successful acknowledgement grants no peer authority.
+    public func bindAccountRoute(_ attachment: AccountRouteAttachment, on session: AuthenticatedPresenceSession,
+                                 timeout: Duration = .seconds(10)) async throws {
+        let context = try requireRouteContext()
+        guard let socket = routeSocket, socket.attachment == attachment,
+              socket.session === session, socket.contextID == context.id else {
+            throw AccountRouteBindingError.invalidAttachment
+        }
+        if socket.bound { return }
+        guard socket.operation == nil else { throw AccountRouteBindingError.busy }
+        guard let record = current else { throw AccountRouteBindingError.missingVerifiedContext }
+        let token = record.tokens.accessToken
+        let audience = binding.audience
+        let operation = Task {
+            try Task.checkCancellation()
+            try await session.bindAccountRoute(accessToken: token, audience: audience,
+                groupID: context.snapshot.groupID, generation: context.snapshot.generation, timeout: timeout)
+        }
+        routeSocket?.operation = operation
+        context.lifetime.track(operation)
+        try await withTaskCancellationHandler {
+            do {
+                try await operation.value
+                try Task.checkCancellation()
+                guard try requireRouteContext().id == context.id,
+                      routeSocket?.attachment == attachment else { throw AccountRouteBindingError.invalidAttachment }
+                routeSocket?.operation = nil
+                routeSocket?.bound = true
+                context.lifetime.clearOperation()
+            } catch {
+                if routeSocket?.attachment == attachment { retireRouteSocket() }
+                throw error
+            }
+        } onCancel: { operation.cancel() }
+    }
+
+    /// Cleanup is fenced to this opaque attachment. Stale callbacks cannot stop
+    /// the next socket, including when retirement is still draining old sends.
+    public func detachAccountRoute(_ attachment: AccountRouteAttachment) {
+        guard routeSocket?.attachment == attachment else { return }
+        retireRouteSocket()
+    }
+
+    /// Synchronous lifecycle intent: withdraw authority and cancel queued work
+    /// before returning; replacement sockets still join asynchronous retirement.
+    public func suspendAccountRuntime() {
+        withdrawPeerAccount()
+        operationRevision = UUID()
+        wakeRuntime()
+    }
+
+    /// Credential-free, coalesced wakeups. Consumers must re-enter the controller
+    /// for admission. At most 32 subscriptions are retained, one event each.
+    public func runtimeChanges() -> AsyncStream<Void> {
+        let id = UUID()
+        let pair = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        if runtimeObservers.count >= 32, let oldest = runtimeObservers.keys.first {
+            runtimeObservers.removeValue(forKey: oldest)?.finish()
+        }
+        runtimeObservers[id] = pair.continuation
+        pair.continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeRuntimeObserver(id) }
+        }
+        pair.continuation.yield(())
+        return pair.stream
+    }
+
+    private func removeRuntimeObserver(_ id: UUID) { runtimeObservers[id] = nil }
+    private func wakeRuntime() { for observer in runtimeObservers.values { observer.yield(()) } }
+
+    private func retireRouteSocket() {
+        routeAttachmentRequest = UUID()
+        guard let old = routeSocket else { return }
+        routeSocket = nil
+        old.operation?.cancel()
+        let prior = routeRetirement
+        let id = UUID()
+        routeRetirementID = id
+        routeRetirement = Task { [weak self] in
+            await prior?.value
+            await old.session.stop()
+            _ = try? await old.operation?.value
+            await self?.finishedRouteRetirement(id)
+        }
+    }
+
+    private func finishedRouteRetirement(_ id: UUID) {
+        if routeRetirementID == id { routeRetirement = nil }
+    }
+
+    private func invalidateRouteContext() {
+        let changed = routeContext != nil || routeSocket != nil
+        routeContext?.lifetime.invalidate()
+        routeContext = nil
+        routeExpiryID = UUID()
+        routeExpiry?.cancel()
+        routeExpiry = nil
+        retireRouteSocket()
+        if changed { wakeRuntime() }
+    }
+
+    private func requireRouteContext() throws -> RouteContext {
+        try Task.checkCancellation()
+        let date = try validNow()
+        guard let context = routeContext, let record = current,
+              let configuration = peerAuthorization,
+              context.lifetime.isValid,
+              context.revision == operationRevision, context.epoch == peerEpoch,
+              !busyForLogin, state.phase == .signedIn, record.phase == .active,
+              record.binding == binding, record.tokens.identity == context.identity,
+              record.tokens.accessExpiresAt > date, context.freshUntil > date,
+              context.snapshot.members.contains(where: {
+                  $0.deviceID == binding.deviceID.uuidString.lowercased() && $0.publicKey == configuration.localPublicKey
+              }) else {
+            invalidateRouteContext()
+            throw AccountRouteBindingError.missingVerifiedContext
+        }
+        return context
+    }
+
+    private func installRouteContext(snapshot: AccountGroupSnapshot, record: AccountStoredSession,
+                                     epoch: PeerAccountEpoch, freshUntil: Date, verificationLifetime: AccountRouteLifetime) throws {
+        try Task.checkCancellation()
+        let same = routeContext.map { $0.revision == operationRevision && $0.epoch == epoch &&
+            $0.lifetime.isValid && $0.identity == record.tokens.identity && $0.snapshot == snapshot } ?? false
+        let id = same ? routeContext!.id : UUID()
+        let lifetime = same ? routeContext!.lifetime : verificationLifetime
+        if !same { invalidateRouteContext() }
+        routeContext = RouteContext(id: id, lifetime: lifetime, revision: operationRevision, epoch: epoch,
+            identity: record.tokens.identity, snapshot: snapshot, freshUntil: freshUntil)
+        routeExpiry?.cancel()
+        let expiryID = UUID()
+        routeExpiryID = expiryID
+        let delay = max(0, freshUntil.timeIntervalSince(now()))
+        routeExpiry = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            await self?.expireRouteContext(id, expiryID: expiryID)
+        }
+        wakeRuntime()
+    }
+
+    private func expireRouteContext(_ id: UUID, expiryID: UUID) {
+        guard routeContext?.id == id, routeExpiryID == expiryID else { return }
+        withdrawPeerAccount()
+    }
+
+    private func cancelRouteContext(_ id: UUID) {
+        guard routeContext?.id == id else { return }
+        withdrawPeerAccount()
+    }
+
+    private func cancelRouteVerification(_ lifetime: AccountRouteLifetime) {
+        guard routeContext?.lifetime === lifetime else { return }
+        withdrawPeerAccount()
+    }
+
     public init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
                 groupVerifier: AccountGroupHistoryVerifier, peerAuthorization: AccountPeerAuthorization,
                 firstDeviceEnrollment: AccountFirstDeviceEnrollment? = nil,
@@ -130,6 +347,7 @@ public actor AccountSessionController {
     }
 
     private func withdrawPeerAccount() {
+        invalidateRouteContext()
         if let epoch = peerEpoch { peerAuthorization?.owner.invalidateAccount(epoch) }
         peerEpoch = nil
     }
@@ -521,6 +739,8 @@ public actor AccountSessionController {
                   active.tokens.accessExpiresAt > (try validNow()) else { throw AccountSessionControllerError.needsSignIn }
         }
         let owner = peerAuthorization?.owner
+        let priorRoute = routeContext
+        let verificationLifetime = AccountRouteLifetime()
         return try await withTaskCancellationHandler {
             do {
                 try requireCurrentSession()
@@ -536,6 +756,9 @@ public actor AccountSessionController {
                     // owner admission. Cancellation races this same owner lock.
                     try configuration.owner.install(VerifiedPeerAccountEvidence(epoch: epoch, binding: binding, snapshot: snapshot,
                         freshUntil: min(observedAt.addingTimeInterval(configuration.freshness), record.tokens.accessExpiresAt)))
+                    try installRouteContext(snapshot: snapshot, record: record, epoch: epoch,
+                        freshUntil: min(observedAt.addingTimeInterval(configuration.freshness), record.tokens.accessExpiresAt),
+                        verificationLifetime: verificationLifetime)
                 }
                 return snapshot
             } catch {
@@ -549,6 +772,10 @@ public actor AccountSessionController {
             // No actor hop: even noncooperative history/storage cannot retain
             // active grants. An old task can only withdraw its exact epoch.
             if let epoch { owner?.invalidateAccount(epoch) }
+            priorRoute?.lifetime.invalidate()
+            verificationLifetime.invalidate()
+            if let priorRoute { Task { await self.cancelRouteContext(priorRoute.id) } }
+            Task { await self.cancelRouteVerification(verificationLifetime) }
         }
     }
 
@@ -801,6 +1028,7 @@ public actor AccountSessionController {
         }
         operationRevision = UUID()
         state = AccountSessionSnapshot(phase: phase, identity: identity)
+        wakeRuntime()
     }
 
     private func safeError(_ error: Error) -> AccountSessionControllerError {
