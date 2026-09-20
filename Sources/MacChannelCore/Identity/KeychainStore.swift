@@ -6,6 +6,14 @@ public protocol SecretStore {
     func store(_ data: Data, for account: String, policy: KeychainPolicy) throws
 }
 
+/// Optional, explicitly policy-scoped cleanup capability. Existing SecretStore
+/// conformers and read/write behavior remain unchanged.
+public protocol ScopedSecretStoreRecords: SecretStore {
+    func accounts(policy: KeychainPolicy, maximumCount: Int) throws -> [String]
+    func dataForRemoval(for account: String, policy: KeychainPolicy) throws -> Data?
+    func removeData(for account: String, policy: KeychainPolicy) throws
+}
+
 public enum KeychainAccessibility: String, Equatable, Sendable {
     case afterFirstUnlockThisDeviceOnly
 }
@@ -36,7 +44,7 @@ public enum KeychainStoreError: Error, Equatable {
     case operationFailed(Int32)
 }
 
-public struct KeychainStore: SecretStore, Sendable {
+public struct KeychainStore: ScopedSecretStoreRecords, Sendable {
     public static let identityService = "com.mason.macchannel.identity"
     public static let identityPolicy = KeychainPolicy(
         service: identityService,
@@ -118,6 +126,63 @@ public struct KeychainStore: SecretStore, Sendable {
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainStoreError.operationFailed(status)
         }
+    }
+
+    public func accounts(policy: KeychainPolicy, maximumCount: Int) throws -> [String] {
+        try validate(policy)
+        guard (1...4096).contains(maximumCount) else { throw KeychainStoreError.invalidPolicy }
+        let query = enumerationQuery(maximumCount: maximumCount)
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw KeychainStoreError.operationFailed(status) }
+        guard let records = result as? [[String: Any]], records.count <= maximumCount else {
+            throw KeychainStoreError.unexpectedAttributes
+        }
+        var accounts = Set<String>()
+        for attributes in records {
+            guard let account = attributes[kSecAttrAccount as String] as? String, !account.isEmpty,
+                  account.utf8.count <= 1024,
+                  attributes[kSecAttrService as String] as? String == policy.service,
+                  (attributes[kSecAttrSynchronizable as String] as? Bool ?? false) == policy.synchronizable,
+                  accounts.insert(account).inserted else { throw KeychainStoreError.unexpectedAttributes }
+        }
+        return accounts.sorted()
+    }
+
+    public func removeData(for account: String, policy: KeychainPolicy) throws {
+        try validate(policy)
+        guard !account.isEmpty, account.utf8.count <= 1024 else { throw KeychainStoreError.invalidPolicy }
+        let status = SecItemDelete(removalQuery(account: account) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainStoreError.operationFailed(status)
+        }
+    }
+
+    /// Inspection for cleanup must not migrate attributes on unrelated records.
+    public func dataForRemoval(for account: String, policy: KeychainPolicy) throws -> Data? {
+        try validate(policy)
+        var query = recordQuery(account: account)
+        query[kSecReturnData] = true; query[kSecReturnAttributes] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeychainStoreError.operationFailed(status) }
+        return try validatedData(from: result, policy: policy).data
+    }
+
+    func enumerationQuery(maximumCount: Int) -> [CFString: Any] {
+        var query = recordQuery(account: nil)
+        query[kSecReturnAttributes] = true
+        query[kSecMatchLimit] = maximumCount + 1
+        return query
+    }
+
+    func removalQuery(account: String) -> [CFString: Any] {
+        var query = recordQuery(account: account)
+        query[kSecAttrSynchronizable] = allowedPolicy.synchronizable
+        return query
     }
 
     func recordQuery(account: String?) -> [CFString: Any] {

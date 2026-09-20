@@ -6,7 +6,7 @@ public protocol AccountGroupCheckpointStorage: Sendable {
     func save(_ checkpoint: AccountGroupCheckpoint) async throws
 }
 
-/// Dedicated namespace; no reset/delete API. Use one storage/coordinator per
+/// Dedicated namespace; no namespace reset API. Use one storage/coordinator per
 /// runtime. In-process serialization does not promise cross-process CAS.
 public actor KeychainAccountGroupCheckpointStorage: AccountGroupCheckpointStorage {
     static let policy = KeychainPolicy(service: "com.zensystech.dropmesh.account-group-checkpoint",
@@ -38,6 +38,38 @@ public actor KeychainAccountGroupCheckpointStorage: AccountGroupCheckpointStorag
             let data = try Self.encode(checkpoint)
             guard data.count <= 4096 else { throw AccountGroupCheckpointError.secureStorage }
             try store.store(data, for: key, policy: Self.policy)
+        } catch { throw AccountGroupCheckpointError.secureStorage }
+    }
+
+    /// Only after confirmed server deletion and after all account writers have
+    /// drained. This is actor-local serialization, not cross-process CAS.
+    public func removeForAccount(binding: AccountSessionBinding, accountID: String) async throws {
+        guard AccountGroupCheckpoint.canonicalUUID(accountID) else { throw AccountGroupCheckpointError.invalidCheckpoint }
+        guard let records = store as? any ScopedSecretStoreRecords else { throw AccountGroupCheckpointError.secureStorage }
+        do {
+            let keys = try records.accounts(policy: Self.policy, maximumCount: 1024)
+            guard keys.count <= 1024, Set(keys).count == keys.count else { throw AccountGroupCheckpointError.secureStorage }
+            var selected: [(String, Data)] = []
+            // Preflight the complete bounded namespace before deleting anything.
+            // Hash-only keys cannot tell which account owns a malformed record.
+            for key in keys.sorted() {
+                guard let data = try records.dataForRemoval(for: key, policy: Self.policy), data.count <= 4096 else {
+                    throw AccountGroupCheckpointError.secureStorage
+                }
+                let checkpoint = try JSONDecoder().decode(CheckpointDTO.self, from: data).checkpoint()
+                guard try Self.encode(checkpoint) == data,
+                      try Self.key(binding: checkpoint.binding, accountID: checkpoint.accountID, groupID: checkpoint.groupID) == key else {
+                    throw AccountGroupCheckpointError.secureStorage
+                }
+                if checkpoint.binding == binding, checkpoint.accountID == accountID { selected.append((key, data)) }
+            }
+            for (key, data) in selected {
+                // Detect an unexpected independent writer before its exact key
+                // is removed. The runtime owner must still quiesce all writers.
+                guard let current = try records.dataForRemoval(for: key, policy: Self.policy) else { continue }
+                guard current == data else { throw AccountGroupCheckpointError.secureStorage }
+                try records.removeData(for: key, policy: Self.policy)
+            }
         } catch { throw AccountGroupCheckpointError.secureStorage }
     }
 

@@ -54,10 +54,26 @@ public actor KeychainAccountGroupApprovalIntentStorage: AccountGroupApprovalInte
         try write(records, binding: scope.binding, accountID: scope.accountID)
     }
 
-    private func read(binding: AccountSessionBinding, accountID: String) throws -> [AccountGroupApprovalIntent] {
+    /// Confirmed deletion only; caller must first drain every approval writer.
+    /// Unlike normal pruning, this removes active and terminal account intents.
+    public func removeForAccount(binding: AccountSessionBinding, accountID: String) async throws {
+        guard let records = store as? any ScopedSecretStoreRecords else { throw AccountDeviceApprovalValueError.secureStorage }
+        do {
+            let key = try Self.key(binding: binding, accountID: accountID)
+            _ = try read(binding: binding, accountID: accountID, inspection: true)
+            try records.removeData(for: key, policy: Self.policy)
+        } catch { throw AccountDeviceApprovalValueError.secureStorage }
+    }
+
+    private func read(binding: AccountSessionBinding, accountID: String, inspection: Bool = false) throws -> [AccountGroupApprovalIntent] {
         let key = try Self.key(binding: binding, accountID: accountID)
         do {
-            guard let data = try store.data(for: key, policy: Self.policy) else { return [] }
+            let stored: Data?
+            if inspection {
+                guard let records = store as? any ScopedSecretStoreRecords else { throw AccountDeviceApprovalValueError.secureStorage }
+                stored = try records.dataForRemoval(for: key, policy: Self.policy)
+            } else { stored = try store.data(for: key, policy: Self.policy) }
+            guard let data = stored else { return [] }
             guard data.count <= 1_048_576 else { throw AccountDeviceApprovalValueError.secureStorage }
             let dto = try JSONDecoder().decode(ApprovalCollectionDTO.self, from: data)
             guard dto.version == 1, dto.deviceID == binding.deviceID.uuidString.lowercased(), dto.audience == binding.audience,
