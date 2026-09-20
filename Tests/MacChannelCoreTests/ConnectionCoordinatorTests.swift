@@ -3,6 +3,70 @@ import XCTest
 @testable import MacChannelCore
 
 final class ConnectionCoordinatorTests: XCTestCase {
+    func testSharedBudgetHoldsCancelledAcceptanceUntilLateFactoryCloses() async throws {
+        let f = try AttemptAuthorizationFixture()
+        let pair = try await f.loopback()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let budget = WebRTCAcceptanceBudget()
+        let occupied = try XCTUnwrap(budget.acquire(for: f.remote.id))
+        let factory = AuthorizedAttemptFactory { _, _ in await barrier.wait(); return pair.left }
+        let listener = WebRTCConnectionListener(directory: f.directory, identity: f.local,
+            authorizationProvider: f.owner, signaling: f.signaling,
+            ice: ICEConfiguration(stunURLs: [], turnServers: []), factory: factory,
+            acceptanceBudget: budget)
+        _ = await listener.channels()
+        try await f.offer()
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        await listener.stop()
+        XCTAssertNil(budget.acquire(for: f.remote.id), "Cancelled but noncooperative acceptance remains charged")
+        barrier.release()
+        await listener.stopAndWait()
+        let replacement = try XCTUnwrap(budget.acquire(for: f.remote.id))
+        budget.release(replacement)
+        budget.release(occupied)
+        do { _ = try await pair.left.exportKey(label: "closed", context: Data(), length: 32); XCTFail("Late channel not closed") }
+        catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        await pair.right.close()
+    }
+    func testSharedInboundAcceptanceBudgetAcrossTwoListeners() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let peers = try (0..<6).map { _ in try DeviceIdentity.ephemeral() }
+        let repository = try TrustRepository(ownerIdentity: identity,
+            trustStore: TrustStore(owner: identity.id), persistedGeneration: 0)
+        for peer in peers {
+            _ = try await repository.issueAuthorization(subject: peer.id,
+                subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        }
+        let budget = WebRTCAcceptanceBudget()
+        let factory = BlockingInboundWebRTCFactory()
+        var listeners: [WebRTCConnectionListener] = []
+        for _ in 0..<2 {
+            let session = MemoryRendezvousSignalSession()
+            let signaling = RendezvousWebRTCSignaling(session: session)
+            let listener = WebRTCConnectionListener(directory: DeviceDirectory(trust: .allowing(identity.id)),
+                identity: identity, trustRepository: repository, signaling: signaling,
+                ice: ICEConfiguration(stunURLs: [], turnServers: []), factory: factory,
+                acceptanceBudget: budget)
+            listeners.append(listener)
+            _ = await listener.channels()
+            for peer in peers {
+                for _ in 0..<3 {
+                    try await signaling.send(.offer(sdp: "v=0\r\n", route: .directInternet),
+                        to: peer.id, connectionID: UUID())
+                    let payload = await session.lastSentPayload()
+                    await session.deliver(RendezvousSignalFrame(from: peer.id, payload: try XCTUnwrap(payload)))
+                }
+            }
+            await waitForSignalingToProcess(18, signaling: signaling)
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        let counts = await factory.snapshot()
+        XCTAssertEqual(counts.maximumTotal, 8)
+        XCTAssertEqual(counts.maximumPerDevice, 2)
+        for listener in listeners { await listener.stopAndWait() }
+    }
+
     func testProviderOnlyOutboundUsesExactAuthorizedFactoryOverload() async throws {
         let fixture = try AttemptAuthorizationFixture()
         let factory = AuthorizedAttemptFactory { _, provider in

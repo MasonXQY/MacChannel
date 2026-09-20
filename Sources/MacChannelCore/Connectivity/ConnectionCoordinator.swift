@@ -749,9 +749,7 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         let task: Task<Void, Never>
     }
 
-    private static let maximumConcurrentAcceptances =
-        IncomingTransferCapacity.maximumUpstreamAcceptances
-    private static let maximumConcurrentAcceptancesPerDevice = 2
+    private let acceptanceBudget: WebRTCAcceptanceBudget
 
     private let directory: DeviceDirectory
     private let identity: DeviceIdentity
@@ -771,17 +769,19 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
     public init(directory: DeviceDirectory, identity: DeviceIdentity,
                 authorizationProvider: any PeerAuthorizationProviding,
                 signaling: RendezvousWebRTCSignaling, iceProvider: any ICEConfigurationProviding,
-                factory: any AuthorizedWebRTCChannelFactory = WebRTCFactory()) {
+                factory: any AuthorizedWebRTCChannelFactory = WebRTCFactory(),
+                acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) {
         self.init(directory: directory, identity: identity, authority: .provider(authorizationProvider, factory),
-            signaling: signaling, iceProvider: iceProvider)
+            signaling: signaling, iceProvider: iceProvider, acceptanceBudget: acceptanceBudget)
     }
 
     public init(directory: DeviceDirectory, identity: DeviceIdentity,
                 authorizationProvider: any PeerAuthorizationProviding,
                 signaling: RendezvousWebRTCSignaling, ice: ICEConfiguration,
-                factory: any AuthorizedWebRTCChannelFactory = WebRTCFactory()) {
+                factory: any AuthorizedWebRTCChannelFactory = WebRTCFactory(),
+                acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) {
         self.init(directory: directory, identity: identity, authorizationProvider: authorizationProvider,
-            signaling: signaling, iceProvider: StaticICEConfigurationProvider(ice), factory: factory)
+            signaling: signaling, iceProvider: StaticICEConfigurationProvider(ice), factory: factory, acceptanceBudget: acceptanceBudget)
     }
 
     public init(
@@ -790,7 +790,8 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         trustRepository: TrustRepository,
         signaling: RendezvousWebRTCSignaling,
         ice: ICEConfiguration,
-        factory: any WebRTCChannelFactory = WebRTCFactory()
+        factory: any WebRTCChannelFactory = WebRTCFactory(),
+        acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()
     ) {
         self.init(
             directory: directory,
@@ -798,7 +799,7 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
             trustRepository: trustRepository,
             signaling: signaling,
             iceProvider: StaticICEConfigurationProvider(ice),
-            factory: factory
+            factory: factory, acceptanceBudget: acceptanceBudget
         )
     }
 
@@ -808,14 +809,17 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         trustRepository: TrustRepository,
         signaling: RendezvousWebRTCSignaling,
         iceProvider: any ICEConfigurationProviding,
-        factory: any WebRTCChannelFactory = WebRTCFactory()
+        factory: any WebRTCChannelFactory = WebRTCFactory(),
+        acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()
     ) {
         self.init(directory: directory, identity: identity, authority: .repository(trustRepository, factory),
-            signaling: signaling, iceProvider: iceProvider)
+            signaling: signaling, iceProvider: iceProvider, acceptanceBudget: acceptanceBudget)
     }
 
     private init(directory: DeviceDirectory, identity: DeviceIdentity, authority: WebRTCConnectionAuthority,
-                 signaling: RendezvousWebRTCSignaling, iceProvider: any ICEConfigurationProviding) {
+                 signaling: RendezvousWebRTCSignaling, iceProvider: any ICEConfigurationProviding,
+                 acceptanceBudget: WebRTCAcceptanceBudget) {
+        self.acceptanceBudget = acceptanceBudget
         self.directory = directory
         self.identity = identity
         self.authority = authority
@@ -901,13 +905,12 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
     }
 
     private func beginAccepting(_ offer: IncomingWebRTCOffer) {
-        guard !stopped,
-              acceptanceTasks.count < Self.maximumConcurrentAcceptances,
-              acceptanceTasks.values.lazy.filter({ $0.remoteDevice == offer.remoteDevice }).count
-                < Self.maximumConcurrentAcceptancesPerDevice
-        else { return }
+        guard !stopped, let permit = acceptanceBudget.acquire(for: offer.remoteDevice) else { return }
         let token = UUID()
-        let task = Task { [weak self] in
+        let task = Task { [weak self, acceptanceBudget] in
+            // Cancellation only requests retirement; late factory/channel close
+            // remains charged until the entire acceptance returns.
+            defer { acceptanceBudget.release(permit) }
             await self?.accept(offer)
             await self?.acceptanceFinished(token)
         }
