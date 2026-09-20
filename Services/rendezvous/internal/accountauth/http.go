@@ -54,6 +54,7 @@ type AccountHTTPConfig struct {
 	Groups     AccountGroups
 	Enrollment AccountGroupEnrollment
 	Pending    AccountGroupPending
+	TURN       *AccountTURNConfig
 }
 
 type sourceWindow struct {
@@ -68,6 +69,7 @@ type accountHTTP struct {
 	groups     AccountGroups
 	enrollment AccountGroupEnrollment
 	pending    AccountGroupPending
+	turn       *AccountTURNConfig
 	clock      func() time.Time
 	global     chan struct{}
 	mu         sync.Mutex
@@ -80,6 +82,12 @@ func NewAccountHTTP(config AccountHTTPConfig) (http.Handler, error) {
 		return nil, errAccountHTTP
 	}
 	h := &accountHTTP{verifier: config.Verifier, challenges: config.Challenges, login: config.Login, sessions: config.Sessions, clock: time.Now, global: make(chan struct{}, accountGlobalLimit), sources: make(map[string]sourceWindow), completing: make(map[string]bool)}
+	if config.TURN != nil {
+		if !validAccountTURNConfig(config.TURN) {
+			return nil, errAccountHTTP
+		}
+		h.turn = &AccountTURNConfig{Issuer: config.TURN.Issuer, SharedSecret: append([]byte(nil), config.TURN.SharedSecret...), URLs: append([]string(nil), config.TURN.URLs...)}
+	}
 	if !nilInterface(config.Groups) {
 		h.groups = config.Groups
 	}
@@ -106,6 +114,10 @@ func nilInterface(v any) bool {
 
 func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	accountHeaders(w)
+	if r.URL.Path == "/v1/account/turn-credentials" && h.turn == nil {
+		writeAccountError(w, http.StatusNotFound, "invalid_request")
+		return
+	}
 	if _, ok := pendingOperation(r.URL.Path); ok && nilInterface(h.pending) {
 		writeAccountError(w, http.StatusNotFound, "invalid_request")
 		return
@@ -163,6 +175,10 @@ func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device := strings.ToLower(envelope.DeviceID)
+	if r.URL.Path == "/v1/account/turn-credentials" {
+		h.serveAccountTURN(w, r, device, envelope.PublicKey, envelope.Payload)
+		return
+	}
 	if operation, ok := pendingOperation(r.URL.Path); ok {
 		h.servePending(w, r, device, envelope.PublicKey, operation, envelope.Payload)
 		return
@@ -199,6 +215,8 @@ func accountPurpose(path string) (string, bool) {
 		return "dropmesh.account.group.join." + op + ".v1", true
 	}
 	switch path {
+	case "/v1/account/turn-credentials":
+		return "dropmesh.account.turn.credentials.v1", true
 	case "/v1/account/group/discover":
 		return "dropmesh.account.group.discover.v1", true
 	case "/v1/account/group/bootstrap":
