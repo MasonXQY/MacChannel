@@ -33,6 +33,18 @@ independent verification format and operation ordering. Consume the reviewed
 intent implementation's real interfaces directly; do not create parallel DTOs or
 another storage authority. Dispatch requires that intent task to be accepted first.
 
+Intent component interface mapping (verify against its accepted report at dispatch):
+AccountDeviceApprovalRequestContext owns the exact request tuple and requestCode;
+AccountDeviceApprovalCapsule.parse(_:expectedRequest:expectedDraft:) checks the
+independent import. AccountGroupApprovalIntent.Scope binds binding/account/request/
+role. Acknowledgment retains server epoch milliseconds. Proof owns draft/capsule
+and both comparison digests. ActivePhase is subjectRequested, actorProposed(Proof)
+or subjectCountersigned(Proof, AccountGroupEvent); terminal retains that predecessor
+plus acknowledged status or local abandonment. Use replacing(phase:acknowledgment:)
+and storage.replace(scope:expected:with:) for exact monotonic updates, not a mutable
+view-state dictionary. Raw create acknowledgment times may shorten but never extend
+confirmationDeadline derived from preparedAtMilliseconds/originalAccessExpiresAtMilliseconds.
+
 ### Public controller surface
 
 ```swift
@@ -148,7 +160,7 @@ and pure verifier rather than a view-only fake success path.
 - [ ] Focused final gate, once current-source tests pass:
 
 ```sh
-swift test --filter 'AccountDeviceApproval|AccountGroupApprovalIntent|AccountGroupHistoryVerifier|AccountSessionController|AccountFirstDeviceEnrollment'
+swift test --filter 'AccountDeviceApproval|AccountGroupApprovalIntent|AccountGroupHistoryVerifier|AccountSessionController|AccountSessionGroupTests|AccountFirstDeviceEnrollment'
 ```
 
 No Go, SQL, device or broad package suite is needed for this component gate.

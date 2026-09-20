@@ -77,7 +77,7 @@ SecretStore; do not access realstore inunit tests.
 - [ ] Run focused tests and existing bootstrap/checkpointstorage regression once:
 
 ```sh
-swift test --filter 'AccountDeviceApprovalVerification|AccountGroupApprovalIntent|AccountGroupBootstrapIntent|AccountGroupCheckpointStorage'
+swift test --filter 'AccountDeviceApprovalVerification|AccountGroupApprovalIntent|AccountGroupBootstrapIntent|AccountGroupCheckpointTests'
 ```
 
 Add roundtrip across independently reconstructed storageactor, capacity32/33,

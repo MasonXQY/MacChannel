@@ -2,6 +2,15 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+LATEST native intent e163302 DONE; native_approval_intent_review active on frozen
+bf8d4e2..e163302 (includes root docs a67fb22). Root read full report and actual
+17/0 intent/bootstrap log + 6/0 checkpoint regression log. Plan's mistaken
+checkpoint filter corrected to actual AccountGroupCheckpointTests. Caches free,
+fixtures stopped. Next executable controller plan is ready pending this review;
+includes verification-only recovery for historical committed receipt with a fresh
+independent code/confirmation, never reviving expired mutation consent. Unacknowledged
+abandoned Create records remain capacity-bearing; no automatic pruning/reset.
+
 CURRENT native transport review Approved/no findings. native_approval_intent is
 sole implementer/cache owner from bf8d4e2, requirements native-approval-intent-brief.md,
 report native-approval-intent-verification-report.md. It owns only verification/
