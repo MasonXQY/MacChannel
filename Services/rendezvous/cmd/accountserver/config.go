@@ -25,6 +25,7 @@ type config struct {
 	ingress                                    ingress.Adapter
 	enabled, groupsEnabled                     bool
 	transferEnabled                            bool
+	deletionEnabled                            bool
 	turnSecret                                 []byte
 	turnURLs                                   []string
 	teamID, keyID, audience, addr, databaseDSN string
@@ -47,6 +48,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, errConfiguration
 	}
 	var turnSecret []byte
+	deletionEnabled, err := groupCapability(getenv("DROPMESH_ACCOUNT_DELETION_ENABLED"))
+	if err != nil || (deletionEnabled && !groupsEnabled) {
+		return config{}, errConfiguration
+	}
 	var turnURLs []string
 	if transferEnabled {
 		turnSecret, err = readSecureFile(getenv("DROPMESH_ACCOUNT_TURN_SECRET_FILE"), 4096)
@@ -94,7 +99,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if dsn == "" {
 		return config{}, errConfiguration
 	}
-	return config{enabled: true, groupsEnabled: groupsEnabled, transferEnabled: transferEnabled, turnSecret: turnSecret, turnURLs: turnURLs, ingress: adapter, teamID: values[requiredEnvironment[0]], keyID: values[requiredEnvironment[1]], audience: values[requiredEnvironment[2]],
+	return config{enabled: true, groupsEnabled: groupsEnabled, deletionEnabled: deletionEnabled, transferEnabled: transferEnabled, turnSecret: turnSecret, turnURLs: turnURLs, ingress: adapter, teamID: values[requiredEnvironment[0]], keyID: values[requiredEnvironment[1]], audience: values[requiredEnvironment[2]],
 		addr: values["DROPMESH_ACCOUNT_ADDR"], databaseDSN: dsn, applePrivateKey: p8, credentialKey: credential}, nil
 }
 

@@ -3,6 +3,20 @@ import MacChannelCore
 @testable import DropMeshTestHost
 
 final class MobileAccountConfigurationTests: XCTestCase {
+    func testDeletionCapabilityRequiresExplicitBooleanAndGroups() throws {
+        let base: [String: Any] = ["DropMeshAccountServiceOrigin": "https://accounts.example.com", "DropMeshAccountGroupsEnabled": true]
+        XCTAssertFalse(try XCTUnwrap(MobileAccountConfiguration.load(info: base, bundleIdentifier: "com.example.app")).deletionEnabled)
+        var info = base
+        info["DropMeshAccountDeletionEnabled"] = true
+        XCTAssertTrue(try XCTUnwrap(MobileAccountConfiguration.load(info: info, bundleIdentifier: "com.example.app")).deletionEnabled)
+        for value: Any in ["true", 1, NSNull()] {
+            info["DropMeshAccountDeletionEnabled"] = value
+            XCTAssertThrowsError(try MobileAccountConfiguration.load(info: info, bundleIdentifier: "com.example.app"))
+        }
+        info["DropMeshAccountDeletionEnabled"] = true
+        info["DropMeshAccountGroupsEnabled"] = false
+        XCTAssertThrowsError(try MobileAccountConfiguration.load(info: info, bundleIdentifier: "com.example.app"))
+    }
     func testGroupsOnlyConfigurationCannotCreateAccountAuthorizationProducer() throws {
         let f = try AccountGroupEvidenceFixture()
         let owner = PeerAuthorizationOwner.live(identity: f.identity)

@@ -37,8 +37,14 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 	}
 	var closeOnce sync.Once
 	var routes *routeauth.ConnectionRouter
+	var stopDeletion context.CancelFunc
+	var deletionDone chan struct{}
 	closeDatabase := func() {
 		closeOnce.Do(func() {
+			if stopDeletion != nil {
+				stopDeletion()
+				<-deletionDone
+			}
 			if routes != nil {
 				routes.Shutdown()
 			}
@@ -62,6 +68,11 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 		}
 	}
 	audiences := []string{cfg.audience}
+	if cfg.deletionEnabled {
+		if !cfg.groupsEnabled || checkTables(startup, database, []string{"account_deletions", "account_apple_exchanges"}) != nil {
+			return fail()
+		}
+	}
 	secrets, err := accountauth.NewAppleClientSecrets(cfg.teamID, cfg.keyID, cfg.applePrivateKey, audiences)
 	if err != nil {
 		return fail()
@@ -84,6 +95,18 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 	}
 	verifier := auth.NewVerifier(auth.VerifierConfig{ReplayStore: auth.NewPostgresReplayStore(database)})
 	httpConfig := accountauth.AccountHTTPConfig{Verifier: verifier, Challenges: challenges, Login: login, Sessions: sessions}
+	var deletion *accountauth.PostgresDeletion
+	if cfg.deletionEnabled {
+		revoker, revokerErr := accountauth.NewAppleRevoker(secrets, audiences)
+		if revokerErr != nil {
+			return fail()
+		}
+		deletion, err = accountauth.NewPostgresDeletion(database, protector, login, revoker, audiences)
+		if err != nil {
+			return fail()
+		}
+		httpConfig.Deletion = deletion
+	}
 	var groups *accountgroup.PostgresStore
 	if cfg.groupsEnabled {
 		groups, err = accountgroup.NewPostgresStore(database)
@@ -118,7 +141,13 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 			AccountRoutes: &httpapi.AccountRouteConfig{Routes: routes, Sessions: sessions},
 		})
 	}
-	return cfg.ingress.Wrap(newServiceMuxWithTransfer(accountHandler, database.PingContext, cfg.groupsEnabled, transfer)), closeDatabase, nil
+	if deletion != nil {
+		var workerContext context.Context
+		workerContext, stopDeletion = context.WithCancel(ctx)
+		deletionDone = make(chan struct{})
+		go func() { defer close(deletionDone); _ = deletion.Run(workerContext) }()
+	}
+	return cfg.ingress.Wrap(newServiceMuxWithCapabilities(accountHandler, database.PingContext, cfg.groupsEnabled, transfer, cfg.deletionEnabled)), closeDatabase, nil
 }
 
 // Candidate trust is exclusively checked by SQL route admission. Uploaded
@@ -147,7 +176,16 @@ func newServiceMux(account http.Handler, health func(context.Context) error, gro
 }
 
 func newServiceMuxWithTransfer(account http.Handler, health func(context.Context) error, groupsEnabled bool, transfer http.Handler) http.Handler {
+	return newServiceMuxWithCapabilities(account, health, groupsEnabled, transfer, false)
+}
+
+func newServiceMuxWithCapabilities(account http.Handler, health func(context.Context) error, groupsEnabled bool, transfer http.Handler, deletionEnabled bool) http.Handler {
 	mux := http.NewServeMux()
+	if deletionEnabled {
+		mux.Handle("/v1/account/deletion/begin", account)
+		mux.Handle("/v1/account/deletion/status", account)
+		mux.Handle("/v1/account/deletion/recover", account)
+	}
 	if transfer != nil {
 		mux.Handle("/v1/ws", transfer)
 		mux.Handle("/v1/account/turn-credentials", account)

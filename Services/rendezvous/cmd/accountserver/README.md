@@ -1,6 +1,6 @@
 # Isolated DropMesh account service
 
-This executable is a development assembly of the existing account components. It is disabled by default; when enabled, its default remains login-only. It never modifies or mounts rendezvous transfer, pairing, trust, approved-device, or invitation routes. It performs no migrations.
+This executable is an isolated assembly of account components. It is disabled by default; when enabled, its default remains login-only. Optional capabilities below add account-only routes, never modify the legacy rendezvous service or mount manual pairing/trust or invitation routes. It performs no migrations.
 
 Set `DROPMESH_ACCOUNT_ENABLED=1` and provide all of:
 
@@ -32,4 +32,10 @@ DROPMESH_ACCOUNT_TEST_DATABASE_URL='postgresql:///dropmesh_account_auth_test?hos
   go test -race ./cmd/accountserver -count=1
 ```
 
-No deployment or runtime capability toggle was performed by this implementation. This assembly does not wire native account deletion. Public activation, trusted HTTPS termination, real Apple credential acceptance, deployment, and phone acceptance remain separate approval and acceptance gates.
+Optional `DROPMESH_ACCOUNT_TRANSFER_ENABLED=1` requires groups, an owner-only `DROPMESH_ACCOUNT_TURN_SECRET_FILE` (at least 32 bytes), and comma-separated `DROPMESH_ACCOUNT_TURN_URLS`. It mounts account-only `/v1/ws` and `/v1/account/turn-credentials`; it does not replace legacy/manual transfer endpoints. Account membership and exact session admission remain required.
+
+Optional `DROPMESH_ACCOUNT_DELETION_ENABLED=1` requires groups and pre-provisioned migration012 (`account_deletions`, `account_apple_exchanges`). It mounts signed POST `/v1/account/deletion/begin`, `/status`, and `/recover` under that deletion prefix, and starts the durable retry worker. Shutdown cancels and joins the worker before closing PostgreSQL. Missing/0 leaves routes absent; malformed capability values fail startup.
+
+Deletion begin requires a live bound session, fresh Apple verification and explicit confirmation. Recovery instead requires the original account UUID, same receipt and fresh Apple verification; it never creates an account or session. Status is receipt-bound without an access session. Completed-with-manual-revocation-required means data erasure completed but automatic Apple revocation was not proven. Keep that distinction in clients and operational monitoring. The isolated deletion SQL fixture must be named `dropmesh_account_deletion_test` over a Unix socket; do not run fixture tests against a deployed database.
+
+No deployment or runtime capability toggle was performed by this implementation. Public activation, trusted HTTPS termination, real Apple credential acceptance, deployment, and phone acceptance remain separate approval and acceptance gates. Native deletion UI/cleanup and physical acceptance must pass before releasing an account-enabled client.

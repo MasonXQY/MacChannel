@@ -65,6 +65,24 @@ func TestLoadConfigCarriesGroupCapability(t *testing.T) {
 	}
 }
 
+func TestDeletionRequiresExplicitCapabilityAndGroups(t *testing.T) {
+	for _, tc := range []struct {
+		value, groups string
+		valid         bool
+	}{
+		{"", "", true}, {"0", "", true}, {"1", "1", true},
+		{"1", "", false}, {"true", "1", false}, {" 1", "1", false},
+	} {
+		env := validEnvironment(t)
+		env["DROPMESH_ACCOUNT_DELETION_ENABLED"] = tc.value
+		env["DROPMESH_ACCOUNT_GROUPS_ENABLED"] = tc.groups
+		_, err := loadConfig(mapGetter(env))
+		if (err == nil) != tc.valid {
+			t.Fatalf("deletion %q groups %q: %v", tc.value, tc.groups, err)
+		}
+	}
+}
+
 func TestEnabledConfigRequiresEverySetting(t *testing.T) {
 	base := validEnvironment(t)
 	for _, key := range requiredEnvironment {

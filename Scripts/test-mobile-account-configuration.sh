@@ -19,6 +19,16 @@ reject 'string instead of Boolean activation'
 /usr/libexec/PlistBuddy -c 'Delete :DropMeshAccountGroupsEnabled' -c 'Add :DropMeshAccountGroupsEnabled bool false' "$plist"
 reject 'disabled activation'
 /usr/libexec/PlistBuddy -c 'Set :DropMeshAccountGroupsEnabled true' "$plist"
+reject 'missing candidate transport origin'
+/usr/libexec/PlistBuddy -c 'Add :DropMeshAccountTransportOrigin string https://old.example.com' "$plist"
+reject 'mismatched candidate transport origin'
+/usr/libexec/PlistBuddy -c 'Set :DropMeshAccountTransportOrigin https://candidate.example.com' "$plist"
+reject 'missing account deletion capability'
+/usr/libexec/PlistBuddy -c 'Add :DropMeshAccountDeletionEnabled string true' "$plist"
+reject 'mistyped account deletion capability'
+/usr/libexec/PlistBuddy -c 'Delete :DropMeshAccountDeletionEnabled' -c 'Add :DropMeshAccountDeletionEnabled bool false' "$plist"
+reject 'disabled account deletion capability'
+/usr/libexec/PlistBuddy -c 'Set :DropMeshAccountDeletionEnabled true' "$plist"
 bash "$check" "$fixture" 'https://candidate.example.com' com.example.candidate
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.example.other' "$plist"
 reject 'wrong account audience'

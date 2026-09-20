@@ -7,6 +7,7 @@ struct MobileAccountConfiguration: Equatable, Sendable {
     let audience: String
     let groupsEnabled: Bool
     let transportOrigin: URL?
+    let deletionEnabled: Bool
 
     /// Group settings alone cannot authorize transfers on the legacy plane.
     func makePeerAuthorization(owner: PeerAuthorizationOwner, identity: DeviceIdentity) throws -> AccountPeerAuthorization? {
@@ -46,7 +47,14 @@ struct MobileAccountConfiguration: Equatable, Sendable {
             guard binding.origin == validation.origin else { throw AccountSessionControllerError.unavailable }
             transportOrigin = binding.origin
         }
+        var deletionEnabled = false
+        if let value = info["DropMeshAccountDeletionEnabled"] {
+            guard let boolean = value as? NSNumber, CFGetTypeID(boolean) == CFBooleanGetTypeID(),
+                  !boolean.boolValue || groupsEnabled else { throw AccountSessionControllerError.unavailable }
+            deletionEnabled = boolean.boolValue
+        }
         return MobileAccountConfiguration(origin: validation.origin, audience: validation.audience,
-                                          groupsEnabled: groupsEnabled, transportOrigin: transportOrigin)
+                                          groupsEnabled: groupsEnabled, transportOrigin: transportOrigin,
+                                          deletionEnabled: deletionEnabled)
     }
 }

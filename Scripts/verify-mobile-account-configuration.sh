@@ -16,6 +16,9 @@ read_string() {
 }
 [[ "$(read_string CFBundleIdentifier)" == "$expected_bundle" ]] || fail 'account audience does not match expected bundle'
 [[ "$(read_string DropMeshAccountServiceOrigin)" == "$expected_origin" ]] || fail 'account origin does not match expected candidate'
+[[ "$(read_string DropMeshAccountTransportOrigin)" == "$expected_origin" ]] || fail 'account transport origin does not match expected candidate'
 [[ "$(/usr/bin/plutil -type DropMeshAccountGroupsEnabled "$plist" 2>/dev/null)" == bool ]] || fail 'account groups flag must be a plist Boolean'
 [[ "$(/usr/bin/plutil -extract DropMeshAccountGroupsEnabled raw -o - "$plist")" == true ]] || fail 'account groups are not enabled in this artifact'
-printf 'PASS: built account configuration matches expected origin and audience; groups enabled (signature and live service not checked)\n'
+[[ "$(/usr/bin/plutil -type DropMeshAccountDeletionEnabled "$plist" 2>/dev/null)" == bool ]] || fail 'account deletion flag must be a plist Boolean'
+[[ "$(/usr/bin/plutil -extract DropMeshAccountDeletionEnabled raw -o - "$plist")" == true ]] || fail 'account deletion is not enabled in this artifact'
+printf 'PASS: built account configuration matches expected origin and audience; groups and deletion enabled (signature and live service not checked)\n'

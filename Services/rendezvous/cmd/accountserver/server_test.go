@@ -47,6 +47,24 @@ func TestGroupRoutesRequireCapability(t *testing.T) {
 	}
 }
 
+func TestDeletionRoutesRequireCapability(t *testing.T) {
+	account := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	for _, enabled := range []bool{false, true} {
+		h := newServiceMuxWithCapabilities(account, func(context.Context) error { return nil }, true, nil, enabled)
+		for _, path := range []string{"/v1/account/deletion/begin", "/v1/account/deletion/status", "/v1/account/deletion/recover"} {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, nil))
+			want := http.StatusNotFound
+			if enabled {
+				want = http.StatusTeapot
+			}
+			if w.Code != want {
+				t.Fatalf("enabled=%v %s: %d", enabled, path, w.Code)
+			}
+		}
+	}
+}
+
 func TestHealthFailureIsGeneric(t *testing.T) {
 	secret := "postgres://admin:password@example.invalid/private"
 	h := newServiceMux(http.NotFoundHandler(), func(context.Context) error { return errors.New(secret) }, false)
