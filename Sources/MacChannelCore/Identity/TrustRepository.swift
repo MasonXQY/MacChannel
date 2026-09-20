@@ -34,6 +34,7 @@ public actor TrustRepository {
     public nonisolated let ownerID: DeviceID
 
     private let ownerIdentity: DeviceIdentity
+    private let authorizationSource: PeerSourceAttachment?
     private let issuerSequenceReserver: (any IssuerSequenceReserving)?
     private var store: TrustStore
     private var latestSnapshot: TrustStoreSnapshot?
@@ -45,7 +46,8 @@ public actor TrustRepository {
         trustStore: TrustStore,
         persistedGeneration: UInt64,
         authenticationRecords: [SignedTrustRecord] = [],
-        issuerSequenceReserver: (any IssuerSequenceReserving)? = nil
+        issuerSequenceReserver: (any IssuerSequenceReserving)? = nil,
+        authorizationOwner: PeerAuthorizationOwner? = nil
     ) throws {
         guard trustStore.isOwned(by: ownerIdentity) else {
             throw TrustRepositoryError.invalidOwner
@@ -54,6 +56,7 @@ public actor TrustRepository {
             throw TrustRepositoryError.generationMismatch
         }
         self.ownerID = ownerIdentity.id
+        self.authorizationSource = try authorizationOwner?.attachManual(identity: ownerIdentity, store: trustStore)
         self.ownerIdentity = ownerIdentity
         self.issuerSequenceReserver = issuerSequenceReserver
         self.store = trustStore
@@ -167,6 +170,7 @@ public actor TrustRepository {
         )
         try candidate.authorize(authorization)
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(authorization)
@@ -245,6 +249,7 @@ public actor TrustRepository {
         try candidate.bootstrapFromConfirmedPairing(peerAuthorization, localIdentity: ownerIdentity)
         try candidate.authorize(localAuthorization)
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(localAuthorization)
@@ -256,6 +261,7 @@ public actor TrustRepository {
         var candidate = store
         try candidate.bootstrapFromConfirmedPairing(record, localIdentity: ownerIdentity)
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(record)
@@ -276,6 +282,7 @@ public actor TrustRepository {
             timestamp: timestamp
         )
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(record)
@@ -316,6 +323,7 @@ public actor TrustRepository {
             return false
         }
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(record)

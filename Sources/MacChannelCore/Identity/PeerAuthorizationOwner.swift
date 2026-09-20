@@ -26,6 +26,7 @@ public final class PeerAuthorizationOwner: PeerAuthorizationProviding, @unchecke
     private let now: @Sendable () -> Date
     private let schedule: PeerDeadlineScheduler
     private var manual: [DeviceID: Data] = [:]
+    private var attachments: [PeerAuthorizationSource: UUID] = [:]
     private var account: Account?
     private var effective: [DeviceID: Effective] = [:]
     private var registrations: [UUID: Registration] = [:]
@@ -39,8 +40,69 @@ public final class PeerAuthorizationOwner: PeerAuthorizationProviding, @unchecke
         self.local = local; self.now = now; self.schedule = schedule
     }
 
-    /// For the future synchronous TrustRepository commit seam. No observer or
-    /// signed-record publication is modified by this owner.
+    var localDeviceID: DeviceID { local }
+
+    /// Explicit, initially empty runtime owner. Share this instance with both
+    /// producers and consumers; this factory does not activate any transport.
+    public static func live(identity: DeviceIdentity) -> PeerAuthorizationOwner {
+        PeerAuthorizationOwner(local: identity.id, now: Date.init, schedule: { date, callback in
+            let deadline = PeerLiveDeadline(date: date, callback: callback)
+            return { deadline.cancel() }
+        })
+    }
+
+    func attachAccount(localPublicKey: Data, binding: AccountSessionBinding) throws -> PeerSourceAttachment {
+        guard binding.deviceID == local.rawValue, Self.validKey(localPublicKey, for: local) else {
+            throw PeerAuthorizationError.invalidEvidence
+        }
+        let token = UUID()
+        try transact { _ in
+            guard attachments[.account] == nil else { throw PeerAuthorizationError.denied }
+            attachments[.account] = token
+            account = nil
+        }
+        return PeerSourceAttachment(owner: self, source: .account, token: token)
+    }
+
+    func attachManual(identity: DeviceIdentity, store: TrustStore) throws -> PeerSourceAttachment {
+        guard identity.id == local, store.isOwned(by: identity) else { throw PeerAuthorizationError.invalidEvidence }
+        let keys = Self.manualKeys(store)
+        let token = UUID()
+        try transact { _ in
+            guard attachments[.manual] == nil else { throw PeerAuthorizationError.denied }
+            attachments[.manual] = token
+            manual = keys.filter { $0.key != local }
+        }
+        return PeerSourceAttachment(owner: self, source: .manual, token: token)
+    }
+
+    fileprivate func release(_ attachment: PeerSourceAttachment) {
+        try? transact(requiresValidClock: false) { _ in
+            guard attachments[attachment.source] == attachment.token else { return }
+            attachments.removeValue(forKey: attachment.source)
+            switch attachment.source {
+            case .manual: manual = [:]
+            case .account: account = nil
+            }
+        }
+    }
+
+    func replaceManual(_ store: TrustStore, attachment: PeerSourceAttachment) throws {
+        let keys = Self.manualKeys(store)
+        try transact { _ in
+            guard attachment.owner === self, attachment.source == .manual,
+                  attachments[.manual] == attachment.token else { throw PeerAuthorizationError.denied }
+            manual = keys.filter { $0.key != local }
+        }
+    }
+
+    private static func manualKeys(_ store: TrustStore) -> [DeviceID: Data] {
+        Dictionary(uniqueKeysWithValues: store.trustedDeviceIDs.compactMap { id in
+            store.trustedPublicKey(for: id).map { (id, $0) }
+        })
+    }
+
+    /// Module-internal source updates. Signed-record publication is independent.
     func replaceManual(_ store: TrustStore) throws {
         try replaceManual(Dictionary(uniqueKeysWithValues: store.trustedDeviceIDs.compactMap { id in
             store.trustedPublicKey(for: id).map { (id, $0) }
@@ -49,12 +111,22 @@ public final class PeerAuthorizationOwner: PeerAuthorizationProviding, @unchecke
 
     func replaceManual(_ keys: [DeviceID: Data]) throws {
         guard keys.allSatisfy({ Self.validKey($0.value, for: $0.key) }) else { throw PeerAuthorizationError.invalidEvidence }
-        try transact { _ in manual = keys.filter { $0.key != local } }
+        try transact { _ in
+            guard attachments[.manual] == nil else { throw PeerAuthorizationError.denied }
+            manual = keys.filter { $0.key != local }
+        }
     }
 
     func beginAccountSession(binding: AccountSessionBinding, accountID: String, sessionID: String,
-                             localPublicKey: Data, accessExpiresAt: Date) throws -> PeerAccountEpoch {
+                             localPublicKey: Data, accessExpiresAt: Date,
+                             attachment: PeerSourceAttachment? = nil) throws -> PeerAccountEpoch {
         try transact { date in
+            if let attachment {
+                guard attachment.owner === self, attachment.source == .account,
+                      attachments[.account] == attachment.token else { throw PeerAuthorizationError.denied }
+            } else {
+                guard attachments[.account] == nil else { throw PeerAuthorizationError.denied }
+            }
             guard binding.deviceID == local.rawValue, Self.validKey(localPublicKey, for: local),
                   Self.validUUID(accountID), Self.validUUID(sessionID), Self.validDate(accessExpiresAt),
                   accessExpiresAt > date else { throw PeerAuthorizationError.invalidEvidence }
@@ -187,7 +259,7 @@ public final class PeerAuthorizationOwner: PeerAuthorizationProviding, @unchecke
         return calls
     }
 
-    private func transact<T>(_ body: (Date) throws -> T) throws -> T {
+    private func transact<T>(requiresValidClock: Bool = true, _ body: (Date) throws -> T) throws -> T {
         lock.lock()
         let previousRevision = revision
         let date = now()
@@ -197,7 +269,7 @@ public final class PeerAuthorizationOwner: PeerAuthorizationProviding, @unchecke
         }
         var calls = reconcile()
         let result: Result<T, Error>
-        if !Self.validDate(date) { result = .failure(PeerAuthorizationError.denied) }
+        if requiresValidClock && !Self.validDate(date) { result = .failure(PeerAuthorizationError.denied) }
         else { result = Result { try body(date) } }
         calls += reconcile()
         var cancellation: PeerDeadlineCancellation?
@@ -225,6 +297,38 @@ public final class PeerAuthorizationOwner: PeerAuthorizationProviding, @unchecke
         // Registrations hold only a weak owner; subsequent checks fail closed.
         registrations.values.forEach { $0.callback() }
     }
+}
+
+enum PeerAuthorizationSource { case manual, account }
+
+/// Exact source incarnation. No asynchronous teardown or process-global registry.
+final class PeerSourceAttachment: Sendable {
+    fileprivate let owner: PeerAuthorizationOwner
+    fileprivate let source: PeerAuthorizationSource
+    fileprivate let token: UUID
+    fileprivate init(owner: PeerAuthorizationOwner, source: PeerAuthorizationSource, token: UUID) {
+        self.owner = owner; self.source = source; self.token = token
+    }
+    func replaceManual(_ store: TrustStore) throws { try owner.replaceManual(store, attachment: self) }
+    func cancel() { owner.release(self) }
+    deinit { cancel() }
+}
+
+/// Wall-clock scheduling matches the owner's Date-based admission clock.
+/// Cancellation may race delivery; admission and epoch checks remain authoritative.
+private final class PeerLiveDeadline: @unchecked Sendable {
+    private let timer: DispatchSourceTimer
+    init(date: Date, callback: @escaping @Sendable () -> Void) {
+        timer = DispatchSource.makeTimerSource(queue: .global())
+        let seconds = date.timeIntervalSince1970
+        let whole = seconds.rounded(.down)
+        timer.schedule(wallDeadline: DispatchWallTime(timespec: timespec(tv_sec: Int(whole),
+            tv_nsec: Int((seconds - whole) * 1_000_000_000))), leeway: .milliseconds(1))
+        timer.setEventHandler(handler: callback)
+        timer.resume()
+    }
+    func cancel() { timer.cancel() }
+    deinit { cancel() }
 }
 
 /// Pure direct-source union; never a transitive graph. Kept separate so conflict

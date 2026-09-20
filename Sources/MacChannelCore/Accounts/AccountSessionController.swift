@@ -39,7 +39,8 @@ public enum AccountSessionControllerError: Error, Equatable, Sendable {
 
 enum AccountSessionOperation: Sendable { case restoreJoined, refreshJoined, logoutStarted, logoutJoined }
 
-/// Serializes account credential changes; transfer trust and device identity are outside its scope.
+/// Serializes credentials and, only when explicitly configured, verified ephemeral
+/// account authorization. Manual trust and identity remain independently owned.
 public actor AccountSessionController {
     private let service: any AccountSessionService
     private let storage: any AccountSessionStorage
@@ -71,6 +72,9 @@ public actor AccountSessionController {
     private var completing = false
     private var didRestore = false
     private var acknowledgedLogout = false
+    private var peerAuthorization: AccountPeerAuthorization?
+    private var peerSource: PeerSourceAttachment?
+    private var peerEpoch: PeerAccountEpoch?
 
     public init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
                 groupVerifier: AccountGroupHistoryVerifier? = nil,
@@ -98,6 +102,49 @@ public actor AccountSessionController {
     }
 
     public func snapshot() -> AccountSessionSnapshot { state }
+
+    public init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
+                groupVerifier: AccountGroupHistoryVerifier, peerAuthorization: AccountPeerAuthorization,
+                firstDeviceEnrollment: AccountFirstDeviceEnrollment? = nil,
+                deviceApproval: AccountDeviceApproval? = nil) throws {
+        try self.init(service: service, storage: storage, binding: binding, groupVerifier: groupVerifier,
+            peerAuthorization: peerAuthorization, firstDeviceEnrollment: firstDeviceEnrollment,
+            deviceApproval: deviceApproval, now: Date.init)
+    }
+
+    init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
+         groupVerifier: AccountGroupHistoryVerifier, peerAuthorization: AccountPeerAuthorization,
+         firstDeviceEnrollment: AccountFirstDeviceEnrollment? = nil,
+         deviceApproval: AccountDeviceApproval? = nil,
+         now: @escaping @Sendable () -> Date) throws {
+        guard peerAuthorization.binding == binding, service is any AccountGroupService else {
+            throw PeerAuthorizationError.invalidEvidence
+        }
+        self.service = service; self.storage = storage; self.binding = binding; self.now = now
+        self.groupVerifier = groupVerifier
+        self.firstDeviceEnrollment = firstDeviceEnrollment
+        self.deviceApprovalConfiguration = deviceApproval
+        self.operationObserver = nil
+        self.peerSource = try peerAuthorization.owner.attachAccount(localPublicKey: peerAuthorization.localPublicKey, binding: binding)
+        self.peerAuthorization = peerAuthorization
+    }
+
+    private func withdrawPeerAccount() {
+        if let epoch = peerEpoch { peerAuthorization?.owner.invalidateAccount(epoch) }
+        peerEpoch = nil
+    }
+
+    private func accountEpoch(for record: AccountStoredSession) throws -> PeerAccountEpoch? {
+        guard let configuration = peerAuthorization, let peerSource else { return nil }
+        if let peerEpoch { return peerEpoch }
+        let epoch = try configuration.owner.beginAccountSession(binding: binding,
+            accountID: record.tokens.identity.accountID.uuidString.lowercased(),
+            sessionID: record.tokens.identity.sessionID.uuidString.lowercased(),
+            localPublicKey: configuration.localPublicKey, accessExpiresAt: record.tokens.accessExpiresAt,
+            attachment: peerSource)
+        peerEpoch = epoch
+        return epoch
+    }
 
     private struct ApprovalAttempt {
         let context: EnrollmentSession
@@ -445,8 +492,8 @@ public actor AccountSessionController {
         return try AccountGroupBootstrapIntent(binding: binding, event: event)
     }
 
-    /// Reads a known independently pinned group. Credentials remain actor-private;
-    /// the returned membership still requires explicit transfer consent.
+    /// Reads a known independently pinned group. Only an explicitly configured
+    /// producer installs current authority; the returned snapshot is not a grant.
     public func syncGroup(groupID: String) async throws -> AccountGroupSnapshot {
         try Task.checkCancellation()
         guard let groupVerifier, let groupService = service as? any AccountGroupService else {
@@ -464,30 +511,52 @@ public actor AccountSessionController {
         guard state.phase == .signedIn, let record = current, record.phase == .active,
               record.binding == binding else { throw AccountSessionControllerError.needsSignIn }
         let revision = operationRevision
+        let epoch = try accountEpoch(for: record)
+        let observedAt = try validNow()
         func requireCurrentSession() throws {
             try Task.checkCancellation()
-            guard operationRevision == revision, !busyForLogin, state.phase == .signedIn,
+            guard operationRevision == revision, peerEpoch == epoch, !busyForLogin, state.phase == .signedIn,
                   let active = current, active.phase == .active, active.binding == record.binding,
                   active.tokens.identity == record.tokens.identity,
                   active.tokens.accessExpiresAt > (try validNow()) else { throw AccountSessionControllerError.needsSignIn }
         }
-        do {
-            try requireCurrentSession()
-            let history = try await groupService.groupHistory(accessToken: record.tokens.accessToken, groupID: groupID)
-            try requireCurrentSession()
-            let authorization = beginVerification(accessExpiresAt: record.tokens.accessExpiresAt)
-            defer { authorization.invalidate(); groupVerificationAuthorization = nil }
-            let snapshot = try await groupVerifier.accept(history: history, binding: record.binding,
-                accountID: record.tokens.identity.accountID.uuidString.lowercased(), groupID: groupID, authorization: authorization)
-            try requireCurrentSession()
-            return snapshot
-        } catch { try requireCurrentSession(); throw error }
+        let owner = peerAuthorization?.owner
+        return try await withTaskCancellationHandler {
+            do {
+                try requireCurrentSession()
+                let history = try await groupService.groupHistory(accessToken: record.tokens.accessToken, groupID: groupID)
+                try requireCurrentSession()
+                let authorization = beginVerification(accessExpiresAt: record.tokens.accessExpiresAt)
+                defer { authorization.invalidate(); groupVerificationAuthorization = nil }
+                let snapshot = try await groupVerifier.accept(history: history, binding: record.binding,
+                    accountID: record.tokens.identity.accountID.uuidString.lowercased(), groupID: groupID, authorization: authorization)
+                try requireCurrentSession()
+                if let configuration = peerAuthorization, let epoch {
+                    // No suspension from the exact actor session check to locked
+                    // owner admission. Cancellation races this same owner lock.
+                    try configuration.owner.install(VerifiedPeerAccountEvidence(epoch: epoch, binding: binding, snapshot: snapshot,
+                        freshUntil: min(observedAt.addingTimeInterval(configuration.freshness), record.tokens.accessExpiresAt)))
+                }
+                return snapshot
+            } catch {
+                // Presentation/consent supersession only fences this attempt.
+                // Current verification failure or explicit cancellation is fail-closed.
+                if peerEpoch == epoch, Task.isCancelled || operationRevision == revision { withdrawPeerAccount() }
+                try requireCurrentSession()
+                throw error
+            }
+        } onCancel: {
+            // No actor hop: even noncooperative history/storage cannot retain
+            // active grants. An old task can only withdraw its exact epoch.
+            if let epoch { owner?.invalidateAccount(epoch) }
+        }
     }
 
     public func restore() async {
         if let task = restoreTask { operationObserver?(.restoreJoined); await task.value; return }
         guard refreshTask == nil, logoutTask == nil, preparingID == nil, attempt == nil, !completing else { return }
         guard !didRestore || state.phase == .unavailable || state.phase == .secureStorageError else { return }
+        withdrawPeerAccount()
         operationRevision = UUID()
         let task = Task { await self.runRestore() }
         restoreTask = task
@@ -620,6 +689,7 @@ public actor AccountSessionController {
 
     private func sharedRefresh() async throws {
         if let task = refreshTask { try await task.value; return }
+        withdrawPeerAccount()
         operationRevision = UUID()
         let task = Task { try await self.runRefresh() }
         refreshTask = task
@@ -657,6 +727,7 @@ public actor AccountSessionController {
         guard restoreTask == nil, preparingID == nil, attempt == nil, !completing else { throw AccountSessionControllerError.busy }
         // Install intent before suspension. Refresh/login cannot overtake this operation.
         let pendingRefresh = refreshTask
+        withdrawPeerAccount()
         operationRevision = UUID()
         let task = Task { try await self.runLogout(waitingFor: pendingRefresh) }
         logoutTask = task
@@ -699,6 +770,7 @@ public actor AccountSessionController {
     }
 
     private func invalidate() async throws {
+        withdrawPeerAccount()
         current = nil
         do { try await storage.remove() }
         catch { publish(.secureStorageError); throw AccountSessionControllerError.secureStorage }
@@ -714,11 +786,19 @@ public actor AccountSessionController {
 
     private func validNow() throws -> Date {
         let date = now()
-        guard AccountServiceClient.validEpochMilliseconds(date) != nil else { throw AccountSessionControllerError.unavailable }
+        guard AccountServiceClient.validEpochMilliseconds(date) != nil else {
+            withdrawPeerAccount()
+            throw AccountSessionControllerError.unavailable
+        }
         return date
     }
 
     private func publish(_ phase: AccountSessionPhase, identity: AccountSessionIdentity? = nil) {
+        switch phase {
+        case .signedOut, .restoring, .preparingLogin, .signingIn, .refreshing, .signingOut,
+             .needsSignIn, .unavailable, .secureStorageError: withdrawPeerAccount()
+        case .signedIn, .awaitingApple: break
+        }
         operationRevision = UUID()
         state = AccountSessionSnapshot(phase: phase, identity: identity)
     }
