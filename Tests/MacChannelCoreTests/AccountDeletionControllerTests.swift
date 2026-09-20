@@ -2,6 +2,23 @@ import XCTest
 @testable import MacChannelCore
 
 final class AccountDeletionControllerTests: XCTestCase, @unchecked Sendable {
+    func testOldMinimalReceiptCannotDescribeNewSessionOrFailedNewSubmission() async throws {
+        let f = try DeletionFixture(); try await f.grant()
+        await f.service.setStatus(.completedManualRevocationRequired)
+        let first = try await f.controller.beginDeletionReauthentication()
+        _ = try await f.controller.confirmAccountDeletion(attemptID: first.id, code: "code", identityToken: "id", confirmation: true)
+        let retained = await f.receipts.load()
+        let login = try await f.controller.beginLogin()
+        try await f.controller.completeLogin(attemptID: login.id, code: "new-code", identityToken: "id")
+        let visible = await f.controller.deletionSnapshot(); XCTAssertNil(visible)
+        let next = try await f.controller.beginDeletionReauthentication()
+        await f.receipts.failSaves(true)
+        do { _ = try await f.controller.confirmAccountDeletion(attemptID: next.id, code: "code", identityToken: "id", confirmation: true); XCTFail("save fails") } catch {}
+        let snapshot = await f.controller.snapshot(); XCTAssertEqual(snapshot.phase, .secureStorageError)
+        let status = await f.controller.deletionSnapshot(); XCTAssertNil(status)
+        let after = await f.receipts.load(); XCTAssertEqual(after?.receipt, retained?.receipt)
+        let calls = await f.service.begins; XCTAssertEqual(calls, 1)
+    }
     func testRestartWithoutSessionRetainsOriginalReceiptAcrossRejectedStatusAndRecovery() async throws {
         let f = try DeletionFixture(); try await f.grant()
         let ticket = try await f.controller.beginDeletionReauthentication()

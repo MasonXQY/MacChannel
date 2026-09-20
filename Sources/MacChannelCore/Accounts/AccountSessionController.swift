@@ -164,7 +164,11 @@ public actor AccountSessionController {
 
     public func snapshot() -> AccountSessionSnapshot { state }
 
-    public func deletionSnapshot() -> AccountDeletionStatus? { deletionRecord?.status }
+    public func deletionSnapshot() -> AccountDeletionStatus? {
+        // A minimal historical receipt must not describe a later active session.
+        if deletionRecord?.accountID == nil, current != nil { return nil }
+        return deletionRecord?.status
+    }
     public func supportsAccountDeletion() -> Bool { deletion != nil && service is any AccountDeletionService }
     public func beginDeletionReauthentication() async throws -> AccountDeletionAttempt {
         try Task.checkCancellation()
@@ -222,8 +226,10 @@ public actor AccountSessionController {
             let receipt = try recovery?.receipt ?? newAccountDeletionReceipt()
             let pending = try AccountDeletionRecord(binding: self.binding, receipt: receipt,
                 accountID: accountID, status: recovery?.status ?? .submitting)
+            var persisted = false
             do {
                 try await deletion.storage.save(pending)
+                persisted = true
                 self.deletionRecord = pending
                 self.suspendAccountRuntime()
                 self.publish(.unavailable)
@@ -238,7 +244,7 @@ public actor AccountSessionController {
                 return try await self.acceptDeletionStatus(result, for: pending)
             } catch {
                 self.suspendAccountRuntime()
-                self.publish(self.deletionRecord == nil ? .secureStorageError : .unavailable)
+                self.publish(!persisted ? .secureStorageError : .unavailable)
                 throw error
             }
         }
