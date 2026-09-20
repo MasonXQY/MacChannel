@@ -13,7 +13,7 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     private var discoveryEnabled: Bool
     private var cachedAccountController: AccountSessionController?
     private var cachedAccountLifecycle: AccountForegroundLifecycle?
-    private var accountForegroundRequested = false
+    private var cachedForegroundOwnership: MobileForegroundOwnership?
 
     static func load() async throws -> ProductionMobileAppDependencies {
         let manager = FileManager.default
@@ -75,20 +75,25 @@ actor ProductionMobileAppDependencies: MobileAppSession {
             await group.waitForAll()
         }
     }
-    func startForeground() async throws {
-        accountForegroundRequested = true
-        try await runtime.startForeground()
-        guard accountForegroundRequested else { return }
+    func startForeground() async throws { try await foregroundOwnership().start() }
+    func stopForeground() async { await foregroundOwnership().stop() }
+
+    private func foregroundOwnership() -> MobileForegroundOwnership {
+        if let cachedForegroundOwnership { return cachedForegroundOwnership }
+        let owner = MobileForegroundOwnership(
+            startRuntime: { [runtime] in try await runtime.startForeground() },
+            stopRuntime: { [runtime] in await runtime.stopForeground() },
+            startAccount: { [weak self] in await self?.startAccountForeground() },
+            stopAccount: { [weak self] in await self?.stopAccountForeground() })
+        cachedForegroundOwnership = owner
+        return owner
+    }
+
+    private func startAccountForeground() async {
         // Account configuration failure must not disable the manual plane.
-        if let lifecycle = try? await accountLifecycle(), accountForegroundRequested {
-            await lifecycle.start()
-        }
+        if let lifecycle = try? await accountLifecycle() { await lifecycle.start() }
     }
-    func stopForeground() async {
-        accountForegroundRequested = false
-        await cachedAccountLifecycle?.stop()
-        await runtime.stopForeground()
-    }
+    private func stopAccountForeground() async { await cachedAccountLifecycle?.stop() }
     func refreshTrust() async throws { try await runtime.refreshTrust() }
     func retryConnection() async { await runtime.retryConnection() }
     func send(items: [URL], to device: DeviceID) async throws -> TransferID {
