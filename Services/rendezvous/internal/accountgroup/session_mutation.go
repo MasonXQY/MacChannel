@@ -21,6 +21,13 @@ type SessionActor struct {
 var ErrGroupSessionInvalid = errors.New("invalid account group session")
 
 func (s *PostgresStore) BootstrapAuthenticated(ctx context.Context, actor SessionActor, event Event) error {
+	if err := validateSessionActor(actor); err != nil {
+		return err
+	}
+	return s.mutate(ctx, Actor{actor.AccountID, actor.DeviceID}, event, true, &actor)
+}
+
+func validateSessionActor(actor SessionActor) error {
 	if !canonicalUUID(actor.AccountID) || !canonicalUUID(actor.SessionID) || !canonicalUUID(actor.DeviceID) ||
 		len(actor.Audience) == 0 || len(actor.Audience) > 255 || !utf8.ValidString(actor.Audience) {
 		return ErrGroupSessionInvalid
@@ -30,7 +37,7 @@ func (s *PostgresStore) BootstrapAuthenticated(ctx context.Context, actor Sessio
 			return ErrGroupSessionInvalid
 		}
 	}
-	return s.mutate(ctx, Actor{actor.AccountID, actor.DeviceID}, event, true, &actor)
+	return nil
 }
 
 // The caller must already hold accounts FOR SHARE, which serializes against

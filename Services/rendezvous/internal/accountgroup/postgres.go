@@ -65,10 +65,6 @@ func (s *PostgresStore) mutate(ctx context.Context, actor Actor, event Event, bo
 	if err != nil || actor.AccountID != event.AccountID || actor.DeviceID != event.ActorDeviceID || (bootstrap && event.Action != ActionBootstrap) {
 		return ErrGroupInvalid
 	}
-	data, err := json.Marshal(event)
-	if err != nil || len(data) == 0 || len(data) > 4096 {
-		return ErrGroupInvalid
-	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return ErrGroupUnavailable
@@ -115,13 +111,30 @@ func (s *PostgresStore) mutate(ctx context.Context, actor Actor, event Event, bo
 			return ErrGroupInvalid
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO account_group_events(account_id,sequence,event_hash,event_data) VALUES($1,$2,$3,$4)`, actor.AccountID, int64(event.Sequence), digest[:], data); err != nil {
-		return ErrGroupUnavailable
+	if err = insertGroupEvent(ctx, tx, event); err != nil {
+		return err
 	}
 	if err = activeGroupSession(ctx, tx, session); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
+		return ErrGroupUnavailable
+	}
+	return nil
+}
+
+// Caller owns the group/account locks and validates the transition in this
+// same transaction. This helper still revalidates both event signatures.
+func insertGroupEvent(ctx context.Context, tx *sql.Tx, event Event) error {
+	digest, err := event.Digest()
+	if err != nil {
+		return ErrGroupInvalid
+	}
+	data, err := json.Marshal(event)
+	if err != nil || len(data) == 0 || len(data) > 4096 {
+		return ErrGroupInvalid
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO account_group_events(account_id,sequence,event_hash,event_data) VALUES($1,$2,$3,$4)`, event.AccountID, int64(event.Sequence), digest[:], data); err != nil {
 		return ErrGroupUnavailable
 	}
 	return nil
