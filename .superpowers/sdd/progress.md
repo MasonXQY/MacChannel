@@ -1,5 +1,53 @@
 # iPhone continuation ledger
 
+Task native-first-device-ui: complete (commits3c1c037..c86119f, review clean).
+Independent account_ios_review Approved/spec compliant; no blocking findings.
+Minor existing AppIntents/document-picker warnings retained for final review.
+Root verified exact-source PASS logs, shipping build and EN/ZH834/393 native
+renders; scoped commit excludes existing unrelated dirty files. Physical and
+deployed enrollment remain outside acceptance. Next: group-service composition.
+
+2026-09-20 UI implementation DONE c86119f; independent account_ios_review ACTIVE
+on review-3c1c037..c86119f.diff.28units+2iPhoneUI+2iPadUI PASS and unsigned
+shipping build PASS;36renders. Final frozen-iphone.log is exact-source PASS.
+Root inspected834AX consent, previous393 consent/status images. Cache released.
+No deployment/install; waiting task gate before service composition. SQL running.
+
+2026-09-20 fixture RESTARTED by root for upcoming group-service composition:
+UNIX /private/tmp/dropmesh-group-db.igBdYS port55459, no TCP. Verified auth DB
+name dropmesh_account_auth_test and inet_server_addr IS NULL; group tables absent
+(useful missing-schema acceptance). No migrations/writes performed after restart.
+Root still owns stop+verification before ending. UI agent remains sole Swift owner.
+
+2026-09-20 UI interim:28 native unit tests pass; native EN/ZH standard accept/
+cancel pass. Group Section textCase inheritance fixed and root visually verified
+refreshed393/en-confirmation. Attempt-scoped dismissal regression added. AX UI
+refresh still under focused investigation; source/log line mismatch suggests
+stale test bundle. Agent owns fresh isolated DerivedData run, no root tests.
+Root SQL fixture remains stopped. No UI acceptance/commit/install yet.
+
+2026-09-20 native_first_device_ui ACTIVE base3c1c037, sole Swift/Xcode cache
+owner. Requirements task-1-brief.md; report native-first-device-ui-report.md.
+Root owns docs only. SQL fixture stopped. Service assembly gap recorded in
+account-group-service-assembly-notes.md: shipped accountserver currently omits
+group dependencies AND route whitelist. No enabled physical enrollment before
+that separate default-off composition and isolated-service acceptance.
+
+2026-09-20 native enrollment interop COMPLETE0009ff6..3c1c037, independent
+review spec compliant/Approved/no findings. Root inspected native final evidence
+(Swift1test0fail0skip, SQL exact single event) and existing cleanup helper;
+regression174passes8explicit opt-in skips, no SQL skips. Root stopped owned UNIX
+PostgreSQL fixture and pg_ctl confirms no server running. No test processes left.
+Next native first-device UI task, brief task-1-brief.md, plan2026-09-20-native-
+first-device-ui.md. No deployment or installation; group UI still pending.
+
+2026-09-20 native enrollment interop ACTIVE base0009ff6. Agent owns new Go/Swift
+test files and both caches. Report native-enrollment-interop-report.md, brief
+native-enrollment-interop-brief.md. RED unpersisted ack Swift1test2fail; GREEN
+realSQL Go4.548s/Swift1test0fail0skip; final race + regression reported, scoped
+commit/review pending. Fixture group/auth databases still RUNNING UNIX55459.
+Root UI plan prepared2026-09-20-native-first-device-ui.md, not implemented.
+
 2026-09-20 session transaction COMPLETE8c02d6d..af14591, independent review
 spec compliant/Approved/no findings.174top-level SQL race pass7opt-in skips;
 full Go had only missing base test schema failure, root applied001 locally then

@@ -2,6 +2,43 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+CURRENT UI c86119f accepted: independent review Approved/no blocking findings.
+Root verified logs/build and EN/ZH native evidence; existing warning noise noted.
+Next default-off service composition plan is ready. SQL fixture remains running;
+root owns shutdown. No installation or remote activation occurred.
+
+LATEST UI implementation c86119f complete, independent account_ios_review active
+on frozen3c1c037..c86119f. Final28units,2iPhoneUI,2iPadUI and unsigned shipping
+build PASS;36PNG retained. Root inspected834/en-AXXXL-confirmation complete.
+Final iPhone log native-enrollment-ui-frozen-iphone.log supersedes failed earlier
+runs. Swift/Xcode ownership released. Review must clear before next implementation.
+Next plan:2026-09-20-group-service-composition.md. Local SQL fixture still running.
+
+LATEST fixture lifecycle: root restarted UNIX PostgreSQL at
+/private/tmp/dropmesh-group-db.igBdYS port55459 for next composition task; auth DB
+name/socket verified, account_groups/account_group_events absent, no migrations
+applied after restart. Root must stop before ending. UI review now active.
+
+ACTIVE native_first_device_ui from3c1c037, sole Swift/Xcode cache owner. Root
+does not run tests/build concurrently. Brief task-1-brief.md and report native-
+first-device-ui-report.md. Root recorded accountserver dependency+route assembly
+gap in .superpowers/sdd/account-group-service-assembly-notes.md; this must be
+implemented/tested before enabling an isolated physical candidate. No live edits.
+
+CURRENT supersedes snapshots below: native interop accepted3c1c037, independent
+review Approved/no findings. Root checked final native/SQL evidence and process
+cleanup. Local UNIX PostgreSQL /private/tmp/dropmesh-group-db.igBdYS STOPPED and
+verified no server running. No active test processes. Next task is native first-
+device group UI from2026-09-20-native-first-device-ui.md; brief task-1-brief.md.
+Existing installed iPad remains login-only; approvals and invitations unfinished.
+
+Native enrollment interop ACTIVE base0009ff6, agent native_enrollment_interop owns
+new Swift/Go tests and both build caches. Brief native-enrollment-interop-brief.md;
+report native-enrollment-interop-report.md. Root must not run Swift or Go tests
+concurrently. Fixture group/auth DBs still running on local UNIX55459, root-owned.
+No new installed feature. Native UI integration notes include dormant capability,
+strict history classification, native dismissal and independent logout handling.
+
 Session transaction af14591 accepted, independent review spec compliant and
 Approved/no findings. SQL race
 accountgroup41.456s/accountauth28.847s passed;174 top-level tests with7 explicit
