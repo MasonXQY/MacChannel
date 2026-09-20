@@ -1,5 +1,54 @@
 # DropMesh iPhone companion handoff
 
+## Native enrollment continuation — 2026-09-20
+
+Session transaction af14591 accepted, independent review spec compliant and
+Approved/no findings. SQL race
+accountgroup41.456s/accountauth28.847s passed;174 top-level tests with7 explicit
+native/restart/timing opt-in skips, no fixture SQL skips. Full module run only
+failed existing accountserver fixture setup (missing base auth tables); root
+applied existing001 migration to new auth test DB, affected package17tests then
+passed1.066s. Root fresh lock-order/expiry race subset passed6.414s ataf14591,
+log /tmp/group-session-root-final.log. No running root test/build session.
+Next exact plan2026-09-20-native-enrollment-interop.md is prepared but not started.
+
+LATEST: first-device consent accepted through8c02d6d after synchronous lifecycle
+fence correction. Independent focused re-review Approved/no findings. Fix RED4
+tests12failures; GREEN70tests0fail/skip/warnings. Root final unsigned shipping
+iOS build PASS /tmp/dropmesh-first-device-ios-final.log (one AppIntents warning).
+Agent group_session_transaction now active base8c02d6d; brief task-1-brief.md now
+contains group-session-transaction task, not consent. Sole Go tests owner. Local
+UNIX fixture /private/tmp/dropmesh-group-db.igBdYS port55459 RUNNING, verified
+dropmesh_account_group_test. Root owns stop/verification before ending. No other
+build/test sessions active. No UI, installation or remote changes.
+
+Fresh device inventory during continuation: physical iPad mini7 connected and
+Mason iPhone16ProMax available(paired). No install/launch/mutation performed.
+Local fixture now also has guarded dropmesh_account_auth_test for SQL session
+regressions, same UNIX socket/port; root must stop the instance after tests.
+
+Current HEAD87328ef: strict native enrollment transport15b6792 independently
+approved (59 focused tests); immutable first-device consent87328ef has80 passing
+focused regressions, but independent review found a nested checkpoint-write
+lifecycle gap and acceptance is pending. Agent first_device_consent is fixing
+controller/verifier authorization with deterministic second-load/advanced-head
+tests; sole Swift cache owner. Do not redispatch the transport or original task.
+Root shipping unsigned iOS build at87328ef passed, log
+/tmp/dropmesh-first-device-ios-build.log (one existing AppIntents metadata warning).
+No new UI, signed build, installation or deployment this stage. Installed iPad
+remains the previously accepted login-only version. Groups/approvals/invites are
+not available there yet. Preserve unrelated dirty UI/runtime/release files.
+
+Review package .superpowers/sdd/review-15b6792..87328ef.diff; report
+.superpowers/sdd/first-device-consent-report.md. Next staged plan:
+docs/superpowers/plans/2026-09-20-group-session-transaction.md closes HTTP
+Authenticate-to-journal-commit revocation race before remote enablement. Existing
+session lifecycle account FOR UPDATE and journal account FOR SHARE supply the
+shared serialization boundary; no production schema/deployment planned. After
+review fixes, verify final shipping build, then session transaction, real native-Go
+enrollment and native consent surface before installing. Full automatic pairing,
+second-device approvals and recipient-selected invitations remain unfinished.
+
 ## Enrollment continuation — 2026-09-20
 
 Owner reports installed iPad account login normal. This is user-reported provider

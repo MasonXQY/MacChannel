@@ -1,5 +1,43 @@
 # iPhone continuation ledger
 
+2026-09-20 session transaction COMPLETE8c02d6d..af14591, independent review
+spec compliant/Approved/no findings.174top-level SQL race pass7opt-in skips;
+full Go had only missing base test schema failure, root applied001 locally then
+affected accountserver17pass. Root fresh lock/expiry race PASS6.414s. Logs
+/tmp/group-session-race.log,/tmp/group-session-accountserver-green.log,
+/tmp/group-session-root-final.log. No deploy/install. Fixture remains RUNNING.
+Next native enrollment interop plan; source UI still unchanged.
+
+2026-09-20 first-device consent COMPLETE15b6792..8c02d6d. Initial87328ef80pass;
+review Important nested verifier lifecycle gap fixed8c02d6d with RED4tests12fail,
+GREEN70tests0fail0skip; independent re-review Approved/no remaining findings.
+Root final shipping unsigned iOS build PASS /tmp/dropmesh-first-device-ios-final.log
+one existing AppIntents warning. No UI/install/deployment. Next group-session-
+transaction plan. Root named UNIX fixture /private/tmp/dropmesh-group-db.igBdYS
+port55459 RUNNING and guarded name/socket verified; root must stop before ending.
+
+2026-09-20 first_device_consent initial87328ef from15b6792:80focused tests pass,
+root unsigned shipping iOS build PASS /tmp/dropmesh-first-device-ios-build.log
+(one existing AppIntents metadata warning). Independent review Needs fixes:
+verifier nested checkpoint loads can initiate save after logout/refresh/expiry.
+Same implementer owns narrow verifier/controller fix and deterministic regressions;
+root must not run Swift concurrently. Re-review required before acceptance.
+
+2026-09-20 first_device_consent ACTIVE base15b6792, sole Swift cache owner.
+Current task-1-brief now first-device-consent plan; report first-device-consent-report.md.
+Owns immutable intent/storage/configuration, narrow session controller and tests.
+Storage RED5tests then GREEN5pass reported; controller RED underway. Root does not
+run Swift concurrently. UI and session-transaction integration notes prepared;
+no UI source, installation, deployment or existing transfer changes this stage.
+
+2026-09-20 native enrollment transport COMPLETE 9cfda5e..15b6792, independent
+spec/quality Approved/no findings.59 focused Swift tests0fail0skip; root inspected
+final log /tmp/dropmesh-native-enrollment-final.log. Root shipping unsigned iOS
+main/Share build SUCCEEDED /tmp/dropmesh-enrollment-ios.9nrw08/build.log; only2
+existing AppIntents metadata warnings. No installed/deployed enrollment.
+NEXT first-device-consent plan/controller + immutable local intent; exact brief
+will replace task-1-brief. All build sessions currently drained.
+
 2026-09-20 enrollment API task complete: source86c9238 from1948be3; independent
 spec/quality Approved, Minor null fixture corrected and re-reviewed Approved.
 Root fixed separately reproduced subprocess test Close/Fd race by channel-joined
