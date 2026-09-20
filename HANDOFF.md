@@ -12,6 +12,14 @@ no install/deploy. Next remaining seams documented in mobile-runtime-account-
 consumer-seams.md and account-presence-turn-seams.md (latter is an audit proposal,
 not an approved implementation API; reservation ownership/enumeration need narrowing).
 
+ACTIVE next slice: account_route_admission owns only DeviceDirectory.swift,
+BonjourPeerBrowser.swift, DeviceDirectoryTests.swift and native-discovery-
+authorization-report.md; sole Swift/cache implementer. Add compatible provider
+projection observation with source-generation/revision fencing, no fake online,
+no admission from snapshots, no runtime activation. Root owns integration docs.
+mobile_adapter_regression_review is read-only narrowing presence/TURN audit;
+no Go/SQL/cache use authorized. Index remains root-coordinated.
+
 CURRENT: user explicitly approved isolated candidate deployment on the existing
 host, preserving production. Native channel e4730ce is independently Approved
 with no findings, actual focused158/0/0skip; root Xcode27 unsigned shipping main

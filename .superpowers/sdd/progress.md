@@ -1,5 +1,11 @@
 # iPhone continuation ledger
 
+Nextnativeprojectiondispatched toaccount_route_admission: DeviceDirectory+
+BonjourPeerBrowser+DeviceDirectoryTests+report only; soleSwiftcacheowner. Preserve
+legacyAPIs, sourcegeneration/revision fencing, effectiveIDsprojection notauthority,
+purgewithdrawals/noinventedonline, oldqueuedupdate cannotregrant. No runtime yet.
+Goagentread-onlyseamauditrefinement only, noSQL/cache/index. Rootdocs/integration.
+
 Native attempts/listener cf319301 independentlyApproved/no findings; root actual
 177/0/0skip log+hashesverified, Xcode27 unsignedshippingRelease main/Shareexit0
 BUILD SUCCEEDED (/tmp/native-attempts-ios-shipping-build.log), embeddedprivacyPASS.
