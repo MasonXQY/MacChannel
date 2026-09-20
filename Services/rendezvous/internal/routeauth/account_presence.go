@@ -21,6 +21,11 @@ type AccountPresenceConfig struct {
 	Projection        PresenceProjector
 	CandidatesPerTurn int
 	WorkTimeout       time.Duration
+	// RefreshInterval enables best-effort refresh, not a wall-clock revocation
+	// guarantee. Zero preserves event-only behavior; per-frame admission remains
+	// authoritative. Providers must still honor WorkTimeout cancellation.
+	RefreshInterval time.Duration
+	refreshTicks    <-chan time.Time // private deterministic clock override
 }
 
 // PresenceHub identifies the immutable hub configured for owned presence.
@@ -53,6 +58,7 @@ type accountPresence struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	done, wake   chan struct{}
+	refreshDone  chan struct{}
 	shutdownDone chan struct{}
 	closing      sync.WaitGroup
 	stopped      bool
@@ -62,7 +68,7 @@ type accountPresence struct {
 }
 
 func NewCompositeConnectionRouterWithPresence(capacity int, graph signal.TrustGraph, gate AccountGate, config AccountPresenceConfig) (*ConnectionRouter, error) {
-	if config.Hub == nil || config.Projection == nil || gate == nil || config.CandidatesPerTurn < 1 || config.CandidatesPerTurn > 63 || config.WorkTimeout <= 0 || config.WorkTimeout > 5*time.Second {
+	if config.Hub == nil || config.Projection == nil || gate == nil || config.CandidatesPerTurn < 1 || config.CandidatesPerTurn > 63 || config.WorkTimeout <= 0 || config.WorkTimeout > 5*time.Second || config.RefreshInterval < 0 || config.RefreshInterval > 60*time.Second {
 		return nil, ErrConnectionUnavailable
 	}
 	r, err := NewCompositeConnectionRouter(capacity, graph, gate)
@@ -72,8 +78,50 @@ func NewCompositeConnectionRouterWithPresence(capacity int, graph signal.TrustGr
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &accountPresence{router: r, config: config, ctx: ctx, cancel: cancel, done: make(chan struct{}), shutdownDone: make(chan struct{}), wake: make(chan struct{}, 1), pending: make(map[ConnectionHandle]bool), pairs: make(map[presencePairKey]presencePair)}
 	r.presence = p
+	p.refreshDone = make(chan struct{})
+	if config.RefreshInterval == 0 {
+		close(p.refreshDone)
+	} else {
+		go p.refresh()
+	}
 	go p.run()
 	return r, nil
+}
+
+// refresh only queues exact current route versions. The single worker owns all
+// projection/admission work, including when ticks outpace a blocked provider.
+func (p *accountPresence) refresh() {
+	defer close(p.refreshDone)
+	ticks := p.config.refreshTicks
+	if ticks == nil {
+		ticker := time.NewTicker(p.config.RefreshInterval)
+		defer ticker.Stop()
+		ticks = ticker.C
+	}
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+		}
+		p.mu.Lock()
+		if p.stopped {
+			p.mu.Unlock()
+			return
+		}
+		o := p.router.owner
+		o.mu.Lock()
+		for _, c := range o.connections {
+			if c.presence != nil && c.binding != nil {
+				p.enqueue(presenceJob{handle: c.handle, version: c.bindingVersion})
+			}
+		}
+		o.mu.Unlock()
+		p.mu.Unlock()
+	}
 }
 
 // AttachPresence must follow successful auth-ok delivery. It transfers sink
@@ -445,6 +493,7 @@ func (r *ConnectionRouter) Shutdown() {
 	for _, a := range attachments {
 		a.cleanup()
 	}
+	<-p.refreshDone
 	<-p.done
 	p.closing.Wait()
 	close(p.shutdownDone)
