@@ -206,6 +206,10 @@ public struct AccountServiceClient: Sendable, AccountTURNCredentialService {
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             payload = try encoder.encode(fields)
         } catch { throw AccountServiceError.invalidRequest }
+        return try await send(path: path, payload: payload, requestDate: requestDate)
+    }
+
+    func send(path: String, payload: Data, requestDate: Date) async throws -> Data {
         guard payload.count <= 24_576 else { throw AccountServiceError.invalidRequest }
         let nonce: Data
         do { nonce = try self.nonce() } catch { throw AccountServiceError.transport }
@@ -250,7 +254,7 @@ public struct AccountServiceClient: Sendable, AccountTURNCredentialService {
         catch is CancellationError { throw CancellationError() }
         catch let error as AccountServiceError { throw error }
         catch { throw AccountServiceError.transport }
-        if path == "/v1/account/turn-credentials", result.1.statusCode == 404 {
+        if (path == "/v1/account/turn-credentials" || path.hasPrefix("/v1/account/deletion/")), result.1.statusCode == 404 {
             throw AccountServiceError.unavailable
         }
         if path == "/v1/account/group/events" {
@@ -357,7 +361,7 @@ public struct AccountServiceClient: Sendable, AccountTURNCredentialService {
         }
     }
 
-    private static func validCredential(_ value: String, maximumBytes: Int) -> Bool {
+    static func validCredential(_ value: String, maximumBytes: Int) -> Bool {
         !value.isEmpty && value.utf8.count <= maximumBytes && value.unicodeScalars.allSatisfy {
             !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0)
         }
