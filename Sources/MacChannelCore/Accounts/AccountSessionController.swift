@@ -100,8 +100,10 @@ public actor AccountSessionController {
     private var routeExpiry: Task<Void, Never>?
     private var routeExpiryID = UUID()
     private var runtimeObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var turnRequests: [UUID: Task<RendezvousTURNCredentials, Error>] = [:]
 
     deinit {
+        for task in turnRequests.values { task.cancel() }
         routeContext?.lifetime.invalidate()
         routeExpiry?.cancel()
         for observer in runtimeObservers.values { observer.finish() }
@@ -147,6 +149,43 @@ public actor AccountSessionController {
     /// The supervisor uses this before opening a socket; attach/bind still
     /// perform their own authoritative checks after every suspension.
     public func isAccountRouteReady() -> Bool { (try? requireRouteContext()) != nil }
+
+    func fetchAccountTURNCredentials() async throws -> RendezvousTURNCredentials {
+        let context = try requireRouteContext()
+        guard let record = current, let service = service as? any AccountTURNCredentialService else {
+            throw AccountSessionControllerError.unavailable
+        }
+        // Retain even cancelled noncooperative requests until their exact drain
+        // finishes, so repeated withdrawal/retry cannot grow work without bound.
+        guard turnRequests.count < 8 else { throw AccountRouteBindingError.busy }
+        let id = UUID()
+        let request = Task {
+            try Task.checkCancellation()
+            return try await service.turnCredentials(accessToken: record.tokens.accessToken,
+                groupID: context.snapshot.groupID, generation: context.snapshot.generation)
+        }
+        turnRequests[id] = request
+        defer { turnRequests.removeValue(forKey: id) }
+        return try await withTaskCancellationHandler {
+            let value = try await request.value
+            try Task.checkCancellation()
+            let active = try requireRouteContext()
+            guard active.id == context.id, active.revision == context.revision,
+                  active.epoch == context.epoch, active.snapshot.groupID == context.snapshot.groupID,
+                  active.snapshot.generation == context.snapshot.generation,
+                  let current, current.tokens.identity == record.tokens.identity else {
+                throw AccountRouteBindingError.missingVerifiedContext
+            }
+            let date = try validNow()
+            guard AccountServiceClient.validEpochMilliseconds(value.expiresAt) != nil,
+                  value.expiresAt > date else { throw AccountServiceError.invalidResponse }
+            let expiry = min(value.expiresAt, context.freshUntil, active.freshUntil,
+                             record.tokens.accessExpiresAt, current.tokens.accessExpiresAt)
+            guard expiry > date else { throw AccountRouteBindingError.missingVerifiedContext }
+            return RendezvousTURNCredentials(urls: value.urls, username: value.username,
+                credential: value.credential, expiresAt: expiry)
+        } onCancel: { request.cancel() }
+    }
 
     /// Keep early refresh policy with the credential owner. Foreground callers
     /// receive no token or expiry value and must still verify group history.
@@ -273,6 +312,7 @@ public actor AccountSessionController {
     }
 
     private func invalidateRouteContext() {
+        for task in turnRequests.values { task.cancel() }
         let changed = routeContext != nil || routeSocket != nil
         routeContext?.lifetime.invalidate()
         routeContext = nil
