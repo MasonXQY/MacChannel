@@ -1,8 +1,11 @@
 # Native device approval continuation outline
 
 Status: design-to-code integration notes within approved account-device scope;
-not yet an implementation task. Resolve exact controller interfaces after native
-pending transport review. Do not enable/install a partial workflow.
+not an implementation task itself. The executable continuation is
+2026-09-20-native-device-approval-controller.md, after intent review. Its explicit
+verifyCommitted ticket clarifies historical receipt recovery: new independent
+comparison and consent can verify current history without reviving an expired
+mutation ticket or old session. Do not enable/install a partial workflow.
 
 ## Placement and user tasks
 
@@ -61,6 +64,36 @@ preparation. Reuse the same pure replay/high-water rules used by accept rather
 than introducing a weaker second journal validator. Existing public confirm and
 accept behavior remains unchanged. Tests must distinguish zero writes on this
 preparation path from normal current-member checkpoint advancement.
+
+Use an internal verifier entry point with these exact inputs (not a public
+unguarded alternate trust API):
+
+```swift
+func inspect(history: [AccountGroupEvent], binding: AccountSessionBinding,
+             accountID: String, groupID: String, expectedGeneration: UInt64,
+             expectedAnchorHash: Data,
+             authorization: AccountGroupVerificationAuthorization) async throws
+    -> AccountGroupSnapshot
+```
+
+It holds the verifier's existing admission until storage reads settle, validates
+the caller-supplied independent anchor, replays the complete bounded history, and
+checks any stored checkpoint's exact generation/anchor and sequence/hash prefix.
+An absent checkpoint is permitted only for this nonmutating inspection; malformed
+or inaccessible storage is not absence. It never calls storage.save. Existing
+checkpoint acceptance and this inspection should share one pure replay routine,
+not duplicated validation loops. Root tests require a counting fake storage with
+zero writes for valid unpinned inspection, and rejection of rollback, fork,
+cross-group/owner, invalid signatures and stale lifecycle authorization.
+
+When preparing a member proposal, its independently trusted anchor hash can be
+derived from history[0] only AFTER that same full history was accepted against
+the existing checkpoint. An unverified discovery anchor never substitutes for
+that check. Joining inspection verifies the pending draft's predecessor equals
+the inspected head and its actor is a current exact-key member. After a committed
+receipt, inspect the full journal under the retained independent anchor and
+require the exact countersigned event at its sequence before installing a missing
+pin and accepting current history. A later removal remains visible as removal.
 
 Reuse AccountSessionController lifecycle revision and synchronous verification
 authorization. Expose operation-specific expiring tickets, not access tokens or

@@ -2,6 +2,13 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+CURRENT native transport review Approved/no findings. native_approval_intent is
+sole implementer/cache owner from bf8d4e2, requirements native-approval-intent-brief.md,
+report native-approval-intent-verification-report.md. It owns only verification/
+intent/storage values and six tests/source files, not controller or UI. Root is
+refining controller/helper and read-only history inspection contract in native-flow
+notes while it works. No device installation or service changes this stage.
+
 LATEST native transport a0dd9f7 DONE; pending_native_review reviewing frozen
 e860480..a0dd9f7. Root inspected report and final Swift40/0/0 + Go literalwire
 PASS logs; caches idle, both SQL fixtures remain stopped. Next intent brief is
