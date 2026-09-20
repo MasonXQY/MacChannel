@@ -1,6 +1,7 @@
 package accountauth
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -14,6 +15,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -143,6 +146,93 @@ func (r *nativeGroupReadRecorder) snapshot() []groupRequest {
 	return append([]groupRequest(nil), r.requests...)
 }
 
+func runNativeGroupReadCommand(command *exec.Cmd) (output []byte, runErr error) {
+	configureNativeGroupReadProcess(command)
+	command.WaitDelay = 5 * time.Second
+	command.Cancel = func() error { return terminateNativeGroupReadProcess(command) }
+	defer func() { runErr = errors.Join(runErr, terminateNativeGroupReadProcess(command)) }()
+	return command.CombinedOutput()
+}
+
+func TestNativeGroupReadCommandKillsDescendantOnCancellation(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("process-group regression requires Darwin")
+	}
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readPipe.Close()
+	defer writePipe.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	command := exec.CommandContext(ctx, "/bin/sh", "-c",
+		`/bin/sh -c 'echo $$ >&3; exec /bin/sleep 300' & wait`)
+	command.ExtraFiles = []*os.File{writePipe}
+	type commandResult struct {
+		output []byte
+		err    error
+	}
+	result := make(chan commandResult, 1)
+	go func() {
+		output, runErr := runNativeGroupReadCommand(command)
+		result <- commandResult{output: output, err: runErr}
+	}()
+
+	reader := bufio.NewReader(readPipe)
+	ready := make(chan string, 1)
+	go func() {
+		line, _ := reader.ReadString('\n')
+		ready <- line
+	}()
+	var descendant *os.Process
+	select {
+	case line := <-ready:
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(line))
+		if parseErr != nil || pid <= 0 {
+			t.Fatalf("invalid descendant PID %q: %v", line, parseErr)
+		}
+		descendant, err = os.FindProcess(pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("descendant did not report readiness")
+	}
+	defer func() {
+		if descendant != nil {
+			_ = descendant.Kill() // Emergency cleanup for the intentional RED path.
+		}
+	}()
+	if err := writePipe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case completed := <-result:
+		if completed.err == nil {
+			t.Fatalf("cancelled command succeeded: %s", completed.output)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled command did not return within WaitDelay")
+	}
+
+	eof := make(chan error, 1)
+	go func() {
+		_, readErr := reader.ReadByte()
+		eof <- readErr
+	}()
+	select {
+	case readErr := <-eof:
+		if !errors.Is(readErr, io.EOF) {
+			t.Fatalf("descendant readiness pipe ended with %v, want EOF", readErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("descendant survived cancellation and retained its inherited pipe")
+	}
+}
+
 func TestNativeGroupReadInterop(t *testing.T) {
 	if runtime.GOOS != "darwin" || os.Getenv("MACCHANNEL_GROUP_READ_INTEROP") != "1" {
 		t.Skip("requires Darwin and explicit MACCHANNEL_GROUP_READ_INTEROP=1")
@@ -205,7 +295,6 @@ func TestNativeGroupReadInterop(t *testing.T) {
 	defer cancel()
 	command := exec.CommandContext(ctx, "swift", "test", "--disable-automatic-resolution",
 		"--filter", "GoGroupReadInteropTests")
-	command.WaitDelay = 5 * time.Second
 	command.Dir = root
 	command.Env = append(os.Environ(),
 		"DROPMESH_GO_GROUP_READ_TEST_URL="+server.URL,
@@ -216,7 +305,7 @@ func TestNativeGroupReadInterop(t *testing.T) {
 		"DROPMESH_GO_GROUP_READ_TEST_ANCHOR_HASH="+base64.StdEncoding.EncodeToString(anchorHash[:]),
 		"DROPMESH_GO_GROUP_READ_TEST_HEAD_HASH="+base64.StdEncoding.EncodeToString(headHash[:]),
 	)
-	output, err := command.CombinedOutput()
+	output, err := runNativeGroupReadCommand(command)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			t.Fatalf("Swift group-read integration exceeded 3 minutes: %v\n%s", err, output)

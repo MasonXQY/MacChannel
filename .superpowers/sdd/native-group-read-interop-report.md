@@ -9,6 +9,7 @@ Scope: test-only Go -> Swift known-group read acceptance; no production code cha
 ## Implemented gate
 
 - `Services/rendezvous/internal/accountauth/native_group_read_test.go` starts an explicit TCP4 `127.0.0.1` server around real `accountauth.NewAccountHTTP` and `auth.NewVerifier`.
+- `native_group_read_process_darwin_test.go` and its non-Darwin compile stub keep process-group ownership entirely inside test code.
 - The fixture provides an immutable, ephemeral 19-event signed bootstrap/approve/remove journal. Its synthetic session dependency accepts only the fixture token/audience, binds the first signature-authenticated device, rejects other credentials/devices, and returns a fixture account/session.
 - One child command runs `GoGroupReadInteropTests` with a three-minute context deadline and five-second `WaitDelay`.
 - Swift creates its own ephemeral request identity, uses shipping `AccountServiceClient.groupHistory` with a trusted synthetic HTTPS origin plus test-only loopback transport, and observes exactly two signed requests: cursors `0`/`16`, then the exact expected head.
@@ -27,6 +28,12 @@ Scope: test-only Go -> Swift known-group read acceptance; no production code cha
 
 ## Shutdown and boundaries
 
-The Swift child exited normally. The Go test owns and closes the loopback server on every return, and the test process has exited; no fixture service or child remains running.
+Independent review found that the original `exec.CommandContext` cancellation killed only the immediate Swift process; `WaitDelay` bounded pipe waiting but did not terminate descendants. A Darwin-only test helper now starts the child in its own process group, replaces context cancellation with group termination, retains the five-second `WaitDelay`, and terminates the owned group again on every return. The non-Darwin fixture remains explicitly skipped and has a compile-only no-op helper.
+
+- Cleanup behavioral RED: a real descendant inherited a pipe, the parent-only command was cancelled, and after the full five-second `WaitDelay` the descendant still retained the pipe. The regression failed in 6.02 seconds and its emergency cleanup killed the child. Log: `/tmp/native-group-read-process-cleanup-red.log`.
+- Cleanup GREEN: `go test ./internal/accountauth -run '^TestNativeGroupReadCommandKillsDescendantOnCancellation$' -count=1 -timeout=20s -v` passed 1/1 in 1.094 seconds. Log: `/tmp/native-group-read-process-cleanup-green.log`.
+- Interop after cleanup fix: the required opt-in command still passed Swift 1/1 with 0 failures/0 skipped and Go 1/1 in 5.231 seconds. Log: `/tmp/native-group-read-interop-cleanup-green.log`.
+
+The Swift child exited normally. The Go test owns and closes the loopback server on every return, and the owned child process group is terminated on timeout, error, and final cleanup. All test processes have exited; no fixture service or child remains running.
 
 This proves local real device signatures, Go request verification/handler pagination/journal validation, Swift page parsing/collection, and native pin/checkpoint rollback protection. It substitutes session storage/authentication and Apple, does not exercise SQL or OS Keychain, and does not prove real Apple sessions, installed-device/phone behavior, production provider consent, deployment, or transfer trust.
