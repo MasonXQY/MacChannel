@@ -2,19 +2,28 @@
 
 ## Current mainline decision — 2026-09-20
 
-CURRENT OWNERS: native_device_approval_ui now runs the actual two-controller
-HTTP/SQL interop task, owning Swift/cache, newinteroptestfiles, SQL55461 and isolated
-Go cache /private/tmp/dropmesh-approval-go-cache.qIjA8g. account_route_admission now
-owns new routeauth connection/queue package and default Go cache, no SQL. Root owns
-database shutdown and docs/review coordination. SQL55461 is RUNNING socket-only.
-Native owner782bb39, SQL admission465930c and approval UI incl40d0683 are all
-independently Approved as bounded components; no feature activation or install.
-Fresh-agent creation hit the thread limit, so explicit existing-agent reassignment
-is recorded in progress.md. Core expiry rereview Approved/no findings. Mobile adapter supplement
-Approved/no findings, actual2/0 +unsigned main/Share compile root-verified; original
-Minor1 closed. Brief native-device-approval-ui-brief.md. Root prepares local actual
-HTTP/SQL approval acceptance, not live activation. Older chronological entries below
-are history, not active owner instructions.
+CURRENT OWNER: account_route_admission is explicitly reassigned native producer
+integration per .superpowers/sdd/account-native-producer-brief.md, sole Swift/cache
+owner. Manual repository producer5tests GREEN; account controller integration is
+in progress, not approved/complete. No other implementer currently active. Root
+owns database shutdown and docs/review coordination. SQL55461 is STOPPED with
+fixture data retained; isolated Go cache remains available but unused.
+
+Completed/reviewed: routeauth owner e627179; actual two-controller signed HTTP/SQL
+interop5fdd896; exact SQL group count supplement095591a; real subject-list409 UI
+repair e636542. All independently Approved, no remaining findings. Actual interop
+Go2/0+XCTest1/0, supplementGo1/0+XCTest1/0; UI13model/0+2native/0+shipping main/Share
+compile. No member permission was relaxed. Native owner782bb39 and SQL465930c are
+still not live transport authority. Earlier mobile six-digit host/recovery local
+gates remain complete; no physical install or Store update in this continuation.
+
+Physical read-only check: iPad mini connected, installed1.0(8); iPhone unavailable.
+Optional async reconnect request sent. A separate async request asks authorization
+for an isolated candidate transfer deployment preserving existing production; no
+answer or deployment yet. User wants current development mainline as future Store
+update, iOS free. Do not imply accounts/invitations/end-to-end transfer are finished.
+Fresh-agent thread limit requires explicit reuse, recorded in progress.md.
+Older chronological entries below are history, not active owner instructions.
 
 LATEST: expiry fix 05f7ae7/report ae3023e has actual RED4/9 assertions and GREEN25/0
 verified by root; independent rereview reports Important resolved (final pending).

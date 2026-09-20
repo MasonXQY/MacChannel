@@ -24,3 +24,10 @@ and deleting an account. Each has different retained files, manual pairs, remote
 sessions and journal effects that must be documented against actual tests. Current
 backup statement has no universal deletion deadline and must not be tightened
 without corresponding operational evidence.
+
+Apple official requirements rechecked20 September2026:
+[Offering account deletion in your app](https://developer.apple.com/support/offering-account-deletion-in-your-app)
+requires in-app initiation of account deletion and Apple-token revocation for
+Sign in with Apple apps. [TN3194](https://developer.apple.com/documentation/technotes/tn3194-handling-account-deletions-and-revoking-tokens-for-sign-in-with-apple)
+is the provider integration reference. These requirements do not establish that
+this branch's deletion workflow is implemented or accepted by App Review.
