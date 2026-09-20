@@ -45,7 +45,9 @@ public actor AccountSessionController {
     private let storage: any AccountSessionStorage
     private let binding: AccountSessionBinding
     private let groupVerifier: AccountGroupHistoryVerifier?
+    private let firstDeviceEnrollment: AccountFirstDeviceEnrollment?
     private var groupSyncInProgress = false
+    private var firstDeviceAttempt: FirstDeviceAttempt?
     private var operationRevision = UUID()
     private let now: @Sendable () -> Date
     private let operationObserver: (@Sendable (AccountSessionOperation) -> Void)?
@@ -61,23 +63,229 @@ public actor AccountSessionController {
     private var acknowledgedLogout = false
 
     public init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
-                groupVerifier: AccountGroupHistoryVerifier? = nil) {
+                groupVerifier: AccountGroupHistoryVerifier? = nil,
+                firstDeviceEnrollment: AccountFirstDeviceEnrollment? = nil) {
         self.service = service; self.storage = storage; self.binding = binding
         self.groupVerifier = groupVerifier
+        self.firstDeviceEnrollment = firstDeviceEnrollment
         now = Date.init
         operationObserver = nil
     }
 
     init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
          groupVerifier: AccountGroupHistoryVerifier? = nil,
+         firstDeviceEnrollment: AccountFirstDeviceEnrollment? = nil,
          now: @escaping @Sendable () -> Date,
          operationObserver: (@Sendable (AccountSessionOperation) -> Void)? = nil) {
         self.service = service; self.storage = storage; self.binding = binding; self.now = now
         self.groupVerifier = groupVerifier
+        self.firstDeviceEnrollment = firstDeviceEnrollment
         self.operationObserver = operationObserver
     }
 
     public func snapshot() -> AccountSessionSnapshot { state }
+
+    /// Informational only: discovery never persists intent or authorizes a pin.
+    public func discoverAccountGroup() async throws -> AccountGroupDiscovery {
+        let dependencies = try enrollmentDependencies()
+        try beginGroupOperation()
+        defer { groupSyncInProgress = false }
+        let context = try await enrollmentSession()
+        return try await discover(using: dependencies.enrollment, context: context)
+    }
+
+    /// Returns an expiring, single-use ticket for a separately confirmed action.
+    /// An existing foreign group requires trusted-device approval instead.
+    public func prepareFirstDeviceJoin() async throws -> UUID {
+        let dependencies = try enrollmentDependencies()
+        try beginGroupOperation()
+        defer { groupSyncInProgress = false }
+        firstDeviceAttempt = nil
+        let context = try await enrollmentSession()
+        do {
+            let intent = try await loadIntent(dependencies.configuration, context: context)
+            let found = try await discover(using: dependencies.enrollment, context: context)
+            if case let .present(metadata) = found {
+                guard let intent, metadata.groupID == intent.event.groupID,
+                      metadata.generation == intent.event.generation,
+                      metadata.anchor.accountID == intent.event.accountID,
+                      try metadata.anchorHash == intent.event.digest() else {
+                    throw AccountFirstDeviceEnrollmentError.approvalRequired
+                }
+            }
+            try requireEnrollmentSession(context)
+            let ticket = FirstDeviceAttempt(id: UUID(), context: context,
+                expiresAt: min(try validNow().addingTimeInterval(300), context.record.tokens.accessExpiresAt))
+            firstDeviceAttempt = ticket
+            return ticket.id
+        } catch { try requireEnrollmentSession(context); throw error }
+    }
+
+    /// Persists the exact locally signed event before HTTP, then returns only
+    /// verified current history. Acknowledgment alone never grants membership.
+    public func confirmFirstDeviceJoin(attemptID: UUID) async throws -> AccountGroupSnapshot {
+        try Task.checkCancellation()
+        guard let ticket = firstDeviceAttempt, ticket.id == attemptID else {
+            throw AccountFirstDeviceEnrollmentError.invalidAttempt
+        }
+        // Consume before any suspension, including storage or token refresh.
+        firstDeviceAttempt = nil
+        guard ticket.context.revision == operationRevision, !busyForLogin, state.phase == .signedIn,
+              current?.phase == .active, current?.tokens.identity == ticket.context.record.tokens.identity,
+              ticket.expiresAt > (try validNow()) else { throw AccountFirstDeviceEnrollmentError.invalidAttempt }
+        let dependencies = try enrollmentDependencies()
+        try beginGroupOperation()
+        defer { groupSyncInProgress = false }
+        let context = ticket.context
+        do {
+            try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+            let retained = try await loadIntent(dependencies.configuration, context: context, expiresAt: ticket.expiresAt)
+            let intent: AccountGroupBootstrapIntent
+            if let retained { intent = retained }
+            else {
+                try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+                intent = try makeIntent(identity: dependencies.configuration.identity, context: context)
+                try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+                do { try await dependencies.configuration.intentStorage.save(intent) }
+                catch { throw AccountFirstDeviceEnrollmentError.secureStorage }
+                try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+            }
+            try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+            try await dependencies.enrollment.recordGroupBootstrap(accessToken: context.record.tokens.accessToken, event: intent.event)
+            try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+            let history = try await dependencies.history.groupHistory(accessToken: context.record.tokens.accessToken, groupID: intent.event.groupID)
+            try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+            let snapshot: AccountGroupSnapshot
+            do {
+                snapshot = try await dependencies.verifier.accept(history: history, binding: binding,
+                    accountID: context.accountID, groupID: intent.event.groupID)
+            } catch AccountGroupCheckpointError.missingCheckpoint {
+                // Only retained LOCAL consent authorizes this anchor. Never
+                // reconfirm on invalid history, storage failures or later heads.
+                try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+                _ = try await dependencies.verifier.confirm(anchor: intent.event, expectedAccountID: context.accountID,
+                    expectedGroupID: intent.event.groupID, expectedGeneration: 1,
+                    expectedAnchorHash: intent.event.digest(), binding: binding)
+                try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+                snapshot = try await dependencies.verifier.accept(history: history, binding: binding,
+                    accountID: context.accountID, groupID: intent.event.groupID)
+            }
+            try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+            return snapshot
+        } catch { try requireEnrollmentSession(context, expiresAt: ticket.expiresAt); throw error }
+    }
+
+    private struct EnrollmentSession {
+        let record: AccountStoredSession
+        let revision: UUID
+        var accountID: String { record.tokens.identity.accountID.uuidString.lowercased() }
+    }
+
+    private struct FirstDeviceAttempt {
+        let id: UUID
+        let context: EnrollmentSession
+        let expiresAt: Date
+    }
+
+    private func enrollmentDependencies() throws -> (configuration: AccountFirstDeviceEnrollment,
+        enrollment: any AccountGroupEnrollmentService, history: any AccountGroupService, verifier: AccountGroupHistoryVerifier) {
+        try Task.checkCancellation()
+        guard let configuration = firstDeviceEnrollment, configuration.identity.id.rawValue == binding.deviceID,
+              let enrollment = service as? any AccountGroupEnrollmentService,
+              let history = service as? any AccountGroupService, let verifier = groupVerifier else {
+            throw AccountFirstDeviceEnrollmentError.unavailable
+        }
+        return (configuration, enrollment, history, verifier)
+    }
+
+    private func beginGroupOperation() throws {
+        try Task.checkCancellation()
+        guard !groupSyncInProgress, !busyForLogin else { throw AccountSessionControllerError.busy }
+        groupSyncInProgress = true
+    }
+
+    private func enrollmentSession() async throws -> EnrollmentSession {
+        guard state.phase == .signedIn, let initial = current, initial.phase == .active else {
+            throw AccountSessionControllerError.needsSignIn
+        }
+        if initial.tokens.accessExpiresAt <= (try validNow()) { try await refresh() }
+        try Task.checkCancellation()
+        guard !busyForLogin else { throw AccountSessionControllerError.busy }
+        guard state.phase == .signedIn, let record = current, record.phase == .active, record.binding == binding else {
+            throw AccountSessionControllerError.needsSignIn
+        }
+        let context = EnrollmentSession(record: record, revision: operationRevision)
+        try requireEnrollmentSession(context)
+        return context
+    }
+
+    private func requireEnrollmentSession(_ context: EnrollmentSession, expiresAt: Date? = nil) throws {
+        try Task.checkCancellation()
+        guard operationRevision == context.revision, !busyForLogin, state.phase == .signedIn,
+              let active = current, active.phase == .active, active.binding == context.record.binding,
+              active.tokens.identity == context.record.tokens.identity else { throw AccountSessionControllerError.needsSignIn }
+        let date = try validNow()
+        if let expiresAt, expiresAt <= date { throw AccountFirstDeviceEnrollmentError.invalidAttempt }
+        guard active.tokens.accessExpiresAt > date else { throw AccountSessionControllerError.needsSignIn }
+    }
+
+    private func discover(using enrollment: any AccountGroupEnrollmentService, context: EnrollmentSession) async throws -> AccountGroupDiscovery {
+        do {
+            try requireEnrollmentSession(context)
+            let found = try await enrollment.discoverGroup(accessToken: context.record.tokens.accessToken, accountID: context.accountID)
+            try requireEnrollmentSession(context)
+            if case let .present(metadata) = found {
+                // Protocol implementations can supply unchecked metadata. Match
+                // transport validation here without adopting its anchor as trust.
+                do {
+                    try metadata.anchor.validate()
+                    guard AccountGroupPage.validGroupID(metadata.groupID), metadata.anchor.action == "bootstrap",
+                          metadata.anchor.accountID == context.accountID, metadata.anchor.groupID == metadata.groupID,
+                          metadata.generation == metadata.anchor.generation,
+                          try metadata.anchorHash == metadata.anchor.digest(), (1...8192).contains(metadata.headSequence),
+                          metadata.headHash.count == 32,
+                          metadata.headSequence != 1 || metadata.headHash == metadata.anchorHash else {
+                        throw AccountServiceError.invalidResponse
+                    }
+                } catch { throw AccountServiceError.invalidResponse }
+            }
+            try requireEnrollmentSession(context)
+            return found
+        } catch { try requireEnrollmentSession(context); throw error }
+    }
+
+    private func loadIntent(_ configuration: AccountFirstDeviceEnrollment, context: EnrollmentSession,
+                            expiresAt: Date? = nil) async throws -> AccountGroupBootstrapIntent? {
+        do {
+            try requireEnrollmentSession(context, expiresAt: expiresAt)
+            let intent: AccountGroupBootstrapIntent?
+            do { intent = try await configuration.intentStorage.load(binding: binding, accountID: context.accountID) }
+            catch { throw AccountFirstDeviceEnrollmentError.secureStorage }
+            try requireEnrollmentSession(context, expiresAt: expiresAt)
+            if let intent {
+                guard intent.binding == binding, intent.event.accountID == context.accountID,
+                      intent.event.actorPublicKey == configuration.identity.publicKey.rawRepresentation else {
+                    throw AccountFirstDeviceEnrollmentError.secureStorage
+                }
+                _ = try AccountGroupBootstrapIntent(binding: binding, event: intent.event)
+            }
+            return intent
+        } catch { try requireEnrollmentSession(context, expiresAt: expiresAt); throw error }
+    }
+
+    private func makeIntent(identity: DeviceIdentity, context: EnrollmentSession) throws -> AccountGroupBootstrapIntent {
+        guard let timestamp = AccountServiceClient.validEpochMilliseconds(try validNow()), timestamp > 0 else {
+            throw AccountFirstDeviceEnrollmentError.unavailable
+        }
+        let deviceID = binding.deviceID.uuidString.lowercased(), key = identity.publicKey.rawRepresentation
+        let unsigned = try AccountGroupEvent(accountID: context.accountID, groupID: UUID().uuidString.lowercased(),
+            generation: 1, sequence: 1, previousHash: Data(), action: "bootstrap", actorDeviceID: deviceID,
+            actorPublicKey: key, subjectDeviceID: deviceID, subjectPublicKey: key, epochMilliseconds: timestamp)
+        let payload = try unsigned.canonicalPayload()
+        let event = try AccountGroupEvent(wire: .init(payload: payload.base64EncodedString(),
+            signature: identity.sign(payload).derRepresentation.base64EncodedString(), subjectSignature: ""))
+        return try AccountGroupBootstrapIntent(binding: binding, event: event)
+    }
 
     /// Reads a known independently pinned group. Credentials remain actor-private;
     /// the returned membership still requires explicit transfer consent.
