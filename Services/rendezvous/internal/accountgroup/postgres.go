@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// Actor must be supplied from an authenticated device-bound AccountSession and
-// verified HTTP envelope, never user fields. This store does not authenticate
-// sessions, device possession, fingerprint confirmation, or owner confirmation.
+// Actor identifies caller-authorized low-level journal operations. It does not
+// authenticate sessions, device possession or owner confirmation. HTTP mutations
+// must use SessionActor and BootstrapAuthenticated instead.
 type Actor struct{ AccountID, DeviceID string }
 
 // PostgresStore persists account-only directory proofs. It grants no peer trust.
@@ -44,15 +44,17 @@ func (s *PostgresStore) ready(ctx context.Context, actor Actor) error {
 	return nil
 }
 
+// Bootstrap is a caller-authorized journal primitive; it does not check sessions.
 func (s *PostgresStore) Bootstrap(ctx context.Context, actor Actor, event Event) error {
-	return s.mutate(ctx, actor, event, true)
+	return s.mutate(ctx, actor, event, true, nil)
 }
 
+// Append is a caller-authorized journal primitive; it does not check sessions.
 func (s *PostgresStore) Append(ctx context.Context, actor Actor, event Event) error {
-	return s.mutate(ctx, actor, event, false)
+	return s.mutate(ctx, actor, event, false, nil)
 }
 
-func (s *PostgresStore) mutate(ctx context.Context, actor Actor, event Event, bootstrap bool) error {
+func (s *PostgresStore) mutate(ctx context.Context, actor Actor, event Event, bootstrap bool, session *SessionActor) error {
 	if err := s.ready(ctx, actor); err != nil {
 		return err
 	}
@@ -76,6 +78,12 @@ func (s *PostgresStore) mutate(ctx context.Context, actor Actor, event Event, bo
 		return ErrGroupUnavailable
 	}
 	if err = activeAccount(ctx, tx, actor.AccountID, true); err != nil {
+		if session != nil && errors.Is(err, ErrGroupInvalid) {
+			return ErrGroupSessionInvalid
+		}
+		return err
+	}
+	if err = activeGroupSession(ctx, tx, session); err != nil {
 		return err
 	}
 	journal, err := loadGroup(ctx, tx, actor.AccountID, "")
@@ -94,6 +102,9 @@ func (s *PostgresStore) mutate(ctx context.Context, actor Actor, event Event, bo
 		// membership; the entire persisted history was validated first.
 		for _, hash := range journal.hashes {
 			if hash == digest {
+				if err = activeGroupSession(ctx, tx, session); err != nil {
+					return err
+				}
 				if err = tx.Commit(); err != nil {
 					return ErrGroupUnavailable
 				}
@@ -106,6 +117,9 @@ func (s *PostgresStore) mutate(ctx context.Context, actor Actor, event Event, bo
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO account_group_events(account_id,sequence,event_hash,event_data) VALUES($1,$2,$3,$4)`, actor.AccountID, int64(event.Sequence), digest[:], data); err != nil {
 		return ErrGroupUnavailable
+	}
+	if err = activeGroupSession(ctx, tx, session); err != nil {
+		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return ErrGroupUnavailable

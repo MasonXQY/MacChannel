@@ -16,12 +16,13 @@ import (
 )
 
 type enrollmentFake struct {
-	events []accountgroup.Event
-	err    error
-	calls  int
-	actor  accountgroup.Actor
-	event  accountgroup.Event
-	hook   func(context.Context)
+	events       []accountgroup.Event
+	err          error
+	calls        int
+	actor        accountgroup.Actor
+	sessionActor accountgroup.SessionActor
+	event        accountgroup.Event
+	hook         func(context.Context)
 }
 
 func (f *enrollmentFake) Discover(ctx context.Context, a accountgroup.Actor) ([]accountgroup.Event, error) {
@@ -40,6 +41,52 @@ func (f *enrollmentFake) Bootstrap(ctx context.Context, a accountgroup.Actor, e 
 		f.hook(ctx)
 	}
 	return f.err
+}
+func (f *enrollmentFake) BootstrapAuthenticated(ctx context.Context, a accountgroup.SessionActor, e accountgroup.Event) error {
+	f.sessionActor = a
+	return f.Bootstrap(ctx, accountgroup.Actor{AccountID: a.AccountID, DeviceID: a.DeviceID}, e)
+}
+
+func TestEnrollmentSessionAuthority(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(map[bool]string{false: "exact session", true: "revoked after authentication"}[rejected], func(t *testing.T) {
+			h, d, f, id := enrollmentFixture(t)
+			session := validTokens(id.id, "com.example.app").Session
+			session.SessionID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+			d.session = &session
+			want := 200
+			if rejected {
+				f.err = accountgroup.ErrGroupSessionInvalid
+				want = 401
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, id.request(t, "/v1/account/group/bootstrap", enrollmentFields(t, id, "bootstrap"), 1))
+			if w.Code != want {
+				t.Errorf("status=%d want=%d body=%s", w.Code, want, w.Body.String())
+			}
+			expected := accountgroup.SessionActor{AccountID: session.AccountID, SessionID: session.SessionID, DeviceID: session.DeviceID, Audience: session.Audience}
+			if f.calls != 1 || f.sessionActor != expected {
+				t.Fatalf("session binding=%+v want=%+v calls=%d", f.sessionActor, expected, f.calls)
+			}
+			if rejected && strings.TrimSpace(w.Body.String()) != `{"error":"authentication_failed"}` {
+				t.Fatal("session rejection leaked details", w.Body.String())
+			}
+		})
+	}
+}
+
+type legacyEnrollment struct{}
+
+func (legacyEnrollment) Discover(context.Context, accountgroup.Actor) ([]accountgroup.Event, error) {
+	return nil, nil
+}
+func (legacyEnrollment) Bootstrap(context.Context, accountgroup.Actor, accountgroup.Event) error {
+	return nil
+}
+func TestEnrollmentRequiresAuthenticatedMutation(t *testing.T) {
+	if _, ok := any(legacyEnrollment{}).(AccountGroupEnrollment); ok {
+		t.Fatal("legacy bootstrap dependency accepted")
+	}
 }
 func enrollmentFixture(t *testing.T) (http.Handler, *fakeAccountDeps, *enrollmentFake, httpIdentity) {
 	t.Helper()

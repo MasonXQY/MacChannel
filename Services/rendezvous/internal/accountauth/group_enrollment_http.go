@@ -14,7 +14,7 @@ import (
 
 type AccountGroupEnrollment interface {
 	Discover(context.Context, accountgroup.Actor) ([]accountgroup.Event, error)
-	Bootstrap(context.Context, accountgroup.Actor, accountgroup.Event) error
+	BootstrapAuthenticated(context.Context, accountgroup.SessionActor, accountgroup.Event) error
 }
 
 type enrollmentRequest struct {
@@ -116,7 +116,9 @@ func (h *accountHTTP) serveGroupEnrollment(w http.ResponseWriter, r *http.Reques
 	}
 	actor := accountgroup.Actor{AccountID: session.AccountID, DeviceID: session.DeviceID}
 	groupError := func(err error) {
-		if errors.Is(err, accountgroup.ErrGroupInvalid) {
+		if errors.Is(err, accountgroup.ErrGroupSessionInvalid) {
+			writeAccountError(w, 401, "authentication_failed")
+		} else if errors.Is(err, accountgroup.ErrGroupInvalid) {
 			writeAccountError(w, 409, "group_conflict")
 		} else {
 			unavailable()
@@ -143,7 +145,10 @@ func (h *accountHTTP) serveGroupEnrollment(w http.ResponseWriter, r *http.Reques
 			writeAccountError(w, 400, "invalid_request")
 			return
 		}
-		err = h.enrollment.Bootstrap(ctx, actor, f.event)
+		err = h.enrollment.BootstrapAuthenticated(ctx, accountgroup.SessionActor{
+			AccountID: session.AccountID, SessionID: session.SessionID,
+			DeviceID: session.DeviceID, Audience: session.Audience,
+		}, f.event)
 		if ctx.Err() != nil {
 			unavailable()
 			return
