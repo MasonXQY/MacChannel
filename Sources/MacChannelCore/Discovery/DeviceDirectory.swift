@@ -58,6 +58,9 @@ public actor DeviceDirectory {
     private var expirationTask: Task<Void, Never>?
     private var trustUpdateTask: Task<Void, Never>?
     private var observedTrustRepository: TrustRepository?
+    private var observedAuthorization: (any PeerAuthorizationProviding)?
+    private var observationID = UUID()
+    private var observationRevision: UInt64?
     private var activeLANDiscoverySession: UUID?
 
     /// Opaque capability held by a single discovery lifecycle. A stale browser
@@ -83,22 +86,54 @@ public actor DeviceDirectory {
     /// trust-state transition, never an unauthenticated presence frame.
     public func observeTrust(_ repository: TrustRepository) async {
         trustUpdateTask?.cancel()
+        let id = UUID()
+        observationID = id
+        observationRevision = nil
+        observedAuthorization = nil
         observedTrustRepository = repository
-        synchronizeTrust(await repository.currentTrustStore())
+        replaceProjection([])
+        let store = await repository.currentTrustStore()
+        guard observationID == id else { return }
+        synchronizeTrust(store, observation: id)
         let updates = await repository.updates()
+        guard observationID == id else { return }
         trustUpdateTask = Task { [weak self] in
             for await store in updates {
                 guard !Task.isCancelled else { return }
-                await self?.synchronizeTrust(store)
+                await self?.synchronizeTrust(store, observation: id)
             }
         }
     }
 
-    /// Synchronizes deterministically for lifecycle callers and tests while the
-    /// long-lived repository stream remains active in production.
+    /// Discovery projection only; transport admission must acquire its own lease.
+    public func observeAuthorization(_ provider: any PeerAuthorizationProviding) {
+        trustUpdateTask?.cancel()
+        let id = UUID()
+        observationID = id
+        observationRevision = nil
+        observedTrustRepository = nil
+        observedAuthorization = provider
+        // Subscribe first; its initial value covers changes between these calls.
+        let updates = provider.updates()
+        synchronizeAuthorization(provider.snapshot(), observation: id)
+        trustUpdateTask = Task { [weak self] in
+            for await snapshot in updates {
+                guard !Task.isCancelled else { return }
+                await self?.synchronizeAuthorization(snapshot, observation: id)
+            }
+        }
+    }
+
+    /// Refreshes the current repository or provider observation without switching
+    /// sources. This is a discovery projection, not transport authorization.
     public func waitForTrustUpdates() async {
+        let id = observationID
+        if let observedAuthorization {
+            synchronizeAuthorization(observedAuthorization.snapshot(), observation: id)
+            return
+        }
         guard let observedTrustRepository else { return }
-        synchronizeTrust(await observedTrustRepository.currentTrustStore())
+        synchronizeTrust(await observedTrustRepository.currentTrustStore(), observation: id)
     }
 
     public init(
@@ -160,6 +195,27 @@ public actor DeviceDirectory {
         lanSightings = lanSightings.filter { $0.value.discoverySession != token.value }
         scheduleExpiryRefresh()
         if lanSightings.count != before { publishSnapshot() }
+    }
+
+    /// Rotate one browser's capability without renewing or inventing sightings.
+    /// A delayed replacement cannot displace a newer/ended discovery lifecycle.
+    func replaceLANDiscoverySession(_ token: LANDiscoverySessionToken,
+                                    retaining devices: Set<DeviceID>) -> LANDiscoverySessionToken? {
+        guard activeLANDiscoverySession == token.value else { return nil }
+        let replacement = LANDiscoverySessionToken(value: UUID())
+        activeLANDiscoverySession = replacement.value
+        let current = now()
+        for (device, sighting) in lanSightings where sighting.discoverySession == token.value {
+            if devices.contains(device), isEligible(device), sighting.expiresAt > current {
+                lanSightings[device] = LANSighting(endpoint: sighting.endpoint,
+                    expiresAt: sighting.expiresAt, discoverySession: replacement.value)
+            } else {
+                lanSightings.removeValue(forKey: device)
+            }
+        }
+        scheduleExpiryRefresh()
+        publishSnapshot()
+        return replacement
     }
 
     /// Atomically checks the discovery capability immediately before mutating
@@ -236,10 +292,27 @@ public actor DeviceDirectory {
         trust.isTrusted(device)
     }
 
-    private func synchronizeTrust(_ store: TrustStore) {
-        trust = DeviceTrust(trustedIDs: store.trustedDeviceIDs)
-        // The verified snapshot is authoritative: re-authorization deliberately
-        // makes a peer eligible again, while any current revocation purges it.
+    private func synchronizeTrust(_ store: TrustStore, observation: UUID) {
+        guard acceptRevision(store.persistedGeneration, observation: observation) else { return }
+        replaceProjection(store.trustedDeviceIDs)
+    }
+
+    private func synchronizeAuthorization(_ snapshot: PeerAuthorizationSnapshot, observation: UUID) {
+        guard acceptRevision(snapshot.revision, observation: observation) else { return }
+        replaceProjection(Set(snapshot.peers.keys))
+    }
+
+    private func acceptRevision(_ revision: UInt64, observation: UUID) -> Bool {
+        guard observationID == observation,
+              observationRevision.map({ revision > $0 }) ?? true else { return false }
+        observationRevision = revision
+        return true
+    }
+
+    private func replaceProjection(_ devices: Set<DeviceID>) {
+        trust = DeviceTrust(trustedIDs: devices)
+        // Replacement is never a union with previous sources. Eligibility does
+        // not create a sighting or grant transport authority.
         _ = purgeExpiredSightings()
         scheduleExpiryRefresh()
         publishSnapshot()

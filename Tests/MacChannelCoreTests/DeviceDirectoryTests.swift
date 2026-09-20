@@ -5,6 +5,375 @@ import XCTest
 @testable import MacChannelCore
 
 final class DeviceDirectoryTests: XCTestCase {
+    func testAuthorizationSessionReplacementPreservesExpiryAndRejectsOldOrEndedTokens() async throws {
+        let retained = DeviceID(rawValue: UUID()), withdrawn = DeviceID(rawValue: UUID())
+        let clock = ManualDirectoryClock()
+        let directory = DeviceDirectory(trust: .allowing(retained, withdrawn), now: { clock.now })
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType,
+                                          domain: "local.", interface: nil)
+        let original = await directory.beginLANDiscoverySession()
+        await directory.applyLAN(retained, endpoint: endpoint, token: original)
+        await directory.applyLAN(withdrawn, endpoint: endpoint, token: original)
+        clock.advance(by: 14)
+        let replacementValue = await directory.replaceLANDiscoverySession(original, retaining: [retained])
+        let replacement = try XCTUnwrap(replacementValue)
+        let kept = await directory.endpoint(for: retained)
+        let removed = await directory.endpoint(for: withdrawn)
+        XCTAssertEqual(kept, .bonjour(endpoint))
+        XCTAssertNil(removed)
+        await directory.applyLAN(withdrawn, endpoint: endpoint, token: original)
+        let staleWrite = await directory.endpoint(for: withdrawn)
+        XCTAssertNil(staleWrite)
+        clock.advance(by: 2)
+        let expired = await directory.endpoint(for: retained)
+        XCTAssertNil(expired, "Rollover must not extend the original 15-second sighting")
+        await directory.endLANDiscoverySession(replacement)
+        let afterEnd = await directory.replaceLANDiscoverySession(replacement, retaining: [retained, withdrawn])
+        XCTAssertNil(afterEnd)
+        await directory.applyLAN(retained, endpoint: endpoint, token: replacement)
+        let endedWrite = await directory.endpoint(for: retained)
+        XCTAssertNil(endedWrite)
+        let newer = await directory.beginLANDiscoverySession()
+        let staleReplacement = await directory.replaceLANDiscoverySession(original, retaining: [retained])
+        XCTAssertNil(staleReplacement)
+        await directory.applyLAN(retained, endpoint: endpoint, token: newer)
+        let newerEndpoint = await directory.endpoint(for: retained)
+        XCTAssertEqual(newerEndpoint, .bonjour(endpoint))
+        await directory.endLANDiscoverySession(newer)
+    }
+
+    func testAuthorizationBonjourSourceReplacementChainIsJoinedByStop() async throws {
+        let fixture = try PeerOwnerFixture()
+        try fixture.install(fixture.begin())
+        let directory = DeviceDirectory(trust: .allowing(fixture.peer))
+        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing())
+        browser.observeAuthorization(fixture.owner)
+        browser.startWithoutSystemBrowserForTesting()
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType,
+                                          domain: "local.", interface: nil)
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: fixture.peer))
+        try await waitUntilDeviceDirectory { await directory.endpoint(for: fixture.peer) != nil }
+        let gate = DiscoveryRepositoryGate()
+        let held = Task { await directory.holdDiscoveryForTest(gate) }
+        await fulfillment(of: [gate.entered], timeout: 2)
+        defer { gate.release() }
+        let empty = DiscoveryProjectionProbe(snapshot: .init(peers: [:], revision: 0))
+        browser.observeAuthorization(empty)
+        XCTAssertEqual(browser.state(), .ready) // replacement queued before stop
+        let stopped = PeerTestBox(false)
+        let stop = Task { await browser.stop(); stopped.update { $0 = true } }
+        try await waitUntilDeviceDirectory { browser.state() == .stopped }
+        XCTAssertFalse(stopped.value, "Stop must own the still-pending session replacement")
+        gate.release()
+        await held.value
+        await stop.value
+        let finalEndpoint = await directory.endpoint(for: fixture.peer)
+        XCTAssertNil(finalEndpoint)
+        XCTAssertTrue(stopped.value)
+    }
+
+    func testAuthorizationBonjourWithdrawalRetractsOwnedEndpointFromPermissiveDirectory() async throws {
+        let fixture = try PeerOwnerFixture()
+        let epoch = try fixture.begin()
+        try fixture.install(epoch)
+        let directory = DeviceDirectory(trust: .allowing(fixture.peer))
+        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing())
+        browser.observeAuthorization(fixture.owner)
+        browser.startWithoutSystemBrowserForTesting()
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType,
+                                          domain: "local.", interface: nil)
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: fixture.peer))
+        try await waitUntilDeviceDirectory { await directory.endpoint(for: fixture.peer) != nil }
+        try fixture.owner.replaceManual([fixture.peer: fixture.peerKey])
+        fixture.owner.invalidateAccount(epoch)
+        let overlapping = await directory.endpoint(for: fixture.peer)
+        XCTAssertEqual(overlapping, .bonjour(endpoint))
+        try fixture.owner.replaceManual([:])
+        do {
+            try await waitUntilDeviceDirectory { await directory.endpoint(for: fixture.peer) == nil }
+        } catch { XCTFail("Withdrawn Bonjour endpoint survived in permissive directory") }
+        await browser.stop()
+    }
+
+    func testAuthorizationBonjourObserveAfterStopDefersSubscriptionUntilExplicitStart() async throws {
+        let provider = DiscoveryProjectionProbe(snapshot: .init(peers: [:], revision: 0))
+        let browser = BonjourPeerBrowser(directory: DeviceDirectory(trust: .allowing()), trust: .allowing())
+        browser.observeAuthorization(provider)
+        XCTAssertEqual(browser.state(), .stopped)
+        XCTAssertEqual(provider.subscriptionCount, 1) // initial pre-start observation stays compatible
+        browser.startWithoutSystemBrowserForTesting()
+        await browser.stop()
+        let count = provider.subscriptionCount
+        browser.observeAuthorization(provider)
+        XCTAssertEqual(browser.state(), .stopped)
+        XCTAssertEqual(provider.subscriptionCount, count)
+        browser.startWithoutSystemBrowserForTesting()
+        XCTAssertEqual(browser.state(), .ready)
+        XCTAssertEqual(provider.subscriptionCount, count + 1)
+        await browser.stop()
+    }
+    func testAuthorizationOverlapFinalWithdrawalPurgesBothSightingsWithoutInventingOnline() async throws {
+        let fixture = try PeerOwnerFixture()
+        let epoch = try fixture.begin()
+        try fixture.install(epoch)
+        let directory = DeviceDirectory(trust: .allowing())
+        await directory.observeAuthorization(fixture.owner)
+        await directory.apply(.internet(fixture.peer, online: true))
+        await directory.apply(.lan(fixture.peer, host: "peer.local", port: 7443))
+        try fixture.owner.replaceManual([fixture.peer: fixture.peerKey])
+        fixture.owner.invalidateAccount(epoch)
+        await directory.waitForTrustUpdates()
+        let overlapping = await directory.snapshot()
+        XCTAssertEqual(overlapping.first?.availability, .lan)
+        try fixture.owner.replaceManual([:])
+        await directory.waitForTrustUpdates()
+        let withdrawn = await directory.snapshot()
+        let endpoint = await directory.endpoint(for: fixture.peer)
+        XCTAssertTrue(withdrawn.isEmpty)
+        XCTAssertNil(endpoint)
+        try fixture.owner.replaceManual([fixture.peer: fixture.peerKey])
+        await directory.waitForTrustUpdates()
+        let reauthorized = await directory.snapshot()
+        XCTAssertTrue(reauthorized.isEmpty)
+    }
+
+    func testAuthorizationExpiryStreamPurgesWithoutPresenceExpiry() async throws {
+        let fixture = try PeerOwnerFixture()
+        try fixture.install(fixture.begin())
+        let directory = DeviceDirectory(trust: .allowing())
+        await directory.observeAuthorization(fixture.owner)
+        await directory.apply(.internet(fixture.peer, online: true))
+        await directory.apply(.lan(fixture.peer, host: "peer.local", port: 7443))
+        fixture.clock.update { $0 = fixture.start.addingTimeInterval(21) }
+        _ = fixture.owner.snapshot()
+        try await waitUntilDeviceDirectory { await directory.snapshot().isEmpty }
+        let endpoint = await directory.endpoint(for: fixture.peer)
+        XCTAssertNil(endpoint)
+    }
+
+    func testAuthorizationInitialStreamCannotRollBackNewerSnapshot() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let marker = DeviceID(rawValue: UUID())
+        let provider = DiscoveryProjectionProbe(snapshot: .init(peers: [:], revision: 2),
+                                                initial: .init(peers: [peer: Data()], revision: 1))
+        let directory = DeviceDirectory(trust: .allowing(peer))
+        await directory.observeAuthorization(provider)
+        // A later live update proves the subscriber is running. Then a stale
+        // synchronous read must not lower its revision floor either.
+        provider.emit(.init(peers: [marker: Data()], revision: 3))
+        try await waitUntilDeviceDirectory {
+            await directory.apply(.internet(marker, online: true))
+            return await directory.snapshot().map(\.id) == [marker]
+        }
+        await directory.waitForTrustUpdates()
+        await directory.apply(.internet(peer, online: true))
+        let visible = await directory.snapshot()
+        XCTAssertEqual(visible.map(\.id), [marker])
+        XCTAssertEqual(provider.admissionCalls, 0)
+    }
+
+    func testAuthorizationRevisionRollbackAndEqualRevisionCannotRegrant() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let provider = DiscoveryProjectionProbe(snapshot: .init(peers: [peer: Data()], revision: 8))
+        let directory = DeviceDirectory(trust: .allowing())
+        await directory.observeAuthorization(provider)
+        await directory.apply(.internet(peer, online: true))
+        provider.setSnapshot(.init(peers: [:], revision: 9))
+        await directory.waitForTrustUpdates()
+        for revision: UInt64 in [8, 9] {
+            provider.setSnapshot(.init(peers: [peer: Data()], revision: revision))
+            await directory.waitForTrustUpdates()
+            await directory.apply(.internet(peer, online: true))
+            let visible = await directory.snapshot()
+            XCTAssertTrue(visible.isEmpty)
+        }
+    }
+
+    func testAuthorizationSourceReplacementResetsFloorAndNeverMergesOldIDs() async throws {
+        let oldPeer = DeviceID(rawValue: UUID()), newPeer = DeviceID(rawValue: UUID())
+        let old = DiscoveryProjectionProbe(snapshot: .init(peers: [oldPeer: Data()], revision: 99))
+        let new = DiscoveryProjectionProbe(snapshot: .init(peers: [newPeer: Data()], revision: 1))
+        let directory = DeviceDirectory(trust: .allowing())
+        await directory.observeAuthorization(old)
+        await directory.apply(.internet(oldPeer, online: true))
+        old.emit(.init(peers: [oldPeer: Data()], revision: 100))
+        await directory.observeAuthorization(new)
+        old.emit(.init(peers: [oldPeer: Data()], revision: 101))
+        await directory.waitForTrustUpdates()
+        await directory.apply(.internet(oldPeer, online: true))
+        await directory.apply(.internet(newPeer, online: true))
+        let visible = await directory.snapshot()
+        XCTAssertEqual(visible.map(\.id), [newPeer])
+        XCTAssertEqual(old.admissionCalls + new.admissionCalls, 0)
+    }
+
+    func testAuthorizationCanReplaceAndBeReplacedByLegacyRepository() async throws {
+        let local = try DeviceIdentity.ephemeral(), legacy = try DeviceIdentity.ephemeral()
+        let repository = try TrustRepository(ownerIdentity: local, trustStore: TrustStore(owner: local.id), persistedGeneration: 0)
+        _ = try await repository.issueAuthorization(subject: legacy.id, subjectPublicKey: legacy.publicKey.rawRepresentation, timestamp: Date())
+        let fixture = try PeerOwnerFixture()
+        try fixture.install(fixture.begin())
+        let directory = DeviceDirectory(trust: .allowing())
+        await directory.observeTrust(repository)
+        await directory.observeAuthorization(fixture.owner)
+        _ = try await repository.revoke(legacy.id)
+        await directory.waitForTrustUpdates()
+        await directory.apply(.internet(fixture.peer, online: true))
+        let account = await directory.snapshot()
+        XCTAssertEqual(account.map(\.id), [fixture.peer])
+        await directory.observeTrust(repository)
+        await directory.waitForTrustUpdates()
+        await directory.apply(.internet(fixture.peer, online: true))
+        let switched = await directory.snapshot()
+        XCTAssertTrue(switched.isEmpty)
+    }
+
+    func testAuthorizationAccountOnlyProjectionRequiresPresenceAndRejectsUnknown() async throws {
+        let fixture = try PeerOwnerFixture()
+        try fixture.install(fixture.begin())
+        let directory = DeviceDirectory(trust: .allowing())
+        await directory.observeAuthorization(fixture.owner)
+        let initial = await directory.snapshot()
+        XCTAssertTrue(initial.isEmpty)
+        await directory.apply(.internet(fixture.peer, online: true))
+        await directory.apply(.internet(DeviceID(rawValue: UUID()), online: true))
+        let visible = await directory.snapshot()
+        XCTAssertEqual(visible.map(\.id), [fixture.peer])
+    }
+
+    func testAuthorizationNewerInitialStreamClosesSnapshotRace() async throws {
+        let peer = DeviceID(rawValue: UUID())
+        let provider = DiscoveryProjectionProbe(snapshot: .init(peers: [:], revision: 1),
+                                                initial: .init(peers: [peer: Data()], revision: 2))
+        let directory = DeviceDirectory(trust: .allowing())
+        await directory.observeAuthorization(provider)
+        try await waitUntilDeviceDirectory {
+            await directory.apply(.internet(peer, online: true))
+            return await directory.snapshot().map(\.id) == [peer]
+        }
+        await directory.waitForTrustUpdates() // stale revision 1 cannot erase 2
+        let visible = await directory.snapshot()
+        XCTAssertEqual(visible.map(\.id), [peer])
+    }
+
+    func testAuthorizationBonjourStopRestartRefreshesWithoutStartingFromUpdates() async throws {
+        let fixture = try PeerOwnerFixture()
+        let epoch = try fixture.begin()
+        try fixture.install(epoch)
+        // Directory remains permissive here to isolate the browser hash filter.
+        let directory = DeviceDirectory(trust: .allowing(fixture.peer))
+        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing())
+        browser.observeAuthorization(fixture.owner)
+        browser.startWithoutSystemBrowserForTesting()
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType,
+                                          domain: "local.", interface: nil)
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: fixture.peer))
+        try await waitUntilDeviceDirectory { await directory.endpoint(for: fixture.peer) != nil }
+        await browser.stop()
+        fixture.owner.invalidateAccount(epoch)
+        XCTAssertEqual(browser.state(), .stopped)
+        browser.startWithoutSystemBrowserForTesting()
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: fixture.peer))
+        XCTAssertEqual(browser.state(), .ready) // queue barrier after accept
+        let rejected = await directory.endpoint(for: fixture.peer)
+        XCTAssertNil(rejected)
+        await browser.stop()
+        try fixture.owner.replaceManual([fixture.peer: fixture.peerKey])
+        XCTAssertEqual(browser.state(), .stopped)
+        browser.startWithoutSystemBrowserForTesting()
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: fixture.peer))
+        try await waitUntilDeviceDirectory { await directory.endpoint(for: fixture.peer) != nil }
+        await browser.stop()
+    }
+
+    func testAuthorizationBonjourReplacementAndRestartKeepRevisionFloor() async throws {
+        let oldPeer = DeviceID(rawValue: UUID()), newPeer = DeviceID(rawValue: UUID())
+        let old = DiscoveryProjectionProbe(snapshot: .init(peers: [oldPeer: Data()], revision: 100))
+        let new = DiscoveryProjectionProbe(snapshot: .init(peers: [newPeer: Data()], revision: 1))
+        let directory = DeviceDirectory(trust: .allowing(oldPeer, newPeer))
+        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing())
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType,
+                                          domain: "local.", interface: nil)
+        browser.observeAuthorization(old)
+        browser.startWithoutSystemBrowserForTesting()
+        old.emit(.init(peers: [oldPeer: Data()], revision: 101))
+        browser.observeAuthorization(new)
+        old.emit(.init(peers: [oldPeer: Data()], revision: 102))
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: oldPeer))
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: newPeer))
+        try await waitUntilDeviceDirectory { await directory.endpoint(for: newPeer) != nil }
+        let staleEndpoint = await directory.endpoint(for: oldPeer)
+        XCTAssertNil(staleEndpoint)
+        await browser.stop()
+        // Same source's older synchronous snapshot cannot regrant on restart.
+        new.setSnapshot(.init(peers: [oldPeer: Data()], revision: 0))
+        browser.startWithoutSystemBrowserForTesting()
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: oldPeer))
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: newPeer))
+        try await waitUntilDeviceDirectory { await directory.endpoint(for: newPeer) != nil }
+        let rolledBack = await directory.endpoint(for: oldPeer)
+        XCTAssertNil(rolledBack)
+        XCTAssertEqual(old.admissionCalls + new.admissionCalls, 0)
+        await browser.stop()
+    }
+
+    func testAuthorizationBonjourLegacyRestartRestoresUnchangedRepositoryAndRejectsRevoked() async throws {
+        let local = try DeviceIdentity.ephemeral(), peer = try DeviceIdentity.ephemeral()
+        let repository = try TrustRepository(ownerIdentity: local, trustStore: TrustStore(owner: local.id), persistedGeneration: 0)
+        _ = try await repository.issueAuthorization(subject: peer.id, subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        let directory = DeviceDirectory(trust: .allowing(peer.id))
+        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing())
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType,
+                                          domain: "local.", interface: nil)
+        browser.observeTrust(repository)
+        for _ in 0..<2 {
+            browser.startWithoutSystemBrowserForTesting()
+            try await waitUntilDeviceDirectory {
+                browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: peer.id))
+                return await directory.endpoint(for: peer.id) != nil
+            }
+            await browser.stop()
+        }
+        _ = try await repository.revoke(peer.id)
+        let gate = DiscoveryRepositoryGate()
+        let heldRepository = Task { await repository.holdDiscoveryReadForTest(gate) }
+        await fulfillment(of: [gate.entered], timeout: 2)
+        defer { gate.release() }
+        browser.startWithoutSystemBrowserForTesting()
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: peer.id))
+        XCTAssertEqual(browser.state(), .ready)
+        // Keep the repository actor occupied: the first callback cannot rely on
+        // a fast subscription winning the race. Observe during this window,
+        // before stop can erase a wrongly accepted endpoint.
+        do {
+            try await waitUntilDeviceDirectory(timeout: .milliseconds(150)) {
+                await directory.endpoint(for: peer.id) != nil
+            }
+            XCTFail("Restart accepted stale hash while repository resubscription was suspended")
+        } catch is DeviceDirectoryTestTimeout { }
+        gate.release()
+        await heldRepository.value
+        await browser.stop()
+        let final = await directory.endpoint(for: peer.id)
+        XCTAssertNil(final)
+    }
+
+    func testAuthorizationAccountOnlyBonjourHashProjection() async throws {
+        let fixture = try PeerOwnerFixture()
+        try fixture.install(fixture.begin())
+        let directory = DeviceDirectory(trust: .allowing(fixture.peer))
+        let browser = BonjourPeerBrowser(directory: directory, trust: .allowing())
+        browser.observeAuthorization(fixture.owner)
+        browser.startWithoutSystemBrowserForTesting()
+        let endpoint = NWEndpoint.service(name: "opaque", type: BonjourPeerBrowser.serviceType,
+                                          domain: "local.", interface: nil)
+        browser.accept(endpoint: endpoint, txtRecord: BonjourPeerBrowser.txtRecord(for: fixture.peer))
+        do {
+            try await waitUntilDeviceDirectory { await directory.endpoint(for: fixture.peer) == .bonjour(endpoint) }
+        } catch { XCTFail("Account-only peer never passed Bonjour projection") }
+        await browser.stop()
+    }
+
     func testBonjourPolicyDenialIsUserActionable() {
         let denied = BonjourFailureMapper.map(
             NWError.dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied))
@@ -1101,6 +1470,62 @@ final class DeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(
             advertiser.service.txtRecordObject?.dictionary, BonjourPeerBrowser.txtRecord(for: id))
     }
+}
+
+/// Controlled discovery delivery only. Any attempt to treat a projection as
+/// authority fails, independently of its deliberately arbitrary peer keys.
+private final class DiscoveryProjectionProbe: PeerAuthorizationProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: PeerAuthorizationSnapshot
+    private let initial: PeerAuthorizationSnapshot?
+    private var sinks: [AsyncStream<PeerAuthorizationSnapshot>.Continuation] = []
+    private var calls = 0
+    init(snapshot: PeerAuthorizationSnapshot, initial: PeerAuthorizationSnapshot? = nil) {
+        current = snapshot; self.initial = initial
+    }
+    var admissionCalls: Int { lock.withLock { calls } }
+    var subscriptionCount: Int { lock.withLock { sinks.count } }
+    func acquire(for peer: DeviceID) throws -> PeerAuthorizationLease {
+        lock.withLock { calls += 1 }; throw PeerAuthorizationError.denied
+    }
+    func validate(_ lease: PeerAuthorizationLease) throws {
+        lock.withLock { calls += 1 }; throw PeerAuthorizationError.denied
+    }
+    func claim(_ lease: PeerAuthorizationLease, onInvalidation: @escaping @Sendable () -> Void) throws -> PeerAuthorizationRegistration {
+        lock.withLock { calls += 1 }; throw PeerAuthorizationError.denied
+    }
+    func snapshot() -> PeerAuthorizationSnapshot { lock.withLock { current } }
+    func setSnapshot(_ value: PeerAuthorizationSnapshot) { lock.withLock { current = value } }
+    func emit(_ value: PeerAuthorizationSnapshot) {
+        let observers = lock.withLock { sinks }
+        observers.forEach { $0.yield(value) }
+    }
+    func updates() -> AsyncStream<PeerAuthorizationSnapshot> {
+        let (stream, sink) = AsyncStream<PeerAuthorizationSnapshot>.makeStream()
+        lock.withLock { sinks.append(sink); sink.yield(initial ?? current) }
+        return stream
+    }
+    deinit { sinks.forEach { $0.finish() } }
+}
+
+private final class DiscoveryRepositoryGate: @unchecked Sendable {
+    let entered = XCTestExpectation(description: "repository actor held")
+    private let semaphore = DispatchSemaphore(value: 0)
+    func block() {
+        entered.fulfill()
+        // A bounded test-only actor occupancy barrier; never an unbounded wait
+        // on Swift's cooperative executor if a test exits unexpectedly.
+        _ = semaphore.wait(timeout: .now() + 5)
+    }
+    func release() { semaphore.signal() }
+}
+
+private extension TrustRepository {
+    func holdDiscoveryReadForTest(_ gate: DiscoveryRepositoryGate) { gate.block() }
+}
+
+private extension DeviceDirectory {
+    func holdDiscoveryForTest(_ gate: DiscoveryRepositoryGate) { gate.block() }
 }
 
 private actor MemoryPresenceSocket: PresenceWebSocket {

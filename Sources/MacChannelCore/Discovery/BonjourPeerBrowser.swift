@@ -162,6 +162,13 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     private var stateContinuations: [UUID: AsyncStream<BonjourLifecycleState>.Continuation] = [:]
     private var trustUpdateTask: Task<Void, Never>?
     private var trustObservationGeneration: UInt64 = 0
+    private enum ObservationSource {
+        case repository(TrustRepository)
+        case authorization(any PeerAuthorizationProviding)
+    }
+    private var observationSource: ObservationSource?
+    private var observationRevision: UInt64?
+    private var observationSuspended = false
     private var directoryTasks: [UUID: Task<Void, Never>] = [:]
     private var directorySessionTask: Task<DeviceDirectory.LANDiscoverySessionToken?, Never>?
     private var directorySessionEndTask: Task<Void, Never>?
@@ -214,24 +221,78 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
         stateContinuations.values.forEach { $0.yield(state) }
     }
     public func observeTrust(_ repository: TrustRepository) {
-        queue.async { [weak self] in self?.observeTrustOnQueue(repository) }
+        queue.async { [weak self] in self?.replaceObservationOnQueue(.repository(repository)) }
     }
-    private func observeTrustOnQueue(_ repository: TrustRepository) {
+    public func observeAuthorization(_ provider: any PeerAuthorizationProviding) {
+        queue.async { [weak self] in self?.replaceObservationOnQueue(.authorization(provider)) }
+    }
+    private func replaceObservationOnQueue(_ source: ObservationSource) {
+        observationSource = source
+        observationRevision = nil
+        if observationSuspended {
+            trustObservationGeneration &+= 1
+            trustUpdateTask?.cancel()
+            trustUpdateTask = nil
+            applyProjectionOnQueue([])
+            return
+        }
+        startObservationOnQueue()
+    }
+    private func startObservationOnQueue() {
         dispatchPrecondition(condition: .onQueue(queue))
         trustUpdateTask?.cancel()
         trustObservationGeneration &+= 1
         let observationGeneration = trustObservationGeneration
-        trustUpdateTask = Task { [weak self] in
-            let updates = await repository.updates()
-            for await store in updates {
-                guard !Task.isCancelled else { return }
-                self?.queue.async { [weak self] in
-                    guard let self, self.trustObservationGeneration == observationGeneration else { return }
-                    let updatedTrust = DeviceTrust(trustedIDs: store.trustedDeviceIDs)
-                    self.trust = updatedTrust
-                    self.currentSightings = self.currentSightings.filter { updatedTrust.isTrusted($0.key) }
+        switch observationSource {
+        case let .repository(repository):
+            // Repository subscription suspends. A restart must not expose the
+            // pre-stop allow-list while waiting for its current verified store.
+            applyProjectionOnQueue([])
+            trustUpdateTask = Task { [weak self] in
+                let updates = await repository.updates()
+                for await store in updates {
+                    guard !Task.isCancelled else { return }
+                    self?.queue.async { [weak self] in
+                        self?.applyObservedProjectionOnQueue(store.trustedDeviceIDs,
+                            revision: store.persistedGeneration, generation: observationGeneration,
+                            allowEqualRevision: true)
+                    }
                 }
             }
+        case let .authorization(provider):
+            let updates = provider.updates()
+            let snapshot = provider.snapshot()
+            applyObservedProjectionOnQueue(Set(snapshot.peers.keys), revision: snapshot.revision,
+                                           generation: observationGeneration)
+            trustUpdateTask = Task { [weak self] in
+                for await snapshot in updates {
+                    guard !Task.isCancelled else { return }
+                    self?.queue.async { [weak self] in
+                        self?.applyObservedProjectionOnQueue(Set(snapshot.peers.keys),
+                            revision: snapshot.revision, generation: observationGeneration)
+                    }
+                }
+            }
+        case nil: break
+        }
+    }
+    private func applyObservedProjectionOnQueue(_ devices: Set<DeviceID>, revision: UInt64, generation: UInt64,
+                                                allowEqualRevision: Bool = false) {
+        guard generation == trustObservationGeneration,
+              observationRevision.map({ revision > $0 || (allowEqualRevision && revision == $0) }) ?? true else { return }
+        observationRevision = revision
+        applyProjectionOnQueue(devices)
+    }
+    private func applyProjectionOnQueue(_ devices: Set<DeviceID>) {
+        let removed = trust.deviceIDs.subtracting(devices)
+        trust = DeviceTrust(trustedIDs: devices)
+        currentSightings = currentSightings.filter { trust.isTrusted($0.key) }
+        guard !removed.isEmpty, let previousSession = directorySessionTask else { return }
+        // Keep the chain owned by stop(). The actor rotates exactly this old
+        // capability and preserves retained sightings' original expiry dates.
+        directorySessionTask = Task { [directory] in
+            guard let token = await previousSession.value else { return nil }
+            return await directory.replaceLANDiscoverySession(token, retaining: devices)
         }
     }
     public func start() { queue.async { [weak self] in self?.startOnQueue(launchSystemBrowser: true) } }
@@ -280,6 +341,8 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
 
     private func startOnQueue(launchSystemBrowser: Bool, assumeReady: Bool = false) {
         guard browser == nil, directorySessionTask == nil else { return }
+        observationSuspended = false
+        if observationSource != nil { startObservationOnQueue() }
         generation &+= 1; let activeGeneration = generation; setLifecycleState(.starting)
         let directory = self.directory
         let sessionTask: Task<DeviceDirectory.LANDiscoverySessionToken?, Never> = Task { [weak self, directory] in
@@ -372,6 +435,7 @@ public final class BonjourPeerBrowser: @unchecked Sendable {
     }
     private func cancelOwnedTasksOnQueue() {
         dispatchPrecondition(condition: .onQueue(queue))
+        observationSuspended = true
         trustObservationGeneration &+= 1
         trustUpdateTask?.cancel()
         trustUpdateTask = nil
