@@ -1,5 +1,20 @@
 # iPhone continuation ledger
 
+## Active continuation — shared mobile authorization
+
+Bootstrap complete8583fff..bb8930a; independent bootstrap_review Approved, no
+findings. Root checked actual85/0/0skip, RED3/6 and source hashes/preserved delta.
+Runtime consumer integration dispatched atbb8930a to mobile_runtime_authorization;
+brief mobile-runtime-authorization-brief.md. Root shipping build in progress;
+implementer holds source edits/tests until cache released.
+
+Bootstrap task active at base8583fff, fresh mobile_authorization_bootstrap owns
+snapshot loader/context/dedicated tests and Swift cache. Brief/report prefix
+mobile-authorization-bootstrap. Prior dirty identity recovery edits preserved.
+Root prepared follow-on mobile-runtime-authorization-brief.md; not dispatched yet.
+Fresh device inspection: physical iPhone16ProMax available(paired), iPadmini7
+connected. No installation or production mutation. Root owns review/build gates.
+
 Finaldiscovery6c26b1fc independentlyApproved/nofindings; rootfullreport/reviewread,
 actual153/0/0skip2.436s+hasheschecked. RootXcode27 unsignedRelease main/SharePASS
 exit0, /tmp/native-discovery-ios-shipping-build.log; privacyPASS. Allagentsand

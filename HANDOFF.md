@@ -2,6 +2,17 @@
 
 ## Current mainline decision — 2026-09-20
 
+LATEST: shared mobile authorization bootstrap bb8930a independently Approved,
+no findings (mobile-authorization-bootstrap-review.md). Root checked actual
+85tests/0fail/0skip, RED3tests/6failures and exact source hashes; prior dirty
+identity recovery changes preserved. Xcode27 unsigned shipping main/Share
+BUILD SUCCEEDED exit0 (/tmp/mobile-bootstrap-ios-shipping-build.log), privacyPASS.
+Runtime consumer task now active: mobile_runtime_authorization owns runtime,
+production foreground network and focused tests; sole Swift cache owner.
+Requirements mobile-runtime-authorization-brief.md, basebb8930a. No account
+producer/endpoint enabled yet; no install/deploy. Fresh devicectl now reports
+iPhone16ProMax available(paired), iPad mini7 connected. No new approval needed.
+
 LATEST VERIFIED: discovery6c26b1fc independentlyApproved/no findings in
 native-discovery-authorization-review.md. Rootreadfullreport/review, actualfinal
 153tests/0fail/0skip2.436s andthreeSHA256matches. RootXcode27 unsignedRelease
