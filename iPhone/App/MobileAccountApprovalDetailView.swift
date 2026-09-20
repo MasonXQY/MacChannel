@@ -120,7 +120,7 @@ struct MobileAccountApprovalDetailView: View {
             }.frame(minHeight: 44).accessibilityIdentifier("approval-paste")
         }
     }
-    private func codeSection(_ code: String, title: String, instructions: String) -> some View {
+    func codeSection(_ code: String, title: String, instructions: String) -> some View {
         Section(LocalizedStringKey(title)) {
             Text(LocalizedStringKey(instructions)).foregroundStyle(.secondary)
             if code.count > 160 {
@@ -128,7 +128,7 @@ struct MobileAccountApprovalDetailView: View {
                     Text(code).font(.body.monospaced()).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("approval-comparison-code")
-                }.frame(height: 220).accessibilityLabel(Text("approval.member-code"))
+                }.frame(height: 220).accessibilityLabel(Text(LocalizedStringKey(title)))
             } else {
                 Text(code).font(.body.monospaced()).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("approval-comparison-code")

@@ -5,12 +5,16 @@ import UIKit
 /// Synthetic account dependencies; renders the shipping Settings and account views.
 struct MobileAccountEvidenceHost: View {
     @State private var settings: MobileSettingsModel
+    private let longRequestCodeEvidence: MobileAccountApprovalModel?
     private let dark = ProcessInfo.processInfo.arguments.contains("-account-evidence-dark")
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
         let state = arguments.firstIndex(of: "-account-evidence-state")
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil } ?? "signed-out"
+        longRequestCodeEvidence = state == "approval-long-request-code"
+            ? (try? AccountApprovalEvidenceFixture()).map { MobileAccountApprovalModel(controller: $0.controller) }
+            : nil
         let loader: @Sendable () async throws -> AccountSessionController? = {
             if state.hasPrefix("approval-") {
                 if state == "approval-member" || state == "approval-proposed" {
@@ -56,7 +60,15 @@ struct MobileAccountEvidenceHost: View {
     }
 
     var body: some View {
-        NavigationStack { MobileSettingsView(model: settings) }
+        NavigationStack {
+            if let longRequestCodeEvidence {
+                Form {
+                    MobileAccountApprovalDetailView(model: longRequestCodeEvidence, requestID: nil)
+                        .codeSection(String(repeating: "R", count: 161), title: "approval.request-code",
+                            instructions: "approval.request-code.help")
+                }
+            } else { MobileSettingsView(model: settings) }
+        }
             .preferredColorScheme(dark ? .dark : .light)
     }
 }

@@ -3,6 +3,35 @@ import XCTest
 @MainActor
 final class MobileAccountUITests: XCTestCase {
     override func setUp() { super.setUp(); continueAfterFailure = false }
+    func testApprovalLongRequestCodeAccessibilityUsesRequestSemantics() throws {
+        for language in ["en", "zh-Hans"] {
+            let app = launch(state: "approval-new", language: language)
+            defer { app.terminate() }
+            openAccount(app)
+            let entry = app.buttons["account-device-requests"]; reveal(entry, in: app); entry.tap()
+            XCTAssertTrue(app.staticTexts["approval-empty"].waitForExistence(timeout: 5))
+            app.buttons["approval-new"].tap()
+            let prepare = app.buttons["approval-prepare-request"]
+            XCTAssertTrue(prepare.waitForExistence(timeout: 5)); prepare.tap()
+            let confirm = app.buttons["approval-confirm"]
+            reveal(confirm, in: app); XCTAssertTrue(confirm.waitForExistence(timeout: 5)); confirm.tap()
+            let code = app.staticTexts["approval-comparison-code"]
+            revealApprovalText(code, in: app)
+            XCTAssertTrue(code.waitForExistence(timeout: 5))
+            let label = language == "en" ? "Request comparison code" : "请求核对码"
+            XCTAssertLessThanOrEqual(code.label.count, 160, "Real request codes use the short-code branch")
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ==[c] %@", label)).firstMatch.exists)
+            app.terminate()
+            let synthetic = launch(state: "approval-long-request-code", language: language)
+            defer { synthetic.terminate() }
+            let longCode = synthetic.staticTexts["approval-comparison-code"]
+            XCTAssertTrue(longCode.waitForExistence(timeout: 5))
+            XCTAssertEqual(longCode.label.count, 161, "Exercise the same shipping helper's long-code branch")
+            XCTAssertTrue(synthetic.scrollViews.matching(NSPredicate(format: "label == %@", label)).firstMatch.exists,
+                "The joining device's long code must be announced as a request code, not a member code")
+            try captureApproval(synthetic, name: language + "-synthetic-long-request-code-accessibility")
+        }
+    }
     func testApprovalAccessibleExpiryLayout() throws {
         let app = launch(state: "approval-proposed", language: "en", large: true)
         defer { app.terminate() }

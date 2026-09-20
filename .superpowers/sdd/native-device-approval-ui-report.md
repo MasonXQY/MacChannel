@@ -181,7 +181,47 @@ artifact: its context prefix before existing project tabs and final context blan
 line are intentionally preserved, so generic git diff --check flags that artifact.
 Reverse apply and all 64 manifest hashes pass; 45 PNGs include the expiry RED image.
 
-## Remaining independent gates
+## Independent review amendments (2026-09-20)
+
+The shared long-code helper incorrectly hardcoded the member-code accessibility
+label. It now localizes its passed title. Impact clarification: the actual core
+requestCode is DMJR1- plus formatted SHA-256 hexadecimal, 85 characters in the
+native fixture, and never enters the >160-character branch. Existing long member
+codes already had the correct label; this fixes the generic helper's semantics,
+not an observed long real-request encoding. No core format or model changed.
+
+The coordinator approved removing only codeSection's private modifier and an
+existing-test-host-only synthetic 161-character request-title presentation that
+renders that same shipping helper. It has no production fixture flag or workflow.
+The focused UI test also creates a real request and checks its short-code boundary
+and actual localized request heading before checking the synthetic long branch.
+
+Review RED/GREEN commands use the native xcodebuild command above with exactly:
+`-only-testing:DropMeshTests/MobileAccountApprovalModelTests/testMemberRejectionRequiresConfirmationAndAcceptsExactlyOnce`
+and `-only-testing:DropMeshUITests/MobileAccountUITests/testApprovalLongRequestCodeAccessibilityUsesRequestSemantics`.
+Each command records the matching .build basename with `-resultBundlePath`.
+
+- `account-approval-review-red.log/.xcresult`: model passed; UI failed the mistaken
+  85 > 160 precondition. This is a test premise error, NOT behavioral RED.
+- `account-approval-review-semantic-red.log/.xcresult`: model passed; corrected UI
+  failed line 30 because the synthetic long request-title scroll container lacked
+  the request accessibility label. This is the relevant behavioral RED.
+- `account-approval-review-green.log/.xcresult`: 1 model + 1 native UI, zero failures,
+  exit 0 TEST SUCCEEDED. Native case exercises English and Simplified Chinese.
+  Model uses the actual controller: dismiss means zero reject calls; acceptance
+  followed by a duplicate tap means exactly one reject and rejected terminal state.
+- `account-approval-review-shipping.log/.xcresult`: same unsigned shipping command
+  above on final source, exit 0 BUILD SUCCEEDED for actual main and Share. Existing
+  AppIntents warnings only; no full unrelated suite was rerun.
+
+Only DetailView, existing test-host composition, two test files, manifest, this
+report and two explicitly synthetic accessibility PNGs changed for review. Prior
+45 screenshots and protected patch are unchanged. Manifest now contains 66 hashes
+and 47 PNGs. Both completed command sessions exited; Swift/Xcode caches released
+again after the review gate. Original matrix evidence remains valid for unchanged
+layout/actions; this amendment changes only the long container's spoken title.
+
+## Remaining independent gates (unchanged)
 
 Independent review, actual Swift-controller/HTTP/Go/PostgreSQL interoperability,
 signed physical iPhone/iPad approval with Apple sessions and secure storage, and

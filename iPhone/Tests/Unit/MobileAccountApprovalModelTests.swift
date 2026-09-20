@@ -192,6 +192,27 @@ import UIKit
         XCTAssertEqual(m.phase, .secureStorageError)
         await f.intents.protect(false); await m.refresh(); XCTAssertEqual(m.phase, .ready)
     }
+    func testMemberRejectionRequiresConfirmationAndAcceptsExactlyOnce() async throws {
+        let f = try await AccountApprovalEvidenceFixture.memberEvidence(proposed: false)
+        let m = MobileAccountApprovalModel(controller: f.controller)
+        await m.refresh()
+        let request = try XCTUnwrap(m.requests.first).requestID
+        await m.open(requestID: request)
+        m.prepareRejection()
+        let dismissed = try XCTUnwrap(m.confirmation)
+        m.dismiss(id: dismissed.id)
+        XCTAssertNil(m.accept(id: dismissed.id))
+        let before = await f.service.calls
+        XCTAssertEqual(before.filter { $0 == "reject" }.count, 0)
+        m.prepareRejection()
+        let accepted = try XCTUnwrap(m.confirmation)
+        let operation = try XCTUnwrap(m.accept(id: accepted.id))
+        XCTAssertNil(m.accept(id: accepted.id))
+        await operation.value
+        XCTAssertEqual(m.detail?.phase, .rejected)
+        let after = await f.service.calls
+        XCTAssertEqual(after.filter { $0 == "reject" }.count, 1)
+    }
     private func entered(_ gate: GroupEvidenceGate) async {
         for _ in 0..<200 {
             if await gate.entered { return }
