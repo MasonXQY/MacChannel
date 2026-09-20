@@ -14,6 +14,7 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     private var cachedAccountController: AccountSessionController?
     private var cachedAccountLifecycle: AccountForegroundLifecycle?
     private var cachedForegroundOwnership: MobileForegroundOwnership?
+    private var accountConfigurationUnavailable = false
 
     static func load() async throws -> ProductionMobileAppDependencies {
         let manager = FileManager.default
@@ -43,7 +44,8 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         let current = await runtime.currentSnapshot()
         let trustedIDs = await durableTrust.trustedIDs()
         return MobileAppSnapshot(state: current.state, trustSyncState: current.trustSyncState, localID: context.identity.id,
-            trustedIDs: trustedIDs, reachable: current.devices,
+            trustedIDs: trustedIDs, effectivePeerIDs: Set(context.authorizationOwner.snapshot().peers.keys),
+            accountConfigurationUnavailable: accountConfigurationUnavailable, reachable: current.devices,
             names: names.values, failure: current.failure, transfers: current.transfers,
             receivedCompletionIDs: current.received.map(\.transferID),
             localNetworkAvailable: current.localNetworkAvailable, localDiscoveryEnabled: discoveryEnabled,
@@ -54,6 +56,12 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         let repository = context.repository
         let context = context
         await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for await _ in context.authorizationOwner.updates() {
+                    guard !Task.isCancelled else { break }
+                    await changed()
+                }
+            }
             group.addTask {
                 for await _ in await runtime.snapshots() {
                     guard !Task.isCancelled else { break }
@@ -81,12 +89,37 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     private func foregroundOwnership() -> MobileForegroundOwnership {
         if let cachedForegroundOwnership { return cachedForegroundOwnership }
         let owner = MobileForegroundOwnership(
-            startRuntime: { [runtime] in try await runtime.startForeground() },
+            startRuntime: { [weak self] in try await self?.prepareAndStartRuntime() },
             stopRuntime: { [runtime] in await runtime.stopForeground() },
             startAccount: { [weak self] in await self?.startAccountForeground() },
             stopAccount: { [weak self] in await self?.stopAccountForeground() })
         cachedForegroundOwnership = owner
         return owner
+    }
+
+    private func prepareAndStartRuntime() async throws {
+        try Task.checkCancellation()
+        if await runtime.currentSnapshot().foregroundRequested {
+            try Task.checkCancellation()
+            try await runtime.startForeground()
+            return
+        }
+        var plane: MobileAccountPlaneConfiguration?
+        accountConfigurationUnavailable = false
+        do {
+            if let configuration = try MobileAccountConfiguration.load(),
+               let origin = configuration.transportOrigin,
+               let controller = try await accountController() {
+                var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
+                components.scheme = "wss"; components.path = "/v1/ws"
+                plane = try MobileAccountPlaneConfiguration(webSocketOrigin: components.url!, controller: controller,
+                    turnFetcher: AccountTURNCredentialFetcher(controller: controller))
+            }
+        } catch { accountConfigurationUnavailable = true }
+        try Task.checkCancellation()
+        try await runtime.configureAccountPlane(plane)
+        try Task.checkCancellation()
+        try await runtime.startForeground()
     }
 
     private func startAccountForeground() async {
@@ -123,12 +156,11 @@ actor ProductionMobileAppDependencies: MobileAppSession {
                                                audience: configuration.audience)
         let binding = try AccountSessionBinding(deviceID: context.identity.id.rawValue,
             audience: configuration.audience, origin: configuration.origin)
-        if configuration.groupsEnabled {
+        if let authorization = try configuration.makePeerAuthorization(owner: context.authorizationOwner, identity: context.identity) {
             let controller = try AccountSessionController(service: service,
-                storage: KeychainAccountSessionStorage(), binding: binding,
+                storage: KeychainAccountSessionStorage(binding: binding), binding: binding,
                 groupVerifier: AccountGroupHistoryVerifier(storage: KeychainAccountGroupCheckpointStorage()),
-                peerAuthorization: AccountPeerAuthorization(owner: context.authorizationOwner,
-                    identity: context.identity, binding: binding, freshness: 300),
+                peerAuthorization: authorization,
                 firstDeviceEnrollment: AccountFirstDeviceEnrollment(identity: context.identity),
                 deviceApproval: AccountDeviceApproval(identity: context.identity))
             // Both objects are cached before this actor reaches any suspension.
@@ -154,6 +186,11 @@ actor ProductionMobileAppDependencies: MobileAppSession {
     func rememberConfirmedPeer(_ peer: DeviceSummary) async {
         let trusted = await context.repository.currentTrustStore().trustedDeviceIDs
         names.remember(peer, trustedIDs: trusted)
+    }
+    func renamePeer(id: DeviceID, name: String) async throws {
+        let trusted = await context.repository.currentTrustStore().trustedDeviceIDs
+        let eligible = trusted.union(context.authorizationOwner.snapshot().peers.keys)
+        try names.rename(id, to: name, trustedIDs: eligible)
     }
     func makePairingAttempt() async throws -> any PairingAttempt {
         let configuration = URLSessionConfiguration.ephemeral

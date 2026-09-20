@@ -6,11 +6,18 @@ import MacChannelCore
 protocol MobileForegroundNetwork: Sendable {
     var connector: any RouteEscalatingPeerConnector { get }
     var source: any IncomingTransferConnectionSource { get }
+    var sources: [any IncomingTransferConnectionSource] { get }
+    func projectedDevices() async -> AsyncStream<[DeviceSummary]>?
     func start() async
     func stop() async
     func retryConnection() async
     func refreshTrust() async
     func setLocalDiscoveryEnabled(_ enabled: Bool) async
+}
+
+extension MobileForegroundNetwork {
+    var sources: [any IncomingTransferConnectionSource] { [source] }
+    func projectedDevices() async -> AsyncStream<[DeviceSummary]>? { nil }
 }
 
 actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
@@ -41,7 +48,8 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
          persistedUpdates: @escaping @Sendable () async -> AsyncStream<AuthenticatedTrustState?>,
          onState: @escaping @Sendable (MobilePresenceState) async -> Void,
          onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
-         onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
+         onDiscovery: @escaping @Sendable (Bool) async -> Void,
+         acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) throws {
         let session = URLSession(configuration: .ephemeral)
         let presence = MobilePresenceSupervisor(identity: identity, repository: repository,
             directory: directory, onState: onState, onTrustSyncState: onTrustSyncState,
@@ -54,7 +62,8 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
         try self.init(identity: identity, repository: repository, directory: directory,
             authorizationProvider: authorizationProvider,
             presence: presence, signaling: signaling, iceProvider: ice,
-            factory: WebRTCFactory(), session: session, onDiscovery: onDiscovery)
+            factory: WebRTCFactory(), session: session, onDiscovery: onDiscovery,
+            acceptanceBudget: acceptanceBudget)
     }
 
     /// Transport injection keeps the actual connector, listener and shutdown
@@ -62,10 +71,11 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
     init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
          presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
          iceProvider: any ICEConfigurationProviding, factory: any WebRTCChannelFactory,
-         session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
+         session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void,
+         acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) throws {
         try self.init(identity: identity, repository: repository, directory: directory,
             authority: .repository(factory), presence: presence, signaling: signaling,
-            iceProvider: iceProvider, session: session, onDiscovery: onDiscovery)
+            iceProvider: iceProvider, session: session, onDiscovery: onDiscovery, acceptanceBudget: acceptanceBudget)
     }
 
     /// Explicitly paired provider/factory injection preserves the legacy transport
@@ -74,16 +84,18 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
          authorizationProvider: any PeerAuthorizationProviding,
          presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
          iceProvider: any ICEConfigurationProviding, factory: any AuthorizedWebRTCChannelFactory,
-         session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
+         session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void,
+         acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) throws {
         try self.init(identity: identity, repository: repository, directory: directory,
             authority: .provider(authorizationProvider, factory), presence: presence, signaling: signaling,
-            iceProvider: iceProvider, session: session, onDiscovery: onDiscovery)
+            iceProvider: iceProvider, session: session, onDiscovery: onDiscovery, acceptanceBudget: acceptanceBudget)
     }
 
     private init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
                  authority: Authority, presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
                  iceProvider: any ICEConfigurationProviding, session: URLSession,
-                 onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
+                 onDiscovery: @escaping @Sendable (Bool) async -> Void,
+                 acceptanceBudget: WebRTCAcceptanceBudget) throws {
         self.repository = repository
         self.onDiscovery = onDiscovery
         self.session = session
@@ -94,7 +106,8 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
             connector = ConnectionCoordinator(directory: directory, identity: identity,
                 trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
             listener = WebRTCConnectionListener(directory: directory, identity: identity,
-                trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
+                trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory,
+                acceptanceBudget: acceptanceBudget)
         case let .provider(provider, factory):
             authorizationProvider = provider
             connector = ConnectionCoordinator(attempts: WebRTCConnectionAttempts(directory: directory,
@@ -102,7 +115,7 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
                 signaling: signaling, iceProvider: iceProvider, factory: factory))
             listener = WebRTCConnectionListener(directory: directory, identity: identity,
                 authorizationProvider: provider, signaling: signaling,
-                iceProvider: iceProvider, factory: factory)
+                iceProvider: iceProvider, factory: factory, acceptanceBudget: acceptanceBudget)
         }
         source = listener
         browser = BonjourPeerBrowser(directory: directory, trust: DeviceTrust(trustedIDs: []))

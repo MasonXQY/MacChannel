@@ -5,6 +5,28 @@ import XCTest
 @testable import MacChannelCore
 
 final class DeviceDirectoryTests: XCTestCase {
+    func testStoppedDirectoryObservationRejectsLateOwnerUpdatesAndRepeatedStop() async throws {
+        let fixture = try PeerOwnerFixture()
+        try fixture.install(fixture.begin())
+        let directory = DeviceDirectory(trust: .allowing())
+        await directory.observeAuthorization(fixture.owner)
+        await directory.apply(.internet(fixture.peer, online: true))
+        let before = await directory.snapshot()
+        XCTAssertEqual(before.map(\.id), [fixture.peer])
+        async let first: Void = directory.stopObservingTrustAndWait()
+        async let second: Void = directory.stopObservingTrustAndWait()
+        _ = await (first, second)
+        try fixture.owner.replaceManual([fixture.peer: fixture.peerKey])
+        await directory.waitForTrustUpdates()
+        await directory.apply(.internet(fixture.peer, online: true))
+        let stopped = await directory.snapshot()
+        XCTAssertTrue(stopped.isEmpty)
+        await directory.observeAuthorization(fixture.owner)
+        await directory.apply(.internet(fixture.peer, online: true))
+        let restarted = await directory.snapshot()
+        XCTAssertEqual(restarted.map(\.id), [fixture.peer])
+        await directory.stopObservingTrustAndWait()
+    }
     func testAuthorizationSessionReplacementPreservesExpiryAndRejectsOldOrEndedTokens() async throws {
         let retained = DeviceID(rawValue: UUID()), withdrawn = DeviceID(rawValue: UUID())
         let clock = ManualDirectoryClock()

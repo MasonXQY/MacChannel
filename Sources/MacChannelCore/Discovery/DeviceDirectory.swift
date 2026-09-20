@@ -85,6 +85,7 @@ public actor DeviceDirectory {
     /// Starts applying only verified, actor-owned trust state. Revocation is a
     /// trust-state transition, never an unauthenticated presence frame.
     public func observeTrust(_ repository: TrustRepository) async {
+        trustObservationDrain = nil
         trustUpdateTask?.cancel()
         let id = UUID()
         observationID = id
@@ -107,6 +108,7 @@ public actor DeviceDirectory {
 
     /// Discovery projection only; transport admission must acquire its own lease.
     public func observeAuthorization(_ provider: any PeerAuthorizationProviding) {
+        trustObservationDrain = nil
         trustUpdateTask?.cancel()
         let id = UUID()
         observationID = id
@@ -122,6 +124,23 @@ public actor DeviceDirectory {
                 await self?.synchronizeAuthorization(snapshot, observation: id)
             }
         }
+    }
+
+    private var trustObservationDrain: Task<Void, Never>?
+
+    /// Retire an ephemeral directory's observation without modifying its owner.
+    /// Existing process-lifetime directories need not call this method.
+    public func stopObservingTrustAndWait() async {
+        if let trustObservationDrain { await trustObservationDrain.value; return }
+        observationID = UUID(); observationRevision = nil
+        observedAuthorization = nil; observedTrustRepository = nil
+        let observer = trustUpdateTask
+        trustUpdateTask = nil
+        observer?.cancel()
+        replaceProjection([])
+        let drain = Task<Void, Never> { await observer?.value }
+        trustObservationDrain = drain
+        await drain.value
     }
 
     /// Refreshes the current repository or provider observation without switching

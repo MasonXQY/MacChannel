@@ -4,6 +4,41 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileForegroundRuntimeTests: XCTestCase {
+    func testAccountPlaneConfigurationCannotMutateLiveGraph() async throws {
+        let fixture = try await RuntimeFixture.make()
+        try await fixture.runtime.configureAccountPlane(nil)
+        try await fixture.runtime.startForeground()
+        do { try await fixture.runtime.configureAccountPlane(nil); XCTFail("Live origin mutation must fail") }
+        catch MobileRuntimeError.notReady {}
+        await fixture.runtime.stopForeground()
+        try await fixture.runtime.configureAccountPlane(nil)
+    }
+
+    func testGraphProjectionIsExclusiveAndRetiredWithForegroundEpoch() async throws {
+        let fixture = try await RuntimeFixture.make()
+        let first = AsyncStream<[DeviceSummary]>.makeStream()
+        await fixture.networks.setProjection(first.stream)
+        try await fixture.runtime.startForeground()
+        first.continuation.yield([DeviceSummary(id: fixture.peer, displayName: "candidate", availability: .internet)])
+        try await eventually { await fixture.runtime.currentSnapshot().devices.first?.displayName == "candidate" }
+        let directory = await fixture.networks.directory!
+        await directory.apply(.internet(fixture.peer, online: true))
+        // Synchronize the directory callback before checking source exclusivity.
+        await directory.waitForTrustUpdates()
+        let snapshot = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(snapshot.devices.first?.displayName, "candidate")
+        await fixture.runtime.stopForeground()
+        let second = AsyncStream<[DeviceSummary]>.makeStream()
+        await fixture.networks.setProjection(second.stream)
+        try await fixture.runtime.startForeground()
+        second.continuation.yield([DeviceSummary(id: fixture.peer, displayName: "new epoch", availability: .internet)])
+        try await eventually { await fixture.runtime.currentSnapshot().devices.first?.displayName == "new epoch" }
+        first.continuation.yield([DeviceSummary(id: fixture.peer, displayName: "retired", availability: .lan)])
+        let current = await fixture.runtime.currentSnapshot()
+        XCTAssertEqual(current.devices.first?.displayName, "new epoch")
+        await fixture.runtime.stopForeground()
+        first.continuation.finish(); second.continuation.finish()
+    }
     func testSameKeyAccountSourcePreservesRuntimeSendUntilLastSourceWithdraws() async throws {
         let fixture = try await RuntimeFixture.make(provider: true)
         let owner = try XCTUnwrap(fixture.authorization)
@@ -813,6 +848,7 @@ private actor RuntimeSource: IncomingTransferConnectionSource {
 }
 
 private struct RuntimeNetwork: MobileForegroundNetwork {
+    let projection: AsyncStream<[DeviceSummary]>?
     let fixtureConnector: RuntimeConnector
     let fixtureSource: RuntimeSource
     let stopped: RuntimeGate
@@ -820,6 +856,7 @@ private struct RuntimeNetwork: MobileForegroundNetwork {
     let startControl: RuntimeTrustPersistence
     var connector: any RouteEscalatingPeerConnector { fixtureConnector }
     var source: any IncomingTransferConnectionSource { fixtureSource }
+    func projectedDevices() async -> AsyncStream<[DeviceSummary]>? { projection }
     func start() async { await startControl.wait(); await state(.online) }
     func stop() async { await fixtureSource.stop(); await fixtureConnector.release.open(); await stopped.open() }
     func retryConnection() async { }
@@ -828,6 +865,10 @@ private struct RuntimeNetwork: MobileForegroundNetwork {
 }
 
 private actor RuntimeNetworks {
+    var projection: AsyncStream<[DeviceSummary]>?
+    var directory: DeviceDirectory?
+    func setProjection(_ value: AsyncStream<[DeviceSummary]>) { projection = value }
+    func recordDirectory(_ value: DeviceDirectory) { directory = value }
     var syncCallbacks: [@Sendable (PresenceTrustSyncState) async -> Void] = []
     func recordSync(_ callback: @escaping @Sendable (PresenceTrustSyncState) async -> Void) { syncCallbacks.append(callback) }
     let firstStopped = RuntimeGate()
@@ -842,7 +883,7 @@ private actor RuntimeNetworks {
         if failNext { failNext = false; throw MobileRuntimeFailure.network }
         lastConnector = RuntimeConnector()
         lastSource = RuntimeSource()
-        return RuntimeNetwork(fixtureConnector: lastConnector, fixtureSource: lastSource, stopped: firstStopped, state: state, startControl: startControl)
+        return RuntimeNetwork(projection: projection, fixtureConnector: lastConnector, fixtureSource: lastSource, stopped: firstStopped, state: state, startControl: startControl)
     }
 }
 
@@ -882,7 +923,8 @@ private struct RuntimeFixture {
         try Data("fixture".utf8).write(to: file)
         let runtime = MobileForegroundRuntime(identity: context.identity, repository: context.repository, layout: layout,
             database: database, persistence: persistence, persistTrust: { await trustPersistence.wait(); try await context.persistTrust() },
-            makeNetwork: { _, state, sync, _ in
+            makeNetwork: { directory, state, sync, _ in
+                await networks.recordDirectory(directory)
                 await networks.recordSync(sync)
                 return try await networks.make(state: state)
             },

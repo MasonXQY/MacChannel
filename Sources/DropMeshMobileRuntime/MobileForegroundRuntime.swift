@@ -55,6 +55,10 @@ public actor MobileForegroundRuntime {
     private let persistence: any TransferSnapshotPersistence
     private let persistTrust: @Sendable () async throws -> Void
     private let makeNetwork: NetworkFactory
+    private let makeAccountNetwork: (@Sendable (MobileAccountPlaneConfiguration) -> NetworkFactory)?
+    private var accountPlane: MobileAccountPlaneConfiguration?
+    private var graphDeviceObserver: Task<Void, Never>?
+    private var usesGraphProjection = false
     private let onRestored: @Sendable (TransferCoordinator) async -> Void
     private let beforeSendAccounting: @Sendable () async -> Void
     private let connector = MobileForegroundConnector()
@@ -112,6 +116,15 @@ public actor MobileForegroundRuntime {
                 persistedUpdates: { await context.persistedTrustUpdates() },
                 onState: state, onTrustSyncState: sync, onDiscovery: discovery)
         }
+        makeAccountNetwork = { account in
+            { directory, state, sync, discovery in
+                try MobileDualPlaneForegroundNetwork(identity: identity, repository: repository,
+                    authorizationProvider: context.authorizationOwner, directory: directory, account: account,
+                    publication: { await context.trustPublicationSnapshot() },
+                    persistedUpdates: { await context.persistedTrustUpdates() },
+                    onState: state, onTrustSyncState: sync, onDiscovery: discovery)
+            }
+        }
         onRestored = { _ in }
         beforeSendAccounting = { }
     }
@@ -122,7 +135,8 @@ public actor MobileForegroundRuntime {
          makeNetwork: @escaping NetworkFactory,
          onRestored: @escaping @Sendable (TransferCoordinator) async -> Void = { _ in },
          beforeSendAccounting: @escaping @Sendable () async -> Void = { },
-         authorizationProvider: (any PeerAuthorizationProviding)? = nil) {
+         authorizationProvider: (any PeerAuthorizationProviding)? = nil,
+         makeAccountNetwork: (@Sendable (MobileAccountPlaneConfiguration) -> NetworkFactory)? = nil) {
         self.identity = identity; self.repository = repository; self.layout = layout
         self.database = database; self.persistence = persistence; self.persistTrust = persistTrust
         let outputs = MobileReceivedOutputIndex(url: layout.receivedOutputIndexFile,
@@ -130,6 +144,7 @@ public actor MobileForegroundRuntime {
         transferHistory = MobileTransferHistory(database: database, outputs: outputs)
         historyAvailabilityFailure = outputs.initialAvailabilityFailure
         self.makeNetwork = makeNetwork; self.onRestored = onRestored
+        self.makeAccountNetwork = makeAccountNetwork
         self.beforeSendAccounting = beforeSendAccounting
         self.authorizationProvider = authorizationProvider
     }
@@ -154,6 +169,7 @@ public actor MobileForegroundRuntime {
     }
 
     deinit {
+        graphDeviceObserver?.cancel()
         transferObserver?.cancel()
         directoryObserver?.cancel()
         trustObserver?.cancel()
@@ -168,6 +184,12 @@ public actor MobileForegroundRuntime {
             continuation.yield(currentSnapshot())
             continuation.onTermination = { [weak self] _ in Task { await self?.unsubscribe(token) } }
         }
+    }
+
+    /// Configuration is immutable for the entire joined foreground lifetime.
+    public func configureAccountPlane(_ configuration: MobileAccountPlaneConfiguration?) throws {
+        guard !desiredForeground, network == nil, transition == nil else { throw MobileRuntimeError.notReady }
+        accountPlane = configuration
     }
 
     public func startForeground() async throws {
@@ -313,11 +335,24 @@ public actor MobileForegroundRuntime {
                 do {
                     await startObserversIfNeeded()
                     guard desiredForeground, generation == epoch else { continue }
-                    let graph = try await makeNetwork(directory,
+                    let factory = accountPlane.flatMap { makeAccountNetwork?($0) } ?? makeNetwork
+                    let graph = try await factory(directory,
                         { [weak self] in await self?.presenceChanged($0, generation: generation) },
                         { [weak self] in await self?.trustSyncChanged($0, generation: generation) },
                         { [weak self] in await self?.discoveryChanged($0, generation: generation) })
                     network = graph; graphEpoch = generation
+                    guard desiredForeground, generation == epoch else { continue }
+                    usesGraphProjection = true
+                    let projectedDevices = await graph.projectedDevices()
+                    guard desiredForeground, generation == epoch else { continue }
+                    if let stream = projectedDevices {
+                        graphDeviceObserver = Task { [weak self] in
+                            for await value in stream {
+                                guard !Task.isCancelled else { return }
+                                await self?.graphDevicesChanged(value, generation: generation)
+                            }
+                        }
+                    } else { usesGraphProjection = false }
                     guard desiredForeground, generation == epoch else { continue }
                     await connector.install(graph.connector)
                     guard desiredForeground, generation == epoch else { continue }
@@ -420,7 +455,7 @@ public actor MobileForegroundRuntime {
                 guard desiredForeground, graphEpoch == epoch else { handledAuthorizationRevision = revision; return }
                 let trusted = await receiveEligiblePeers()
                 guard desiredForeground, let generation = graphEpoch, generation == epoch else { handledAuthorizationRevision = revision; return }
-                let listener = IncomingTransferListener(source: graph.source,
+                let listener = IncomingTransferListener(sources: graph.sources,
                     policy: ReceivePolicy(trustedSources: trusted, defaultAutoAccept: true),
                     directories: DownloadDirectory(globalDirectory: layout.receiveDirectory), database: database,
                     incomingDirectory: layout.stateDirectory.appendingPathComponent("incoming", isDirectory: true),
@@ -455,10 +490,13 @@ public actor MobileForegroundRuntime {
 
     private func beginNetworkDrain() {
         guard networkDrain == nil, let network else { return }
+        graphDeviceObserver?.cancel()
+        let observer = graphDeviceObserver
         // Disable before graph cleanup; each graph starts every close before joining.
         networkDrain = Task { [connector] in
             await connector.disable()
             await network.stop()
+            await observer?.value
         }
     }
 
@@ -478,6 +516,7 @@ public actor MobileForegroundRuntime {
         await networkDrain?.value
         incoming = nil; incomingDrain = nil; incomingPolicy = nil
         network = nil; networkDrain = nil; graphEpoch = nil
+        graphDeviceObserver = nil; usesGraphProjection = false
         handledDiscoveryEnabled = false
         await accountOutstandingSends()
         do { try await persistTrust() } catch { failure = .trustPersistence }
@@ -549,7 +588,14 @@ public actor MobileForegroundRuntime {
         failure = .receive; publish()
     }
     private func transfersChanged(_ value: [TransferSnapshot]) { transfers = value; publish() }
-    private func devicesChanged(_ value: [DeviceSummary]) { devices = value.filter { $0.id != identity.id }; publish() }
+    private func devicesChanged(_ value: [DeviceSummary]) {
+        guard !usesGraphProjection else { return }
+        devices = value.filter { $0.id != identity.id }; publish()
+    }
+    private func graphDevicesChanged(_ value: [DeviceSummary], generation: UInt64) {
+        guard desiredForeground, graphEpoch == generation, epoch == generation else { return }
+        devices = value.filter { $0.id != identity.id }; publish()
+    }
     private func trustChanged() { trustRevision &+= 1; _ = reconcileTask() }
     private func authorizationChanged() { authorizationRevision &+= 1; _ = reconcileTask() }
     private func unsubscribe(_ token: UUID) { subscribers[token] = nil }
