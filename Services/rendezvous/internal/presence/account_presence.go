@@ -150,6 +150,9 @@ func (h *Hub) AdvanceAccountSource(handle ConnectionHandle) bool {
 
 // WithdrawAccountPair is called outside SQL admission when a current refresh
 // is denied or cannot reserve capacity. It removes only that exact pair epoch.
+// Retirement releases the pair slot; repeated or stale withdrawal returns false.
+// BeginAccountPair uses a hub-wide increasing epoch, so recreating this pair
+// cannot make any previously retired reservation or epoch current again.
 func (h *Hub) WithdrawAccountPair(l, r ConnectionHandle, epoch uint64) bool {
 	if h == nil {
 		return false
@@ -162,6 +165,7 @@ func (h *Hub) WithdrawAccountPair(l, r ConnectionHandle, epoch uint64) bool {
 	}
 	h.retireBatchLocked(p.reserved)
 	p.consumed = true
+	delete(h.accountPairs, keyFor(l, r))
 	out := h.dispatchLocked(h.accountTransitionLocked(p, false))
 	h.mu.Unlock()
 	sendAll(out)

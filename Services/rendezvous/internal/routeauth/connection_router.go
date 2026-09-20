@@ -9,8 +9,9 @@ import (
 // ConnectionRouter keeps the admission policy and the only queue owner it may
 // enqueue into inseparable. Callers can hold opaque handles, never owner state.
 type ConnectionRouter struct {
-	owner  *ConnectionOwner
-	policy *Policy
+	owner    *ConnectionOwner
+	policy   *Policy
+	presence *accountPresence
 }
 
 func NewCompositeConnectionRouter(capacity int, graph signal.TrustGraph, gate AccountGate) (*ConnectionRouter, error) {
@@ -25,11 +26,21 @@ func (r *ConnectionRouter) Register(deviceID string, publicKey []byte, source st
 	if r == nil || r.owner == nil {
 		return ConnectionHandle{}, ErrConnectionUnavailable
 	}
+	if r.presence != nil {
+		r.presence.mu.Lock()
+		defer r.presence.mu.Unlock()
+		if r.presence.stopped {
+			return ConnectionHandle{}, ErrConnectionUnavailable
+		}
+	}
 	return r.owner.Register(deviceID, publicKey, source)
 }
 func (r *ConnectionRouter) Bind(h ConnectionHandle, b AccountBinding) error {
 	if r == nil || r.owner == nil {
 		return ErrConnectionUnavailable
+	}
+	if r.presence != nil {
+		return r.presence.change(h, &b, false)
 	}
 	return r.owner.Bind(h, b)
 }
@@ -37,11 +48,17 @@ func (r *ConnectionRouter) Unbind(h ConnectionHandle) error {
 	if r == nil || r.owner == nil {
 		return ErrConnectionUnavailable
 	}
+	if r.presence != nil {
+		return r.presence.change(h, nil, false)
+	}
 	return r.owner.Unbind(h)
 }
 func (r *ConnectionRouter) Close(h ConnectionHandle) error {
 	if r == nil || r.owner == nil {
 		return ErrConnectionUnavailable
+	}
+	if r.presence != nil {
+		return r.presence.change(h, nil, true)
 	}
 	return r.owner.Close(h)
 }

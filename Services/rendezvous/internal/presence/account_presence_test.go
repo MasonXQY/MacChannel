@@ -2,6 +2,7 @@ package presence
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -516,8 +517,8 @@ func TestWithdrawAccountPairEpochAndIdempotence(t *testing.T) {
 	if !ok {
 		t.Fatal("reserve")
 	}
-	if !h.WithdrawAccountPair(l, r, current) || !h.WithdrawAccountPair(l, r, current) {
-		t.Fatal("current withdrawal is idempotent")
+	if !h.WithdrawAccountPair(l, r, current) || h.WithdrawAccountPair(l, r, current) {
+		t.Fatal("current withdrawal retires epoch; repeat must be a no-op")
 	}
 	if batch.Publish() {
 		t.Fatal("withdrawn reservation published")
@@ -529,6 +530,108 @@ func TestWithdrawAccountPairEpochAndIdempotence(t *testing.T) {
 	assertPresenceEvent(t, rs.events, "left", "offline")
 	assertNoPresenceEvent(t, ls.events)
 	assertNoPresenceEvent(t, rs.events)
+}
+
+func TestWithdrawAccountPairReleasesHistoricalCapacity(t *testing.T) {
+	h := NewHub(&graphSpy{})
+	// 92 live principals have 4,186 distinct pairs: above the account-pair
+	// ceiling while remaining far below the connected-principal ceiling.
+	handles := make([]ConnectionHandle, 92)
+	for i := range handles {
+		id := fmt.Sprintf("principal-%d", i)
+		handle, cleanup, err := h.ConnectOwned(id, id, newOwnedTestSink())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(cleanup)
+		handles[i] = handle
+	}
+	count := 0
+	for i, left := range handles {
+		for _, right := range handles[i+1:] {
+			epoch, ok := h.BeginAccountPair(left, right)
+			if !ok {
+				t.Fatalf("historical withdrawn pairs exhausted live capacity after %d pairs", count)
+			}
+			batch, ok := reserveEventually(h, left, right, epoch, true)
+			if !ok {
+				t.Fatal("reserve current epoch")
+			}
+			if !h.WithdrawAccountPair(left, right, epoch) {
+				t.Fatal("withdraw current epoch")
+			}
+			if batch.Publish() {
+				t.Fatal("retired batch published")
+			}
+			count++
+		}
+	}
+	if count <= MaximumAccountPairs {
+		t.Fatal("fixture must exceed pair ceiling")
+	}
+	h.mu.Lock()
+	remaining, pending := len(h.accountPairs), h.pending
+	h.mu.Unlock()
+	if remaining != 0 || pending != 0 {
+		t.Fatalf("retirement leaked pairs=%d pending=%d", remaining, pending)
+	}
+}
+
+func TestWithdrawAccountPairRecreationRejectsOldEpoch(t *testing.T) {
+	for _, manual := range []bool{false, true} {
+		t.Run(fmt.Sprint(manual), func(t *testing.T) {
+			g := &graphSpy{}
+			if manual {
+				g.adjacency = map[string][]string{"left": {"right"}, "right": {"left"}}
+			}
+			h, left, right, ls, rs := ownedPair(t, g)
+			if manual {
+				assertPresenceEvent(t, ls.events, "right", "internet")
+				assertPresenceEvent(t, rs.events, "left", "internet")
+			}
+			oldEpoch, _ := h.BeginAccountPair(left, right)
+			oldBatch, ok := reserveEventually(h, left, right, oldEpoch, true)
+			if !ok {
+				t.Fatal("old reserve")
+			}
+			if !h.WithdrawAccountPair(left, right, oldEpoch) {
+				t.Fatal("withdraw")
+			}
+			newEpoch, ok := h.BeginAccountPair(left, right)
+			if !ok || newEpoch <= oldEpoch {
+				t.Fatal("epoch not globally monotonic")
+			}
+			newBatch, ok := reserveEventually(h, left, right, newEpoch, true)
+			if !ok || !newBatch.Publish() {
+				t.Fatal("new success")
+			}
+			if oldBatch.Publish() {
+				t.Fatal("old batch published after recreation")
+			}
+			if _, ok := h.ReserveAccountPair(left, right, oldEpoch, true); ok {
+				t.Fatal("old epoch reserved after recreation")
+			}
+			if h.WithdrawAccountPair(left, right, oldEpoch) {
+				t.Fatal("old epoch erased recreated success")
+			}
+			if !manual {
+				assertPresenceEvent(t, ls.events, "right", "internet")
+				assertPresenceEvent(t, rs.events, "left", "internet")
+			}
+			h.mu.Lock()
+			bits := h.visible["left"]["right"]
+			h.mu.Unlock()
+			want := accountSource
+			if manual {
+				want |= manualSource
+			}
+			if bits != want {
+				t.Fatalf("new visibility changed: %d", bits)
+			}
+			assertNoPresenceEvent(t, ls.events)
+			assertNoPresenceEvent(t, rs.events)
+		})
+	}
 }
 
 func TestWithdrawAccountPairPreservesManualOverlap(t *testing.T) {

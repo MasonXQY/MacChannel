@@ -47,6 +47,7 @@ type AccountBinding struct {
 }
 
 type connection struct {
+	presence                 *presenceAttachment
 	handle                   ConnectionHandle
 	publicKey                []byte
 	binding                  *AccountBinding
