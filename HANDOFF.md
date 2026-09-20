@@ -2,6 +2,22 @@
 
 ## Current mainline decision — 2026-09-20
 
+LATEST VERIFIED: discovery6c26b1fc independentlyApproved/no findings in
+native-discovery-authorization-review.md. Rootreadfullreport/review, actualfinal
+153tests/0fail/0skip2.436s andthreeSHA256matches. RootXcode27 unsignedRelease
+main/Share BUILD SUCCEEDED exit0 (/tmp/native-discovery-ios-shipping-build.log),
+embeddedprivacyPASS. Newaccountprojection observation, source/revision fencing,
+atomicLANtokenreplacement preservingexpiry andjoinedstop verified locally.
+Originalreview2risks bothactualRED2/3assertions->GREEN2/0. Allagents/cache/index
+released; no active implementation. No runtime call sites switched, no candidate
+deploy/install/Storeupdate. Approval remains resolved, not a blocker.
+NEXT: compose one shared identity-matched owner through mobile runtime policy,
+send/retry/receipt/discovery; implement accountpresence/relay admission + candidate
+command and signednativebind control; only then isolated deployment/physical tests.
+Follow mobile-runtime-account-consumer-seams.md and narrowed section of
+account-presence-turn-seams.md; audits are not themselves implementation approval
+of every illustrative API. Preserve manualtransport availability andalluserfiles.
+
 LATEST: native attempts/listener cf319301 locally complete, independently Approved
 with no findings in native-attempts-authorization-review.md. Root read full report,
 actual RED2/12assertions, final combined177/0/0skip9.278s and sourcehashes. Root
@@ -12,13 +28,13 @@ no install/deploy. Next remaining seams documented in mobile-runtime-account-
 consumer-seams.md and account-presence-turn-seams.md (latter is an audit proposal,
 not an approved implementation API; reservation ownership/enumeration need narrowing).
 
-ACTIVE next slice: account_route_admission owns only DeviceDirectory.swift,
+COMPLETED slice: account_route_admission owned only DeviceDirectory.swift,
 BonjourPeerBrowser.swift, DeviceDirectoryTests.swift and native-discovery-
-authorization-report.md; sole Swift/cache implementer. Add compatible provider
+authorization-report.md; released Swift/cache. Added compatible provider
 projection observation with source-generation/revision fencing, no fake online,
 no admission from snapshots, no runtime activation. Root owns integration docs.
-mobile_adapter_regression_review is read-only narrowing presence/TURN audit;
-no Go/SQL/cache use authorized. Index remains root-coordinated.
+mobile_adapter_regression_review completed read-only presence/TURN audit narrowing;
+no Go/SQL/cache use active. Index remains root-coordinated.
 
 CURRENT: user explicitly approved isolated candidate deployment on the existing
 host, preserving production. Native channel e4730ce is independently Approved

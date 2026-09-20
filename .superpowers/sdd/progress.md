@@ -1,5 +1,22 @@
 # iPhone continuation ledger
 
+Finaldiscovery6c26b1fc independentlyApproved/nofindings; rootfullreport/reviewread,
+actual153/0/0skip2.436s+hasheschecked. RootXcode27 unsignedRelease main/SharePASS
+exit0, /tmp/native-discovery-ios-shipping-build.log; privacyPASS. Allagentsand
+cachesreleased; noactiveimplementation. Noappcallersswitched, deploy/install/Store
+stillundone. Userapprovedisolatedcandidate; remainingcodeintegrationnotpermission.
+Nextsharedmobileowner/runtime+accountserverpresence/TURN+bind/candidateassembly,
+thenphysicalacceptance. KnownunrelatedOCRfullsuitefailure remainsnotgreen.
+
+Discoverypre-review found2risks beforefreeze: browserprojectionfilteredcachedIDs
+butdidnotremovealreadywrittenDirectoryLAN, andobserveafterstopresubscribed.
+Implementerconfirmed, correctingonlyownedfiles. Rootapprovedinternalatomic
+replaceLANDiscoverySession(oldToken,retainingIDs)->Token? thatrotatesexactnonce,
+migratesonlyexistingunexpiredallowedsightingswithoutchangingexpiresAt; oldended/
+displacedtokenreturnsnil. Browserlatesttaskchainsoldreplacement, stopjoinslatest
+andendsit; noend+unconditionalbegin resurrection. Addlateoldapply, expiryretention,
+sourcechange/stopchain tests. No commit authorized untilreviewfixesfreeze.
+
 Nextnativeprojectiondispatched toaccount_route_admission: DeviceDirectory+
 BonjourPeerBrowser+DeviceDirectoryTests+report only; soleSwiftcacheowner. Preserve
 legacyAPIs, sourcegeneration/revision fencing, effectiveIDsprojection notauthority,
@@ -19,7 +36,7 @@ root read rereview and actual final logs. HTTP121PASS/19SKIP/0FAIL, full no-SQL
 15packagePASS/1no-tests, racePASS. Root isolated55462 focusedHTTP16topPASS/0SKIP/
 0FAIL1.829s includes realSQL revoke denial; unique log account-router-root-6b95c03-http-sql.log.
 Restart initially failed default5432 bind (missing prior command-line options),
-then explicitUnix-only55462 worked; stopped after verification. NoSQLcurrentlyrunning.
+then explicitUnix-only55462 worked; bothtaskSQLclustersstopped after verification.
 Nativeattempts/listener soleimplementer account_route_admission withSwift/Xcodecache;
 root read full141line seam audit, dispatched8group matrix. No runtime activation,
 installation or deployment. Go reviewer/implementer released, indexempty.
