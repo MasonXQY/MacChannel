@@ -1,6 +1,123 @@
 import XCTest
 
+private let sendAdapterPath = "App/ClipboardTransferSource.swift"
+private let copyAdapterPath = "Sources/DropMeshMobileRuntime/ExplicitApprovalCodeCopy.swift"
+private let copyButtonPath = "iPhone/App/MobileAccountApprovalDetailView.swift"
+private let copyButton = #"Button("approval.copy") { ExplicitApprovalCodeCopy.copy(code) }"#
+private let copyAdapter = """
+#if canImport(UIKit)
+import UIKit
+@MainActor
+public enum ExplicitApprovalCodeCopy {
+    public static func copy(_ code: String) {
+        UIPasteboard.general.string = code
+    }
+}
+#endif
+"""
+
+private func copySources(adapter: String = copyAdapter, button: String = copyButton) -> [String: String] {
+    [sendAdapterPath: "let pasteboard = NSPasteboard.general", copyAdapterPath: adapter, copyButtonPath: button]
+}
+
+private func copyPolicy(adapter: String = copyAdapter, button: String = copyButton) -> Bool {
+    copyPolicy(sources: copySources(adapter: adapter, button: button))
+}
+
+private func copyPolicy(sources: [String: String]) -> Bool {
+    SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(in: sources, allowingSingleExplicitAccessAt: sendAdapterPath,
+        allowingWriteOnlyApprovalCopyAt: copyAdapterPath, calledFrom: copyButtonPath)
+}
+
 final class SwiftPasteboardSourceAuditorTests: XCTestCase {
+    func testExplicitCopyBoundaryAllowsOnlyCompleteWriteOnlyAdapterAndButton() {
+        XCTAssertTrue(copyPolicy())
+        XCTAssertTrue(copyPolicy(adapter: copyAdapter.replacingOccurrences(of: "UIPasteboard.general.string = code",
+            with: "UIPasteboard /* write only */\n .general.string = code")))
+    }
+
+    func testExplicitCopyAdapterRejectsReadsAliasesAndAdditionalBehavior() {
+        let bodies = [
+            "let board = UIPasteboard.general; board.string = code",
+            "let previous = UIPasteboard.general.string",
+            "UIPasteboard.general.string = UIPasteboard.general.string",
+            "UIPasteboard.general.string = code + (read() ?? \"\")",
+            "UIPasteboard.general.string += code",
+            "UIPasteboard.general.string == code",
+            "UIPasteboard.general.strings = [code]",
+            "UIPasteboard.`general`.string = code",
+            "`UIPasteboard`.general.string = code",
+            "let board: UIPasteboard = .general; board.string = code",
+            "UIKit.UIPasteboard.general.string = code",
+            "UIPasteboard.general.string = code; send(code)",
+            "Task { UIPasteboard.general.string = code }",
+            "UIPasteboard.general.string = code; UIPasteboard.general.string = code",
+        ]
+        for body in bodies {
+            XCTAssertFalse(copyPolicy(adapter: copyAdapter.replacingOccurrences(of: "UIPasteboard.general.string = code", with: body)), body)
+        }
+        XCTAssertFalse(copyPolicy(adapter: copyAdapter + "\nfunc read() -> String? { UIPasteboard.general.string }"))
+        XCTAssertFalse(copyPolicy(adapter: copyAdapter + "\nlet extra = 1"))
+        XCTAssertFalse(copyPolicy(adapter: copyAdapter.replacingOccurrences(of: "@MainActor", with: "")))
+        XCTAssertFalse(copyPolicy(adapter: copyAdapter.replacingOccurrences(of: "canImport(UIKit)", with: "true")))
+    }
+
+    func testExplicitCopyRejectsAutomaticCallsMethodReferencesAndDuplicateButtons() {
+        for caller in [
+            "ExplicitApprovalCodeCopy.copy(code)",
+            ".task { ExplicitApprovalCodeCopy.copy(code) }",
+            ".onAppear { ExplicitApprovalCodeCopy.copy(code) }",
+            "let copy = ExplicitApprovalCodeCopy.copy; copy(code)",
+            "typealias Writer = ExplicitApprovalCodeCopy; Writer.copy(code)",
+            "Button(\"approval.copy\") { ExplicitApprovalCodeCopy.copy(read()) }",
+            "Button(\"approval.copy\") { ExplicitApprovalCodeCopy.copy(code); send(code) }",
+            "Button(\"approval.copy\") { `ExplicitApprovalCodeCopy`.copy(code) }",
+            copyButton + "\n" + copyButton,
+        ] {
+            XCTAssertFalse(copyPolicy(button: caller), caller)
+        }
+    }
+
+    func testExplicitCopyDoesNotAllowAnyExtraGeneralAccessOrOtherCallSite() {
+        for hidden in [
+            "let board = UIPasteboard.general", "let board: UIPasteboard = .general",
+            "let board = NSPasteboard.general", "let board = UIPasteboard.`general`",
+            #"let value = "\(UIPasteboard.general.string)""#,
+            ##"let value = #"\#(UIPasteboard.general.string)"#"##,
+            ##"let value = #/\#(UIPasteboard.general.string)/#"##,
+            "ExplicitApprovalCodeCopy.copy(code)",
+            #"let value = "\(ExplicitApprovalCodeCopy.copy(code))""#,
+        ] {
+            var sources = copySources()
+            sources["Sources/Other.swift"] = hidden
+            XCTAssertFalse(copyPolicy(sources: sources), hidden)
+            sources = copySources()
+            sources[copyButtonPath] = copyButton + "\n" + hidden
+            XCTAssertFalse(copyPolicy(sources: sources), hidden)
+        }
+    }
+
+    func testExplicitCopyRequiresExactPathsAndDoesNotReplaceLegacySendBoundary() {
+        for path in [copyAdapterPath, copyButtonPath, sendAdapterPath] {
+            var sources = copySources()
+            sources["Other/" + path] = sources.removeValue(forKey: path)
+            XCTAssertFalse(copyPolicy(sources: sources), path)
+        }
+        var sources = copySources()
+        sources[sendAdapterPath] = "let board: NSPasteboard = .general"
+        XCTAssertFalse(copyPolicy(sources: sources))
+        sources = copySources()
+        sources[sendAdapterPath] = "let board = NSPasteboard.`general`"
+        XCTAssertFalse(copyPolicy(sources: sources))
+        XCTAssertFalse(SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(in: copySources(), allowingSingleExplicitAccessAt: sendAdapterPath))
+    }
+
+    func testExplicitCopyPolicyIgnoresNonExecutableCommentsAndLiteralMentions() {
+        var sources = copySources()
+        sources["Sources/Unrelated.swift"] = #"let name = "ExplicitApprovalCodeCopy.copy(code) UIPasteboard.general" // .general"#
+        XCTAssertTrue(copyPolicy(sources: sources))
+    }
+
     func testCommentsAndStringLiteralsDoNotCountAsGeneralPasteboardAccess() {
         let source = ##"""
         // NSPasteboard.general

@@ -950,7 +950,9 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertTrue(
             SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
                 in: inventoriedSources,
-                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift",
+                allowingWriteOnlyApprovalCopyAt: "Sources/DropMeshMobileRuntime/ExplicitApprovalCodeCopy.swift",
+                calledFrom: "iPhone/App/MobileAccountApprovalDetailView.swift"
             ),
             "Unexpected .general accesses: \(accesses)"
         )

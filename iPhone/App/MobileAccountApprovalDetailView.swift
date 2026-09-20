@@ -1,4 +1,5 @@
 import MacChannelCore
+import DropMeshMobileRuntime
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
@@ -134,7 +135,7 @@ struct MobileAccountApprovalDetailView: View {
                 Text(code).font(.body.monospaced()).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("approval-comparison-code")
             }
-            Button("approval.copy") { UIPasteboard.general.string = code }
+            Button("approval.copy") { ExplicitApprovalCodeCopy.copy(code) }
                 .frame(minHeight: 44).accessibilityIdentifier("approval-copy")
         }
     }
