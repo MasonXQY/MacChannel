@@ -106,6 +106,13 @@ func validLoginCredential(s string, max int) bool {
 // Once consumed, a challenge stays consumed on every later failure; retry needs
 // a new challenge and authorization code. No request in this pipeline retries.
 func (l *AppleLogin) Complete(ctx context.Context, challengeID, authenticatedDeviceID, audience, code, identityToken string) (AppleLoginResult, error) {
+	return l.CompleteWithAdmission(ctx, challengeID, authenticatedDeviceID, audience, code, identityToken, nil)
+}
+
+// CompleteWithAdmission calls admit only after verifying the native identity
+// against the consumed device/audience nonce, before any token exchange. The
+// callback must be bounded and release all database locks before returning.
+func (l *AppleLogin) CompleteWithAdmission(ctx context.Context, challengeID, authenticatedDeviceID, audience, code, identityToken string, admit func(context.Context, AppleIdentity) error) (AppleLoginResult, error) {
 	fail := func() (AppleLoginResult, error) { return AppleLoginResult{}, ErrAppleLogin }
 	unavailable := func() (AppleLoginResult, error) { return AppleLoginResult{}, errAppleLoginUnavailable }
 	if l == nil || ctx == nil || l.clock == nil || l.transport == nil || nilLoginDependency(l.challenges) || nilLoginDependency(l.secrets) || l.keys == nil {
@@ -136,6 +143,11 @@ func (l *AppleLogin) Complete(ctx context.Context, challengeID, authenticatedDev
 			return unavailable()
 		}
 		return fail()
+	}
+	if admit != nil {
+		if err = admit(ctx, clientIdentity); err != nil {
+			return AppleLoginResult{}, err
+		}
 	}
 	secret, err := l.secrets.ClientSecret(ctx, audience)
 	if err != nil || ctx.Err() != nil || !validLoginCredential(secret, 16384) {

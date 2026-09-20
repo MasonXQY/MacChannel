@@ -25,6 +25,10 @@ func sessionContext(ctx context.Context) (context.Context, context.CancelFunc, e
 // new encrypted credential row, so later account deletion can revoke every
 // retained provider authorization independently.
 func (s *PostgresSessions) Login(ctx context.Context, verified AppleLoginResult, device, audience string) (SessionTokens, error) {
+	return s.loginAdmitted(ctx, verified, device, audience, "")
+}
+
+func (s *PostgresSessions) loginAdmitted(ctx context.Context, verified AppleLoginResult, device, audience, exchangeID string) (SessionTokens, error) {
 	if s == nil || s.db == nil || s.protector == nil {
 		return SessionTokens{}, ErrSessionUnavailable
 	}
@@ -45,18 +49,21 @@ func (s *PostgresSessions) Login(ctx context.Context, verified AppleLoginResult,
 		if sealErr != nil {
 			return SessionTokens{}, ErrSessionUnavailable
 		}
-		tokens, retry, txErr := s.loginTx(ctx, verified.Identity.Subject, device, audience, envelope, g)
+		tokens, retry, txErr := s.loginTx(ctx, verified.Identity.Subject, device, audience, envelope, g, exchangeID)
 		if txErr == nil {
 			return tokens, nil
 		}
 		if !retry {
+			if errors.Is(txErr, ErrSessionInvalid) {
+				return SessionTokens{}, ErrSessionInvalid
+			}
 			return SessionTokens{}, ErrSessionUnavailable
 		}
 	}
 	return SessionTokens{}, ErrSessionUnavailable
 }
 
-func (s *PostgresSessions) loginTx(ctx context.Context, subject, device, audience string, envelope []byte, g generatedSession) (SessionTokens, bool, error) {
+func (s *PostgresSessions) loginTx(ctx context.Context, subject, device, audience string, envelope []byte, g generatedSession, exchangeID string) (SessionTokens, bool, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return SessionTokens{}, false, err
@@ -67,12 +74,39 @@ func (s *PostgresSessions) loginTx(ctx context.Context, subject, device, audienc
 	}
 	var accountID, status string
 	err = tx.QueryRowContext(ctx, `SELECT account_id::text,status FROM accounts WHERE apple_subject=$1 FOR UPDATE`, subject).Scan(&accountID, &status)
+	accountErr := err
+	if exchangeID != "" {
+		var id string
+		err = tx.QueryRowContext(ctx, `SELECT exchange_id::text FROM account_apple_exchanges WHERE exchange_id=$1::uuid AND apple_subject=$2 AND device_id=$3::uuid AND audience=$4 AND encrypted_refresh IS NOT NULL FOR UPDATE`, exchangeID, subject, device, audience).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return SessionTokens{}, false, ErrSessionInvalid
+		}
+		if err != nil {
+			return SessionTokens{}, false, err
+		}
+		if _, err = tx.ExecContext(ctx, `DELETE FROM account_apple_exchanges WHERE exchange_id=$1::uuid`, exchangeID); err != nil {
+			return SessionTokens{}, false, err
+		}
+	}
+	err = accountErr
 	if errors.Is(err, sql.ErrNoRows) {
 		accountID = g.accountID
 		_, err = tx.ExecContext(ctx, `INSERT INTO accounts(account_id,apple_subject,status,created_at) VALUES($1::uuid,$2,'active',clock_timestamp())`, accountID, subject)
 	}
-	if err != nil || status == "deleting" {
+	if err != nil {
 		return SessionTokens{}, false, errOrInvalid(err)
+	}
+	if status == "deleting" {
+		// A verified code exchange can finish after deletion starts. Retain its
+		// protected credential for the deletion worker, but never issue a session.
+		_, err = tx.ExecContext(ctx, `INSERT INTO account_apple_credentials(credential_id,account_id,device_id,audience,encrypted_refresh,created_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,clock_timestamp())`, g.credentialID, accountID, device, audience, envelope)
+		if err != nil {
+			return SessionTokens{}, isCollision(err), err
+		}
+		if err = tx.Commit(); err != nil {
+			return SessionTokens{}, false, err
+		}
+		return SessionTokens{}, false, ErrSessionInvalid
 	}
 	var now time.Time
 	if err = tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {

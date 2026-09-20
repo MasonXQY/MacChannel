@@ -55,6 +55,7 @@ type AccountHTTPConfig struct {
 	Enrollment AccountGroupEnrollment
 	Pending    AccountGroupPending
 	TURN       *AccountTURNConfig
+	Deletion   AccountDeletion
 }
 
 type sourceWindow struct {
@@ -70,6 +71,7 @@ type accountHTTP struct {
 	enrollment AccountGroupEnrollment
 	pending    AccountGroupPending
 	turn       *AccountTURNConfig
+	deletion   AccountDeletion
 	clock      func() time.Time
 	global     chan struct{}
 	mu         sync.Mutex
@@ -82,6 +84,9 @@ func NewAccountHTTP(config AccountHTTPConfig) (http.Handler, error) {
 		return nil, errAccountHTTP
 	}
 	h := &accountHTTP{verifier: config.Verifier, challenges: config.Challenges, login: config.Login, sessions: config.Sessions, clock: time.Now, global: make(chan struct{}, accountGlobalLimit), sources: make(map[string]sourceWindow), completing: make(map[string]bool)}
+	if !nilInterface(config.Deletion) {
+		h.deletion = config.Deletion
+	}
 	if config.TURN != nil {
 		if !validAccountTURNConfig(config.TURN) {
 			return nil, errAccountHTTP
@@ -114,6 +119,10 @@ func nilInterface(v any) bool {
 
 func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	accountHeaders(w)
+	if _, ok := deletionOperation(r.URL.Path); ok && nilInterface(h.deletion) {
+		writeAccountError(w, http.StatusNotFound, "invalid_request")
+		return
+	}
 	if r.URL.Path == "/v1/account/turn-credentials" && h.turn == nil {
 		writeAccountError(w, http.StatusNotFound, "invalid_request")
 		return
@@ -175,6 +184,10 @@ func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device := strings.ToLower(envelope.DeviceID)
+	if operation, ok := deletionOperation(r.URL.Path); ok {
+		h.serveDeletion(w, r, device, operation, envelope.Payload)
+		return
+	}
 	if r.URL.Path == "/v1/account/turn-credentials" {
 		h.serveAccountTURN(w, r, device, envelope.PublicKey, envelope.Payload)
 		return
@@ -211,6 +224,9 @@ func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func accountPurpose(path string) (string, bool) {
+	if op, ok := deletionOperation(path); ok {
+		return "dropmesh.account.deletion." + op + ".v1", true
+	}
 	if op, ok := pendingOperation(path); ok {
 		return "dropmesh.account.group.join." + op + ".v1", true
 	}
@@ -258,6 +274,19 @@ func (h *accountHTTP) dispatch(w http.ResponseWriter, r *http.Request, device st
 			ExpiresAt   int64  `json:"expiresAt"`
 		}{v.ID, v.Nonce, v.ExpiresAt.UnixMilli()})
 	case "/v1/account/login/complete":
+		if !nilInterface(h.deletion) {
+			tokens, err := h.deletion.CompleteLogin(ctx, f["challengeID"], device, audience, f["code"], f["identityToken"])
+			if err != nil {
+				if errors.Is(err, ErrDeletionInvalid) {
+					writeAccountError(w, 401, "authentication_failed")
+				} else {
+					h.writeDependencyError(w, err)
+				}
+				return
+			}
+			h.writeTokens(w, tokens, device, audience)
+			return
+		}
 		result, err := h.login.Complete(ctx, f["challengeID"], device, audience, f["code"], f["identityToken"])
 		if err != nil {
 			h.writeDependencyError(w, err)
