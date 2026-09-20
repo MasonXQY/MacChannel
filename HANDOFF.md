@@ -2,12 +2,12 @@
 
 ## Current mainline decision — 2026-09-20
 
-CURRENT OWNER: account_route_admission is explicitly reassigned native producer
-integration per .superpowers/sdd/account-native-producer-brief.md, sole Swift/cache
-owner. Manual repository producer5tests GREEN; account controller integration is
-in progress, not approved/complete. No other implementer currently active. Root
-owns database shutdown and docs/review coordination. SQL55461 is STOPPED with
-fixture data retained; isolated Go cache remains available but unused.
+CURRENT: native producer integration0426d47 complete and independently Approved,
+118 XCTest / zero failures or skips. Review account-native-producer-review.md.
+Root Xcode27 unsigned Release shipping main/Share build succeeded; this is not
+signed installation. No implementation agent active. mobile_adapter_regression_review
+is read-only mapping next native transport consumption seams. Root owns caches
+and docs/review coordination. SQL55461 STOPPED, fixture data retained.
 
 Completed/reviewed: routeauth owner e627179; actual two-controller signed HTTP/SQL
 interop5fdd896; exact SQL group count supplement095591a; real subject-list409 UI

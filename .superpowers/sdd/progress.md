@@ -1,5 +1,13 @@
 # iPhone continuation ledger
 
+Native producers0426d47 complete; independent Approved/no findings, saved
+account-native-producer-review.md. Root verified118XCTest/0fail/0skip actual log.
+Xcode27 unsigned Release complete shipping main+Share BUILD SUCCEEDED, existing
+AppIntents warning only observed; full activity logs in mainline-validation-20260920
+DerivedData (console capture partial). No install/deployment/Store update.
+All implementation/cache ownership released; root owns caches. Read-only native
+consumer seam audit assigned mobile_adapter_regression_review. SQL remains stopped.
+
 Task own-request UI repair complete (5fdd896..e636542, independent Approved/no
 findings). InteropMinor exactSQLgroupcount closed095591a, independent rereviewclean.
 Actual13model/2UI/0 and shipping main+Share gates; interopcount1Go/1XCTest/0.
