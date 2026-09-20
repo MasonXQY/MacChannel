@@ -1,5 +1,224 @@
 # DropMesh iPhone companion handoff
 
+## Connected phone continuation — 2026-09-20
+
+LATEST: real Go/Swift group-read gate f7fd86d plus cleanup fix6de531c accepted;
+independent focused re-review Approved/no remaining findings. Root reran both
+descendant cleanup and real interop: Go PASS4.063s, Swift1/1 zero skips/failures.
+Log /tmp/native-group-read-root-final.log. Synthetic sessions/storage only, no
+Apple/SQL/OSKeychain/phone acceptance. No install or remote deployment.
+Next implement discovery and explicit device-join consent/mutation flow; existing
+installed build does not expose these group foundations. Last physical inventory:
+iPhone unavailable, iPad mini no DDI. Do not install to the wrong device.
+
+Later device refresh supersedes initial connectivity: physical iPhone now
+unavailable; iPad mini connected(no DDI). No alternate-device install attempted.
+Local development/verification continues; phone installation is not accepted.
+
+Known-group native sync35e4320 accepted: independent review Approved/no findings,
+27focusedpass/93regressionpass/2expectedGo-skips. Root fresh3boundarytestsPASS,
+unsigned iPhone buildSUCCESS with2existingAppIntents warnings, log
+/tmp/dropmesh-account-sync-ios.VTTJ6V/build.log. Optional verifier not wired to
+UI; no phone installation or service deployment. Real Go-handler read interop
+is the next gate before discovery/consent mutation API and native UI.
+
+Checkpoint implementation978a8e2 now complete, independent group_checkpoint_review
+Approved/no findings.33focusedpass;33accountregressionpass/1expectedGo-fixture
+skip. Root independently reran restart/fork/cancelledwrite3testsPASS0.027s.
+Logout preservation integration and real Keychain behavior remain deferred; no
+checkpoint deletion API. Native signed page/session sync plan prepared next.
+
+Fresh devicectl confirms physical Mason iPhone16ProMax connected over wired
+transport, Developer Mode enabled, passcodeRequired false. Installed development
+bundle com.zensystech.dropmesh.iphone.dev is version1.0 build8. Public isolated
+account-dev /healthz returned ok. No new install, private-key access or reset.
+Native checkpoint task active at base8297a76, plan
+docs/superpowers/plans/2026-09-20-native-group-checkpoints.md. Sole implementer
+group_checkpoints owns new checkpoint/storage/history-verifier files and tests;
+root handles phone read-only checks and follow-on integration planning. Existing
+dirty UI/history/release files preserved. Next page/session integration must
+hold tokens inside controller and reject late results after account lifecycle
+changes. New grouping/invitation flow is NOT yet available on phone.
+
+## Current native group milestone — 2026-09-20
+
+Native proof/Event/pinned State committed786e255 (base0e64ada), independent
+native_group_review Approved/no findings. Pure value verification only: no
+client/session/UI/production/phone changes. Coordinator independently ran real
+Go↔Swift interop PASS1.580s zero skips, both64/65 public-key chains. Unsigned
+iOS build BUILD SUCCEEDED, log /tmp/dropmesh-group-ios.jAOonT/build.log; two
+nonfatal AppIntents no-dependency metadata warnings. See acceptance
+docs/acceptance/native-group-proofs-20260920.md and implementer report
+.superpowers/sdd/native-group-proofs-report.md. No builds/services left running.
+Next: durable pins/high-water and native page/session integration, then explicit
+device consent UI; no server-returned pin can authorize itself. No automatic
+trust from login or from valid proof alone. Cross-account invites still later.
+
+## Latest continuation — 2026-09-20
+
+Optional authenticated group read API and explicit wire codec committed342a389
+(base50a1d64); independent group_read_review Approved/no findings. Actor derives from validated
+device-bound session, pages16events/64KiB, expected-head change409, full proof
+replay validation, disabled dependency404. No server assembly/migration/remote
+deployment or phone install. Swift/native group client and consent remain open.
+Implementation race/accountauth21.369s/group1.683s; defaultGo suitePASS. Root
+fresh signed HTTP pagination/auth/head-change testsPASS0.767s; unchanged native
+AccountServiceClientTests8/8PASS. Physical iPhone unavailable in fresh devicectl.
+Plan docs/superpowers/plans/2026-09-20-account-group-read-api.md; report
+.superpowers/sdd/group-read-api-report.md. Native integration notes in
+.superpowers/sdd/group-native-integration-notes.md. Older fixture remains stopped.
+
+## Phone acceptance continuation — 2026-09-19
+
+CURRENT: group journal Task3 committed 50a1d64; independent review Approved,
+no findings. Next: authenticated group API and pending consent, then Swift/native
+integration; group membership still grants no transfer trust by itself.
+SQL race PASS32.859s, focused SQL PASS13.533s, default Go PASS. Root actually
+stopped/restarted PostgreSQL and ran read-only TestPostgresGroupRestart verify:
+PASS1.471s, persisted bootstrap/approve/remove retained. Local fixture
+/private/tmp/dropmesh-group-db.igBdYS/data is now STOPPED; pg_ctl status confirms
+no server running. Data retained, no remote DB touched. State removes redundant
+Validate because Digest validates internally; reviewer explicitly checks this.
+Physical iPhone currently unavailable in fresh devicectl inventory; no new install.
+
+CURRENT DEVELOPMENT: owner reports real Apple login succeeded on installed
+development iPhone and explicitly requests continuous development without routine
+approval questions. Treat this as user-confirmed physical login acceptance, not
+independent cross-device/group acceptance. Temporary SSH is closed, seven rules.
+New group foundation plan docs/superpowers/plans/2026-09-19-account-group-events.md.
+group_event_codec sole implementer starts base4e02f45, owns new internal/accountgroup
+event codec/tests only; report .superpowers/sdd/account-group-events-report.md.
+Coordinator owns docs; old dirty UI/history files preserved. Review required before
+membership persistence or routing integration. No automatic trust from Apple login.
+
+LATEST VERIFIED (supersedes historical notes below): shared443 ingress cutover
+completed successfully under systemd120s deadline and180s watchdog. Public
+channel health and signed synthetic P256 WebSocket authentication PASS before
+and after; account-dev public HTTPS health PASS; SNI/Host mismatch421.
+Watchdog timer cancelled after acceptance. Current rendezvous is narrow
+dropmesh-rendezvous-ingress:bea9551 built over historical e9ea1e0, NOT whole branch.
+Original postgres and coturn stayed healthy with unchanged two-week uptime.
+New isolated dropmesh-account-dev service enabled/active on loopback18081,
+new network-none postgres DB and dedicated credentials. New nginx ingress
+enabled/active; staging container stopped/removed. Account certificate reload
+hook execution passed; actual channel renewal/reboot not tested. Rollback at
+/usr/local/sbin/dropmesh-ingress-rollback, backup /root/dropmesh-ingress-rollback-20260919.
+Source commits bea9551,564079d,4e02f45 passed scoped race tests and independent review.
+TEMPORARY SSH RULE REMOVED: browser verified Fully applied, seven original rules,
+source92.96.17.75 absent. Do not assume SSH still available.
+Phone connected freshly; nonsynced development artifact
+/Users/mason/Developer/DropMesh-Releases/account-phone-live-20260919/DropMesh.app
+has account origin https://account-dev.zensys-tech.com, root strict codesign PASS.
+devicectl install app SUCCESS on00008140-001A6CE63082201C, launch SUCCESS,
+fresh process listing confirmed PID26423. No uninstall/data reset. Main/Share
+profiles and entitlements preserved. Submitted IPA unchanged.
+Owner asked via async question to open Settings > Account and authorize Apple.
+Real Apple authorization/session acceptance STILL UNVERIFIED. Same-account
+automatic trust and cross-account invitations are not claimed complete.
+
+Current continuation: Cloudflare login verified via new tab15. Added DNS-only A
+account-dev.zensys-tech.com ->178.105.165.209; authoritative DNS resolves it.
+Temporary SSH22 source92.96.17.75/32 added again for deployment preflight; MUST
+REMOVE before ending/blocking. SSH successful. No existing-service modification.
+Live rendezvous image is macchannel-legacy-recovery:e9ea1e0 (not current branch);
+do not deploy whole current branch over this without compatibility verification.
+No nginx installed; certbot present;80 free; existing cert channel only.
+ingress_source subagent implementing local strict source adapter, brief
+.superpowers/sdd/ingress-source-brief.md, base13a3060, root owns HANDOFF.
+
+Owner now explicitly approved shared HTTPS ingress adjustment, brief interruption
+and rollback via "允许" after the scoped explanation. Do not re-ask this scope.
+Preflight opened Cloudflare dashboard (CUA tab14); Google passkey confirmation
+required for xuqy87@gmail.com. User asked to complete it. No new firewall or host
+mutation this turn; original seven rules remain from prior verified cleanup.
+Fresh public health returned status ok; account-dev DNS still no answer.
+Read-only ingress_preflight reviewer checks source-address/rate-limit preservation
+before topology implementation. Do not blindly proxy production RemoteAddr.
+Preflight confirmed router.go sourceIP and accountauth/http.go accountSource use
+RemoteAddr; naive reverse proxy collapses independent callers and changes source-
+bound challenge/rate-limit semantics. Before migration implement and review a
+default-off strict trusted-peer source adapter with proxy-overwritten canonical
+client address, rejecting untrusted/spoofed headers; test challenge source binding
+and independent limits. Also verify certificate reload: deploy hook invokes
+try-reload-or-restart while existing TLS listener loads certificate at startup.
+No ingress switch has occurred. Cloudflare passkey remains the external blocker.
+
+Latest live check after owner login: added temporary inbound TCP22 only from
+92.96.17.75/32, SSH succeeded. Production rendezvous directly publishes
+0.0.0.0:443 and [::]:443 to container8443; no shared HTTPS proxy. Host has33GB
+disk available and about2.9GB available RAM. No host/service/DNS/secret writes.
+Existing authorization excludes old-service changes, so shared443 routing needs
+explicit approval for a controlled ingress migration with possible brief outage.
+Temporary SSH rule REMOVED and browser verified Fully applied, seven original
+rules, original SSH source92.96.19.217, temporary source absent. Do not re-ask
+isolated deployment authorization; ask only the additional ingress change.
+Earlier logged-out/approval-unanswered statements below are historical.
+
+Latest user "继续" follows explicit two-item authorization request: proceed with
+isolated account service/database/DNS/TLS deployment and temporary source-only
+SSH allowance92.96.17.75/32 removed after work. Treat these scopes as authorized;
+do not re-ask. Fresh public IP remains92.96.17.75. Browser navigation to exact
+Hetzner firewall now redirects to accounts.hetzner.com/login; tab10 handed off
+for owner login. SSH probe again timed out. No firewall/DNS/host mutation yet,
+therefore no temporary rule to remove. Current blocker is logged-out Hetzner,
+not missing deployment permission. After login inspect live routing before any
+443 changes; preserve existing transfer service and submitted IPA.
+
+User requests continue until usable/testable on phone. Fresh devicectl confirms
+Mason physical iPhone connected. phone_signing subagent implements main-only
+Apple login entitlement plus signed development build, preserving Share and
+dirty UI/history changes. Brief .superpowers/sdd/account-phone-signing-brief.md.
+Signed build initially hit resource-fork metadata in Documents output. Final
+candidate /Users/mason/Developer/DropMesh-Releases/account-phone-signing-20260919/DropMesh.app
+passes root fresh codesign --verify --deep --strict. Main Apple login Default and
+unchanged AppGroup; Share no Apple login. Independent scoped review Approved;
+one Minor regression-script gap: array checks only index0, extra elements not
+rejected. Current plists exact. Synced .build copy reacquires FinderInfo and must
+NOT be installed. Scoped changes uncommitted to preserve dirty project.
+Root read-only SSH probe to178.105.165.209:22 with existing verified host and
+existing admin key timed out. Public source92.96.17.75; account-dev.zensys-tech.com
+has no observed DNS answer; nameservers Cloudflare. Explicit async approval asked
+for isolated account service/database/subdomain/TLS/key deployment on existing
+Hetzner host (no purchase, no old-service/DB mutation), and temporary SSH22 rule
+only92.96.17.75/32 removed after work. Neither answered yet. No remote mutations.
+Standalone local composition complete e4006d7 + review fixes13a3060, independent
+final review Approved/no remaining findings. New cmd/accountserver only, default
+disabled, loopback listener, protected secret files, durable PostgreSQL composition.
+Exact replay401/authentication_failed + fresh signed200 after reconstruction;
+test-only actual503 injection failed unchanged assertion then restored. Exact
+loopback literals enforced. Root final SQL-enabled go test -race ./cmd/accountserver
+-count=1 PASS2.407s; synthetic PG started Unix-socket-only and stopped afterward.
+No install, real Apple login, deployment or secret upload. Native origin remains
+absent, so current signed artifact does not enable account login. Native account
+deletion/public activation remain gates. Deployment authorizations unanswered;
+stop here for user direction rather than mutate host/firewall/DNS without consent.
+Review IPA hash
+rechecked unchanged436ae5d4e20db6b14539d5a6e53e2f62ad9d21a19d1f52fb5d2a87d3698f0ab9.
+
+## Phone reconnected — 2026-09-19
+
+Fresh `devicectl list devices` confirms physical Mason iPhone 16 Pro Max
+`00008140-001A6CE63082201C` connected. Scoped installed-app query confirms
+`com.zensystech.dropmesh.iphone.dev` version 0.1.0 build 6. No install,
+uninstall, reset, account capability/profile/key or production changes performed.
+User explicitly answered "允许" on September19 to development Apple login
+capability/profile/dedicated-key setup. This authorization must not be requested again.
+First portal save failed with expired session; account-page navigation refreshed
+the visible session. Capability saved and verified enabled by reopening App ID.
+Development profile AAL5WXBMSJ (UUID08dc67d5-1d8a-4fe7-9149-831230956723)
+downloaded, decoded and installed in Xcode UserData/Provisioning Profiles.
+Entitlements include Apple sign-in Default and unchanged development App Group;
+its only device is the above iPhone. Portal also marked the associated old
+"DropMesh iPhone App Store 2026" profile Invalid; owner was informed. Submitted
+IPA was not replaced. New dedicated login key S4AA4XQXBC registered only for
+the development primary App ID, downloaded and moved out of Downloads into
+owner-only /Users/mason/.dropmesh-secrets/apple-development/ (directory700,
+file600). openssl pkey -check -noout passed; key contents were never printed.
+No service deployment, native entitlement edit, phone install or real login yet.
+Account service origin is not configured; existing
+development entitlements contain only the App Group, not Apple sign-in.
+Source remains c9349b4 with unrelated dirty work preserved. See readiness report.
+
 ## Continuous phone-account integration — 2026-09-17 (in progress)
 
 Owner requests continuous development until usable on phone. See new plan

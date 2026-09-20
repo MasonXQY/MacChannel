@@ -1,5 +1,106 @@
 # iPhone continuation ledger
 
+COMPLETE group read interop f7fd86d + cleanup6de531c. Independent focused
+re-review Approved/no remaining findings. Root fresh combined cleanup+interop
+Go PASS4.063s; Swift1/1 no skips/failures, log /tmp/native-group-read-root-final.log.
+No active test/build/fixture jobs. No phone install or service deployment.
+Next discovery/explicit join consent mutation and native UI, not more read gates.
+
+Interop f7fd86d independent review Needs fixes: test subprocess descendants were
+not guaranteed to terminate on timeout. Same implementer owns test-only process
+group cleanup and regression; root will request frozen re-review before accepting.
+Latest devicectl still lists physical iPhone unavailable, iPad mini no DDI.
+
+2026-09-20 group_read_interop active base35e4320. Task-1-brief now refers to
+test-only native-group-read-interop plan, not prior checkpoint/sync tasks.
+Owns new Go loopback test and Swift GoGroupReadInteropTests/report only.
+Root build/test sessions drained; unsigned iPhone build log retained. No installs.
+
+Native group sync complete978a8e2..35e4320; independent native_group_sync_review
+Approved/no findings.27focusedPASS;95regression/93pass/2expectedGo-skips0fail.
+Root fresh signedmultipage/expiry/delayedwrite-logout3/3PASS0.029s; unsigned
+shipping iPhone buildSUCCESS /tmp/dropmesh-account-sync-ios.VTTJ6V/build.log,
+two existing AppIntents no-dependency warnings. No install/deployment/UI wiring.
+Next loopback real Go handler/Swift acceptance per native-group-read-interop plan.
+
+Checkpoint task complete8297a76..978a8e2; group_checkpoint_review Approved,
+no findings.33focusedPASS,33accountregressionPASS/1expectedGo-fixtureSkip.
+Root fresh restart/fork/cancellation3/3PASS0.027s. Scoped source reviewed;
+no checkpoint remove API, logout/session integration remains next (not claimed).
+Native group sync next plan2026-09-20-native-group-sync.md. No phone install.
+
+2026-09-20 group_checkpoints active base8297a76; checkpoint plan/task-1-brief.
+Dedicated native pin/highwater storage + verified full-history acceptance only.
+Root fresh physical device connected/unlocked, dev bundle1.0(8), isolated public
+account-dev healthok. No install/reset/deployment. Next page/session integration.
+
+Native group proofs complete0e64ada..786e255; independent native_group_review
+Approved/no findings. Root real interopPASS1.580s bothdirections64/65 zero skips,
+unsigned iOS buildSUCCESS (two nonfatal AppIntents warnings). No phone install,
+no deployment. Acceptance docs/acceptance/native-group-proofs-20260920.md.
+Next native durablehighwater/pages/session integration, not transfertrust yet.
+
+2026-09-20 native_group_proofs activebase0e64ada. Plan
+docs/superpowers/plans/2026-09-20-native-group-proofs.md, task-1-brief.md.
+Owns new pure Swift Event/State + tests + opt-in Go native interoptest/report.
+No client/session/UI/network deployment/phone writes. Root checks next native
+network integration boundary; must review frozen commit and run real interop.
+
+Task group-read-api complete50a1d64..342a389; independent review Approved/no
+findings. Root fresh HTTP page/auth/head testsPASS0.767s, native baseline8/8.
+No assembly/deployment/phone change. Next: Swift proof/page verification and
+device consent/mutation flow, then separately integrate transfer authorization.
+
+2026-09-20: group_read_api active at base50a1d64. Requirements in
+docs/superpowers/plans/2026-09-20-account-group-read-api.md and task-1-brief.md;
+owns Go wire codec + optional read-only account HTTP integration/tests/report.
+64KiB cap matches inspected native transport. No SQL/remote/phone operations.
+Root notes native follow-up in group-native-integration-notes.md. Baseline
+accountauth/accountgroup/cmd-accountserver tests passed (cached).
+
+LATEST Task3 frozen 50a1d64, independent group_store_review Approved/no findings. Full SQL race
+32.859s / SQL13.533s / defaultGo PASS. Root actual PostgreSQL restart + read-only
+TestPostgresGroupRestart verify PASS1.471s. Fixture now STOPPED and status verified;
+older RUNNING entries below are historical. No remote deployment/phone update.
+
+Task2 completeb063ece..38235b0 after two adversarial test fixes; independent
+re-review Approved/no remaining findings. Task3 group_journal_store activebase
+38235b0; owns migration010 +accountgroup/postgres.go/postgres_test.go/report.
+Local fixture /private/tmp/dropmesh-group-db.igBdYS/data RUNNING, UNIXonly55459,
+dropmesh_account_group_test; root muststop beforeending. No remotemutation.
+
+Task2 initialb72368f reviewNeedsfixes: add unsignedbootstrap+exactpins rejection,
+and originalapproval replay AFTERremoval before freshrejoin. Productionpolicy
+review otherwise clean. group_membership_state test-onlyfix active; reportappend
+group-state-report.md, focusedrace then re-review. Do not advance persistenceyet.
+
+Group Task1 complete4e02f45..3c819de, independent review Approved/no findings;
+root focused race1.938sPASS. Plan commitb063ece. Task2 pinned membership reducer
+startsbaseb063ece, briefgroup-state-brief.md, owns state.go/state_test.go only.
+No groupHTTP, storage, routing, nativeUI or deployedgroup functionality yet.
+
+September19 latest: account-dev public HTTPS deployed, narrow legacy ingress patch
+verified with real signed WS probe, DB/TURN unchanged; temporary SSH removed and
+seven original rules Fully applied. Account-origin development iPhone installed
+and launched; owner confirms Apple login success. This supersedes older blocked
+login/deployment snapshots below. group_event_codec activebase4e02f45, new isolated
+event.go/event_test.go only, plan2026-09-19-account-group-events. Independent review
+pending; no group trust/routing/UI or invitation completion claim.
+
+September19 current cursor: physical iPhone connected. Apple capability/profile/key
+setup explicitly approved and completed; see HANDOFF for exact identifiers.
+phone_signing complete, independent review Approved, root external strict signature
+PASS; final artifact Developer/DropMesh-Releases/account-phone-signing-20260919/DropMesh.app.
+One Minor test gap index0-only arrays recorded; no install. Root read-only SSH probe
+to existing server178.105.165.209 timed out; current IP92.96.17.75. Asked explicit
+isolated account service/database/DNS/TLS/key deployment plus source-only temporary
+SSH firewall approval; unanswered. No remote mutations. account_service_assembly
+complete e4006d7..13a3060, final review clean/Approved. Root final SQL race PASS2.407s,
+fixture stopped. No agent running or phoneinstall. Native account origin absent;
+next requires explicit deployment/firewall authority then architecture/TLS wiring,
+native configuration/rebuild/install and actual Apple acceptance. Prior
+pending Apple setup and unavailable phone snapshots below are historical.
+
 Continuous phone-account implementation 2026-09-17: user explicitly requests
 continue until phone usable. Plan7056942 amended7d6cd18/f938de2; Task10 sessions
 complete25bca6d, independent reviewApproved; root actual PGrestart0.587s/0.367s
