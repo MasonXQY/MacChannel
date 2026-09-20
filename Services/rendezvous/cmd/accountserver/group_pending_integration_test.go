@@ -215,7 +215,7 @@ func TestPendingSQLRoundTripRestartAndRotation(t *testing.T) {
 	require := func(w *httptest.ResponseRecorder, status int) {
 		t.Helper()
 		if w.Code != status {
-			t.Fatalf("pending HTTP status=%d want=%d body=%s", w.Code, status, w.Body.String())
+			t.Fatalf("pending HTTP status=%d want=%d body_bytes=%d", w.Code, status, w.Body.Len())
 		}
 	}
 	create := func(device pendingSQLDevice, id string) {
