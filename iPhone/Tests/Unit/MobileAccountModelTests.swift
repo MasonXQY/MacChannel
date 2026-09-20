@@ -5,6 +5,99 @@ import XCTest
 
 @MainActor
 final class MobileAccountModelTests: XCTestCase {
+    func testOldTerminalReceiptDoesNotDescribeNewSignedInAccountAsDeleted() async throws {
+        let service = GatedAccountService(gated: false), apple = RecordingAppleAuthorizer()
+        let controller = makeAccountController(service: service, deletion: true)
+        let model = MobileAccountModel(loadController: { controller }, apple: apple)
+        await model.load(); await model.signIn(anchor: attachedTestWindow())
+        await service.setDeletionStatus(.completedManualRevocationRequired)
+        model.requestDeletionConfirmation()
+        await model.confirmDeletion(id: try XCTUnwrap(model.deletionConfirmationID), anchor: attachedTestWindow())
+        XCTAssertEqual(model.deletionStatus, .completedManualRevocationRequired)
+        await model.signIn(anchor: attachedTestWindow())
+        XCTAssertEqual(model.phase, .signedIn); XCTAssertNil(model.deletionStatus)
+        let restored = MobileAccountModel(loadController: { controller }, apple: apple)
+        await restored.load()
+        XCTAssertEqual(restored.phase, .signedIn); XCTAssertNil(restored.deletionStatus)
+        restored.requestDeletionConfirmation(); XCTAssertNotNil(restored.deletionConfirmationID)
+        let retained = await controller.deletionSnapshot(); XCTAssertNil(retained)
+    }
+    func testDeletionAppleCancellationLeavesAccountAndNoReceipt() async throws {
+        let service = GatedAccountService(gated: false)
+        let controller = makeAccountController(service: service, deletion: true)
+        let signedIn = MobileAccountModel(loadController: { controller }, apple: RecordingAppleAuthorizer())
+        await signedIn.load(); await signedIn.signIn(anchor: attachedTestWindow())
+        let model = MobileAccountModel(loadController: { controller }, apple: RecordingAppleAuthorizer(error: CancellationError()))
+        await model.load(); model.requestDeletionConfirmation()
+        await model.confirmDeletion(id: try XCTUnwrap(model.deletionConfirmationID), anchor: attachedTestWindow())
+        XCTAssertEqual(model.phase, .signedIn)
+        XCTAssertNil(model.deletionStatus); XCTAssertNil(model.deletionMessageKey)
+        let calls = await service.deletionBegins; XCTAssertEqual(calls, 0)
+        model.requestDeletionConfirmation(); XCTAssertNotNil(model.deletionConfirmationID)
+    }
+    func testDeletionCancellationDuringChallengeHandoffDoesNotOpenApple() async throws {
+        let service = GatedAccountService(gated: false)
+        let enabled = makeAccountController(service: service, deletion: true)
+        let signedIn = MobileAccountModel(loadController: { enabled }, apple: RecordingAppleAuthorizer())
+        await signedIn.load(); await signedIn.signIn(anchor: attachedTestWindow())
+        let apple = RecordingAppleAuthorizer(), handoff = AccountHandoffGate()
+        let model = MobileAccountModel(loadController: { enabled }, apple: apple, attemptHandoff: { await handoff.wait() })
+        await model.load(); model.requestDeletionConfirmation()
+        let id = try XCTUnwrap(model.deletionConfirmationID), window = attachedTestWindow()
+        let request = Task { await model.confirmDeletion(id: id, anchor: window) }
+        await handoff.waitUntilEntered(); model.cancel(); await handoff.release(); await request.value
+        XCTAssertEqual(apple.authorizeCount, 0)
+        XCTAssertNil(model.deletionStatus)
+        let fresh = try await enabled.beginDeletionReauthentication()
+        await enabled.cancelDeletionReauthentication(attemptID: fresh.id)
+    }
+    func testDeletionRequiresExplicitConfirmationThenFreshAppleWithoutNormalLogin() async throws {
+        let service = GatedAccountService(gated: false), apple = RecordingAppleAuthorizer()
+        let controller = makeAccountController(service: service, deletion: true)
+        let model = MobileAccountModel(loadController: { controller }, apple: apple)
+        await model.load(); await model.signIn(anchor: attachedTestWindow())
+        model.requestDeletionConfirmation()
+        let first = try XCTUnwrap(model.deletionConfirmationID)
+        let before = await service.challengeCount; XCTAssertEqual(before, 1)
+        model.cancelDeletionConfirmation()
+        await model.confirmDeletion(id: first, anchor: attachedTestWindow())
+        XCTAssertEqual(apple.authorizeCount, 1)
+        model.requestDeletionConfirmation()
+        let confirmed = try XCTUnwrap(model.deletionConfirmationID)
+        await model.confirmDeletion(id: confirmed, anchor: attachedTestWindow())
+        await model.confirmDeletion(id: confirmed, anchor: attachedTestWindow())
+        XCTAssertEqual(apple.authorizeCount, 2)
+        let counts = await (service.completeCount, service.deletionBegins)
+        XCTAssertEqual(counts.0, 1); XCTAssertEqual(counts.1, 1)
+        XCTAssertEqual(model.deletionStatus, .pending)
+    }
+    func testPendingDeletionReloadUsesReceiptWithoutAppleAndShowsManualTerminal() async throws {
+        let service = GatedAccountService(gated: false), apple = RecordingAppleAuthorizer()
+        let controller = makeAccountController(service: service, deletion: true)
+        let model = MobileAccountModel(loadController: { controller }, apple: apple)
+        await model.load(); await model.signIn(anchor: attachedTestWindow())
+        model.requestDeletionConfirmation()
+        await model.confirmDeletion(id: try XCTUnwrap(model.deletionConfirmationID), anchor: attachedTestWindow())
+        await service.setDeletionStatus(.completedManualRevocationRequired)
+        let restored = MobileAccountModel(loadController: { controller }, apple: apple)
+        await restored.load()
+        XCTAssertEqual(restored.deletionStatus, .completedManualRevocationRequired)
+        XCTAssertEqual(apple.authorizeCount, 2)
+        XCTAssertEqual(restored.phase, .signedOut)
+    }
+    func testUncertainDeletionNeverDisplaysCompletionAndCanRequestFreshConfirmation() async throws {
+        let service = GatedAccountService(gated: false), apple = RecordingAppleAuthorizer()
+        let controller = makeAccountController(service: service, deletion: true)
+        let model = MobileAccountModel(loadController: { controller }, apple: apple)
+        await model.load(); await model.signIn(anchor: attachedTestWindow())
+        await service.setDeletionFailure(true)
+        model.requestDeletionConfirmation()
+        await model.confirmDeletion(id: try XCTUnwrap(model.deletionConfirmationID), anchor: attachedTestWindow())
+        XCTAssertEqual(model.deletionStatus, .submitting)
+        XCTAssertEqual(model.deletionMessageKey, "account.delete.error")
+        model.requestDeletionConfirmation()
+        XCTAssertNotNil(model.deletionConfirmationID)
+    }
     func testAbsentConfigurationIsInertAndPreservesSettingsState() async {
         let apple = RecordingAppleAuthorizer()
         let loads = LockedCount()
@@ -17,6 +110,7 @@ final class MobileAccountModelTests: XCTestCase {
         await settings.account.load()
 
         XCTAssertEqual(settings.account.phase, .disabled)
+        XCTAssertFalse(settings.account.deletionSupported)
         XCTAssertFalse(settings.accountRowVisible)
         XCTAssertTrue(settings.discoveryEnabled)
         XCTAssertTrue(settings.localNetworkAvailable)
@@ -174,7 +268,22 @@ private actor MemoryAccountStorage: AccountSessionStorage {
     func remove() { record = nil }
 }
 
-private actor GatedAccountService: AccountSessionService {
+private actor GatedAccountService: AccountSessionService, AccountDeletionService {
+    private(set) var deletionBegins = 0
+    private var deletionResult: AccountDeletionStatus = .pending
+    private var deletionFailure = false
+    func setDeletionStatus(_ value: AccountDeletionStatus) { deletionResult = value }
+    func setDeletionFailure(_ value: Bool) { deletionFailure = value }
+    func beginDeletion(receipt: String, accessToken: String, challengeID: String, code: String, identityToken: String, confirmation: Bool) throws -> AccountDeletionStatus {
+        deletionBegins += 1
+        if deletionFailure { throw AccountServiceError.transport }; return deletionResult
+    }
+    func deletionStatus(receipt: String) throws -> AccountDeletionStatus {
+        if deletionFailure { throw AccountServiceError.transport }; return deletionResult
+    }
+    func recoverDeletion(receipt: String, accountID: UUID, challengeID: String, code: String, identityToken: String, confirmation: Bool) throws -> AccountDeletionStatus {
+        if deletionFailure { throw AccountServiceError.authenticationRejected }; return deletionResult
+    }
     nonisolated let deviceID = UUID()
     private let gated: Bool
     private var released = false
@@ -235,10 +344,17 @@ private actor AccountHandoffGate {
     }
 }
 
-private func makeAccountController(service: GatedAccountService) -> AccountSessionController {
+private actor MemoryAccountDeletionStorage: AccountDeletionStorage {
+    var record: AccountDeletionRecord?
+    func load() -> AccountDeletionRecord? { record }
+    func save(_ record: AccountDeletionRecord) { self.record = record }
+}
+
+private func makeAccountController(service: GatedAccountService, deletion: Bool = false) -> AccountSessionController {
     let binding = try! AccountSessionBinding(deviceID: service.deviceID,
         audience: "com.example.app", origin: URL(string: "https://accounts.example.com")!)
-    return AccountSessionController(service: service, storage: MemoryAccountStorage(), binding: binding)
+    return AccountSessionController(service: service, storage: MemoryAccountStorage(), binding: binding,
+        deletion: deletion ? AccountDeletionConfiguration(storage: MemoryAccountDeletionStorage(), clearAccountCheckpoints: { _, _ in }) : nil)
 }
 
 private func accountToken(_ byte: UInt8) -> String {
