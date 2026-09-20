@@ -70,6 +70,33 @@ func TestNilAccountRouteOptionPreservesUnknownFrameResponses(t *testing.T) {
 	}
 }
 
+func TestNilAccountRouteOptionIgnoresOpaqueEnvelopeOnLegacySignal(t *testing.T) {
+	clock := &testClock{now: time.Now().UTC()}
+	registry := auth.NewTrustRegistry()
+	left, right := newIdentity(t), newIdentity(t)
+	record := left.trustRecord(t, right, 1)
+	for _, identity := range []testIdentity{left, right} {
+		if err := registry.AuthenticateDevice(identity.id, identity.publicKey, []auth.SignedTrustRecord{record}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := NewRouter(Config{Clock: clock.Now, Verifier: auth.NewVerifier(auth.VerifierConfig{Clock: clock.Now}), Registry: registry,
+		Pairings: pairing.NewMemoryStore(pairing.StoreConfig{Clock: clock.Now}), Presence: presence.NewHub(registry), Signals: signal.NewHub(registry)})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	api := &testAPI{t: t, clock: clock, server: server}
+	leftSocket := api.authenticatedWebSocket(t, left, []auth.SignedTrustRecord{record})
+	defer leftSocket.Close()
+	rightSocket := api.authenticatedWebSocket(t, right, []auth.SignedTrustRecord{record})
+	defer rightSocket.Close()
+	if err := leftSocket.WriteJSON(map[string]any{"type": "signal", "to": right.id, "payload": []byte("legacy"), "envelope": "opaque-future-value"}); err != nil {
+		t.Fatal(err)
+	}
+	if frame := readUntilType(t, rightSocket, "signal"); frame["from"] != left.id {
+		t.Fatalf("frame=%#v", frame)
+	}
+}
+
 func TestAccountRouteOptionRoutesManualFrameThroughOwnedQueue(t *testing.T) {
 	clock := &testClock{now: time.Now().UTC()}
 	registry := auth.NewTrustRegistry()

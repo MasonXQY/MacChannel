@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
@@ -48,9 +49,36 @@ type accountRouteBindPayload struct {
 	Generation  uint64 `json:"generation"`
 }
 
+type accountRouteWriter interface {
+	SendJSON(any) error
+	Close() error
+}
+
 var errAccountRouteBind = errors.New("account route bind unavailable")
 
-func newAccountRouteSocket(config *AccountRouteConfig, deviceID string, publicKey []byte, source string, peer *webSocketPeer) (*accountRouteSocket, error) {
+func strictAccountRouteControl(raw []byte, expected string) bool {
+	var frame struct {
+		Type string `json:"type"`
+	}
+	return decodeStrict(bytes.NewReader(raw), &frame, maximumBodySize) == nil && frame.Type == expected
+}
+
+func strictAccountRouteBind(raw []byte) (auth.Envelope, error) {
+	var frame struct {
+		Type     string          `json:"type"`
+		Envelope json.RawMessage `json:"envelope"`
+	}
+	if decodeStrict(bytes.NewReader(raw), &frame, maximumBodySize) != nil || frame.Type != "account-route-bind" || len(frame.Envelope) == 0 {
+		return auth.Envelope{}, errAccountRouteBind
+	}
+	var envelope auth.Envelope
+	if decodeStrict(bytes.NewReader(frame.Envelope), &envelope, maximumBodySize) != nil {
+		return auth.Envelope{}, errAccountRouteBind
+	}
+	return envelope, nil
+}
+
+func newAccountRouteSocket(config *AccountRouteConfig, deviceID string, publicKey []byte, source string, peer accountRouteWriter) (*accountRouteSocket, error) {
 	handle, err := config.Routes.Register(deviceID, publicKey, source)
 	if err != nil {
 		return nil, err
@@ -66,7 +94,7 @@ func newAccountRouteSocket(config *AccountRouteConfig, deviceID string, publicKe
 	return socket, nil
 }
 
-func (s *accountRouteSocket) drain(notifications <-chan struct{}, peer *webSocketPeer) {
+func (s *accountRouteSocket) drain(notifications <-chan struct{}, peer accountRouteWriter) {
 	defer close(s.done)
 	for range notifications {
 		for {
@@ -74,7 +102,7 @@ func (s *accountRouteSocket) drain(notifications <-chan struct{}, peer *webSocke
 			switch state {
 			case routeauth.QueueReady:
 				if peer.SendJSON(frame) != nil {
-					_ = peer.connection.Close()
+					_ = peer.Close()
 					return
 				}
 			case routeauth.QueueEmpty:

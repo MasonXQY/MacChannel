@@ -847,20 +847,28 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 	defer releaseTrustWatch()
 
 	for {
+		var rawFrame json.RawMessage
+		if err := connection.ReadJSON(&rawFrame); err != nil {
+			return
+		}
 		var frame struct {
 			Type     string                   `json:"type"`
 			To       string                   `json:"to"`
 			Payload  []byte                   `json:"payload"`
 			Records  []auth.SignedTrustRecord `json:"trustRecords"`
-			Envelope auth.Envelope            `json:"envelope"`
+			Envelope json.RawMessage          `json:"envelope"`
 		}
-		if err := connection.ReadJSON(&frame); err != nil {
+		if err := json.Unmarshal(rawFrame, &frame); err != nil {
 			return
 		}
 		switch frame.Type {
 		case "account-route-bind-challenge":
 			if accountRouteSocket == nil {
 				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
+				continue
+			}
+			if !strictAccountRouteControl(rawFrame, "account-route-bind-challenge") {
+				_ = peer.SendJSON(map[string]string{"type": "account-route-bind-error", "code": "unavailable"})
 				continue
 			}
 			challenge, err := accountRouteSocket.issueChallenge(request.Context(), r.verifier, r.clock())
@@ -874,7 +882,8 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
 				continue
 			}
-			if accountRouteSocket.bind(request.Context(), r.verifier, r.accountRoutes.Sessions, r.clock(), frame.Envelope) != nil {
+			envelope, err := strictAccountRouteBind(rawFrame)
+			if err != nil || accountRouteSocket.bind(request.Context(), r.verifier, r.accountRoutes.Sessions, r.clock(), envelope) != nil {
 				_ = peer.SendJSON(map[string]string{"type": "account-route-bind-error", "code": "unavailable"})
 				continue
 			}
@@ -882,6 +891,10 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 		case "account-route-unbind":
 			if accountRouteSocket == nil {
 				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
+				continue
+			}
+			if !strictAccountRouteControl(rawFrame, "account-route-unbind") {
+				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "invalid_frame"})
 				continue
 			}
 			accountRouteSocket.unbind()
@@ -1016,6 +1029,10 @@ func (p *webSocketPeer) SendJSON(value any) error {
 	defer p.mu.Unlock()
 	_ = p.connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return p.connection.WriteJSON(value)
+}
+
+func (p *webSocketPeer) Close() error {
+	return p.connection.Close()
 }
 
 func (p *webSocketPeer) SendPing() error {
