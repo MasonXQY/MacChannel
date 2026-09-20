@@ -48,22 +48,45 @@ func activeGroupSession(ctx context.Context, tx *sql.Tx, actor *SessionActor) er
 	if actor == nil { // Explicitly caller-authorized low-level journal operation.
 		return nil
 	}
-	var created, expires, familyCreated, absolute, now time.Time
-	var revoked sql.NullTime
-	err := tx.QueryRowContext(ctx, `SELECT se.created_at,se.access_expires_at,f.created_at,f.absolute_expires_at,
-       f.revoked_at,clock_timestamp()
-FROM account_sessions se
-JOIN account_session_families f ON f.family_id=se.family_id
-WHERE se.session_id=$1::uuid AND f.account_id=$2::uuid
-  AND f.device_id=$3::uuid AND f.audience=$4`, actor.SessionID, actor.AccountID, actor.DeviceID, actor.Audience).Scan(&created, &expires, &familyCreated, &absolute, &revoked, &now)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrGroupSessionInvalid
-	}
+	deadline, err := readGroupSession(ctx, tx, *actor)
 	if err != nil {
+		return err
+	}
+	var now time.Time
+	if err := tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return ErrGroupUnavailable
 	}
-	if revoked.Valid || created.After(now) || familyCreated.After(now) || !expires.After(now) || !absolute.After(now) {
+	if !deadline.activeAt(now) {
 		return ErrGroupSessionInvalid
 	}
 	return nil
+}
+
+// Session lifecycle writers are excluded by accounts FOR SHARE. Reading the
+// tuple separately lets two-endpoint admission check both against one final
+// database-current-time sample, after all potentially blocking journal reads.
+type groupSessionDeadline struct {
+	created, expires, familyCreated, absolute time.Time
+	revoked                                   sql.NullTime
+}
+
+func (d groupSessionDeadline) activeAt(now time.Time) bool {
+	return !d.revoked.Valid && !d.created.After(now) && !d.familyCreated.After(now) && d.expires.After(now) && d.absolute.After(now)
+}
+
+func readGroupSession(ctx context.Context, tx *sql.Tx, actor SessionActor) (groupSessionDeadline, error) {
+	var d groupSessionDeadline
+	err := tx.QueryRowContext(ctx, `SELECT se.created_at,se.access_expires_at,f.created_at,f.absolute_expires_at,
+       f.revoked_at
+FROM account_sessions se
+JOIN account_session_families f ON f.family_id=se.family_id
+WHERE se.session_id=$1::uuid AND f.account_id=$2::uuid
+  AND f.device_id=$3::uuid AND f.audience=$4`, actor.SessionID, actor.AccountID, actor.DeviceID, actor.Audience).Scan(&d.created, &d.expires, &d.familyCreated, &d.absolute, &d.revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return d, ErrGroupSessionInvalid
+	}
+	if err != nil {
+		return d, ErrGroupUnavailable
+	}
+	return d, nil
 }
