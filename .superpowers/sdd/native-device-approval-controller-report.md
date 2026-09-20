@@ -168,3 +168,60 @@ No broad package, SQL, Go, device build, installation or deployment was run.
 All Swift test processes settled; process inventory found no swift-test,
 swift-build or MacChannelPackageTests process. Swift cache ownership released
 to coordinator at final focused GREEN, before documentation/commit work.
+
+## Independent review rework: exact receipt expiry (2026-09-20)
+
+Resolved the Important finding in native-device-approval-review.md under the bounded
+native-device-approval-expiry-fix-brief.md. Tested source commit `05f7ae7` (based on
+`93aabe5` plus protected unrelated mobile work). Only AccountDeviceApprovalFlow and
+the two owned controller test/fixture files changed; this report is appended.
+
+The existing shared receipt/intent match helper now compares the full saved server
+creation/expiry pair. Earlier and later substitutions both fail requestConflict
+before subject history/signature/proof write and before actor proposal retry or
+Commit. When the original Create acknowledgment was lost, mutation matching
+synchronously restricts the existing lifecycle authorization to the newly learned
+receipt expiry and immediately rechecks it. The same fence remains active after
+history/checkpoint/storage awaits. Create acknowledgment persistence also uses
+this guard. No signature bytes, sessions, public API, storage schema or codec changed.
+
+Historical matching validates any known pair but does not impose an expired mutation
+deadline on independent verification-only recovery. Code-less reads remain unable
+to publish membership/install pins. Explicit verifyCommitted still uses its fresh
+independent capsule/current-session ticket and performs no mutation HTTP/signature.
+
+Deterministic RED command:
+
+```sh
+swift test --filter 'AccountDeviceApprovalControllerTests/testReceiptExpiry'
+```
+
+`/tmp/approval-expiry-review-red.log`: 4 tests, 9 failed assertions, exit 1.
+Observed effects include Commit requests after timestamp substitution and a durable
+subjectCountersigned transition after learning an already expired receipt or after
+an earlier learned expiry passed during a suspended history dependency. Known-time
+subject cases also showed the refetch proceeded to a later history dependency.
+Failures did not print credentials or complete proof/intent values.
+
+The same selector after the narrow fix: `/tmp/approval-expiry-review-green.log`,
+4 tests, zero failures/skips, exit 0. Tests cover earlier expired, earlier still-valid
+and later timestamp substitutions for subject and actor, nil acknowledgment after
+a real lost Create response, and a newly learned five-second remaining window that
+expires while history is held. The gate is released before any throwing assertion
+or result await. Assertions count signed-phase persistence/HTTP and retain the exact
+original unsigned record, rather than relying only on a thrown error.
+
+Final controller group, run once:
+
+```sh
+swift test --filter AccountDeviceApprovalControllerTests
+```
+
+`/tmp/approval-expiry-review-final.log`: 25 tests, zero failures/skips, exit 0,
+1.129 seconds, no warnings/errors. Includes existing exact-proof loss/restart,
+session lifecycle, independent historical recovery/removal, and code-less read
+regressions. Self-review confirmed all known receipt-to-mutation paths reach the
+shared match fence; no weaker parallel validator or new actor was introduced.
+`git diff --check` clean. No UI suite, installation, live activation, Go/SQL or
+personal Keychain operation. Swift processes settled and cache ownership released
+before source/report commit work. Frozen-delta independent rereview remains required.
