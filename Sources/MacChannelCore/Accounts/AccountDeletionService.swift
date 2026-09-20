@@ -4,9 +4,26 @@ public protocol AccountDeletionService: Sendable {
     func beginDeletion(receipt: String, accessToken: String, challengeID: String, code: String,
                        identityToken: String, confirmation: Bool) async throws -> AccountDeletionStatus
     func deletionStatus(receipt: String) async throws -> AccountDeletionStatus
+    func recoverDeletion(receipt: String, accountID: UUID, challengeID: String, code: String,
+                         identityToken: String, confirmation: Bool) async throws -> AccountDeletionStatus
 }
 
 extension AccountServiceClient: AccountDeletionService {
+    public func recoverDeletion(receipt: String, accountID: UUID, challengeID: String, code: String,
+                                identityToken: String, confirmation: Bool) async throws -> AccountDeletionStatus {
+        try Task.checkCancellation()
+        guard confirmation, Self.validToken(receipt), Self.validToken(challengeID),
+              accountID != UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
+              Self.validCredential(code, maximumBytes: 4096), Self.validCredential(identityToken, maximumBytes: 16384) else {
+            throw AccountServiceError.invalidRequest
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let payload = try encoder.encode(DeletionRecoveryPayload(audience: audience, receipt: receipt,
+            accountID: accountID.uuidString.lowercased(), challengeID: challengeID, code: code,
+            identityToken: identityToken, confirmation: true))
+        let bytes = try await send(path: "/v1/account/deletion/recover", payload: payload, requestDate: requestDate())
+        return try Self.parseDeletionStatus(bytes)
+    }
     public func beginDeletion(receipt: String, accessToken: String, challengeID: String, code: String,
                               identityToken: String, confirmation: Bool) async throws -> AccountDeletionStatus {
         try Task.checkCancellation()
@@ -45,5 +62,11 @@ extension AccountServiceClient: AccountDeletionService {
 private struct DeletionBeginPayload: Encodable {
     let purpose = "dropmesh.account.deletion.begin.v1"
     let audience: String, receipt: String, accessToken: String, challengeID: String, code: String, identityToken: String
+    let confirmation: Bool
+}
+
+private struct DeletionRecoveryPayload: Encodable {
+    let purpose = "dropmesh.account.deletion.recover.v1"
+    let audience: String, receipt: String, accountID: String, challengeID: String, code: String, identityToken: String
     let confirmation: Bool
 }

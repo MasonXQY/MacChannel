@@ -4,6 +4,23 @@ import XCTest
 @testable import MacChannelCore
 
 final class AccountDeletionServiceTests: XCTestCase, @unchecked Sendable {
+    func testRecoverySignsOriginalAccountAndReceiptWithoutSessionCredential() async throws {
+        let identity = try DeviceIdentity.ephemeral(), transport = DeletionTransport()
+        let accountID = UUID()
+        let result = try await deletionClient(identity, transport).recoverDeletion(receipt: nativeProducerToken(7),
+            accountID: accountID, challengeID: nativeProducerToken(3), code: "fresh-code", identityToken: "fresh-id", confirmation: true)
+        XCTAssertEqual(result, .pending)
+        let requests = await transport.requests
+        let request = try XCTUnwrap(requests.first)
+        let envelope = try JSONDecoder().decode(RendezvousSignedEnvelope.self, from: XCTUnwrap(request.httpBody))
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: envelope.payload) as? [String: Any])
+        XCTAssertEqual(request.url?.path, "/v1/account/deletion/recover")
+        XCTAssertEqual(fields["purpose"] as? String, "dropmesh.account.deletion.recover.v1")
+        XCTAssertEqual(fields["accountID"] as? String, accountID.uuidString.lowercased())
+        XCTAssertEqual(Set(fields.keys), ["purpose", "audience", "receipt", "accountID", "challengeID", "code", "identityToken", "confirmation"])
+        XCTAssertTrue(String(decoding: envelope.payload, as: UTF8.self).contains("\"confirmation\":true"))
+        XCTAssertTrue(identity.publicKey.isValidSignature(try P256.Signing.ECDSASignature(derRepresentation: envelope.signature), for: try envelope.canonicalPayload()))
+    }
     func testExactSignedBeginBooleanAndReceiptOnlyStatus() async throws {
         let identity = try DeviceIdentity.ephemeral(), transport = DeletionTransport()
         let client = try deletionClient(identity, transport)

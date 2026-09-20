@@ -49,7 +49,15 @@ public actor AccountSessionController {
     private let firstDeviceEnrollment: AccountFirstDeviceEnrollment?
     private let deviceApprovalConfiguration: AccountDeviceApproval?
     private var deviceApprovalTicket: ApprovalAttempt?
-    private var groupSyncInProgress = false
+    private var groupSyncInProgress = false {
+        didSet {
+            if !groupSyncInProgress {
+                let pending = groupDrainWaiters; groupDrainWaiters = []
+                for waiter in pending { waiter.resume() }
+            }
+        }
+    }
+    private var groupDrainWaiters: [CheckedContinuation<Void, Never>] = []
     private var firstDeviceAttempt: FirstDeviceAttempt?
     private var groupVerificationAuthorization: AccountGroupVerificationAuthorization?
     private var operationRevision = UUID() {
@@ -105,6 +113,7 @@ public actor AccountSessionController {
     private var deletionRecord: AccountDeletionRecord?
     private var deletionAttempt: AccountDeletionAttempt?
     private var deletionAttemptRevision: UUID?
+    private var deletionAttemptAccountID: UUID?
     private var deletionBusy = false
     private var deletionTask: Task<AccountDeletionStatus, Error>?
 
@@ -156,61 +165,76 @@ public actor AccountSessionController {
     public func snapshot() -> AccountSessionSnapshot { state }
 
     public func deletionSnapshot() -> AccountDeletionStatus? { deletionRecord?.status }
+    public func supportsAccountDeletion() -> Bool { deletion != nil && service is any AccountDeletionService }
     public func beginDeletionReauthentication() async throws -> AccountDeletionAttempt {
         try Task.checkCancellation()
         guard deletion != nil, service is any AccountDeletionService else { throw AccountSessionControllerError.unavailable }
         if !didRestore { await restore() }
         guard !deletionBusy, deletionTask == nil, deletionAttempt == nil, restoreTask == nil,
               refreshTask == nil, logoutTask == nil, preparingID == nil, attempt == nil, !completing,
-              deletionRecord == nil || deletionRecord?.status == .submitting || deletionRecord?.accountID == nil,
-              current != nil else { throw AccountSessionControllerError.busy }
-        if let current, current.tokens.accessExpiresAt <= (try validNow()) { try await sharedRefresh() }
-        guard let record = current else { throw AccountSessionControllerError.needsSignIn }
+              deletionRecord?.status.isCompleted != true || deletionRecord?.accountID == nil else {
+            throw AccountSessionControllerError.busy
+        }
+        let recovery = deletionRecord.flatMap { $0.status.isCompleted ? nil : $0 }
+        if recovery == nil, let current, current.tokens.accessExpiresAt <= (try validNow()) { try await sharedRefresh() }
+        guard let accountID = recovery?.accountID ?? current?.tokens.identity.accountID else {
+            throw AccountSessionControllerError.needsSignIn
+        }
         deletionBusy = true
         defer { deletionBusy = false }
         let revision = operationRevision
         let challenge = try await service.challenge()
         try Task.checkCancellation()
-        guard operationRevision == revision, current?.tokens.identity == record.tokens.identity,
+        guard operationRevision == revision,
+              recovery != nil ? (deletionRecord?.receipt == recovery?.receipt && deletionRecord?.accountID == accountID) : current?.tokens.identity.accountID == accountID,
               AccountServiceClient.validToken(challenge.challengeID), AccountServiceClient.validToken(challenge.nonce),
               challenge.challengeID != challenge.nonce, challenge.expiresAt > (try validNow()),
               AccountServiceClient.validEpochMilliseconds(challenge.expiresAt) != nil else {
             throw AccountSessionControllerError.invalidAttempt
         }
         let value = AccountDeletionAttempt(id: UUID(), challenge: challenge)
-        deletionAttempt = value; deletionAttemptRevision = revision
+        deletionAttempt = value; deletionAttemptRevision = revision; deletionAttemptAccountID = accountID
         return value
     }
     public func cancelDeletionReauthentication(attemptID: UUID) {
-        if deletionAttempt?.id == attemptID { deletionAttempt = nil; deletionAttemptRevision = nil }
+        if deletionAttempt?.id == attemptID { deletionAttempt = nil; deletionAttemptRevision = nil; deletionAttemptAccountID = nil }
     }
     public func confirmAccountDeletion(attemptID: UUID, code: String, identityToken: String,
                                        confirmation: Bool) async throws -> AccountDeletionStatus {
         try Task.checkCancellation()
         guard confirmation, let deletion, let service = service as? any AccountDeletionService,
               let ticket = deletionAttempt, ticket.id == attemptID, deletionAttemptRevision == operationRevision,
-              ticket.challenge.expiresAt > (try validNow()), let record = current,
-              record.tokens.accessExpiresAt > (try validNow()), !deletionBusy, deletionTask == nil,
+              ticket.challenge.expiresAt > (try validNow()), let accountID = deletionAttemptAccountID,
+              !deletionBusy, deletionTask == nil,
               AccountServiceClient.validCredential(code, maximumBytes: 4096),
               AccountServiceClient.validCredential(identityToken, maximumBytes: 16384) else {
             throw AccountSessionControllerError.invalidAttempt
         }
-        deletionAttempt = nil; deletionAttemptRevision = nil; deletionBusy = true
+        let recovery = deletionRecord.flatMap { !$0.status.isCompleted && $0.accountID == accountID ? $0 : nil }
+        let record = current
+        let confirmationDate = try validNow()
+        guard recovery != nil || (record?.tokens.identity.accountID == accountID &&
+              record!.tokens.accessExpiresAt > confirmationDate) else { throw AccountSessionControllerError.invalidAttempt }
+        deletionAttempt = nil; deletionAttemptRevision = nil; deletionAttemptAccountID = nil; deletionBusy = true
         // Explicit acceptance owns its operation beyond presentation cancellation.
         let task = Task {
             defer { self.deletionBusy = false; self.deletionTask = nil }
-            let previous = self.deletionRecord
-            let receipt = try previous?.accountID == record.tokens.identity.accountID
-                ? previous!.receipt : newAccountDeletionReceipt()
+            let receipt = try recovery?.receipt ?? newAccountDeletionReceipt()
             let pending = try AccountDeletionRecord(binding: self.binding, receipt: receipt,
-                accountID: record.tokens.identity.accountID, status: .submitting)
+                accountID: accountID, status: recovery?.status ?? .submitting)
             do {
                 try await deletion.storage.save(pending)
                 self.deletionRecord = pending
                 self.suspendAccountRuntime()
                 self.publish(.unavailable)
-                let result = try await service.beginDeletion(receipt: receipt, accessToken: record.tokens.accessToken,
-                    challengeID: ticket.challenge.challengeID, code: code, identityToken: identityToken, confirmation: true)
+                let result: AccountDeletionStatus
+                if recovery != nil {
+                    result = try await service.recoverDeletion(receipt: receipt, accountID: accountID,
+                        challengeID: ticket.challenge.challengeID, code: code, identityToken: identityToken, confirmation: true)
+                } else {
+                    result = try await service.beginDeletion(receipt: receipt, accessToken: record!.tokens.accessToken,
+                        challengeID: ticket.challenge.challengeID, code: code, identityToken: identityToken, confirmation: true)
+                }
                 return try await self.acceptDeletionStatus(result, for: pending)
             } catch {
                 self.suspendAccountRuntime()
@@ -252,9 +276,9 @@ public actor AccountSessionController {
     private func acceptDeletionStatus(_ status: AccountDeletionStatus, for record: AccountDeletionRecord) async throws -> AccountDeletionStatus {
         guard let deletion, status != .submitting, record.binding == binding else { throw AccountServiceError.invalidResponse }
         let next = try AccountDeletionRecord(binding: binding, receipt: record.receipt, accountID: record.accountID, status: status)
-        deletionRecord = next
         suspendAccountRuntime()
         try await deletion.storage.save(next)
+        deletionRecord = next
         if status.isCompleted { try await cleanDeletedAccount(next) }
         else { publish(.unavailable) }
         return status
@@ -264,6 +288,9 @@ public actor AccountSessionController {
         guard let deletion, record.status.isCompleted, record.binding == binding else { throw AccountSessionControllerError.secureStorage }
         guard let accountID = record.accountID else { return }
         suspendAccountRuntime()
+        // Revision/lifetime retirement fences every old writer. Join its actual
+        // completion before cleanup, including cancellation-insensitive stores.
+        if groupSyncInProgress { await withCheckedContinuation { groupDrainWaiters.append($0) } }
         do {
             let saved = try await storage.load()
             guard saved == nil || (saved?.binding == binding && saved?.tokens.identity.accountID == accountID) else {

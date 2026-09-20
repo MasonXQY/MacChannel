@@ -2,6 +2,80 @@ import XCTest
 @testable import MacChannelCore
 
 final class AccountDeletionControllerTests: XCTestCase, @unchecked Sendable {
+    func testRestartWithoutSessionRetainsOriginalReceiptAcrossRejectedStatusAndRecovery() async throws {
+        let f = try DeletionFixture(); try await f.grant()
+        let ticket = try await f.controller.beginDeletionReauthentication()
+        await f.service.setFailure(true)
+        do { _ = try await f.controller.confirmAccountDeletion(attemptID: ticket.id, code: "code", identityToken: "id", confirmation: true) } catch {}
+        let original = await f.receipts.load()
+        try await f.base.storage.remove()
+        let restarted = try f.makeController(); await restarted.restore()
+        do { _ = try await restarted.resumeAccountDeletion(); XCTFail("unknown receipt") } catch {}
+        do { _ = try await restarted.beginLogin(); XCTFail("no session regrant") } catch {}
+        let fresh = try await restarted.beginDeletionReauthentication()
+        do { _ = try await restarted.confirmAccountDeletion(attemptID: fresh.id, code: "fresh", identityToken: "id", confirmation: true); XCTFail("recovery rejected") } catch {}
+        let retained = await f.receipts.load()
+        XCTAssertEqual(retained?.receipt, original?.receipt)
+        XCTAssertEqual(retained?.accountID, original?.accountID)
+        XCTAssertTrue(f.cleanupIDs.value.isEmpty)
+        await f.service.setFailure(false)
+        let retry = try await restarted.beginDeletionReauthentication()
+        _ = try await restarted.confirmAccountDeletion(attemptID: retry.id, code: "fresh-again", identityToken: "id", confirmation: true)
+        let session = try await f.base.storage.load(); XCTAssertNil(session)
+    }
+    func testUncertainDeletionRecoversAfterAccessExpiryWithoutRefreshingOrGrantingSession() async throws {
+        let f = try DeletionFixture(access: 10); try await f.grant()
+        let original = try await f.controller.beginDeletionReauthentication()
+        await f.service.setFailure(true)
+        do { _ = try await f.controller.confirmAccountDeletion(attemptID: original.id, code: "code", identityToken: "identity", confirmation: true) } catch {}
+        f.base.clock.update { $0 = $0.addingTimeInterval(11) }
+        await f.base.service.fail("refresh")
+        await f.service.setFailure(false)
+        await f.service.setStatus(.completed)
+        let fresh: AccountDeletionAttempt
+        do { fresh = try await f.controller.beginDeletionReauthentication() }
+        catch { XCTFail("fresh Apple deletion recovery must not require session refresh: \(error)"); return }
+        let result = try await f.controller.confirmAccountDeletion(attemptID: fresh.id, code: "fresh", identityToken: "fresh-id", confirmation: true)
+        XCTAssertEqual(result, .completed)
+        let recoveries = await f.service.recoveries; XCTAssertEqual(recoveries, 1)
+        XCTAssertThrowsError(try f.owner.acquire(for: f.base.peer.id))
+    }
+    func testTerminalMustPersistBeforeEveryCleanupAttempt() async throws {
+        let f = try DeletionFixture(); try await f.grant()
+        let attempt = try await f.controller.beginDeletionReauthentication()
+        _ = try await f.controller.confirmAccountDeletion(attemptID: attempt.id, code: "code", identityToken: "identity", confirmation: true)
+        await f.service.setStatus(.completed)
+        await f.receipts.failSaves(true)
+        for _ in 0..<2 {
+            do { _ = try await f.controller.resumeAccountDeletion(); XCTFail("terminal save must fail") } catch {}
+            XCTAssertTrue(f.cleanupIDs.value.isEmpty, "cleanup cannot run before terminal persistence")
+        }
+        await f.receipts.failSaves(false)
+        _ = try await f.controller.resumeAccountDeletion()
+        XCTAssertEqual(f.cleanupIDs.value.count, 1)
+    }
+
+    func testTerminalCleanupJoinsNoncooperativeGroupWriter() async throws {
+        let f = try DeletionFixture(); try await f.grant()
+        let gate = NativeProducerGate()
+        await f.base.service.setGate(gate, operation: "history")
+        let writer = Task { try await f.controller.syncGroup(groupID: groupID) }
+        await gate.entered()
+        await f.service.setStatus(.completed)
+        let attempt = try await f.controller.beginDeletionReauthentication()
+        let deletion = Task { try await f.controller.confirmAccountDeletion(attemptID: attempt.id, code: "code", identityToken: "identity", confirmation: true) }
+        for _ in 0..<1000 {
+            if await f.receipts.load()?.status == .completed { break }
+            await Task.yield()
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertTrue(f.cleanupIDs.value.isEmpty, "an old writer must drain before removing its records")
+        await gate.release()
+        _ = try? await writer.value
+        _ = try await deletion.value
+        XCTAssertEqual(f.cleanupIDs.value.count, 1)
+    }
+
     func testUnknownOutcomeCanOnlyRetryWithFreshConfirmationAndSameReceipt() async throws {
         let f = try DeletionFixture(); try await f.grant()
         let first = try await f.controller.beginDeletionReauthentication()
@@ -122,8 +196,8 @@ private struct DeletionFixture: Sendable {
     let cleanupFail: PeerTestBox<Bool>
     let cleanupIDs: PeerTestBox<[UUID]>
     let controller: AccountSessionController
-    init() throws {
-        let base = try NativeProducerFixture(); self.base = base
+    init(access: TimeInterval = 100) throws {
+        let base = try NativeProducerFixture(access: access); self.base = base
         let receipts = DeletionMemoryStorage(); self.receipts = receipts
         let service = DeletionFixtureService(base: base.service, receipts: receipts); self.service = service
         let failure = PeerTestBox(false); cleanupFail = failure
@@ -158,7 +232,7 @@ private actor DeletionMemoryStorage: AccountDeletionStorage {
 }
 private actor DeletionFixtureService: AccountSessionService, AccountGroupService, AccountDeletionService {
     let base: NativeProducerService, receipts: DeletionMemoryStorage
-    var begins = 0, polls = 0, persistedBeforeBegin = false, failure = false
+    var begins = 0, polls = 0, recoveries = 0, persistedBeforeBegin = false, failure = false
     var result = AccountDeletionStatus.pending, gate: NativeProducerGate?, statusGate: NativeProducerGate?
     init(base: NativeProducerService, receipts: DeletionMemoryStorage) { self.base = base; self.receipts = receipts }
     func setGate(_ value: NativeProducerGate) { gate = value }
@@ -173,6 +247,11 @@ private actor DeletionFixtureService: AccountSessionService, AccountGroupService
     func deletionStatus(receipt: String) async throws -> AccountDeletionStatus {
         polls += 1; await statusGate?.block()
         if failure { throw AccountServiceError.authenticationRejected }; return result
+    }
+    func recoverDeletion(receipt: String, accountID: UUID, challengeID: String, code: String, identityToken: String, confirmation: Bool) async throws -> AccountDeletionStatus {
+        recoveries += 1
+        guard await receipts.load()?.accountID == accountID else { throw AccountServiceError.authenticationRejected }
+        if failure { throw AccountServiceError.transport }; return result
     }
     func challenge() async throws -> AccountLoginChallenge { try await base.challenge() }
     func complete(challengeID: String, code: String, identityToken: String) async throws -> AccountSessionTokens { try await base.complete(challengeID: challengeID, code: code, identityToken: identityToken) }
