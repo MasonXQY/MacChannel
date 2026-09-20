@@ -157,3 +157,82 @@ With disposable SQL and test relay only: bind two exact sockets -> account prese
 - No production refresh cadence or account TURN lifetime is chosen here. Both require load/UX/relay evidence and explicit configuration.
 - No promise of instantaneous peer-channel or TURN-allocation closure. Native consumption-time channel checks remain required, and relay allocation revocation would require a separate approved control-plane design.
 - No deployment topology decision is made. The current account server and transfer rendezvous remain separate until the isolated candidate composition and operational review are approved.
+
+## Recommended revision after source-level narrowing
+
+This section supersedes two exploratory details above. It is a recommendation for the later implementation brief, not approval to implement.
+
+### Candidate enumeration: authenticated group projection, then fresh pair gates
+
+Do not make a scan of all 1,024 connected principals the only or primary enumeration algorithm. The existing group state already enforces `maxMembers = 64`, and `State.Snapshot()` returns a deterministic owned member projection after the persisted journal has been fully validated. `PostgresStore.Discover`/`Events` demonstrate the read pattern, but neither is sufficient as-is: both accept low-level `Actor`, and their comments explicitly say the read is not authorization. The smallest new store seam should authenticate the exact source session and source key before returning candidates:
+
+```go
+// internal/accountgroup
+type PresenceProjectionRequest struct {
+    Actor      SessionActor
+    PublicKey  []byte
+    GroupID    string
+    Generation uint64
+}
+
+type PresenceProjection struct {
+    GroupID    string
+    Generation uint64
+    Sequence   uint64
+    DeviceIDs  []string // owned, sorted, excludes the source; at most 63
+}
+
+func (s *PostgresStore) ProjectPresenceCandidates(
+    ctx context.Context,
+    request PresenceProjectionRequest,
+) (PresenceProjection, error)
+```
+
+`ProjectPresenceCandidates` validates the exact `SessionActor`, active account/session using database current time, canonical source public key, requested group/generation, and source membership/key against one fully replayed journal snapshot. It returns device IDs only; no account/session IDs, peer keys, proofs, events, or reusable authorization. Inputs and outputs are copied and bounded. A projection is merely a candidate list and may become stale immediately.
+
+The account-presence adapter intersects those at-most-63 IDs with the coherent `ConnectionRouter`'s current locally connected/bound handles. It then calls the existing fresh two-endpoint `AccountGate.Admit` separately for every candidate pair before reserving visibility. Thus projection reduces enumeration from all-connected `O(1024²)` to at most the authenticated source group's bounded membership, while every visible pair still receives current session, membership/key, generation, and exact-handle admission. No projection result can authorize signaling, TURN, or later presence refreshes.
+
+Refresh work is source-driven: bind/rebind/connect schedules that exact source projection; unbind/disconnect withdraws its exact account-source state; a bounded cursor processes at most the configured number of the source's projected candidates per turn. Periodic cleanup may revisit bound sources, but it does not construct every global connection pair. A group of 64 still needs explicit per-turn SQL/concurrency limits because fresh pair admission remains per pair.
+
+This seam should factor the source validation/journal replay with existing admission internals rather than call public `Discover` and trust its events. Projection transaction ordering must remain compatible with group/lifecycle writers, but projection is not held through pair visibility reservation; only the later pair gate supplies that authority.
+
+### Presence delivery: one opaque owned batch, no returned commit closure
+
+Replace the earlier illustrative `commit func() []presence.Delivery` return with an opaque, single-consumption batch. Returning a closure plus raw deliveries creates unclear cancellation/reuse ownership and makes double dispatch too easy. Because the coherent adapter is in `routeauth`, the type and two operations must be exported across the Go package boundary, but every field and all delivery/state internals remain private.
+
+```go
+// internal/presence; exported only as an opaque ownership token.
+type AccountBatch struct {
+    hub        *Hub
+    id         uint64
+    generation uint64
+    // reserved queue slots and exact pair/source epoch are private
+}
+
+func (h *Hub) ReserveAccountPair(
+    left, right ConnectionHandle,
+    expectedEpoch uint64,
+    visible bool,
+) (*AccountBatch, bool)
+
+func (b *AccountBatch) Publish() bool
+```
+
+`ReserveAccountPair` runs only inside the fresh pair gate callback. Under one nonblocking hub critical section it rechecks both opaque presence handles and the expected pair/source epoch, reserves both symmetric bounded queue slots or neither, and records an unpublished batch ID. Reserved slots count against capacity immediately. It performs no sink/network write and returns no delivery slice or callable closure.
+
+After `AccountGate.Admit` returns, the adapter treats a successful callback reservation as irrevocable exactly like signal enqueue, even if gate cleanup reports uncertainty. It calls `batch.Publish()` once. `Publish` atomically changes that private batch from reserved to published, applies the account source transition only if the exact handles/epoch are still current, and wakes the two drainers. A second call, foreign hub, stale/retired batch, or disconnected generation returns false and cannot enqueue or dispatch again. Drainers can observe only published entries, so they cannot write to the network while SQL admission is still in progress.
+
+There is no public cancel/unsubscribe method on a batch. Exact connection teardown or a newer pair/source epoch retires unpublished reservations and reclaims their slots under the hub lock. Account withdrawal is a new exact-epoch reservation/owned batch, not mutation or reuse of the earlier online batch. Legacy `Connect` cleanup remains the connection subscription owner and is independent of batch lifetime.
+
+The routeauth adapter keeps the batch in a single local variable guarded by the same at-most-once callback state used by `Policy.Route`; it never stores it as a reusable claim. If the callback is never invoked or reservation returns false, there is no batch and no event. This is the smallest ownership model that supplies all-or-none capacity, post-gate delivery, stale-generation retirement, and double-write prevention without designing a reusable callback layer or a separate general poller framework.
+
+### Smallest executable next slice
+
+Limit the first presence slice to these concrete changes:
+
+1. Add `ProjectPresenceCandidates` and focused real-SQL tests for exact source session/key validation, the 64-member bound, owned/sorted IDs, removal/rebuild/expiry, and the explicit fact that projection is not pair authority.
+2. Add source bits, opaque connection handles, private reserved queue entries, and opaque `AccountBatch` to `presence.Hub` while preserving `NewHub` and legacy `Connect` behavior exactly.
+3. Add one private account-presence adapter owned by the coherent `ConnectionRouter`: source projection -> local handle intersection -> per-pair fresh gate -> one owned batch publish. Trigger only bind/unbind/connect/disconnect in this slice; make any periodic cadence a later explicit configuration decision.
+4. Test account-only, manual-only, overlap withdrawal, A-B manual plus B-C account non-composition, stale projection, gate pause with rebind/replacement, symmetric saturation, unpublished batch invisibility, publish-at-most-once, disconnect retirement, and DB failure preserving manual presence.
+
+TURN remains a separate later slice. Do not combine projection, presence batch ownership, relay-deadline admission, coturn behavior, and candidate deployment into one implementation review.
