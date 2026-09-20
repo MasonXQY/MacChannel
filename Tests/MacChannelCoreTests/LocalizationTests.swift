@@ -278,8 +278,7 @@ final class LocalizationTests: XCTestCase {
     @MainActor
     private func nativeRenderedText(_ view: NSView, language: AppLanguage, artifactName: String) throws -> String {
         view.displayIfNeeded()
-        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let bitmap = try nativeBitmapAtTwoPixelsPerPoint(view)
         if let path = ProcessInfo.processInfo.environment["DROPMESH_LOCALIZATION_RENDER_DIR"] {
             let directory = URL(fileURLWithPath: path, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -291,6 +290,29 @@ final class LocalizationTests: XCTestCase {
         try VNImageRequestHandler(cgImage: XCTUnwrap(bitmap.cgImage)).perform([request])
         return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
             .joined(separator: "\n").replacingOccurrences(of: " ", with: "")
+    }
+
+    @MainActor
+    private func nativeBitmapAtTwoPixelsPerPoint(_ view: NSView) throws -> NSBitmapImageRep {
+        // Offscreen windows can inherit a 1x backing scale. Explicit pixel density
+        // fixes capture dimensions independently of the attached display, without
+        // resizing the retained view or changing its point geometry. OCR can still
+        // misrecognize glyphs; this is not a substitute for the exact assertions.
+        let bounds = view.bounds
+        let frame = view.frame
+        let pixelsPerPoint: CGFloat = 2
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil,
+            pixelsWide: Int(ceil(bounds.width * pixelsPerPoint)), pixelsHigh: Int(ceil(bounds.height * pixelsPerPoint)),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        bitmap.size = bounds.size
+        view.cacheDisplay(in: bounds, to: bitmap)
+        XCTAssertEqual(bitmap.pixelsWide, Int(ceil(bounds.width * pixelsPerPoint)))
+        XCTAssertEqual(bitmap.pixelsHigh, Int(ceil(bounds.height * pixelsPerPoint)))
+        XCTAssertEqual(bitmap.size, bounds.size)
+        XCTAssertEqual(view.bounds, bounds)
+        XCTAssertEqual(view.frame, frame)
+        return bitmap
     }
 
     @MainActor
@@ -388,8 +410,7 @@ final class LocalizationTests: XCTestCase {
             view.layoutSubtreeIfNeeded()
         }
         view.displayIfNeeded()
-        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let bitmap = try nativeBitmapAtTwoPixelsPerPoint(view)
         try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url)
         window.close()
     }
