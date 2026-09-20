@@ -2,6 +2,22 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+LATEST pendingstore650007a DONE, pending_store_review active on frozen
+96f708a..650007a. Root inspected finalSQLrace log PASS46.867s,61pass/3opt-in
+skips; guardedSQL confirms pending rows0 after cleanup, diffcheckclean. Go cache
+released; rootSQLfixture still running for subsequentHTTPintegration. Plans
+pending-approval-http and pending-approval-transport-contract prepared, not
+dispatched until review accepted. No live writes/installation. User asks continue
+through completion, not a component-only final handoff.
+
+ACTIVE pending approval store: pending_approval_store from96f708a, sole Go cache
+owner. Exact plan2026-09-20-pending-approval-store.md and task-1-brief.md;
+report pending-approval-store-report.md. Root owns restarted UNIX-only fixture
+/private/tmp/dropmesh-group-db.igBdYS port55459 and must stop before ending.
+Agent uses scoped synthetic cleanup, not resetGroupDB. Root prepares subsequent
+strict HTTP/native contracts only; no concurrent implementation or Go test run.
+All accepted checkpoints below remain valid; no live deployment/native enablement.
+
 CURRENT accepted checkpoints: nativeUIc86119f, servicecompositionc20bd0a,
 approvaldraftd7b0efd, each independently reviewed. Root fresh final draft checks
 Swift5/0fail +GoPASS1.117s and exactfixture digests. git diff --check clean.
