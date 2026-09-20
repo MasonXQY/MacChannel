@@ -2,12 +2,23 @@
 
 ## Current mainline decision — 2026-09-20
 
-CURRENT: native producer integration0426d47 complete and independently Approved,
+CURRENT: no implementation or test process active; all caches/index released.
+Copy40f4a0e+b528ba2 independently Approved/no findings, focused32/0, actual UIKit
+shipping compile passed. Reviewer withdrew incorrect literal-comparison finding;
+wrong-label coverage confirmed existing correct behavior, no auditor change.
+Localization01646cc capture-only improvement independently reviewed, root viewed
+original/2x images. Final full1353/10skips/1OCRassertion/exit1, complete log
+/tmp/localization-capture-final-full.log. It is NOT a green full suite. Remaining
+Vision misreads visible Chinese offline label; production UI unchanged.
+
+Native producer integration0426d47 complete and independently Approved,
 118 XCTest / zero failures or skips. Review account-native-producer-review.md.
 Root Xcode27 unsigned Release shipping main/Share build succeeded; this is not
-signed installation. No implementation agent active. mobile_adapter_regression_review
-is read-only mapping next native transport consumption seams. Root owns caches
-and docs/review coordination. SQL55461 STOPPED, fixture data retained.
+signed installation. Native transport consumption audit is complete and revised
+to preserve legacy APIs, explicit freshness and check-time admission boundaries.
+Root owns docs/review coordination. SQL55461 STOPPED,
+fixture data retained. Next bounded brief native-channel-authorization-brief.md
+is prepared but NOT dispatched or activated.
 
 Completed/reviewed: routeauth owner e627179; actual two-controller signed HTTP/SQL
 interop5fdd896; exact SQL group count supplement095591a; real subject-list409 UI

@@ -1,5 +1,24 @@
 # iPhone continuation ledger
 
+Copy40f4a0e+b528ba2 final independentApproved/no findings;32focused/0 andXcode27
+shippingmain/Sharecompilepass. Literal-comparison finding retracted after actual
+associated-value lexerinspection+wronglabeltest passed unmodifiedauditor.
+Localization01646cc scopedcaptureimprovement reviewed/no findings, notfullfix:
+full1353/10skips/1OCRassertion/exit1/92.930s. Rootreadactualfullsummary and inspected
+original/2xChinese rows+fan. Samepointgeometry/expectationspreserved;3xtrialdidn't
+resolveofflineOCR, stoppedasbounded. Allagents/caches/indexreleased, SQLstopped.
+Native-channel brief/audit prepared only, notdispatched. Noaccounttransportlive,
+noinvitationcompletion, nodeviceinstall/Storeupdate. Isolatedtestdeployment
+authorizationquestion remainsunanswered; iPhoneunavailableatlastcheck.
+
+Root full package c78b45d FAILED1346tests/12skips/8assertions/exit1/137.558s.
+Complete diagnostic repeat /tmp/account-copy-before-full.log reproduces same8
+(86.949s): Copy privacy audit1 plus localized macOS OCR7 in2testcases.
+account_route_admission owns approved narrow write-only Copy adapter/auditor fix,
+allSwift/cache. Root read actual remaining diagnostics; OCR has misrecognized
+text, no conclusion about UI until fresh renders inspected. Next consumer brief
+prepared only; deployment, device and Store boundaries remain unchanged.
+
 Native producers0426d47 complete; independent Approved/no findings, saved
 account-native-producer-review.md. Root verified118XCTest/0fail/0skip actual log.
 Xcode27 unsigned Release complete shipping main+Share BUILD SUCCEEDED, existing
