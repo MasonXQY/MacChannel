@@ -294,6 +294,69 @@ final class AccountFirstDeviceEnrollmentTests: XCTestCase, @unchecked Sendable {
         await enrollmentFailure(.invalidAttempt) { try await f.controller.confirmFirstDeviceJoin(attemptID: ticket) }
     }
 
+    func testConfirmSecondCheckpointLoadCannotStartWriteAfterLifecycleChange() async throws {
+        try await assertCheckpointLifecycleFence(stage: "confirm-second-load")
+    }
+
+    func testAcceptExistingCheckpointLoadCannotStartWriteAfterLifecycleChange() async throws {
+        try await assertCheckpointLifecycleFence(stage: "accept-load")
+    }
+
+    func testKnownGroupSyncCheckpointLoadCannotStartWriteAfterLifecycleChange() async throws {
+        try await assertCheckpointLifecycleFence(stage: "sync-load")
+    }
+
+    func testAlreadyIssuedCheckpointSavesCanFinishButReturnNoSnapshot() async throws {
+        try await assertCheckpointLifecycleFence(stage: "accept-save")
+        try await assertCheckpointLifecycleFence(stage: "sync-save")
+    }
+
+    private func assertCheckpointLifecycleFence(stage: String) async throws {
+        for change in ["logout", "refresh", "expiry"] {
+            let f = try EnrollmentFixture(); await f.controller.restore()
+            var group = groupID
+            let firstPin = stage == "confirm-second-load"
+            if !firstPin {
+                let initial = try await f.controller.prepareFirstDeviceJoin()
+                let snapshot = try await f.controller.confirmFirstDeviceJoin(attemptID: initial)
+                group = snapshot.groupID
+                let retained = try await f.intent.load(binding: f.binding, accountID: groupAccount)
+                let anchor = try XCTUnwrap(retained).event
+                let remove = try bootstrapEvent(f.identity, group: group, action: "remove", sequence: 2, previous: anchor.digest())
+                await f.service.setHistory([anchor, remove])
+            }
+            // Exercise the existing sync API with first-device configuration nil.
+            let sync = stage.hasPrefix("sync")
+            let controller = sync ? f.makeController(mode: "unconfigured") : f.controller
+            if sync { await controller.restore() }
+            let ticket = sync ? nil : try await controller.prepareFirstDeviceJoin()
+            let gate = EnrollmentGate()
+            let issuedSave = stage.hasSuffix("save")
+            await f.checkpoint.setGate(gate, operation: issuedSave ? "save" : "load", afterLoads: firstPin ? 1 : 0)
+            let groupID = group
+            let task = Task {
+                if let ticket { return try await controller.confirmFirstDeviceJoin(attemptID: ticket) }
+                return try await controller.syncGroup(groupID: groupID)
+            }
+            await entered(gate)
+            let writesBefore = f.checkpointSecret.writes
+            await sessionGroupFailure(.busy) { try await controller.syncGroup(groupID: groupID) }
+            switch change {
+            case "logout": try await controller.logout()
+            case "refresh": try await controller.refresh()
+            default: f.clock.advance(sync ? 600 : 300)
+            }
+            await gate.resume()
+            do { _ = try await task.value; XCTFail("Returned stale snapshot at \(stage)/\(change)") }
+            catch {
+                if !sync && change == "expiry" { XCTAssertEqual(error as? AccountFirstDeviceEnrollmentError, .invalidAttempt) }
+                else { XCTAssertEqual(error as? AccountSessionControllerError, .needsSignIn) }
+            }
+            XCTAssertEqual(f.checkpointSecret.writes, writesBefore + (issuedSave ? 1 : 0), "Late write at \(stage)/\(change)")
+            if firstPin { XCTAssertTrue(f.checkpointSecret.records.isEmpty, change) }
+        }
+    }
+
     private func entered(_ gate: EnrollmentGate, file: StaticString = #filePath, line: UInt = #line) async {
         let arrived = expectation(description: "dependency reached")
         let observer = Task { await gate.wait(); arrived.fulfill() }
@@ -408,11 +471,16 @@ private actor EnrollmentCheckpointStorage: AccountGroupCheckpointStorage {
     let base: KeychainAccountGroupCheckpointStorage
     var gates: [String: EnrollmentGate] = [:]
     var loads = 0
+    var loadGateSkip = 0
     init(secret: CheckpointSecretStore) { base = .init(store: secret) }
-    func setGate(_ gate: EnrollmentGate, operation: String) { gates[operation] = gate }
+    func setGate(_ gate: EnrollmentGate, operation: String, afterLoads: Int = 0) {
+        gates[operation] = gate
+        loadGateSkip = afterLoads
+    }
     func load(binding: AccountSessionBinding, accountID: String, groupID: String) async throws -> AccountGroupCheckpoint? {
         loads += 1
-        if let gate = gates.removeValue(forKey: "load") { await gate.block() }
+        if loadGateSkip > 0 { loadGateSkip -= 1 }
+        else if let gate = gates.removeValue(forKey: "load") { await gate.block() }
         return try await base.load(binding: binding, accountID: accountID, groupID: groupID)
     }
     func save(_ checkpoint: AccountGroupCheckpoint) async throws {

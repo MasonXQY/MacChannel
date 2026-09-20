@@ -13,9 +13,16 @@ public actor AccountGroupHistoryVerifier {
     public func confirm(anchor: AccountGroupEvent, expectedAccountID: String, expectedGroupID: String,
                         expectedGeneration: UInt64, expectedAnchorHash: Data,
                         binding: AccountSessionBinding) async throws -> AccountGroupSnapshot {
+        try await confirm(anchor: anchor, expectedAccountID: expectedAccountID, expectedGroupID: expectedGroupID,
+            expectedGeneration: expectedGeneration, expectedAnchorHash: expectedAnchorHash, binding: binding, authorization: nil)
+    }
+
+    func confirm(anchor: AccountGroupEvent, expectedAccountID: String, expectedGroupID: String,
+                 expectedGeneration: UInt64, expectedAnchorHash: Data, binding: AccountSessionBinding,
+                 authorization: AccountGroupVerificationAuthorization?) async throws -> AccountGroupSnapshot {
         try beginOperation()
         defer { operationInProgress = false }
-        try requireNotCancelled()
+        try requireCurrent(authorization)
         let state: AccountGroupState
         do {
             state = try AccountGroupState(anchor: anchor, expectedAccountID: expectedAccountID,
@@ -23,24 +30,28 @@ public actor AccountGroupHistoryVerifier {
         } catch { throw AccountGroupCheckpointError.invalidHistory }
         let checkpoint = try AccountGroupCheckpoint(binding: binding, accountID: expectedAccountID, groupID: expectedGroupID,
             generation: expectedGeneration, anchorHash: expectedAnchorHash, sequence: 1, headHash: expectedAnchorHash)
-        if let previous = try await load(binding: binding, accountID: expectedAccountID, groupID: expectedGroupID) {
+        if let previous = try await load(binding: binding, accountID: expectedAccountID, groupID: expectedGroupID, authorization: authorization) {
             guard previous == checkpoint else { throw AccountGroupCheckpointError.invalidHistory }
         } else {
-            try requireNotCancelled()
-            try await save(checkpoint)
+            try await save(checkpoint, authorization: authorization)
         }
-        try requireNotCancelled()
+        try requireCurrent(authorization)
         return state.snapshot
     }
 
     /// Accepts a complete bootstrap-to-head journal, never an unverified suffix.
     public func accept(history: [AccountGroupEvent], binding: AccountSessionBinding,
                        accountID: String, groupID: String) async throws -> AccountGroupSnapshot {
+        try await accept(history: history, binding: binding, accountID: accountID, groupID: groupID, authorization: nil)
+    }
+
+    func accept(history: [AccountGroupEvent], binding: AccountSessionBinding,
+                accountID: String, groupID: String, authorization: AccountGroupVerificationAuthorization?) async throws -> AccountGroupSnapshot {
         try beginOperation()
         defer { operationInProgress = false }
-        try requireNotCancelled()
+        try requireCurrent(authorization)
         guard !history.isEmpty, history.count <= 8192 else { throw AccountGroupCheckpointError.invalidHistory }
-        guard let checkpoint = try await load(binding: binding, accountID: accountID, groupID: groupID) else {
+        guard let checkpoint = try await load(binding: binding, accountID: accountID, groupID: groupID, authorization: authorization) else {
             throw AccountGroupCheckpointError.missingCheckpoint
         }
         guard checkpoint.binding == binding, checkpoint.accountID == accountID, checkpoint.groupID == groupID,
@@ -62,9 +73,9 @@ public actor AccountGroupHistoryVerifier {
         let next = try AccountGroupCheckpoint(binding: binding, accountID: accountID, groupID: groupID,
             generation: snapshot.generation, anchorHash: checkpoint.anchorHash,
             sequence: snapshot.sequence, headHash: snapshot.headHash)
-        try requireNotCancelled()
-        if next != checkpoint { try await save(next) }
-        try requireNotCancelled()
+        try requireCurrent(authorization)
+        if next != checkpoint { try await save(next, authorization: authorization) }
+        try requireCurrent(authorization)
         return snapshot
     }
 
@@ -75,19 +86,60 @@ public actor AccountGroupHistoryVerifier {
         operationInProgress = true
     }
 
-    private func requireNotCancelled() throws {
+    private func requireCurrent(_ authorization: AccountGroupVerificationAuthorization?) throws {
         guard !Task.isCancelled else { throw AccountGroupCheckpointError.invalidHistory }
+        try authorization?.requireCurrent()
     }
 
-    private func load(binding: AccountSessionBinding, accountID: String, groupID: String) async throws -> AccountGroupCheckpoint? {
-        do { return try await storage.load(binding: binding, accountID: accountID, groupID: groupID) }
-        catch { throw AccountGroupCheckpointError.secureStorage }
+    private func load(binding: AccountSessionBinding, accountID: String, groupID: String,
+                      authorization: AccountGroupVerificationAuthorization?) async throws -> AccountGroupCheckpoint? {
+        try requireCurrent(authorization)
+        let checkpoint: AccountGroupCheckpoint?
+        do { checkpoint = try await storage.load(binding: binding, accountID: accountID, groupID: groupID) }
+        catch { try requireCurrent(authorization); throw AccountGroupCheckpointError.secureStorage }
+        try requireCurrent(authorization)
+        return checkpoint
     }
 
-    private func save(_ checkpoint: AccountGroupCheckpoint) async throws {
-        // Cancellation never releases admission while this await is in flight.
-        // A cancelled successful write can advance high-water but publishes no snapshot.
+    private func save(_ checkpoint: AccountGroupCheckpoint, authorization: AccountGroupVerificationAuthorization?) async throws {
+        // This synchronous authorization immediately precedes dependency issuance;
+        // there is no async session-actor check whose reply can become stale.
+        // Admission remains held until even a noncooperative save settles.
+        try requireCurrent(authorization)
         do { try await storage.save(checkpoint) }
-        catch { throw AccountGroupCheckpointError.secureStorage }
+        catch { try requireCurrent(authorization); throw AccountGroupCheckpointError.secureStorage }
+        try requireCurrent(authorization)
+    }
+}
+
+/// Internal, credential-free lifecycle fence shared by the session and verifier.
+/// Invalidation and successful authorization are ordered by the same lock. A
+/// successful check immediately before issuing a dependency is its start
+/// linearization point: that already-authorized operation may finish after a
+/// concurrent invalidation, but every later dependency/result requires a new
+/// check. No lock is held over I/O and no actor hop separates check from issuance.
+final class AccountGroupVerificationAuthorization: @unchecked Sendable {
+    private let lock = NSLock()
+    private var invalidated = false
+    private let accessExpiresAt: Date
+    private let confirmationExpiresAt: Date?
+    private let now: @Sendable () -> Date
+
+    init(accessExpiresAt: Date, confirmationExpiresAt: Date? = nil, now: @escaping @Sendable () -> Date) {
+        self.accessExpiresAt = accessExpiresAt
+        self.confirmationExpiresAt = confirmationExpiresAt
+        self.now = now
+    }
+
+    func invalidate() { lock.withLock { invalidated = true } }
+
+    func requireCurrent() throws {
+        try lock.withLock {
+            guard !invalidated else { throw AccountSessionControllerError.needsSignIn }
+            let date = now()
+            guard AccountServiceClient.validEpochMilliseconds(date) != nil else { throw AccountSessionControllerError.unavailable }
+            if let confirmationExpiresAt, confirmationExpiresAt <= date { throw AccountFirstDeviceEnrollmentError.invalidAttempt }
+            guard accessExpiresAt > date else { throw AccountSessionControllerError.needsSignIn }
+        }
     }
 }

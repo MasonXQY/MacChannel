@@ -48,7 +48,12 @@ public actor AccountSessionController {
     private let firstDeviceEnrollment: AccountFirstDeviceEnrollment?
     private var groupSyncInProgress = false
     private var firstDeviceAttempt: FirstDeviceAttempt?
-    private var operationRevision = UUID()
+    private var groupVerificationAuthorization: AccountGroupVerificationAuthorization?
+    private var operationRevision = UUID() {
+        // Revoke synchronously at lifecycle intent, before any suspension or
+        // publication of the new session revision.
+        willSet { groupVerificationAuthorization?.invalidate() }
+    }
     private let now: @Sendable () -> Date
     private let operationObserver: (@Sendable (AccountSessionOperation) -> Void)?
     private var state = AccountSessionSnapshot(phase: .signedOut, identity: nil)
@@ -155,20 +160,23 @@ public actor AccountSessionController {
             try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
             let history = try await dependencies.history.groupHistory(accessToken: context.record.tokens.accessToken, groupID: intent.event.groupID)
             try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
+            let authorization = beginVerification(accessExpiresAt: context.record.tokens.accessExpiresAt,
+                confirmationExpiresAt: ticket.expiresAt)
+            defer { authorization.invalidate(); groupVerificationAuthorization = nil }
             let snapshot: AccountGroupSnapshot
             do {
                 snapshot = try await dependencies.verifier.accept(history: history, binding: binding,
-                    accountID: context.accountID, groupID: intent.event.groupID)
+                    accountID: context.accountID, groupID: intent.event.groupID, authorization: authorization)
             } catch AccountGroupCheckpointError.missingCheckpoint {
                 // Only retained LOCAL consent authorizes this anchor. Never
                 // reconfirm on invalid history, storage failures or later heads.
                 try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
                 _ = try await dependencies.verifier.confirm(anchor: intent.event, expectedAccountID: context.accountID,
                     expectedGroupID: intent.event.groupID, expectedGeneration: 1,
-                    expectedAnchorHash: intent.event.digest(), binding: binding)
+                    expectedAnchorHash: intent.event.digest(), binding: binding, authorization: authorization)
                 try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
                 snapshot = try await dependencies.verifier.accept(history: history, binding: binding,
-                    accountID: context.accountID, groupID: intent.event.groupID)
+                    accountID: context.accountID, groupID: intent.event.groupID, authorization: authorization)
             }
             try requireEnrollmentSession(context, expiresAt: ticket.expiresAt)
             return snapshot
@@ -179,6 +187,13 @@ public actor AccountSessionController {
         let record: AccountStoredSession
         let revision: UUID
         var accountID: String { record.tokens.identity.accountID.uuidString.lowercased() }
+    }
+
+    private func beginVerification(accessExpiresAt: Date, confirmationExpiresAt: Date? = nil) -> AccountGroupVerificationAuthorization {
+        let authorization = AccountGroupVerificationAuthorization(accessExpiresAt: accessExpiresAt,
+            confirmationExpiresAt: confirmationExpiresAt, now: now)
+        groupVerificationAuthorization = authorization
+        return authorization
     }
 
     private struct FirstDeviceAttempt {
@@ -317,8 +332,10 @@ public actor AccountSessionController {
             try requireCurrentSession()
             let history = try await groupService.groupHistory(accessToken: record.tokens.accessToken, groupID: groupID)
             try requireCurrentSession()
+            let authorization = beginVerification(accessExpiresAt: record.tokens.accessExpiresAt)
+            defer { authorization.invalidate(); groupVerificationAuthorization = nil }
             let snapshot = try await groupVerifier.accept(history: history, binding: record.binding,
-                accountID: record.tokens.identity.accountID.uuidString.lowercased(), groupID: groupID)
+                accountID: record.tokens.identity.accountID.uuidString.lowercased(), groupID: groupID, authorization: authorization)
             try requireCurrentSession()
             return snapshot
         } catch { try requireCurrentSession(); throw error }
