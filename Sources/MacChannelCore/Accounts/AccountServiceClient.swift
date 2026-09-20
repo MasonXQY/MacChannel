@@ -2,7 +2,12 @@ import Darwin
 import Foundation
 import Security
 
-public struct AccountServiceClient: Sendable {
+public protocol AccountTURNCredentialService: Sendable {
+    func turnCredentials(accessToken: String, groupID: String, generation: UInt64) async throws
+        -> RendezvousTURNCredentials
+}
+
+public struct AccountServiceClient: Sendable, AccountTURNCredentialService {
     let identity: DeviceIdentity
     private let origin: URL
     let audience: String
@@ -122,6 +127,74 @@ public struct AccountServiceClient: Sendable {
         guard value.signedOut else { throw AccountServiceError.invalidResponse }
     }
 
+    /// Tokens remain private request arguments; no account credentials are cached.
+    /// Issued TURN allocations cannot be recalled by logout. Transfer leases and
+    /// signal authorization must still gate each peer independently.
+    public func turnCredentials(accessToken: String, groupID: String, generation: UInt64) async throws
+        -> RendezvousTURNCredentials
+    {
+        try Task.checkCancellation()
+        guard Self.validToken(accessToken), Self.canonicalUUID(groupID) != nil,
+            generation > 0, generation <= UInt64(Int64.max)
+        else { throw AccountServiceError.invalidRequest }
+        let date = try requestDate()
+        let data: Data
+        do {
+            data = try await send(path: "/v1/account/turn-credentials", fields: [
+                "purpose": "dropmesh.account.turn.credentials.v1", "audience": audience,
+                "accessToken": accessToken, "groupID": groupID, "generation": String(generation),
+            ], requestDate: date)
+        } catch { try Task.checkCancellation(); throw error }
+        try Task.checkCancellation()
+        let received = try requestDate()
+        let value = try AccountTURNResponse(data: data)
+        let formatter = ISO8601DateFormatter()
+        // The server floors to whole seconds; fractions or loose date spellings
+        // must not create a different effective expiry from the coturn username.
+        guard value.expiresAt.utf8.count <= 64,
+            value.expiresAt.range(of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$"#, options: .regularExpression) != nil,
+            let expiry = formatter.date(from: value.expiresAt),
+            expiry > received, expiry.timeIntervalSince(received) <= 300,
+            let seconds = Int64(exactly: expiry.timeIntervalSince1970), seconds > 0,
+            let separator = value.username.firstIndex(of: ":"),
+            String(value.username[..<separator]) == String(seconds),
+            value.username.index(after: separator) < value.username.endIndex,
+            Self.validCredential(value.username, maximumBytes: 256),
+            Self.validCredential(value.credential, maximumBytes: 512),
+            (1...8).contains(value.urls.count), Set(value.urls).count == value.urls.count,
+            value.urls.allSatisfy(Self.validAccountTURNURL)
+        else { throw AccountServiceError.invalidResponse }
+        return RendezvousTURNCredentials(urls: value.urls, username: value.username,
+            credential: value.credential, expiresAt: expiry)
+    }
+
+    private static func validAccountTURNURL(_ value: String) -> Bool {
+        guard Self.validCredential(value, maximumBytes: 2_048),
+            value.unicodeScalars.allSatisfy({ $0.isASCII }),
+            let separator = value.firstIndex(of: ":") else { return false }
+        let scheme = String(value[..<separator])
+        let rest = value[value.index(after: separator)...]
+        guard ["turn", "turns"].contains(scheme), !rest.hasPrefix("//"),
+            let parts = URLComponents(string: scheme + "://" + String(rest)),
+            let rawHost = parts.host, !rawHost.isEmpty,
+            parts.user == nil, parts.password == nil, parts.path.isEmpty, parts.fragment == nil,
+            parts.port.map({ (1...65_535).contains($0) }) ?? true,
+            parts.percentEncodedQuery == nil || parts.percentEncodedQuery == "transport=tcp"
+                || (scheme == "turn" && parts.percentEncodedQuery == "transport=udp")
+        else { return false }
+        let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host.contains(":") {
+            var address = in6_addr()
+            return host.withCString { inet_pton(AF_INET6, $0, &address) == 1 }
+        }
+        return host.utf8.count <= 253 && host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { label in
+            (1...63).contains(label.utf8.count)
+                && label.first.map({ $0.isLetter || $0.isNumber }) == true
+                && label.last.map({ $0.isLetter || $0.isNumber }) == true
+                && label.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" })
+        }
+    }
+
     func send(
         path: String,
         fields: [String: String],
@@ -177,6 +250,9 @@ public struct AccountServiceClient: Sendable {
         catch is CancellationError { throw CancellationError() }
         catch let error as AccountServiceError { throw error }
         catch { throw AccountServiceError.transport }
+        if path == "/v1/account/turn-credentials", result.1.statusCode == 404 {
+            throw AccountServiceError.unavailable
+        }
         if path == "/v1/account/group/events" {
             if result.1.statusCode == 404 { throw AccountServiceError.unavailable }
             if result.1.statusCode == 409 { throw AccountGroupServiceError.changedHead }
@@ -378,3 +454,51 @@ private struct TokensResponse: Decodable {
 }
 
 private struct LogoutResponse: Decodable { let signedOut: Bool }
+
+private struct AccountTURNResponse {
+    let urls: [String]
+    let username: String
+    let credential: String
+    let expiresAt: String
+
+    init(data: Data) throws {
+        do {
+            // Reuse the bounded JSON tokenizer, retaining key uniqueness before
+            // any dictionary or Codable operation could discard duplicate keys.
+            var parser = PageParser(data: data)
+            try parser.token(123)
+            var seen = Set<String>()
+            var values: [String: String] = [:]
+            var urls: [String] = []
+            for field in 0..<4 {
+                if field > 0 { try parser.token(44) }
+                let name = try parser.string()
+                guard ["urls", "username", "credential", "expiresAt"].contains(name),
+                    seen.insert(name).inserted else { throw AccountServiceError.invalidResponse }
+                try parser.token(58)
+                if name == "urls" {
+                    try parser.token(91)
+                    parser.whitespace()
+                    if parser.i < parser.bytes.count, parser.bytes[parser.i] != 93 {
+                        while true {
+                            guard urls.count < 8 else { throw AccountServiceError.invalidResponse }
+                            urls.append(try parser.string())
+                            parser.whitespace()
+                            guard parser.i < parser.bytes.count else { throw AccountServiceError.invalidResponse }
+                            if parser.bytes[parser.i] == 93 { break }
+                            try parser.token(44)
+                        }
+                    }
+                    try parser.token(93)
+                } else { values[name] = try parser.string() }
+            }
+            try parser.token(125)
+            parser.whitespace()
+            guard parser.i == parser.bytes.count,
+                let username = values["username"], let credential = values["credential"],
+                let expiresAt = values["expiresAt"] else { throw AccountServiceError.invalidResponse }
+            self.urls = urls; self.username = username
+            self.credential = credential; self.expiresAt = expiresAt
+        } catch { throw AccountServiceError.invalidResponse }
+    }
+}
