@@ -1,5 +1,14 @@
 # iPhone continuation ledger
 
+Go8ae6148 reviewNeedsFixes (legacy envelope decode + missingrouter matrix).
+Originalimplementer owns correctiononly; noSQL. RootserializedfreshfixtureSQL
+group75top/281allPASS/3SKIP/0FAIL44.021s +HTTP8/0SKIP/0FAIL0.657s. BothclustersSTOPPED.
+Incident: originalagent fullSQLconcurrentrun reset oldsyntheticfixtureviaexisting
+TRUNCATECASCADE; countsnotpreservation, events/sessions/families2->1. Failedlog
+overwritten, disclosedinreport. No production/device data. Use freshdisposable
+cluster perisolatedrun, noSQLmultipackageconcurrency, uniquelogfilenames. Root
+created55462 router-sql.8U4cTG, preservedremainingdataafterstop. SeeHANDOFF.
+
 Native channel e4730ce independently Approved/no findings; root read production
 diff, source hashes, actual158/0/0skip log. Root Xcode27 unsigned shippingmain+Share
 BUILD SUCCEEDED exit0 (/tmp/native-channel-ios-shipping-build.log), embeddedprivacy

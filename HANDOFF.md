@@ -9,12 +9,23 @@ and Share BUILD SUCCEEDED plus embedded privacy check PASS. No app/runtime calls
 the new overload. Root checked source hashes and actual logs; report/review are
 native-channel-authorization-{report,review}.md. Known full-suite OCR failure remains.
 
-mobile_adapter_regression_review now owns the sole implementation: default-off
-Go router integration per account-route-router-next-brief.md (socket-local nonce
-ownership and coherent owner/policy constructor corrections included). It owns
-isolated Go cache qIjA8g. SQL55461 started by root, Unix-only exact group test DB,
-baseline accounts1/groups1/pending0 preserved. No other implementation active.
-Root owns operational preparation and database shutdown after tests/review.
+Go router8ae6148 independent review NEEDS FIXES: nil-mode typed-envelope decoding
+regresses legacy unknown-field behavior; required router lifecycle/adversarial
+matrix incomplete. mobile_adapter_regression_review owns the sole corrective
+implementation and Go cache qIjA8g, per account-route-router-review.md. No remote
+or native activation. Root owns integration and subsequent independent re-review.
+
+IMPORTANT TEST FIXTURE INCIDENT: implementation ran existing accountgroup tests
+that TRUNCATE CASCADE on old local synthetic SQL55461 despite no-reset instruction.
+Original synthetic rows were not preserved; similar counts were misleading.
+Events/sessions/families changed2->1. No production/device data involved. Failed
+run log was overwritten; report discloses both errors. Old cluster STOPPED, remaining
+data retained. Never use it as a preserved baseline again. Root created disposable
+Unix-only SQL55462 /private/tmp/dropmesh-router-sql.8U4cTG, migrations001..011;
+serialized group75top/281allPASS/3SKIP/0FAIL and HTTP8/0SKIP/0FAIL inclrealSQL passed.
+Fresh cluster also STOPPED. No SQL authorized to corrective implementer. SQL-enabled
+multi-package runs on one mutable fixture are prohibited; use fresh disposable
+fixtures and serialized package runs, retain unique failed/success log filenames.
 Read-only SSH preflight to 178.105.165.209:22 timed out; current source IP verified
 92.96.17.75. Hetzner project page is signed in. No firewall or remote changes made.
 Do not open temporary SSH until a deployable reviewed candidate is ready.
