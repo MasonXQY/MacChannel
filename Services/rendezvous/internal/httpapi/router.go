@@ -137,6 +137,9 @@ func NewRouter(config Config) http.Handler {
 	var accountRoutes *AccountRouteConfig
 	if config.AccountRoutes != nil {
 		accountRoutes = &AccountRouteConfig{Routes: config.AccountRoutes.Routes, Sessions: config.AccountRoutes.Sessions}
+		if hub := accountRoutes.Routes.PresenceHub(); hub != nil && hub != config.Presence {
+			panic("incoherent account presence configuration")
+		}
 	}
 	if config.Clock == nil {
 		config.Clock = time.Now
@@ -837,12 +840,19 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 	}
-	disconnectPresence, err := r.presence.Connect(deviceID, source, peer)
-	if err != nil {
-		_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
-		return
+	if accountRouteSocket != nil && accountRouteSocket.routes.PresenceHub() != nil {
+		if err := accountRouteSocket.routes.AttachPresence(accountRouteSocket.handle, peer); err != nil {
+			_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
+			return
+		}
+	} else {
+		disconnectPresence, err := r.presence.Connect(deviceID, source, peer)
+		if err != nil {
+			_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
+			return
+		}
+		defer disconnectPresence()
 	}
-	defer disconnectPresence()
 	releaseTrustWatch := r.retainTrustWatch()
 	defer releaseTrustWatch()
 

@@ -33,6 +33,7 @@ type accountRouteSocket struct {
 	source    string
 	pending   *pendingAccountRouteChallenge
 	done      chan struct{}
+	peer      accountRouteWriter
 }
 
 type pendingAccountRouteChallenge struct {
@@ -89,7 +90,7 @@ func newAccountRouteSocket(config *AccountRouteConfig, deviceID string, publicKe
 		return nil, err
 	}
 	socket := &accountRouteSocket{routes: config.Routes, handle: handle, deviceID: deviceID,
-		publicKey: append([]byte(nil), publicKey...), source: source, done: make(chan struct{})}
+		publicKey: append([]byte(nil), publicKey...), source: source, done: make(chan struct{}), peer: peer}
 	go socket.drain(notifications, peer)
 	return socket, nil
 }
@@ -120,6 +121,8 @@ func (s *accountRouteSocket) drain(notifications <-chan struct{}, peer accountRo
 
 func (s *accountRouteSocket) close() {
 	s.pending = nil
+	// Interrupt any in-flight write before joining either owned drainer.
+	_ = s.peer.Close()
 	_ = s.routes.Close(s.handle)
 	<-s.done
 }

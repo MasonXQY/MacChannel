@@ -22,6 +22,16 @@ type AccountPresenceConfig struct {
 	CandidatesPerTurn int
 	WorkTimeout       time.Duration
 }
+
+// PresenceHub identifies the immutable hub configured for owned presence.
+// A nil result preserves the legacy HTTP presence lifecycle.
+func (r *ConnectionRouter) PresenceHub() *presence.Hub {
+	if r == nil || r.presence == nil {
+		return nil
+	}
+	return r.presence.config.Hub
+}
+
 type presenceAttachment struct {
 	handle  presence.ConnectionHandle
 	cleanup func()
