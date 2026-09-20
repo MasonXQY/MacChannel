@@ -53,6 +53,7 @@ type AccountHTTPConfig struct {
 	Sessions   AccountSessions
 	Groups     AccountGroups
 	Enrollment AccountGroupEnrollment
+	Pending    AccountGroupPending
 }
 
 type sourceWindow struct {
@@ -66,6 +67,7 @@ type accountHTTP struct {
 	sessions   AccountSessions
 	groups     AccountGroups
 	enrollment AccountGroupEnrollment
+	pending    AccountGroupPending
 	clock      func() time.Time
 	global     chan struct{}
 	mu         sync.Mutex
@@ -84,6 +86,9 @@ func NewAccountHTTP(config AccountHTTPConfig) (http.Handler, error) {
 	if !nilInterface(config.Enrollment) {
 		h.enrollment = config.Enrollment
 	}
+	if !nilInterface(config.Pending) {
+		h.pending = config.Pending
+	}
 	return h, nil
 }
 
@@ -101,6 +106,10 @@ func nilInterface(v any) bool {
 
 func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	accountHeaders(w)
+	if _, ok := pendingOperation(r.URL.Path); ok && nilInterface(h.pending) {
+		writeAccountError(w, http.StatusNotFound, "invalid_request")
+		return
+	}
 	if (r.URL.Path == "/v1/account/group/discover" || r.URL.Path == "/v1/account/group/bootstrap") && nilInterface(h.enrollment) {
 		writeAccountError(w, http.StatusNotFound, "invalid_request")
 		return
@@ -154,6 +163,10 @@ func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device := strings.ToLower(envelope.DeviceID)
+	if operation, ok := pendingOperation(r.URL.Path); ok {
+		h.servePending(w, r, device, envelope.PublicKey, operation, envelope.Payload)
+		return
+	}
 	if r.URL.Path == "/v1/account/group/discover" || r.URL.Path == "/v1/account/group/bootstrap" {
 		h.serveGroupEnrollment(w, r, device, purpose, envelope.Payload)
 		return
@@ -182,6 +195,9 @@ func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func accountPurpose(path string) (string, bool) {
+	if op, ok := pendingOperation(path); ok {
+		return "dropmesh.account.group.join." + op + ".v1", true
+	}
 	switch path {
 	case "/v1/account/group/discover":
 		return "dropmesh.account.group.discover.v1", true

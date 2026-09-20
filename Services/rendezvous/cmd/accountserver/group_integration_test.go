@@ -39,6 +39,15 @@ func guardedGroupDatabase(t *testing.T) (string, *sql.DB) {
 	if err := db.QueryRow(`SELECT current_database(), inet_server_addr() IS NULL`).Scan(&name, &local); err != nil || name != "dropmesh_account_auth_test" || !local {
 		t.Fatal("requires isolated named database over Unix socket")
 	}
+	// Group-enabled assembly now requires the pending table. Fixture provisioning
+	// is explicit and guarded; the production builder never runs migrations.
+	migration, err := os.ReadFile("../../../migrations/011_account_group_pending.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(migration)); err != nil {
+		t.Fatal("provision pending fixture schema", err)
+	}
 	return dsn, db
 }
 

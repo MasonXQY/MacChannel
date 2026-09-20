@@ -49,7 +49,7 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 		return fail()
 	}
 	if cfg.groupsEnabled {
-		if err := checkTables(startup, database, []string{"account_groups", "account_group_events"}); err != nil {
+		if err := checkTables(startup, database, []string{"account_groups", "account_group_events", "account_group_pending"}); err != nil {
 			return fail()
 		}
 	}
@@ -83,6 +83,7 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 		}
 		httpConfig.Groups = groups
 		httpConfig.Enrollment = groups
+		httpConfig.Pending = groups
 	}
 	accountHandler, err := accountauth.NewAccountHTTP(httpConfig)
 	if err != nil {
@@ -137,6 +138,9 @@ func registerGroupRoutes(mux *http.ServeMux, account http.Handler, enabled bool)
 	}
 	for _, path := range []string{"/v1/account/group/discover", "/v1/account/group/bootstrap", "/v1/account/group/events"} {
 		mux.Handle(path, account)
+	}
+	for _, op := range []string{"create", "get", "list", "propose", "countersign", "commit", "cancel", "reject"} {
+		mux.Handle("/v1/account/group/join/"+op, account)
 	}
 }
 
