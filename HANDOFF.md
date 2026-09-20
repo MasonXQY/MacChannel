@@ -2,6 +2,16 @@
 
 ## Current mainline decision — 2026-09-20
 
+LATEST: native attempts/listener cf319301 locally complete, independently Approved
+with no findings in native-attempts-authorization-review.md. Root read full report,
+actual RED2/12assertions, final combined177/0/0skip9.278s and sourcehashes. Root
+Xcode27 Release unsigned main/Share BUILD SUCCEEDED exit0 at
+/tmp/native-attempts-ios-shipping-build.log; embeddedprivacy check PASS. All
+agents/cache/index released. No runtime call site uses provider overload yet;
+no install/deploy. Next remaining seams documented in mobile-runtime-account-
+consumer-seams.md and account-presence-turn-seams.md (latter is an audit proposal,
+not an approved implementation API; reservation ownership/enumeration need narrowing).
+
 CURRENT: user explicitly approved isolated candidate deployment on the existing
 host, preserving production. Native channel e4730ce is independently Approved
 with no findings, actual focused158/0/0skip; root Xcode27 unsigned shipping main
@@ -17,10 +27,8 @@ Root fresh55462 serial focusedHTTP rerun at6b95c03:16topPASS/0SKIP/0FAIL, includ
 realPostgres session-revocation route denial, log/tmp/account-router-root-6b95c03-http-sql.log.
 Cluster stopped afterward. First restart omitted Unix/port options and failed on
 occupied default5432; retried exactUnix-only55462 successfully, no other server touched.
-No remote/native activation. Native attempts/listener now sole implementation
-account_route_admission owns Swift/Xcode caches; requirements in
-native-attempts-authorization-seams.md. Preserve exact lease, legacy constructors,
-error-path checks, joined late-channel closure. Root owns review/docs only.
+No remote/native activation. Native attempts/listener requirements are in
+native-attempts-authorization-seams.md; completed status is recorded above.
 
 IMPORTANT TEST FIXTURE INCIDENT: implementation ran existing accountgroup tests
 that TRUNCATE CASCADE on old local synthetic SQL55461 despite no-reset instruction.

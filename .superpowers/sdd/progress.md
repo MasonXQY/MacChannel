@@ -1,5 +1,13 @@
 # iPhone continuation ledger
 
+Native attempts/listener cf319301 independentlyApproved/no findings; root actual
+177/0/0skip log+hashesverified, Xcode27 unsignedshippingRelease main/Shareexit0
+BUILD SUCCEEDED (/tmp/native-attempts-ios-shipping-build.log), embeddedprivacyPASS.
+Zero-buffer delivery case honestlybounded smoke, notwaiter-readyproof. Runtime
+activation/install/deploy remain undone. Root readfullreview, allcachesreleased.
+Next projection/runtime andserverpresence/TURN seams mapped, noauthoritydefaults
+or operationalconfigchosen by thoseaudits. Prior in-progressowner notes superseded.
+
 6b95c03 Go router corrective implementation independently Approved/no findings;
 root read rereview and actual final logs. HTTP121PASS/19SKIP/0FAIL, full no-SQL
 15packagePASS/1no-tests, racePASS. Root isolated55462 focusedHTTP16topPASS/0SKIP/
