@@ -1,5 +1,21 @@
 # DropMesh iPhone companion handoff
 
+## Current mainline decision — 2026-09-20
+
+User explicitly chose the current development version as the single mainline;
+finish it, verify it, and update the existing App Store app. Do not create a
+separate old-version hotfix branch. Preserve bundle identity and existing files.
+Submission/upload and approval/release evidence remain distinct from local tests.
+
+Recovery callback repair: locally complete and independently Approved, including
+the supplemental suspended-operation regression (1/0, root inspected actual log;
+reviewer closed Minor). Original 7 model + 3 native UI checks and unsigned main/
+Share build remain valid. No real identity reset or installed update performed.
+mobile_six_digit_host now owns scoped pairing source and Swift/Xcode caches;
+requirements `.superpowers/sdd/mobile-six-digit-host-brief.md`. Root coordinates
+release/mainline integration and pending account-controller expiry review fix.
+
+
 ## Native enrollment continuation — 2026-09-20
 
 HOTFIX UPDATE: recovery source fixed, task-only delta /tmp/mobile-recovery-task-only.patch
