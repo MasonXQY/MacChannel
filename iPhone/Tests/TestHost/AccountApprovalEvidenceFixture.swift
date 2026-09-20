@@ -132,7 +132,16 @@ actor ApprovalEvidenceService: AccountSessionService, AccountGroupService, Accou
     func groupHistory(accessToken: String, groupID: String) async throws -> [AccountGroupEvent] { try await enter("history"); return history }
     func recordGroupBootstrap(accessToken: String, event: AccountGroupEvent) async throws { try await enter("bootstrap") }
     func groupJoins(accessToken: String, accountID: String) async throws -> [AccountGroupPendingSummary] {
-        try await enter("list"); return records.values.map(\.summary).filter { [.requested, .proposed, .countersigned].contains($0.status) }
+        try await enter("list")
+        // Match the actual PostgreSQL member-only list contract, not discovery.
+        let anchor = history[0]
+        var state = try AccountGroupState(anchor: anchor, expectedAccountID: anchor.accountID,
+            expectedGroupID: anchor.groupID, expectedGeneration: anchor.generation, expectedAnchorHash: anchor.digest())
+        for event in history.dropFirst() { try state.apply(event) }
+        guard state.snapshot.members.contains(where: {
+            $0.deviceID == identity.id.rawValue.uuidString.lowercased() && $0.publicKey == identity.publicKey.rawRepresentation
+        }) else { throw AccountGroupEnrollmentError.conflict }
+        return records.values.map(\.summary).filter { [.requested, .proposed, .countersigned].contains($0.status) }
     }
     func groupJoin(accessToken: String, accountID: String, requestID: String) async throws -> AccountGroupPendingRequest {
         try await enter("get"); guard let value = records[requestID] else { throw AccountServiceError.transport }; return value

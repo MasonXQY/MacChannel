@@ -3,6 +3,8 @@ import MacChannelCore
 import Observation
 
 enum MobileAccountApprovalPhase: Equatable { case disabled, loading, ready, signedOut, unavailable, secureStorageError }
+// Selects which read endpoints the entry needs, never grants membership authority.
+enum MobileAccountApprovalReadScope { case ownRequests, memberRequests }
 
 struct MobileAccountApprovalConfirmation: Identifiable {
     enum Action { case ticket(AccountDeviceApprovalTicket, String), cancel(String), reject(String) }
@@ -33,6 +35,7 @@ final class MobileAccountApprovalModel {
     private(set) var messageKey: String?
     private(set) var selectedRequestID: String?
     private(set) var actionPresentationID: UUID?
+    private(set) var readScope: MobileAccountApprovalReadScope = .ownRequests
     private let controller: AccountSessionController
     private var operation: Task<Void, Never>?
     private var generation = UUID()
@@ -47,7 +50,7 @@ final class MobileAccountApprovalModel {
             guard await controller.supportsDeviceApproval() else {
                 if current(id) { phase = .disabled }; return
             }
-            let rows = try await controller.pendingDeviceApprovals()
+            let rows = readScope == .memberRequests ? try await controller.pendingDeviceApprovals() : []
             let retained = try await controller.retainedDeviceApprovalRequestIDs()
             let value: AccountDeviceApprovalView?
             if let selectedRequestID { value = try await controller.deviceApproval(requestID: selectedRequestID) }
@@ -133,13 +136,14 @@ final class MobileAccountApprovalModel {
             guard current(id) else { return }; detail = value; phase = .ready
         }.value
     }
-    func beginPresentation(owner: UUID) {
-        if presentationOwner != owner { leave() }
-        presentationOwner = owner
+    func beginPresentation(owner: UUID, readScope: MobileAccountApprovalReadScope = .ownRequests) {
+        if presentationOwner != owner || self.readScope != readScope { leave() }
+        presentationOwner = owner; self.readScope = readScope
     }
     func leave(owner: UUID? = nil) {
         if let owner, presentationOwner != owner { return }
         presentationOwner = nil
+        readScope = .ownRequests
         actionPresentationID = nil
         generation = UUID(); operation?.cancel(); operation = nil
         if let confirmation { dismiss(id: confirmation.id) }

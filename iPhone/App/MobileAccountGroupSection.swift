@@ -74,7 +74,7 @@ struct MobileAccountGroupSection: View {
     @ViewBuilder private func approvalLink(canRequest: Bool) -> some View {
         if let approvals {
             NavigationLink {
-                MobileAccountApprovalView(model: approvals, canRequest: canRequest)
+                MobileAccountApprovalView(model: approvals, readScope: canRequest ? .ownRequests : .memberRequests)
             } label: {
                 Text(canRequest ? "approval.request.title" : "approval.title").frame(minHeight: 44)
             }.accessibilityIdentifier("account-device-requests")

@@ -2,7 +2,8 @@ import SwiftUI
 
 struct MobileAccountApprovalView: View {
     let model: MobileAccountApprovalModel
-    let canRequest: Bool
+    let readScope: MobileAccountApprovalReadScope
+    private var canRequest: Bool { readScope == .ownRequests }
     @State private var route: RequestRoute?
     @State private var owner = UUID()
     @Environment(\.scenePhase) private var scenePhase
@@ -52,9 +53,9 @@ struct MobileAccountApprovalView: View {
         }
         .navigationTitle("approval.title")
         .navigationDestination(item: $route) { route in
-            MobileAccountApprovalDetailView(model: model, requestID: route.requestID)
+            MobileAccountApprovalDetailView(model: model, requestID: route.requestID, readScope: readScope)
         }
-        .task { model.beginPresentation(owner: owner); await model.open(requestID: nil) }
+        .task { model.beginPresentation(owner: owner, readScope: readScope); await model.open(requestID: nil) }
         .refreshable { await model.refresh() }
         .onChange(of: scenePhase) { _, value in
             if value == .active, route == nil { Task { await model.refresh() } }

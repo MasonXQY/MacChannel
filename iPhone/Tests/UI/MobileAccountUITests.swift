@@ -72,7 +72,7 @@ final class MobileAccountUITests: XCTestCase {
             let copy = app.buttons["approval-copy"]; reveal(copy, in: app)
             XCTAssertTrue(copy.isHittable); XCTAssertGreaterThanOrEqual(copy.frame.height, 44); copy.tap()
             app.navigationBars.buttons.element(boundBy: 0).tap()
-            let row = app.buttons["approval-request-row"]
+            let row = app.buttons["approval-recovery-row"]
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription); row.tap()
             let cancel = app.buttons["approval-cancel-request"]; reveal(cancel, in: app)
             XCTAssertTrue(cancel.isHittable); cancel.tap()

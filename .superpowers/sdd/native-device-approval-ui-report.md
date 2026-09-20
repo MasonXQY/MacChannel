@@ -221,6 +221,61 @@ and 47 PNGs. Both completed command sessions exited; Swift/Xcode caches released
 again after the review gate. Original matrix evidence remains valid for unchanged
 layout/actions; this amendment changes only the long container's spoken title.
 
+## Real-server subject-list integration repair (baseline5fdd896)
+
+Actual signed Swift/Go/PostgreSQL interoperability exposed a real production
+composition gap: ListJoins is intentionally member-only, while approval refresh
+unconditionally listed before loading retained own requests. The unjoined subject
+therefore reached unavailable instead of Request/recovery. The prior evidence
+service incorrectly permitted subject listing. Neither server permission nor core
+protocol is changed by this repair.
+
+Coordinator approved a feature-local explicit read scope from the already-gated
+group entry: ownRequests for approvalRequired, memberRequests for joined. Own is
+the default and is restored on leave. The list and detail carry the same scope
+across navigation. Scope chooses read endpoints only; it grants no membership,
+signing authority or transfer capability. Discovery is never used as membership.
+
+Own refresh reads retained local IDs and the explicitly selected request only.
+Member refresh still calls the member list and merges retained IDs. No409 or
+other error is swallowed as ready; storage errors remain visible. Existing active
+own requests are reopened through their retained request row after Back rather
+than an unauthorized server list. Native evidence now mirrors the actual
+member-only list permission using verified synthetic history and exact local key.
+
+Task delta: MobileAccountApprovalModel, ApprovalView, ApprovalDetailView,
+MobileAccountGroupSection, AccountApprovalEvidenceFixture and focused existing
+model/UI tests. No protected project/localization/production dependency file,
+server source or controller API changed. The lost-ack model test and native Back
+query now select the retained-own row; no cancellation/confirmation assertions
+were relaxed.
+
+- `.build/account-approval-own-scope-red.log/.xcresult`: actual controller plus
+  strict member-only fixture. New own-request entry assertion fails unavailable
+  versus ready. This is behavioral RED matching the real HTTP409 finding.
+- `.build/account-approval-own-scope-green.log/.xcresult`: approval model class
+  passes13/0, including own request creation/reconstruction/read-only detail,
+  zero subject list calls, storage failure, member list transport failure, member409
+  visibility and scope reset on leave. Both affected native matrices pass2/0 in
+  329.442 seconds, English/Chinese normal/XXXL. Full command exit0 TEST SUCCEEDED.
+- `.build/account-approval-own-scope-shipping.log/.xcresult`: final scope source
+  actual unsigned main application + Share compile passed, exit0 BUILD SUCCEEDED.
+  Existing AppIntents metadata-skipped warning remains.
+
+Commands are the earlier native/shipping commands with the same destination,
+cache and resolver flags. RED selects only
+`DropMeshTests/MobileAccountApprovalModelTests/testOwnRequestRefreshAvoidsMemberOnlyListAndPreservesRestartRecovery`.
+GREEN selects the approval model class plus exactly
+`DropMeshUITests/MobileAccountUITests/testApprovalNativeRequestConfirmationAndBackPreservesRequest`
+and `DropMeshUITests/MobileAccountUITests/testApprovalMemberInputAndFullCapsule`.
+No unrelated whole-application suite or iPad matrix is rerun: layout is unchanged;
+the two affected navigation/action matrices on iPhone receive fresh evidence.
+Manifest is refreshed against this scope-repair source and affected iPhone images;
+47 PNGs remain, including the prior iPad/layout and explicitly synthetic helper
+evidence. All66 file hashes validate. Protected task-only patch is unchanged.
+Swift/Xcode ownership was released immediately after these gates and the separately
+requested single interop count assertion rerun; no further build is scheduled.
+
 ## Remaining independent gates (unchanged)
 
 Independent review, actual Swift-controller/HTTP/Go/PostgreSQL interoperability,

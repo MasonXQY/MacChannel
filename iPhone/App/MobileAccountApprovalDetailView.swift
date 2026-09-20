@@ -6,6 +6,7 @@ import UIKit
 struct MobileAccountApprovalDetailView: View {
     let model: MobileAccountApprovalModel
     let requestID: String?
+    var readScope: MobileAccountApprovalReadScope = .ownRequests
     @State private var independentCode = ""
     @State private var owner = UUID()
     @FocusState private var inputFocused: Bool
@@ -70,7 +71,7 @@ struct MobileAccountApprovalDetailView: View {
         .navigationTitle("approval.detail.title")
         .scrollDismissesKeyboard(.interactively)
         .navigationBarTitleDisplayMode(.inline)
-        .task { model.beginPresentation(owner: owner); await model.open(requestID: requestID) }
+        .task { model.beginPresentation(owner: owner, readScope: readScope); await model.open(requestID: requestID) }
         .refreshable { await model.refresh() }
         .onChange(of: scenePhase) { _, value in
             if value == .active { Task { await model.refresh() } }

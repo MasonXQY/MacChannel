@@ -4,6 +4,33 @@ import UIKit
 @testable import DropMeshTestHost
 
 @MainActor final class MobileAccountApprovalModelTests: XCTestCase {
+    func testOwnRequestRefreshAvoidsMemberOnlyListAndPreservesRestartRecovery() async throws {
+        let f = try AccountApprovalEvidenceFixture(); await f.controller.restore()
+        do { _ = try await f.controller.pendingDeviceApprovals(); XCTFail("Unjoined subject must not list member requests") }
+        catch { XCTAssertEqual(error as? AccountGroupEnrollmentError, .conflict) }
+        let baselineLists = await f.service.calls.filter { $0 == "list" }.count
+        let m = MobileAccountApprovalModel(controller: f.controller)
+        await m.refresh()
+        XCTAssertEqual(m.phase, .ready, "Own request entry must not invoke member-only list")
+        guard m.phase == .ready else { return }
+        await m.prepareJoin(); await m.accept(id: try XCTUnwrap(m.confirmation).id)?.value
+        let request = try XCTUnwrap(m.detail).summary.requestID
+        let restarted = f.reconstructed(); await restarted.restore()
+        let recovered = MobileAccountApprovalModel(controller: restarted)
+        await recovered.refresh()
+        XCTAssertEqual(recovered.phase, .ready); XCTAssertEqual(recovered.recoveryRequestIDs, [request])
+        XCTAssertTrue(recovered.requests.isEmpty)
+        let writes = await f.intents.writes
+        await recovered.open(requestID: request); await recovered.refresh()
+        XCTAssertEqual(recovered.detail?.phase, .waitingForMember)
+        let afterWrites = await f.intents.writes; XCTAssertEqual(afterWrites, writes)
+        let calls = await f.service.calls
+        XCTAssertEqual(calls.filter { $0 == "list" }.count, baselineLists)
+        XCTAssertEqual(calls.filter { $0 == "create" }.count, 1)
+        let pins = await f.group.checkpoints.writes; XCTAssertEqual(pins, 0)
+        await f.intents.protect(true); await recovered.refresh()
+        XCTAssertEqual(recovered.phase, .secureStorageError, "Own scope must not hide storage failure")
+    }
     func testAccountReplacementCannotReceiveFormerGatedCompletion() async throws {
         let first = try AccountApprovalEvidenceFixture(), second = try AccountApprovalEvidenceFixture()
         let loader = ApprovalControllerLoader(first.controller)
@@ -155,8 +182,8 @@ import UIKit
         XCTAssertEqual(m.phase, .unavailable)
         XCTAssertNotNil(m.selectedRequestID, "A lost acknowledgment retains a reachable explicit Resume action")
         await m.refresh()
-        let request = try XCTUnwrap(m.requests.first)
-        await m.open(requestID: request.requestID)
+        let request = try XCTUnwrap(m.recoveryRequestIDs.first)
+        await m.open(requestID: request)
         let before = await f.service.calls.filter { $0 == "create" }.count
         XCTAssertEqual(before, 1)
         await m.resume()
@@ -195,6 +222,7 @@ import UIKit
     func testMemberRejectionRequiresConfirmationAndAcceptsExactlyOnce() async throws {
         let f = try await AccountApprovalEvidenceFixture.memberEvidence(proposed: false)
         let m = MobileAccountApprovalModel(controller: f.controller)
+        m.beginPresentation(owner: UUID(), readScope: .memberRequests)
         await m.refresh()
         let request = try XCTUnwrap(m.requests.first).requestID
         await m.open(requestID: request)
@@ -212,6 +240,28 @@ import UIKit
         XCTAssertEqual(m.detail?.phase, .rejected)
         let after = await f.service.calls
         XCTAssertEqual(after.filter { $0 == "reject" }.count, 1)
+    }
+    func testMemberReadScopePreservesDenialAndTransportErrorsAndClearsOnLeave() async throws {
+        let member = try AccountApprovalEvidenceFixture(member: true); await member.controller.restore()
+        let m = MobileAccountApprovalModel(controller: member.controller)
+        let owner = UUID(); m.beginPresentation(owner: owner, readScope: .memberRequests)
+        await m.refresh(); XCTAssertEqual(m.phase, .ready)
+        let listed = await member.service.calls.filter { $0 == "list" }.count; XCTAssertEqual(listed, 1)
+        await member.service.lose("list"); await m.refresh()
+        XCTAssertEqual(m.phase, .unavailable); XCTAssertNotNil(m.messageKey)
+        await m.refresh(); XCTAssertEqual(m.phase, .ready)
+        m.leave(owner: owner); XCTAssertEqual(m.readScope, .ownRequests)
+        let before = await member.service.calls.filter { $0 == "list" }.count
+        await m.refresh()
+        let after = await member.service.calls.filter { $0 == "list" }.count; XCTAssertEqual(after, before)
+
+        let subject = try AccountApprovalEvidenceFixture(); await subject.controller.restore()
+        let denied = MobileAccountApprovalModel(controller: subject.controller)
+        denied.beginPresentation(owner: UUID(), readScope: .memberRequests)
+        await denied.refresh()
+        XCTAssertEqual(denied.phase, .unavailable, "A member-route409 must not become ready")
+        XCTAssertNotNil(denied.messageKey)
+        denied.leave(); await denied.refresh(); XCTAssertEqual(denied.phase, .ready)
     }
     private func entered(_ gate: GroupEvidenceGate) async {
         for _ in 0..<200 {
