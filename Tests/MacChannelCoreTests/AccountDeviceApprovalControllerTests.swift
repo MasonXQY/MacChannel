@@ -3,6 +3,63 @@ import XCTest
 @testable import MacChannelCore
 
 final class AccountDeviceApprovalControllerTests: XCTestCase, @unchecked Sendable {
+    func testReceiptExpiryKnownSubjectTimesCannotBeSubstitutedBeforeSigning() async throws {
+        for delta: Int64 in [-300_001, -1_000, 1_000] {
+            let f = try await approvalAwaitingSubject()
+            let changed = try approvalReceipt(f.proposal, createdAtMilliseconds: UInt64(2_000_000_000_000 + delta))
+            await f.subject.service.set(changed)
+            let writes = f.subject.secret.writes, calls = await f.subject.service.calls
+            await approvalFailure(.requestConflict) { try await f.subject.controller.confirmDeviceJoinConfirmation(ticketID: f.ticket.id) }
+            let after = await f.subject.service.calls
+            XCTAssertEqual(f.subject.secret.writes, writes)
+            XCTAssertEqual(after.filter { $0 == "countersign" }.count, calls.filter { $0 == "countersign" }.count)
+            XCTAssertEqual(after.filter { $0 == "history" }.count, calls.filter { $0 == "history" }.count,
+                "Substituted acknowledgment must be rejected at refetch before later dependencies")
+        }
+    }
+
+    func testReceiptExpiryLostAcknowledgmentCannotPersistSignedProofAfterLearningExpiredTime() async throws {
+        let f = try await approvalAwaitingSubject(lostCreateAcknowledgment: true)
+        let before = try await f.subject.intents.list(binding: f.subject.binding, accountID: groupAccount)
+        XCTAssertNil(before.first?.acknowledgment)
+        await f.subject.service.set(try approvalReceipt(f.proposal, createdAtMilliseconds: 1_999_999_699_999))
+        let writes = f.subject.secret.writes
+        do { _ = try await f.subject.controller.confirmDeviceJoinConfirmation(ticketID: f.ticket.id); XCTFail("Expired receipt") } catch {}
+        let after = try await f.subject.intents.list(binding: f.subject.binding, accountID: groupAccount)
+        XCTAssertEqual(f.subject.secret.writes, writes, "Expired receipt must not persist the signed phase")
+        XCTAssertTrue(after == before, "Exact original unsigned intent must remain")
+        let calls = await f.subject.service.calls; XCTAssertFalse(calls.contains("countersign"))
+    }
+
+    func testReceiptExpiryNewEarlierDeadlineSurvivesSuspendedHistory() async throws {
+        let f = try await approvalAwaitingSubject(lostCreateAcknowledgment: true)
+        await f.subject.service.set(try approvalReceipt(f.proposal, createdAtMilliseconds: 1_999_999_705_000))
+        let gate = ApprovalGate(), writes = f.subject.secret.writes
+        await f.subject.service.gate("history", gate)
+        let task = Task { try await f.subject.controller.confirmDeviceJoinConfirmation(ticketID: f.ticket.id) }
+        await gate.wait()
+        f.subject.clock.advance(6)
+        await gate.release()
+        do { _ = try await task.value; XCTFail("Newly learned deadline expired during history") } catch {}
+        XCTAssertEqual(f.subject.secret.writes, writes)
+        let records = try await f.subject.intents.list(binding: f.subject.binding, accountID: groupAccount)
+        guard case .active(.subjectRequested) = records.first?.phase else { return XCTFail("Expired consent signed") }
+        let calls = await f.subject.service.calls; XCTAssertFalse(calls.contains("countersign"))
+    }
+
+    func testReceiptExpiryActorRefetchRejectsEarlierAndLaterTimesBeforeCommit() async throws {
+        for delta: Int64 in [-300_001, -1_000, 1_000] {
+            let f = try await approvalAwaitingSubject()
+            _ = try await f.subject.controller.confirmDeviceJoinConfirmation(ticketID: f.ticket.id)
+            let signed = try await f.subject.service.groupJoin(accessToken: "", accountID: groupAccount, requestID: f.proposal.summary.requestID)
+            await f.actor.service.set(try approvalReceipt(signed, createdAtMilliseconds: UInt64(2_000_000_000_000 + delta)))
+            let writes = f.actor.secret.writes
+            await approvalFailure(.requestConflict) { try await f.actor.controller.resumeDeviceApproval(requestID: signed.summary.requestID) }
+            let calls = await f.actor.service.calls
+            XCTAssertFalse(calls.contains("commit"), "Changed acknowledgment reached Commit")
+            XCTAssertEqual(f.actor.secret.writes, writes)
+        }
+    }
     func testCodeLessCommittedReadNeverPublishesMembershipEvenWithRetainedProof() async throws {
         let pair = try await completedPair()
         let pins = pair.actor.pins.writes, intents = pair.actor.secret.writes

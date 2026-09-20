@@ -181,3 +181,37 @@ func approvalAnchor(_ identity: DeviceIdentity) throws -> AccountGroupEvent {
         subjectDeviceID: id, subjectPublicKey: key, epochMilliseconds: 2_000_000_000_000)
     return try .init(canonicalPayload: event.canonicalPayload(), signature: identity.sign(event.canonicalPayload()).derRepresentation, subjectSignature: Data())
 }
+
+/// Real controller preparation through the actor proposal, with optional lost Create acknowledgment.
+func approvalAwaitingSubject(lostCreateAcknowledgment: Bool = false) async throws
+    -> (actor: ApprovalControllerFixture, subject: ApprovalControllerFixture,
+        proposal: AccountGroupPendingRequest, ticket: AccountDeviceApprovalTicket) {
+    let member = try DeviceIdentity.ephemeral(), anchor = try approvalAnchor(member)
+    let actor = try ApprovalControllerFixture(identity: member, history: [anchor])
+    let subject = try ApprovalControllerFixture(history: [anchor])
+    await actor.controller.restore(); await subject.controller.restore()
+    _ = try await actor.verifier.confirm(anchor: anchor, expectedAccountID: groupAccount, expectedGroupID: groupID,
+        expectedGeneration: 1, expectedAnchorHash: anchor.digest(), binding: actor.binding)
+    let join = try await subject.controller.prepareDeviceJoin()
+    if lostCreateAcknowledgment { await subject.service.lose("create") }
+    do { _ = try await subject.controller.confirmDeviceJoin(ticketID: join.id) }
+    catch { guard lostCreateAcknowledgment, error as? AccountServiceError == .transport else { throw error } }
+    let id = join.presentation.requestID
+    let requested = try await subject.service.groupJoin(accessToken: "", accountID: groupAccount, requestID: id)
+    await actor.service.set(requested)
+    let approve = try await actor.controller.prepareDeviceApproval(requestID: id)
+    let code = try AccountDeviceApprovalRequestContext(origin: subject.binding.origin, summary: requested.summary).requestCode
+    let proposed = try await actor.controller.confirmDeviceApproval(ticketID: approve.id, joiningCode: code)
+    let proposal = try await actor.service.groupJoin(accessToken: "", accountID: groupAccount, requestID: id)
+    await subject.service.set(proposal)
+    let ticket = try await subject.controller.prepareDeviceJoinConfirmation(requestID: id, memberCode: proposed.memberCode!)
+    return (actor, subject, proposal, ticket)
+}
+
+func approvalReceipt(_ request: AccountGroupPendingRequest, createdAtMilliseconds: UInt64) throws -> AccountGroupPendingRequest {
+    let s = request.summary
+    let summary = try AccountGroupPendingSummary(requestID: s.requestID, accountID: s.accountID, groupID: s.groupID,
+        generation: s.generation, deviceID: s.deviceID, publicKey: s.publicKey, status: s.status,
+        createdAtMilliseconds: createdAtMilliseconds, expiresAtMilliseconds: createdAtMilliseconds + 300_000)
+    return try .init(summary: summary, draft: request.draft, event: request.event, eventHash: request.eventHash)
+}

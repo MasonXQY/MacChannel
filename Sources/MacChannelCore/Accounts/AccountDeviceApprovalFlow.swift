@@ -172,6 +172,7 @@ struct AccountDeviceApprovalFlow: Sendable {
         let request = try validated(await call { try await pending.createGroupJoin(accessToken: token, accountID: account,
             requestID: intent.scope.requestID, groupID: intent.groupID, generation: intent.generation) },
             request: intent.scope.requestID, expected: intent.request)
+        try match(request, intent: intent, mutation: true)
         try live(intent)
         let retained = try await replace(intent, intent.replacing(phase: intent.phase, acknowledgment: acknowledgment(request)))
         return try await reconcile(request, intent: retained, mayPin: false)
@@ -236,6 +237,7 @@ struct AccountDeviceApprovalFlow: Sendable {
         }
         guard request.summary.status == .proposed, let intent = try await load(id, .subject), intent.request == context,
               case .active(.subjectRequested) = intent.phase else { throw AccountDeviceApprovalError.requestConflict }
+        try match(request, intent: intent)
         try live(intent); try predecessor(snapshot, draft.event)
         return try ticket(.confirmJoin, request: context, deadline: min(intent.confirmationDeadline, request.summary.expiresAt),
             fingerprint: capsule.fingerprint, value: .countersign(intent, proof))
@@ -245,6 +247,7 @@ struct AccountDeviceApprovalFlow: Sendable {
         guard try await load(intent.scope.requestID, .subject) == intent else { throw AccountDeviceApprovalError.requestConflict }
         let request = try validated(await get(intent.scope.requestID), request: intent.scope.requestID, expected: intent.request, proof: proof)
         guard request.summary.status == .proposed, request.draft == proof.draft else { throw AccountDeviceApprovalError.requestConflict }
+        try match(request, intent: intent, mutation: true)
         let events = try await history(intent.groupID)
         let snapshot = try await inspect(events, intent.request, proof.capsule.anchorHash)
         try predecessor(snapshot, proof.draft.event); try live(intent)
@@ -265,6 +268,7 @@ struct AccountDeviceApprovalFlow: Sendable {
     }
     func commit(_ intent: Intent, _ proof: Intent.Proof, _ receipt: AccountGroupPendingRequest) async throws -> AccountDeviceApprovalView {
         try live(intent)
+        try match(receipt, intent: intent, mutation: true)
         guard intent.scope.role == .actor, receipt.draft == proof.draft, receipt.event != nil else { throw AccountDeviceApprovalError.requestConflict }
         let request = try validated(await call { try await pending.commitGroupJoin(accessToken: token, accountID: account,
             requestID: intent.scope.requestID, draftHash: proof.canonicalPayloadDigest) }, request: intent.scope.requestID,
@@ -305,10 +309,23 @@ struct AccountDeviceApprovalFlow: Sendable {
         default: return nil
         }
     }
-    func match(_ request: AccountGroupPendingRequest, intent: Intent) throws {
+    func match(_ request: AccountGroupPendingRequest, intent: Intent, mutation: Bool = false) throws {
         _ = try validated(request, request: intent.scope.requestID, expected: intent.request, proof: retainedProof(intent))
+        // Server acknowledgment is immutable once learned. Neither earlier nor
+        // later timestamps may replace an already confirmed pair.
+        if let known = intent.acknowledgment, try known != acknowledgment(request) {
+            throw AccountDeviceApprovalError.requestConflict
+        }
         if case .subjectCountersigned(_, let retained) = intent.activePredecessor,
            let received = request.event, received != retained { throw AccountDeviceApprovalError.requestConflict }
+        if mutation {
+            // A lost Create response can leave no durable acknowledgment. Bound
+            // this operation immediately to the newly fetched expiry, before
+            // signatures, proof writes or HTTP, and across all following awaits.
+            try live(intent)
+            authorization.restrict(to: request.summary.expiresAt)
+            try check()
+        }
     }
     func read(_ id: String, publishMembership: Bool = false) async throws -> AccountDeviceApprovalView {
         let request = try await get(id)
@@ -340,6 +357,7 @@ struct AccountDeviceApprovalFlow: Sendable {
         case .subjectRequested: return try await sendCreate(intent)
         case .actorProposed(let proof):
             let request = try validated(await get(id), request: id, expected: intent.request, proof: proof)
+            try match(request, intent: intent, mutation: request.summary.status.active)
             if request.summary.status == .countersigned { return try await commit(intent, proof, request) }
             if request.summary.status == .requested || request.summary.status == .proposed { return try await sendProposal(intent, proof) }
             return try await reconcile(request, intent: intent, mayPin: true)
