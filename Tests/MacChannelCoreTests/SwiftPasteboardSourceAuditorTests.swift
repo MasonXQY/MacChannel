@@ -30,6 +30,13 @@ private func copyPolicy(sources: [String: String]) -> Bool {
 }
 
 final class SwiftPasteboardSourceAuditorTests: XCTestCase {
+    func testExplicitCopyRequiresExactVisibleCopyLabel() {
+        XCTAssertTrue(copyPolicy())
+        for label in ["continue", "", "approval.copy ", "Approval.Copy"] {
+            XCTAssertFalse(copyPolicy(button: "Button(\"\(label)\") { ExplicitApprovalCodeCopy.copy(code) }"), label)
+        }
+    }
+
     func testExplicitCopyBoundaryAllowsOnlyCompleteWriteOnlyAdapterAndButton() {
         XCTAssertTrue(copyPolicy())
         XCTAssertTrue(copyPolicy(adapter: copyAdapter.replacingOccurrences(of: "UIPasteboard.general.string = code",

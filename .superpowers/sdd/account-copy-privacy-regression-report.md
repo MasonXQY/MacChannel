@@ -142,7 +142,7 @@ this incremental build log. Signing remained disabled; no install was performed.
 only the new adapter plus the approval view import/action substitution, and the
 auditor retains its original production inventory and legacy send boundary.
 
-Frozen source SHA-256:
+Original correction source SHA-256 (`40f4a0e`, before the supplemental test below):
 
 ```text
 9eea4418a061bc57cb8920b6df71921e520a7059c147ed270d77d16d4455dc44  Sources/DropMeshMobileRuntime/ExplicitApprovalCodeCopy.swift
@@ -161,3 +161,30 @@ the evidence here. No visual changes were made or claimed. The complete Swift
 suite's existing tests exercise their own fixtures, independently of the adapter.
 Separate localization capture diagnosis, independent Copy review and any shipping
 installation/Store acceptance remain outside this correction.
+
+## Exact-label review verification supplement
+
+Independent review alleged that `Button("continue")` would pass because string
+literal token kinds omitted their contents. Source inspection and an executable
+regression contradict that finding: `SwiftSourceToken.Kind.stringLiteral(String)`
+stores the literal value; tokenize passes `stringScan.literalValue`; the scanner
+appends literal characters, and synthesized Equatable compares associated values
+in the existing `.map(\.kind)` comparison. No auditor or production change was
+needed or made for this alleged bypass.
+
+Added `testExplicitCopyRequiresExactVisibleCopyLabel`: accepts `approval.copy`,
+rejects `continue`, empty, trailing-space and differently capitalized labels.
+On the **unchanged** committed auditor:
+
+```sh
+swift test --disable-automatic-resolution --filter 'SwiftPasteboardSourceAuditorTests/testExplicitCopyRequiresExactVisibleCopyLabel'
+```
+
+`/tmp/account-copy-label-review-verification.log`: exit0, 1 test, 0 failures.
+This is coverage for existing correct behavior, not a behavioral RED or a new
+implementation fix. The only supplement source change is this seven-line test.
+
+The full focused command from above was then rerun:
+`/tmp/account-copy-label-focused.log`: exit0, **32 tests, 0 failures, 0 skips**
+(31 auditor cases plus the production inventory), 2.463s tests. Localization's
+separate unstaged capture changes are not part of this supplement commit.
