@@ -9,11 +9,18 @@ and Share BUILD SUCCEEDED plus embedded privacy check PASS. No app/runtime calls
 the new overload. Root checked source hashes and actual logs; report/review are
 native-channel-authorization-{report,review}.md. Known full-suite OCR failure remains.
 
-Go router8ae6148 independent review NEEDS FIXES: nil-mode typed-envelope decoding
-regresses legacy unknown-field behavior; required router lifecycle/adversarial
-matrix incomplete. mobile_adapter_regression_review owns the sole corrective
-implementation and Go cache qIjA8g, per account-route-router-review.md. No remote
-or native activation. Root owns integration and subsequent independent re-review.
+Go router8ae6148 corrected by6b95c03, independently Approved/no findings in
+account-route-router-rereview.md. Legacy opaque-envelope compatibility has actual
+RED/GREEN; deterministic router lifecycle/adversarial matrix added. HTTP121PASS/
+19expectedSKIP/0FAIL; no-SQL full15packagesPASS/1no-tests; routeauth+httpapi racePASS.
+Root fresh55462 serial focusedHTTP rerun at6b95c03:16topPASS/0SKIP/0FAIL, including
+realPostgres session-revocation route denial, log/tmp/account-router-root-6b95c03-http-sql.log.
+Cluster stopped afterward. First restart omitted Unix/port options and failed on
+occupied default5432; retried exactUnix-only55462 successfully, no other server touched.
+No remote/native activation. Native attempts/listener now sole implementation
+account_route_admission owns Swift/Xcode caches; requirements in
+native-attempts-authorization-seams.md. Preserve exact lease, legacy constructors,
+error-path checks, joined late-channel closure. Root owns review/docs only.
 
 IMPORTANT TEST FIXTURE INCIDENT: implementation ran existing accountgroup tests
 that TRUNCATE CASCADE on old local synthetic SQL55461 despite no-reset instruction.

@@ -1,5 +1,15 @@
 # iPhone continuation ledger
 
+6b95c03 Go router corrective implementation independently Approved/no findings;
+root read rereview and actual final logs. HTTP121PASS/19SKIP/0FAIL, full no-SQL
+15packagePASS/1no-tests, racePASS. Root isolated55462 focusedHTTP16topPASS/0SKIP/
+0FAIL1.829s includes realSQL revoke denial; unique log account-router-root-6b95c03-http-sql.log.
+Restart initially failed default5432 bind (missing prior command-line options),
+then explicitUnix-only55462 worked; stopped after verification. NoSQLcurrentlyrunning.
+Nativeattempts/listener soleimplementer account_route_admission withSwift/Xcodecache;
+root read full141line seam audit, dispatched8group matrix. No runtime activation,
+installation or deployment. Go reviewer/implementer released, indexempty.
+
 Go8ae6148 reviewNeedsFixes (legacy envelope decode + missingrouter matrix).
 Originalimplementer owns correctiononly; noSQL. RootserializedfreshfixtureSQL
 group75top/281allPASS/3SKIP/0FAIL44.021s +HTTP8/0SKIP/0FAIL0.657s. BothclustersSTOPPED.
