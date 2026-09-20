@@ -2,6 +2,34 @@
 
 ## Current mainline decision — 2026-09-20
 
+CURRENT OWNERS: native_device_approval_ui now runs the actual two-controller
+HTTP/SQL interop task, owning Swift/cache, newinteroptestfiles, SQL55461 and isolated
+Go cache /private/tmp/dropmesh-approval-go-cache.qIjA8g. account_route_admission now
+owns new routeauth connection/queue package and default Go cache, no SQL. Root owns
+database shutdown and docs/review coordination. SQL55461 is RUNNING socket-only.
+Native owner782bb39, SQL admission465930c and approval UI incl40d0683 are all
+independently Approved as bounded components; no feature activation or install.
+Fresh-agent creation hit the thread limit, so explicit existing-agent reassignment
+is recorded in progress.md. Core expiry rereview Approved/no findings. Mobile adapter supplement
+Approved/no findings, actual2/0 +unsigned main/Share compile root-verified; original
+Minor1 closed. Brief native-device-approval-ui-brief.md. Root prepares local actual
+HTTP/SQL approval acceptance, not live activation. Older chronological entries below
+are history, not active owner instructions.
+
+LATEST: expiry fix 05f7ae7/report ae3023e has actual RED4/9 assertions and GREEN25/0
+verified by root; independent rereview reports Important resolved (final pending).
+mobile_six_digit_host owns source/cache for direct production adapter failure
+coverage supplement; existing mobile host independent review Approved, no blockers.
+Next: native approval UI brief after adapter cache release and final core approval.
+
+Mobile host implemented with 63 core, 23 model, 2 recovery, 8 native UI and
+3 real disk-reload tests passing, actual unsigned main/Share build passed. Root
+inspected logs and three renders. Independent mobile_six_digit_host_review active
+on final task-only patch sha25655bb73de... (report mobile-six-digit-host-report.md).
+Source uncommitted to preserve existing dirty UI; manifest freezes exact files.
+No installed/App Store change. native_device_approval_controller is now sole
+implementation/cache owner for expiry rework brief; mobile reviewer read-only.
+
 User explicitly chose the current development version as the single mainline;
 finish it, verify it, and update the existing App Store app. Do not create a
 separate old-version hotfix branch. Preserve bundle identity and existing files.

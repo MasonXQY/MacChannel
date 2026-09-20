@@ -1,5 +1,211 @@
 # iPhone continuation ledger
 
+Task native approval UI complete incl40d0683 review repair; independent rereview
+Approved/no findings, both issues resolved (actual short-code impact clarified).
+native_device_approval_ui now explicitly reassigned TWO-CONTROLLER INTEROP task
+per native-device-approval-interop-brief.md; owns Swift/cache, newinteroptestfiles,
+SQL55461 restarted/guardverified by root, isolatedGoCache.qIjA8g. Go routeauth agent
+owns separate files/defaultGoCache; no shared cache/source/SQL. Root owns DBstop.
+
+Task native-peer-authorization complete (4c41d3e..782bb39, reportbf30619), independent
+Approved/no findings, saved native-peer-authorization-review.md. Actual77/0 verified.
+Not wired. UI semantic/reject focused fix running with soleSwift/index ownership;
+Go routeauth owner independent. Next after UI rereview: actual two-controller HTTP/
+SQL interop using isolated Go cache, restart dedicated stopped SQL fixture first.
+
+Native owner reportbf30619, independent login_challenges_review active read-only on
+4c41d3e..782bb39. Root read full report/actual77XCTest pass counts. UI owns Swift and
+index for scoped repair. Actual request code is short; >160 premise failure is NOT
+semantic RED. Approved synthetic long-request-title shipping helper render in
+test host only (private->internal), one-line title fix retained. No crypto changes.
+
+Native peer owner source782bb39 complete; root actual XCTest77/0 inspected in
+/tmp/native-peer-owner-regression.log (21new owner tests plus focused regressions).
+Package review-4c41d3e..782bb39.diff prepared; report pending, then independent review.
+Swift/cache handed to original UI agent for focused VoiceOver/reject RED/GREEN and
+incremental shipping build. Peer owner briefly retains index only for report commit.
+Go routeauth owner remains independent; no current agent uses SQL fixture (stopped).
+
+Fresh SQL55461 fixture now STOPPED cleanly by root (pg_ctl explicit data path);
+synthetic rows retained, no deletion. Interop brief updated for restart prerequisite.
+account_route_admission now owns independent new routeauth Go/cache task per
+account-route-owner-brief.md; no SQL. Native peer owner has RED12/22 assertions and
+GREEN work ongoing. UI review fix tests prepared; original wrong label retained
+for focused RED after Swift cache handoff. Root owns index currently free.
+
+UI independent review Needs fixes: long request code VoiceOver label incorrectly
+says Member verification code (Important); direct actor reject test Minor. Saved
+native-device-approval-ui-review.md. Original UI agent prepares scoped fix/tests,
+NO builds until native peer owner releases cache. Both findings will be covered.
+No UI approval claim until covering test report and independent rereview.
+
+Task account-route-admission complete (ae3023e..465930c, independent Approved,
+no findings). Review saved account-route-admission-review.md; root resolves runtime
+evidence caveat with inspected RED/final focused/race logs. UI commits1dfc4dc and
+4c41d3e frozen; independent mobile_adapter_regression_review now reviews clean diff
+465930c..4c41d3e plus protected-task-only.patch. Index free. Native peer owner ongoing.
+
+Route component committed465930c, source/cache/SQL released. Root inspected final
+focused16.414s and race15.824s PASS logs/report. Independent read-only review active
+via login_challenges_review on ae3023e..465930c frozen package. SQL fixture retains
+only synthetic account/session/group data, no connections/transactions/children.
+UI all gates now pass: finaliPhone2UI+1model, iPad4UI, unsigned shipping main+Share;
+root read actual logs and viewed834 AXXXL expiry. UI agent owns index slot only to
+commit clean owned files plus protected task patch/manifest; Swift cache RELEASED.
+Fresh spawn hit agent-thread limit; account_route_plan explicitly reassigned the
+independent native-peer-authorization-brief implementation, sole Swift/cache owner.
+No UI/controller/transport wiring. Root owns docs, reviews and fixture shutdown.
+HTTP/SQL interop remains queued until Swift owner releases and UI review approves.
+
+Root visual verification: final en-AXXXL-expiry.png is vertically stacked and
+readable; en-AXXXL-approval-member.png shows action error plus Try Again without
+keyboard obstruction. Actual outcomes log member UI passed186.931s; request/iPad
+and full task freeze still pending. Shipping-final unsigned BUILD SUCCEEDED.
+Route agent has real SQL RED/GREEN in progress and is fixing context-cancellation
+auto-rollback lock lifetime with a deterministic callback/barrier test; not reviewed.
+
+Parallel ownership update: native_device_approval_ui owns Swift/UI/Xcode only;
+account_route_admission owns scoped Go accountgroup route_admission files/helper,
+Go cache and disposable SQL55461 fixture. No overlapping source/cache ownership.
+Interop task waits until BOTH owners release. Root coordinates git commit slots.
+Route brief account-route-admission-brief.md, report same prefix; no live activation.
+UI expiry AXXXL two-column compression was reproduced with actual screenshot and
+behavioral layout RED; vertical fix and final focused tests in progress.
+
+Root prepared fresh SQL interop fixture at /private/tmp/dropmesh-approval-interop.oczZ2o/data,
+RUNNING PostgreSQL16 socket-only55461 mode0700; named group DB migrations001..011,
+empty accounts/events/pending. Root owns shutdown. Older two fixtures stay stopped.
+No test agent dispatched yet; native UI remains sole source/cache owner.
+
+Adapter supplement complete/review Approved, patch88b68632... and source manifest
+31eca745...; actual2/0 plus shipping compile inspected by root. Minor1 closed.
+native_device_approval_ui now sole source/cache owner at HEADae3023e plus protected
+dirty mobile changes. Brief native-device-approval-ui-brief.md; report same prefix.
+Ownership includes clean MobileAccountEvidenceHost test composition. No activation.
+
+Expiry rework complete (93aabe5..05f7ae7, report ae3023e), independent rereview
+Approved/spec compliant/no findings. Root actual RED4/9 failures and GREEN25/0
+checked. Rereview saved native-device-approval-expiry-rereview.md. Mobile host agent
+now sole cache/source owner for adapter coverage supplement. Native UI ready after
+handoff; cross-language two-controller acceptance brief prepared, not dispatched.
+
+Mobile host independent review Approved/no Critical or Important. Minor direct
+ProductionPairingAttempt failure-overlay/approve guard regression queued after
+current expiry fix releases cache, before whole-branch acceptance. Existing
+AppIntents warning retained; use explicit arm64 for future simulator commands.
+Review saved mobile-six-digit-host-review.md. No physical/install/release claim.
+
+Mobile six-digit host implemented/local acceptance finished; independent review
+mobile_six_digit_host_review active on frozen /tmp/mobile-host-task-only.patch,
+sha25655bb73dec22c42bd9b7454540ab2ac052f4e1ea5b910a19a2fccf05e07fb171d.
+Root read report and actual core63/0, model23+recovery2/0, phoneUI6/0, finaliPad2/0,
+diskreload3/0, unsigned iOS main+Share BUILD SUCCEEDED. Root viewed ZHphone waiting,
+ENXXXL approval and ZHipad approval. No device install/live change. Report/evidence
+under mobile-six-digit-host-report.md / iPhone/Tests/Evidence/PairingHost.
+native_device_approval_controller now sole implementer/cache owner for bounded
+expiry review fix; brief native-device-approval-expiry-fix-brief.md. Accounts files
+independent of frozen mobile review. Next UI still gated on core rereview approval.
+
+Mobile host ongoing: root inspected model21/0 and later core59/0 logs. Native
+XXXL repeated instructions fixed; stale UI target intermediate moved recoverably,
+targeted rebuilt test1/0 inspected. iPad/network/shipping checks pending. Approved
+bounded scope extension: RendezvousPairingTransport serveHost currently silently
+returns on network failure. Add code/attempt-scoped failure observation and adapter
+action guard, intentional stop not error, never mask durable save/paired state.
+Agent must snapshot extra transport file and include URLProtocol regression/delta.
+Root docs commit93aabe5 records unified release gate. Next account expiry fix brief
+ready, then native-device-approval-ui-brief.md; no implementation dispatched yet.
+
+2026-09-20 latest: user chose current development mainline then App Store update,
+not separate old-version hotfix. mobile_six_digit_host active, sole implementation/
+Swift cache owner; baseline HEAD969d614 with protected dirty source.
+Recovery task locally complete: supplemental test 1/0 inspected by root; independent
+supplement review Approved/no findings closes sustained-progress Minor. Source
+not yet installed/shipped. Account controller expiry fix remains queued.
+
+Recovery review Approved/noCriticalImportant. One Minor sustained-progress test gap
+queued to same fix agent as test-only deterministic gate supplement; no source changes.
+Root saw7model+3UI/0 +shippingcompile and2captures. Source remains unstaged by explicit
+preservation exception; originaltaskpatch sha2565d6fe894...; report+review retained.
+Next mobile-six-digit-host-brief.md extracted from plan; dispatch aftercache release.
+Corecontroller review Needs fixes(new receipt expiry before signature/Commit), queued;
+account UI/activation must wait. PublicApplelookup confirms DropMesh Mobile1.0 live.
+
+USER new blockers: mobile host six-digit code missing; recovery alert callback likely
+clears consent before async action. Root source investigation complete; urgent repair
+brief mobile-recovery-callback-brief.md queued after current controller releases cache.
+No actual identity reset. Phone read-only shows dev1.0(8). Account route design DONE
+read-only account-server-route-design.md; no code or deployment evidence.
+
+ACTIVE native_device_approval_controller from80e183a, sole Swift cache/source owner
+for scoped controller/flow/inspection task. Intent review Approved. Root prepares
+native UI plan only. SQL fixtures stopped; no device/live changes. Requirements
+native-device-approval-controller-brief.md; report native-device-approval-controller-report.md.
+
+Task native-approval-intent: complete (commits bf8d4e2..e163302, review clean).
+Independent native_approval_intent_review Approved/no findings, including parser
+and nested-description dependency checks. Root read actual17+6logs. Controller
+brief ready at native-device-approval-controller-brief.md; root docs80e183a.
+
+Native intent e163302 DONE, independent native_approval_intent_review active.
+Root inspected report/logs17+6pass; actual checkpoint class correction recorded.
+Swift cache released, fixtures stopped. Frozen bf8d4e2..e163302 includes root
+docs a67fb22. Next controller plan ready; no installed/live changes.
+
+ACTIVE native_approval_intent from bf8d4e2, sole Swift cache owner. Requirements
+native-approval-intent-brief.md; report native-approval-intent-verification-report.md.
+Root docs-only a67fb22 added executable controller continuation and read-only
+history inspection/historical receipt recovery. Source ownership does not overlap.
+Do not dispatch controller before intent review. Fixtures stopped; no install/live.
+
+Task pending-native-transport: complete (commits e860480..a0dd9f7, review clean).
+pending_native_review Approved/no findings; root verified logs. Cross-task SQL
+authorization is accepted store/HTTP evidence; consent/history/physical remain
+next gates, not transport claims. Docs bf8d4e2; begin native approval intent next.
+
+Native transport a0dd9f7 DONE; pending_native_review active, frozen e860480..a0dd9f7.
+Root inspected final Swift40/0/0 and Go fixture PASS logs. Cache released. Next
+native-approval-intent-brief.md prepared but not dispatched until review. Read-only
+account-transfer-boundary report complete; no live/installed changes.
+
+ACTIVE pending_native_transport, base e860480, sole Swift/Go cache owner;
+task-1-brief remains native transport requirements. Root handles controller notes;
+account_transfer_boundary is read-only source mapping, report-only ownership.
+Both SQL fixtures stopped. No installed apps or production service changed.
+
+Task pending-approval-http: complete (commitsd90c454..b476a4f, review clean).
+Originald5bd647 passedSQLrace177/5skips; Important fullbody testlog fixedb476a4f,
+focusedSQLPASS1.114s, independent rereviewApproved. Rootverifieddiff/log and both
+fixturesstopped. Docs e860480. NextSwifttransport; cache free beforedispatch.
+
+HTTPd5bd647 independent pending_http_review active (base d90c454). Root inspected
+finalSQLrace177pass5skip + freshSQLpending0/schema restored. Both UNIX fixtures
+stopped/verified no server; all implementation cache ownership released.
+Next native shared transport; do not overwrite task-1-brief until review finishes.
+
+ACTIVE pending-approval-http agent pending_approval_http based90c454, soleGo cache;
+task-1-brief nowHTTP, exact transportcontract included. Native controller design
+agent native_approval_contract owns only report; root prepares native plans/UI
+refs. RootSQL fixture running; no activation/install/deploy.
+
+Task pending-approval-store: complete (commits96f708a..650007a, review clean).
+Independent pending_store_review approved, no findings. Cross-task HTTPauthority,
+nativeconsent and final lock-order review remain next gates; covered in contracts,
+not claimed complete. Docs checkpointd90c454. Proceed pending-approval-http.
+
+Pending-store650007a review active pending_store_review, frozen96f708a..650007a.
+Root read durable finalSQLracePASS46.867s/61pass3opt-in skip and verifies guarded
+pending table count0 after cleanup. Cache released. HTTPplan/contracts prepared
+but implementation waits independent review. Root owns running UNIXfixture.
+
+ACTIVE pending-approval-store base96f708a; sole implementer pending_approval_store
+owns Go cache, store/schema files. Root restarted UNIX PostgreSQL fixture
+/private/tmp/dropmesh-group-db.igBdYS:55459 and owns shutdown. Initial real SQL
+create/propose/countersign/commit GREEN reported; adversarial tests in progress,
+not accepted yet. Root prepared pending-approval-transport-contract outline only.
+Physical read confirms mini7 connected and iPhone16ProMax available(paired).
+No installation/deployment or feature flag changes this continuation.
+
 Task approval-draft-protocol: complete (commitse0774e8..d7b0efd, review clean).
 Independent account_ios_review Approved/spec compliant/no findings. Root fresh
 swift test --filter AccountGroupApprovalDraftTests PASS5/0fail and Go focused
