@@ -27,6 +27,44 @@ func TestDisabledConfigDoesNotReadFiles(t *testing.T) {
 	}
 }
 
+func TestGroupCapability(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+		valid bool
+	}{
+		{"", false, true}, {"0", false, true}, {"1", true, true},
+		{"true", false, false}, {"yes", false, false}, {"2", false, false}, {" 1", false, false},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.value), func(t *testing.T) {
+			got, err := groupCapability(tc.value)
+			if tc.valid {
+				if err != nil || got != tc.want {
+					t.Fatalf("groupCapability(%q) = %v, %v; want %v, nil", tc.value, got, err, tc.want)
+				}
+				return
+			}
+			if got || err != errConfiguration {
+				t.Fatalf("groupCapability(%q) = %v, %v; want false, errConfiguration", tc.value, got, err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigCarriesGroupCapability(t *testing.T) {
+	env := validEnvironment(t)
+	env["DROPMESH_ACCOUNT_GROUPS_ENABLED"] = "1"
+	c, err := loadConfig(mapGetter(env))
+	if err != nil || !c.groupsEnabled {
+		t.Fatalf("config = %#v, %v", c, err)
+	}
+
+	env["DROPMESH_ACCOUNT_GROUPS_ENABLED"] = "true"
+	if _, err := loadConfig(mapGetter(env)); err != errConfiguration {
+		t.Fatalf("error = %v, want errConfiguration", err)
+	}
+}
+
 func TestEnabledConfigRequiresEverySetting(t *testing.T) {
 	base := validEnvironment(t)
 	for _, key := range requiredEnvironment {

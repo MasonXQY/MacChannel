@@ -23,7 +23,7 @@ var requiredEnvironment = []string{
 
 type config struct {
 	ingress                                    ingress.Adapter
-	enabled                                    bool
+	enabled, groupsEnabled                     bool
 	teamID, keyID, audience, addr, databaseDSN string
 	applePrivateKey, credentialKey             []byte
 }
@@ -34,6 +34,10 @@ func (c config) GoString() string { return c.String() }
 func loadConfig(getenv func(string) string) (config, error) {
 	if getenv("DROPMESH_ACCOUNT_ENABLED") != "1" {
 		return config{}, nil
+	}
+	groupsEnabled, err := groupCapability(getenv("DROPMESH_ACCOUNT_GROUPS_ENABLED"))
+	if err != nil {
+		return config{}, errConfiguration
 	}
 	adapter, err := ingress.Parse(getenv("DROPMESH_ACCOUNT_TRUSTED_PROXY_IP"))
 	if err != nil {
@@ -65,8 +69,19 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if dsn == "" {
 		return config{}, errConfiguration
 	}
-	return config{enabled: true, ingress: adapter, teamID: values[requiredEnvironment[0]], keyID: values[requiredEnvironment[1]], audience: values[requiredEnvironment[2]],
+	return config{enabled: true, groupsEnabled: groupsEnabled, ingress: adapter, teamID: values[requiredEnvironment[0]], keyID: values[requiredEnvironment[1]], audience: values[requiredEnvironment[2]],
 		addr: values["DROPMESH_ACCOUNT_ADDR"], databaseDSN: dsn, applePrivateKey: p8, credentialKey: credential}, nil
+}
+
+func groupCapability(value string) (bool, error) {
+	switch value {
+	case "", "0":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, errConfiguration
+	}
 }
 
 func validLoopbackAddress(address string) bool {

@@ -13,6 +13,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"macchannel/rendezvous/internal/accountauth"
+	"macchannel/rendezvous/internal/accountgroup"
 	"macchannel/rendezvous/internal/auth"
 )
 
@@ -47,6 +48,11 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 	if err := checkSchema(startup, database); err != nil {
 		return fail()
 	}
+	if cfg.groupsEnabled {
+		if err := checkTables(startup, database, []string{"account_groups", "account_group_events"}); err != nil {
+			return fail()
+		}
+	}
 	audiences := []string{cfg.audience}
 	secrets, err := accountauth.NewAppleClientSecrets(cfg.teamID, cfg.keyID, cfg.applePrivateKey, audiences)
 	if err != nil {
@@ -69,15 +75,28 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 		return fail()
 	}
 	verifier := auth.NewVerifier(auth.VerifierConfig{ReplayStore: auth.NewPostgresReplayStore(database)})
-	accountHandler, err := accountauth.NewAccountHTTP(accountauth.AccountHTTPConfig{Verifier: verifier, Challenges: challenges, Login: login, Sessions: sessions})
+	httpConfig := accountauth.AccountHTTPConfig{Verifier: verifier, Challenges: challenges, Login: login, Sessions: sessions}
+	if cfg.groupsEnabled {
+		groups, err := accountgroup.NewPostgresStore(database)
+		if err != nil {
+			return fail()
+		}
+		httpConfig.Groups = groups
+		httpConfig.Enrollment = groups
+	}
+	accountHandler, err := accountauth.NewAccountHTTP(httpConfig)
 	if err != nil {
 		return fail()
 	}
-	return cfg.ingress.Wrap(newServiceMux(accountHandler, database.PingContext)), closeDatabase, nil
+	return cfg.ingress.Wrap(newServiceMux(accountHandler, database.PingContext, cfg.groupsEnabled)), closeDatabase, nil
 }
 
 func checkSchema(ctx context.Context, database *sql.DB) error {
-	for _, table := range requiredTables {
+	return checkTables(ctx, database, requiredTables)
+}
+
+func checkTables(ctx context.Context, database *sql.DB, tables []string) error {
+	for _, table := range tables {
 		var present bool
 		if err := database.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+table).Scan(&present); err != nil || !present {
 			return errStartup
@@ -86,7 +105,7 @@ func checkSchema(ctx context.Context, database *sql.DB) error {
 	return nil
 }
 
-func newServiceMux(account http.Handler, health func(context.Context) error) http.Handler {
+func newServiceMux(account http.Handler, health func(context.Context) error, groupsEnabled bool) http.Handler {
 	mux := http.NewServeMux()
 	for _, path := range []string{"/v1/account/login/challenge", "/v1/account/login/complete", "/v1/account/session/status", "/v1/account/session/refresh", "/v1/account/session/logout"} {
 		mux.Handle(path, account)
@@ -108,7 +127,17 @@ func newServiceMux(account http.Handler, health func(context.Context) error) htt
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	registerGroupRoutes(mux, account, groupsEnabled)
 	return mux
+}
+
+func registerGroupRoutes(mux *http.ServeMux, account http.Handler, enabled bool) {
+	if !enabled {
+		return
+	}
+	for _, path := range []string{"/v1/account/group/discover", "/v1/account/group/bootstrap", "/v1/account/group/events"} {
+		mux.Handle(path, account)
+	}
 }
 
 func serveHTTP(ctx context.Context, listener net.Listener, handler http.Handler) error {

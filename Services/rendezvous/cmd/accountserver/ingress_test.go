@@ -28,7 +28,7 @@ func TestAccountIngressHealthAndHandler(t *testing.T) {
 		if r.RemoteAddr != "198.51.100.1:1000" {
 			t.Errorf("source=%s", r.RemoteAddr)
 		}
-	}), func(context.Context) error { called = true; return nil }))
+	}), func(context.Context) error { called = true; return nil }, false))
 	for _, path := range []string{"/healthz", "/v1/account/login/challenge"} {
 		called = false
 		r := httptest.NewRequest("GET", path, nil)

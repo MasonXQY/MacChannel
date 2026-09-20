@@ -13,7 +13,7 @@ import (
 
 func TestMuxExposesOnlyAccountHandlerAndHealth(t *testing.T) {
 	account := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
-	h := newServiceMux(account, func(context.Context) error { return nil })
+	h := newServiceMux(account, func(context.Context) error { return nil }, false)
 	for _, tc := range []struct {
 		path string
 		want int
@@ -27,9 +27,29 @@ func TestMuxExposesOnlyAccountHandlerAndHealth(t *testing.T) {
 	}
 }
 
+func TestGroupRoutesRequireCapability(t *testing.T) {
+	account := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	paths := []string{"/v1/account/group/discover", "/v1/account/group/bootstrap", "/v1/account/group/events"}
+	for _, enabled := range []bool{false, true} {
+		h := newServiceMux(account, func(context.Context) error { return nil }, enabled)
+		want := http.StatusNotFound
+		if enabled {
+			want = http.StatusTeapot
+		}
+		for _, path := range paths {
+			r := httptest.NewRequest(http.MethodPost, path, nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != want {
+				t.Errorf("enabled=%v path=%s status=%d, want %d", enabled, path, w.Code, want)
+			}
+		}
+	}
+}
+
 func TestHealthFailureIsGeneric(t *testing.T) {
 	secret := "postgres://admin:password@example.invalid/private"
-	h := newServiceMux(http.NotFoundHandler(), func(context.Context) error { return errors.New(secret) })
+	h := newServiceMux(http.NotFoundHandler(), func(context.Context) error { return errors.New(secret) }, false)
 	r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -39,7 +59,7 @@ func TestHealthFailureIsGeneric(t *testing.T) {
 }
 
 func TestHealthRejectsOtherMethods(t *testing.T) {
-	h := newServiceMux(http.NotFoundHandler(), func(context.Context) error { return nil })
+	h := newServiceMux(http.NotFoundHandler(), func(context.Context) error { return nil }, false)
 	r := httptest.NewRequest(http.MethodPost, "/healthz", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
