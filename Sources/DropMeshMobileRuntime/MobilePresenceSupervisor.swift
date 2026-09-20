@@ -39,6 +39,23 @@ struct MobilePresenceSupervisor: Sendable {
             publication: publication, persistedUpdates: persistedUpdates, deadlineSleep: deadlineSleep)
     }
 
+    /// Explicit account plane. Its immutable endpoint and factory are supplied
+    /// together; the legacy initializer retains the existing manual endpoint.
+    init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+         accountOrigin: URL, accountController: AccountSessionController,
+         makeSocket: @escaping @Sendable () async throws -> any PresenceWebSocket,
+         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+         onState: @escaping @Sendable (MobilePresenceState) async -> Void = { _ in },
+         onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
+         publication: (@Sendable () async throws -> TrustPublicationSnapshot)? = nil,
+         persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)? = nil,
+         deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+        owner = AuthenticatedPresenceSupervisor(identity: identity, repository: repository,
+            directory: directory, origin: accountOrigin, makeSocket: makeSocket, sleep: sleep,
+            onState: onState, onTrustSyncState: onTrustSyncState, publication: publication,
+            persistedUpdates: persistedUpdates, deadlineSleep: deadlineSleep, accountController: accountController)
+    }
+
     func start() async { await owner.start() }
     func stop() async { await owner.stop() }
     func retryConnection() async { await owner.retryConnection() }

@@ -143,6 +143,11 @@ public actor AccountSessionController {
 
     public func snapshot() -> AccountSessionSnapshot { state }
 
+    /// A credential-free scheduling hint, never an attachment or peer grant.
+    /// The supervisor uses this before opening a socket; attach/bind still
+    /// perform their own authoritative checks after every suspension.
+    public func isAccountRouteReady() -> Bool { (try? requireRouteContext()) != nil }
+
     public func attachAccountRoute(to session: AuthenticatedPresenceSession) async throws -> AccountRouteAttachment {
         let context = try requireRouteContext()
         if let socket = routeSocket, socket.session === session, socket.contextID == context.id {

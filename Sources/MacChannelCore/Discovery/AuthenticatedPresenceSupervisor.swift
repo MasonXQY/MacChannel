@@ -46,6 +46,9 @@ public actor AuthenticatedPresenceSupervisor {
     private var retiredToken: PresenceSignalBridge.SocketToken?
     private var initialStop: Task<Void, Never>?
     private var finalDrain: Task<Void, Never>?
+    private let accountController: AccountSessionController?
+    private var accountAttachment: AccountRouteAttachment?
+    private var accountWorker: Task<Void, Never>?
 
     /// Transport and clock seam; tests still execute AuthenticatedPresenceSession.
     public init(
@@ -57,12 +60,13 @@ public actor AuthenticatedPresenceSupervisor {
         records: (@Sendable () async throws -> [SignedTrustRecord])? = nil,
         publication: (@Sendable () async throws -> TrustPublicationSnapshot)? = nil,
         persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)? = nil,
-        deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        accountController: AccountSessionController? = nil
     ) {
         self.init(identity: identity, repository: repository, directory: directory,
                   origin: origin, makeSocket: makeSocket, sleep: sleep, onState: onState,
                   onTrustSyncState: onTrustSyncState, records: records, publication: publication,
-                  persistedUpdates: persistedUpdates, deadlineSleep: deadlineSleep,
+                  persistedUpdates: persistedUpdates, deadlineSleep: deadlineSleep, accountController: accountController,
                   makeClient: { PresenceClient(directory: $0) })
     }
 
@@ -77,6 +81,7 @@ public actor AuthenticatedPresenceSupervisor {
         publication: (@Sendable () async throws -> TrustPublicationSnapshot)? = nil,
         persistedUpdates: (@Sendable () async -> AsyncStream<AuthenticatedTrustState?>)? = nil,
         deadlineSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        accountController: AccountSessionController? = nil,
         makeClient: @escaping @Sendable (DeviceDirectory) -> PresenceClient
     ) {
         self.origin = origin
@@ -94,6 +99,7 @@ public actor AuthenticatedPresenceSupervisor {
         }
         self.persistedUpdates = persistedUpdates
         self.deadlineSleep = deadlineSleep
+        self.accountController = accountController
     }
 
     public func start() {
@@ -109,6 +115,7 @@ public actor AuthenticatedPresenceSupervisor {
         state = .stopping
         loop?.cancel()
         backoff?.cancel()
+        if let current { beginAccountRetirement(current.token) }
         for observer in trustObservers { observer.cancel() }
         await synchronizer?.retire()
         await bridge.finish()
@@ -161,6 +168,19 @@ public actor AuthenticatedPresenceSupervisor {
         }
         var failures = 0
         while !stopped, !Task.isCancelled {
+            // Subscribe before checking readiness. A verification racing this
+            // check stays buffered; absent authority opens no idle raw socket.
+            var accountChanges: AsyncStream<Void>?
+            if let accountController {
+                let changes = await accountController.runtimeChanges()
+                accountChanges = changes
+                var ready = false
+                for await _ in changes {
+                    guard !stopped, !Task.isCancelled else { break }
+                    if await accountController.isAccountRouteReady() { ready = true; break }
+                }
+                guard ready, !stopped, !Task.isCancelled else { break }
+            }
             guard let token = await bridge.beginSocket() else { break }
             var session: AuthenticatedPresenceSession?
             var forwarders: [Task<Void, Never>] = []
@@ -177,6 +197,14 @@ public actor AuthenticatedPresenceSupervisor {
                 session = attempt
                 current = (token, attempt)
                 retiredToken = nil
+                if let accountController {
+                    let attachment = try await accountController.attachAccountRoute(to: attempt)
+                    guard isActive(token), !Task.isCancelled else {
+                        await accountController.detachAccountRoute(attachment)
+                        throw CancellationError()
+                    }
+                    accountAttachment = attachment
+                }
                 await publish(failures == 0 ? .connecting : .reconnecting)
                 try Task.checkCancellation()
                 guard isActive(token) else { throw AttemptInterrupted.retry }
@@ -218,7 +246,11 @@ public actor AuthenticatedPresenceSupervisor {
                 if isActive(token) { await publish(.online) }
                 try Task.checkCancellation()
                 guard isActive(token) else { throw AttemptInterrupted.retry }
-                try await attempt.run(onStarted: { await sync.refresh() },
+                let changes = accountChanges
+                try await attempt.run(onStarted: {
+                    await sync.refresh()
+                    await self.startAccountWorker(token, session: attempt, changes: changes)
+                },
                                       onTrustResult: { await sync.receive($0) })
             } catch is CancellationError {
                 cancelled = true
@@ -238,11 +270,13 @@ public actor AuthenticatedPresenceSupervisor {
             for task in forwarders { task.cancel() }
             let initialStop = initialStop
             let sync = synchronizer
+            let worker = accountWorker
             let drain = Task {
                 await initialStop?.value
                 // connect() may return after an earlier stop() and set running
                 // again. Stop once more after connect/run has actually returned.
                 await session?.stop()
+                await worker?.value
                 await sync?.stop()
                 for task in forwarders { await task.value }
             }
@@ -250,6 +284,8 @@ public actor AuthenticatedPresenceSupervisor {
             await drain.value
             current = nil
             synchronizer = nil
+            accountWorker = nil
+            accountAttachment = nil
             self.initialStop = nil
             finalDrain = nil
             guard !stopped, !Task.isCancelled, !cancelled else { break }
@@ -281,6 +317,42 @@ public actor AuthenticatedPresenceSupervisor {
         state = value
         // Caller must also check its runtime generation inside its own actor.
         await onState(value)
+    }
+
+    /// Never await a bind here: onStarted must return so the sole reader can
+    /// consume the challenge and acknowledgement awaited by this retained task.
+    private func startAccountWorker(_ token: PresenceSignalBridge.SocketToken,
+                                    session: AuthenticatedPresenceSession, changes: AsyncStream<Void>?) {
+        guard isActive(token), let accountController, let attachment = accountAttachment,
+              let changes, accountWorker == nil else { return }
+        accountWorker = Task { [weak self] in
+            do {
+                try Task.checkCancellation()
+                try await accountController.bindAccountRoute(attachment, on: session)
+                for await _ in changes {
+                    try Task.checkCancellation()
+                    try await accountController.bindAccountRoute(attachment, on: session)
+                }
+            } catch {
+                // Controller withdrawal may cancel only its bind task. That
+                // still needs to retire this attempt's bridge immediately.
+                if !Task.isCancelled { await self?.interrupt(token) }
+            }
+        }
+    }
+
+    private func beginAccountRetirement(_ token: PresenceSignalBridge.SocketToken) {
+        guard let accountController, let current, current.token == token else { return }
+        accountWorker?.cancel()
+        let attachment = accountAttachment
+        accountAttachment = nil
+        if initialStop == nil {
+            initialStop = Task {
+                async let close: Void = current.session.stop()
+                if let attachment { await accountController.detachAccountRoute(attachment) }
+                await close
+            }
+        }
     }
 
     private func publishSync(_ value: PresenceTrustSyncState, token: PresenceSignalBridge.SocketToken) async {
@@ -315,6 +387,7 @@ public actor AuthenticatedPresenceSupervisor {
         // Retirement must be visible before bridge/callback actor hops. The
         // loop may finish this attempt while the callback is still suspended.
         retiredToken = token
+        beginAccountRetirement(token)
         let sync = synchronizer
         await bridge.disconnect(token)
         await sync?.retire()

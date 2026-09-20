@@ -4,6 +4,26 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobilePresenceSupervisorTests: XCTestCase {
+    func testExplicitAccountPlaneInitializerWaitsWithoutOpeningSocketWhenSignedOut() async throws {
+        let identity = try DeviceIdentity.ephemeral()
+        let trust = TrustStore(owner: identity.id)
+        let repository = try TrustRepository(ownerIdentity: identity, trustStore: trust, persistedGeneration: 0)
+        let binding = try AccountSessionBinding(deviceID: identity.id.rawValue, audience: "ios",
+            origin: URL(string: "https://account.example.test")!)
+        let controller = AccountSessionController(service: SignedOutAccountService(), storage: SignedOutAccountStorage(), binding: binding)
+        let factory = SupervisorSocketFactory([])
+        let supervisor = MobilePresenceSupervisor(identity: identity, repository: repository,
+            directory: DeviceDirectory(trust: trust), accountOrigin: URL(string: "wss://account.example.test/v1/ws")!,
+            accountController: controller, makeSocket: { try await factory.next() })
+        await supervisor.start()
+        try await Task.sleep(for: .milliseconds(20))
+        let count = await factory.count
+        XCTAssertEqual(count, 0)
+        await supervisor.stop()
+        let state = await supervisor.state
+        XCTAssertEqual(state, .stopped)
+    }
+
     func testContextReceiptDrivesMobilePublicationAndStoppedOwnerCannotRefresh() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -345,6 +365,20 @@ final class MobilePresenceSupervisorTests: XCTestCase {
     }
 
     private func frame(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
+}
+
+private struct SignedOutAccountService: AccountSessionService {
+    func challenge() async throws -> AccountLoginChallenge { throw AccountSessionControllerError.needsSignIn }
+    func complete(challengeID: String, code: String, identityToken: String) async throws -> AccountSessionTokens { throw AccountSessionControllerError.needsSignIn }
+    func status(accessToken: String) async throws -> AccountSessionIdentity { throw AccountSessionControllerError.needsSignIn }
+    func refresh(refreshToken: String) async throws -> AccountSessionTokens { throw AccountSessionControllerError.needsSignIn }
+    func logout(accessToken: String) async throws { throw AccountSessionControllerError.needsSignIn }
+}
+
+private struct SignedOutAccountStorage: AccountSessionStorage {
+    func load() async throws -> AccountStoredSession? { nil }
+    func save(_ record: AccountStoredSession) async throws {}
+    func remove() async throws {}
 }
 
 private final class PublicationSecrets: SecretStore, @unchecked Sendable {
