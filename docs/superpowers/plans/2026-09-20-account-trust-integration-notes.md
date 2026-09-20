@@ -4,6 +4,20 @@ Status: next-stage boundary notes, not implemented or dispatched. Approved accou
 design requires automatic same-account relationships and independent six-digit
 pair preservation. Native group membership is only an input to this stage.
 
+Source mapping completed in .superpowers/sdd/account-transfer-boundary-report.md
+(read-only; no runtime acceptance). The shipping client seam is WebRTCConnectionAttempts
+and WebRTCConnectionListener, not the MACCHANNEL_LEGACY_MESH implementations.
+Signal/presence already accept graph interfaces, while TURN retains a separate
+IsEstablishedDevice gate. All three need account-aware authorization; a local
+trusted-device display alone cannot establish a usable transfer path.
+
+Keep composite decisions non-transitive across authorization sources: legacy
+manual graph A-B plus group grant B-C must not synthesize A-C. A runtime-owned
+authorization lease must also close pending/active account-only channels when
+their last eligible source disappears, while preserving an independent manual
+source for the same key. Candidate tests use an isolated routing service first;
+any change to the deployed legacy rendezvous remains a separate rollout gate.
+
 ## Concrete existing seam
 
 Sources/MacChannelCore/Identity/TrustStore.swift maintains one trusted-key/revoked

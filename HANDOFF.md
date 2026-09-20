@@ -2,6 +2,23 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+LATEST native transport a0dd9f7 DONE; pending_native_review reviewing frozen
+e860480..a0dd9f7. Root inspected report and final Swift40/0/0 + Go literalwire
+PASS logs; caches idle, both SQL fixtures remain stopped. Next intent brief is
+.superpowers/sdd/native-approval-intent-brief.md (unique path, not task-1 overwrite).
+Source mapping account-transfer-boundary-report.md completed read-only: effective
+WebRTC/channel lifetime, signal/presence and separate TURN gates all need typed
+account authorization; no mixing account edges into legacy transitive graph.
+Root added controller placement notes, no UI/source/install/live modifications.
+
+CURRENT: HTTP d5bd647 + logging fix b476a4f independently Approved; root inspected
+the focused SQL result. Both local PostgreSQL fixtures are stopped. Active sole
+implementer pending_native_transport starts from e860480 and owns Swift/Go caches.
+Requirements remain .superpowers/sdd/task-1-brief.md; report will be
+pending-approval-native-transport-report.md. Eight-route AccountServiceClient
+error/cancellation predicate extension is approved as a narrow necessary addition.
+Root prepares subsequent controller integration only. No installation/deployment.
+
 HTTPloggingfixb476a4f ready; pending_http_review rereviewactive onlyfixdiff.
 Root inspected responsebody→bodylength change and focusedSQLPASS1.114s; new
 fixture stoppedagain/no server verified. Bothfixtures now stopped. Nextnative

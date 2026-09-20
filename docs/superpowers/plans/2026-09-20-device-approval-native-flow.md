@@ -27,6 +27,41 @@ because a signed-in account alone does not establish device trust.
 
 ## Controller authority and storage
 
+### Implementation placement after intent types land
+
+Keep credential ownership and operation admission in AccountSessionController.
+Its public approval methods are thin actor-isolated wrappers that capture one
+current session/revision, consume a matching ticket before suspension, hold the
+existing group operation admission, and invalidate their synchronous authorization
+on exit. Existing-request operations use a new no-refresh capture helper. Fresh
+join preparation alone may refresh before capture. The optional approval
+configuration defaults to nil in both initializers.
+
+Put proof preparation/replay and awaited service/storage steps in a focused
+internal value helper, AccountDeviceApprovalFlow.swift. It receives immutable
+captured context and the existing lock-backed verification authorization; it is
+not a second credential actor and cannot refresh or look up a newer session.
+Every signature and dependency issuance must synchronously require authorization,
+with another check after return. Controller wrappers additionally recheck their
+captured revision before installing a ticket or publishing a result. This keeps
+the existing session file from absorbing all request/proof parsing logic without
+exposing mutable session state or introducing an async authorization race.
+
+The helper returns immutable proposed tickets/results; it cannot install a UI
+ticket itself. A cancelled/stale result is discarded. Tickets bind the operation,
+exact request/intent/session/key, verified predecessor and expiry. Read operations
+return presentation state only. An explicit resume may reissue Create using the
+same already-persisted subjectRequested tuple after a lost acknowledgment; it must
+never allocate a new request ID or silently sign a replacement proof.
+
+Add an internal, authorization-fenced read-only history-verifier operation for
+validating an independently supplied anchor against a complete candidate journal
+and any existing checkpoint. It must not persist a new pin/head during subject
+preparation. Reuse the same pure replay/high-water rules used by accept rather
+than introducing a weaker second journal validator. Existing public confirm and
+accept behavior remains unchanged. Tests must distinguish zero writes on this
+preparation path from normal current-member checkpoint advancement.
+
 Reuse AccountSessionController lifecycle revision and synchronous verification
 authorization. Expose operation-specific expiring tickets, not access tokens or
 raw signing closures, to UI. App views do not call service directly. Pending
