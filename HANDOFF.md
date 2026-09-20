@@ -2,6 +2,36 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+HOTFIX UPDATE: recovery source fixed, task-only delta /tmp/mobile-recovery-task-only.patch
+sha2565d6fe89489059bcc14012c860f7d33bf26db7ed1dd5d5a96566b5950d59e22a9,
+baseline /tmp/mobile-recovery-baseline.z1nULS. Unstaged source preservation exception;
+mobile_identity_recovery_review active read-only. Root inspected actual RED and7model+
+3nativeUI/0, unsignedRelease shippingBUILD SUCCEEDED, ENerror/ZHconfirmation renders.
+Report mobile-recovery-callback-report.md; caches released. Apple public lookup
+https://itunes.apple.com/lookup?id=6812051148&country=us verified resultCount1,
+DropMesh Mobile1.0, same .iphone.dev bundle, released2026-09-20T09:03:58Z, minimumiOS17.
+This corrects stale submission-status doc; user is on publicAppStore build. No live
+store metadata, upload, installed app or identity changes performed.
+
+CORE REVIEW RESULT: native_device_approval_review Needs fixes, one Important newly
+fetched acknowledgment expiry not applied before subject signature/actor Commit.
+Saved native-device-approval-review.md; fix queued behind urgent native recovery.
+Do not activate/use controller in new account UI until repaired/rereviewed. Recovery
+hotfix remains independent/default-off accounts. Root prepared mobile-six-digit-host
+plan for next mobile functional task; no hosting source implementation yet.
+
+LATEST: User clarified recovery failure is APP STORE version. Archive1.0(8)
+ApplicationProperties confirms shipped bundle ID also com.zensystech.dropmesh.iphone.dev;
+the suffix is NOT evidence of a development installation. Root corrected this to
+user. Preserve same application identity; no uninstall/reinstall workaround.
+mobile_identity_recovery_fix is sole native/Swift cache owner, requirements
+mobile-recovery-callback-brief.md. Preexisting dirty recovery/tab/history source
+requires task-only before/after delta review, not whole-file staging. Core controller
+implementation a311514/report6afbfa5 now complete; native_device_approval_review
+read-only on frozen80e183a..6afbfa5. Actual104/0 broad pre-final-presentation change,
+23/0 final focused inspected. Next priorities: recovery fix review, mobile host-code
+implementation, isolated shipping candidate with unfinished account flags off.
+
 USER PRIORITY UPDATE: mobile needs six-digit code hosting for iPhone-to-iPhone;
 Recreate identity reportedly does nothing. Root verified PairingAttempt/View is
 join-only although DurablePairingSession already supports createCode/approve/reject.
