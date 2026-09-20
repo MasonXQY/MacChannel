@@ -46,6 +46,7 @@ public actor MobileForegroundRuntime {
 
     private let identity: DeviceIdentity
     private let repository: TrustRepository
+    private let authorizationProvider: (any PeerAuthorizationProviding)?
     private let layout: MobileStorageLayout
     // Neither database nor coordinator is replaced or closed at scene changes.
     private let database: TransferDatabase
@@ -62,6 +63,9 @@ public actor MobileForegroundRuntime {
     private var transferObserver: Task<Void, Never>?
     private var directoryObserver: Task<Void, Never>?
     private var trustObserver: Task<Void, Never>?
+    private var authorizationObserver: Task<Void, Never>?
+    private var authorizationRevision: UInt64 = 0
+    private var handledAuthorizationRevision: UInt64 = 0
     private var desiredForeground = false
     private var acceptingSends = false
     private var epoch: UInt64 = 0
@@ -89,6 +93,7 @@ public actor MobileForegroundRuntime {
     public init<Secrets: SecretStore & Sendable>(context: MobileIdentityContext<Secrets>) throws {
         identity = context.identity
         repository = context.repository
+        authorizationProvider = context.authorizationOwner
         layout = context.layout
         do { database = try TransferDatabase(url: context.layout.transferDatabaseFile) }
         catch { throw MobileRuntimeFailure.storage }
@@ -102,6 +107,7 @@ public actor MobileForegroundRuntime {
         let repository = context.repository
         makeNetwork = { directory, state, sync, discovery in
             try MobileProductionForegroundNetwork(identity: identity, repository: repository,
+                authorizationProvider: context.authorizationOwner,
                 directory: directory, publication: { await context.trustPublicationSnapshot() },
                 persistedUpdates: { await context.persistedTrustUpdates() },
                 onState: state, onTrustSyncState: sync, onDiscovery: discovery)
@@ -115,7 +121,8 @@ public actor MobileForegroundRuntime {
          persistTrust: @escaping @Sendable () async throws -> Void,
          makeNetwork: @escaping NetworkFactory,
          onRestored: @escaping @Sendable (TransferCoordinator) async -> Void = { _ in },
-         beforeSendAccounting: @escaping @Sendable () async -> Void = { }) {
+         beforeSendAccounting: @escaping @Sendable () async -> Void = { },
+         authorizationProvider: (any PeerAuthorizationProviding)? = nil) {
         self.identity = identity; self.repository = repository; self.layout = layout
         self.database = database; self.persistence = persistence; self.persistTrust = persistTrust
         let outputs = MobileReceivedOutputIndex(url: layout.receivedOutputIndexFile,
@@ -124,6 +131,7 @@ public actor MobileForegroundRuntime {
         historyAvailabilityFailure = outputs.initialAvailabilityFailure
         self.makeNetwork = makeNetwork; self.onRestored = onRestored
         self.beforeSendAccounting = beforeSendAccounting
+        self.authorizationProvider = authorizationProvider
     }
 
     public func currentSnapshot() -> MobileRuntimeSnapshot {
@@ -149,6 +157,7 @@ public actor MobileForegroundRuntime {
         transferObserver?.cancel()
         directoryObserver?.cancel()
         trustObserver?.cancel()
+        authorizationObserver?.cancel()
         subscribers.values.forEach { $0.finish() }
     }
 
@@ -208,6 +217,12 @@ public actor MobileForegroundRuntime {
         try Task.checkCancellation()
         guard desiredForeground, acceptingSends else { throw MobileRuntimeError.notForeground }
         guard let coordinator else { throw MobileRuntimeError.notReady }
+        if let authorizationProvider {
+            do {
+                let lease = try authorizationProvider.acquire(for: device)
+                try authorizationProvider.validate(lease)
+            } catch { throw MobileRuntimeError.interrupted }
+        }
         let token = UUID()
         let admittedEpoch = epoch
         let cancellation = MobileSendCancellation()
@@ -247,7 +262,7 @@ public actor MobileForegroundRuntime {
     private func accountSend(_ token: UUID, result: Result<TransferID, Error>) async throws -> TransferID {
         guard let operation = operations[token] else { throw MobileRuntimeError.interrupted }
         // Keep the record while cancellation crosses the coordinator actor.
-        let trusted = await repository.currentTrustStore().trustedDeviceIDs.contains(operation.peer)
+        let trusted = await isAuthorized(operation.peer)
         let interrupted = operation.epoch != epoch || !desiredForeground
         let cancelled = operation.cancellation.finish()
         var revokedCancellation = false
@@ -287,6 +302,7 @@ public actor MobileForegroundRuntime {
                 await accountOutstandingSends()
                 if desiredForeground { continue }
                 if handledTrustRevision != trustRevision { await updateTrust(); continue }
+                if handledAuthorizationRevision != authorizationRevision { await updateAuthorization(); continue }
                 state = .inactive; publish(); return
             }
             if network == nil {
@@ -341,6 +357,7 @@ public actor MobileForegroundRuntime {
                 continue
             }
             if handledTrustRevision != trustRevision { await updateTrust(); continue }
+            if handledAuthorizationRevision != authorizationRevision { await updateAuthorization(); continue }
             if handledDiscoveryEnabled != discoveryEnabled, let network {
                 let value = discoveryEnabled
                 await network.setLocalDiscoveryEnabled(value)
@@ -353,7 +370,16 @@ public actor MobileForegroundRuntime {
 
     private func startObserversIfNeeded() async {
         guard directoryObserver == nil else { return }
-        await directory.observeTrust(repository)
+        if let authorizationProvider {
+            await directory.observeAuthorization(authorizationProvider)
+            let updates = authorizationProvider.updates()
+            authorizationObserver = Task { [weak self] in
+                for await _ in updates {
+                    guard !Task.isCancelled else { return }
+                    await self?.authorizationChanged()
+                }
+            }
+        } else { await directory.observeTrust(repository) }
         let devices = await directory.devices()
         directoryObserver = Task { [weak self] in
             for await value in devices {
@@ -376,18 +402,24 @@ public actor MobileForegroundRuntime {
         let revision = trustRevision
         do { try await persistTrust(); if failure == .trustPersistence { failure = nil } }
         catch { failure = .trustPersistence; publish() }
+        await updateAuthorization()
+        handledTrustRevision = revision
+    }
+
+    private func updateAuthorization() async {
+        let revision = authorizationRevision
         await cancelRevokedTransfers()
         await directory.waitForTrustUpdates()
         if let graph = network, desiredForeground, graphEpoch == epoch {
             // Re-read after the old immutable-policy owner actually drains.
-            let latest = await repository.currentTrustStore().trustedDeviceIDs.subtracting([identity.id])
+            let latest = await receiveEligiblePeers()
             if incomingPolicy != latest {
                 beginIncomingDrain()
                 await incomingDrain?.value
                 incoming = nil; incomingDrain = nil; incomingPolicy = nil
-                guard desiredForeground, graphEpoch == epoch else { handledTrustRevision = revision; return }
-                let trusted = await repository.currentTrustStore().trustedDeviceIDs.subtracting([identity.id])
-                guard desiredForeground, let generation = graphEpoch, generation == epoch else { handledTrustRevision = revision; return }
+                guard desiredForeground, graphEpoch == epoch else { handledAuthorizationRevision = revision; return }
+                let trusted = await receiveEligiblePeers()
+                guard desiredForeground, let generation = graphEpoch, generation == epoch else { handledAuthorizationRevision = revision; return }
                 let listener = IncomingTransferListener(source: graph.source,
                     policy: ReceivePolicy(trustedSources: trusted, defaultAutoAccept: true),
                     directories: DownloadDirectory(globalDirectory: layout.receiveDirectory), database: database,
@@ -400,7 +432,25 @@ public actor MobileForegroundRuntime {
             // The presence owner observes repository and successful checkpoint
             // events directly. This path owns save retry and receive policy.
         }
-        handledTrustRevision = revision
+        handledAuthorizationRevision = revision
+    }
+
+    // Projection is visibility/policy eligibility only. The transport owns its
+    // lease and claim; runtime accounting always performs fresh admission checks.
+    private func receiveEligiblePeers() async -> Set<DeviceID> {
+        if let authorizationProvider { return Set(authorizationProvider.snapshot().peers.keys).subtracting([identity.id]) }
+        return await repository.currentTrustStore().trustedDeviceIDs.subtracting([identity.id])
+    }
+
+    private func isAuthorized(_ peer: DeviceID) async -> Bool {
+        if let authorizationProvider {
+            do {
+                let lease = try authorizationProvider.acquire(for: peer)
+                try authorizationProvider.validate(lease)
+                return true
+            } catch { return false }
+        }
+        return await repository.currentTrustStore().trustedDeviceIDs.contains(peer)
     }
 
     private func beginNetworkDrain() {
@@ -453,8 +503,7 @@ public actor MobileForegroundRuntime {
             guard ![.completed, .cancelled, .failed].contains(snapshot.phase) else { continue }
             // Re-read for each cancellation across actor suspension. Hidden
             // packaging is independently checked when its ID is accounted.
-            let trusted = await repository.currentTrustStore().trustedDeviceIDs
-            if !trusted.contains(snapshot.peer) { _ = await coordinator.cancel(snapshot.id) }
+            if await !isAuthorized(snapshot.peer) { _ = await coordinator.cancel(snapshot.id) }
         }
     }
 
@@ -502,6 +551,7 @@ public actor MobileForegroundRuntime {
     private func transfersChanged(_ value: [TransferSnapshot]) { transfers = value; publish() }
     private func devicesChanged(_ value: [DeviceSummary]) { devices = value.filter { $0.id != identity.id }; publish() }
     private func trustChanged() { trustRevision &+= 1; _ = reconcileTask() }
+    private func authorizationChanged() { authorizationRevision &+= 1; _ = reconcileTask() }
     private func unsubscribe(_ token: UUID) { subscribers[token] = nil }
     private func publish() { let value = currentSnapshot(); subscribers.values.forEach { $0.yield(value) } }
 

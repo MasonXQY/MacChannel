@@ -14,6 +14,10 @@ protocol MobileForegroundNetwork: Sendable {
 }
 
 actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
+    private enum Authority {
+        case repository(any WebRTCChannelFactory)
+        case provider(any PeerAuthorizationProviding, any AuthorizedWebRTCChannelFactory)
+    }
     nonisolated let connector: any RouteEscalatingPeerConnector
     nonisolated let source: any IncomingTransferConnectionSource
     private let listener: WebRTCConnectionListener
@@ -22,6 +26,7 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
     private let browser: BonjourPeerBrowser
     private let advertiser: BonjourPeerAdvertiser
     private let repository: TrustRepository
+    private let authorizationProvider: (any PeerAuthorizationProviding)?
     private let onDiscovery: @Sendable (Bool) async -> Void
     private var stopped = false
     private var drain: Task<Void, Never>?
@@ -30,7 +35,8 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
     private var browserReady = false
     private var advertiserReady = false
 
-    init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+    init(identity: DeviceIdentity, repository: TrustRepository,
+         authorizationProvider: any PeerAuthorizationProviding, directory: DeviceDirectory,
          publication: @escaping @Sendable () async throws -> TrustPublicationSnapshot,
          persistedUpdates: @escaping @Sendable () async -> AsyncStream<AuthenticatedTrustState?>,
          onState: @escaping @Sendable (MobilePresenceState) async -> Void,
@@ -46,6 +52,7 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
         let ice = RefreshingICEConfigurationProvider(
             base: ICEConfiguration(stunURLs: [], turnServers: []), fetcher: turn)
         try self.init(identity: identity, repository: repository, directory: directory,
+            authorizationProvider: authorizationProvider,
             presence: presence, signaling: signaling, iceProvider: ice,
             factory: WebRTCFactory(), session: session, onDiscovery: onDiscovery)
     }
@@ -56,14 +63,47 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
          presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
          iceProvider: any ICEConfigurationProviding, factory: any WebRTCChannelFactory,
          session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
+        try self.init(identity: identity, repository: repository, directory: directory,
+            authority: .repository(factory), presence: presence, signaling: signaling,
+            iceProvider: iceProvider, session: session, onDiscovery: onDiscovery)
+    }
+
+    /// Explicitly paired provider/factory injection preserves the legacy transport
+    /// seam without casts or falling back to repository admission.
+    init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+         authorizationProvider: any PeerAuthorizationProviding,
+         presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
+         iceProvider: any ICEConfigurationProviding, factory: any AuthorizedWebRTCChannelFactory,
+         session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
+        try self.init(identity: identity, repository: repository, directory: directory,
+            authority: .provider(authorizationProvider, factory), presence: presence, signaling: signaling,
+            iceProvider: iceProvider, session: session, onDiscovery: onDiscovery)
+    }
+
+    private init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+                 authority: Authority, presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
+                 iceProvider: any ICEConfigurationProviding, session: URLSession,
+                 onDiscovery: @escaping @Sendable (Bool) async -> Void) throws {
         self.repository = repository
         self.onDiscovery = onDiscovery
         self.session = session
         self.presence = presence
-        connector = ConnectionCoordinator(directory: directory, identity: identity,
-            trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
-        listener = WebRTCConnectionListener(directory: directory, identity: identity,
-            trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
+        switch authority {
+        case let .repository(factory):
+            authorizationProvider = nil
+            connector = ConnectionCoordinator(directory: directory, identity: identity,
+                trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
+            listener = WebRTCConnectionListener(directory: directory, identity: identity,
+                trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
+        case let .provider(provider, factory):
+            authorizationProvider = provider
+            connector = ConnectionCoordinator(attempts: WebRTCConnectionAttempts(directory: directory,
+                identity: identity, authorizationProvider: provider,
+                signaling: signaling, iceProvider: iceProvider, factory: factory))
+            listener = WebRTCConnectionListener(directory: directory, identity: identity,
+                authorizationProvider: provider, signaling: signaling,
+                iceProvider: iceProvider, factory: factory)
+        }
         source = listener
         browser = BonjourPeerBrowser(directory: directory, trust: DeviceTrust(trustedIDs: []))
         advertiser = try BonjourPeerAdvertiser(device: identity.id, port: 45_873) { $0.cancel() }
@@ -111,7 +151,8 @@ actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
         guard !stopped, revision == discoveryRevision else { return }
         await onDiscovery(false)
         guard enabled, !stopped, revision == discoveryRevision else { return }
-        browser.observeTrust(repository)
+        if let authorizationProvider { browser.observeAuthorization(authorizationProvider) }
+        else { browser.observeTrust(repository) }
         let browserStates = browser.states()
         let advertiserStates = advertiser.states()
         discoveryTasks = [

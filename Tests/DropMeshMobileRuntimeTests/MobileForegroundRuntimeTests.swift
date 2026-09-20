@@ -4,6 +4,117 @@ import XCTest
 @testable import DropMeshMobileRuntime
 
 final class MobileForegroundRuntimeTests: XCTestCase {
+    func testSameKeyAccountSourcePreservesRuntimeSendUntilLastSourceWithdraws() async throws {
+        let fixture = try await RuntimeFixture.make(provider: true)
+        let owner = try XCTUnwrap(fixture.authorization)
+        let binding = try AccountSessionBinding(deviceID: fixture.identity.id.rawValue,
+            audience: "runtime-test", origin: URL(string: "https://example.com")!)
+        let account = "11111111-1111-1111-1111-111111111111"
+        let epoch = try owner.beginAccountSession(binding: binding, accountID: account,
+            sessionID: "22222222-2222-2222-2222-222222222222",
+            localPublicKey: fixture.identity.publicKey.rawRepresentation, accessExpiresAt: Date().addingTimeInterval(300))
+        try owner.install(VerifiedPeerAccountEvidence(epoch: epoch, binding: binding,
+            snapshot: AccountGroupSnapshot(accountID: account, groupID: "33333333-3333-3333-3333-333333333333",
+                generation: 1, sequence: 2, headHash: Data(repeating: 3, count: 32), members: [
+                    AccountGroupMember(deviceID: fixture.identity.id.rawValue.uuidString.lowercased(), publicKey: fixture.identity.publicKey.rawRepresentation),
+                    AccountGroupMember(deviceID: fixture.peer.rawValue.uuidString.lowercased(), publicKey: fixture.peerKey)
+                ]), freshUntil: Date().addingTimeInterval(120)))
+        await fixture.persistence.release.open(); await fixture.accounting.release.open()
+        try await fixture.runtime.startForeground()
+        let id = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer)
+        try await fixture.runtime.pause(id)
+        try owner.replaceManual([:])
+        try await fixture.runtime.refreshTrust()
+        let coordinator = await fixture.probe.coordinator!
+        let phase = await coordinator.claimedPhase(for: id)
+        XCTAssertEqual(phase, .paused)
+        _ = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer)
+        owner.invalidateAccount(epoch)
+        try await eventually { await coordinator.claimedPhase(for: id) == .cancelled }
+        await fixture.runtime.stopForeground()
+    }
+    func testProviderOnlyPeerCanSendAndReceive() async throws {
+        let fixture = try await RuntimeFixture.make(provider: true, manualPeer: false)
+        await fixture.persistence.release.open(); await fixture.accounting.release.open()
+        try await fixture.runtime.startForeground()
+        do { _ = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer) }
+        catch { XCTFail("Provider-only send must be admitted: \(error)") }
+        let source = await fixture.networks.lastSource
+        let manifest = try TransferManifest.build(from: fixture.file)
+        let pair = RuntimeChannel.pair()
+        let sender = Task { try await SendSession(manifest).run(on: pair.0) }
+        try await source.offer(IncomingTransferConnection(source: fixture.peer, transferID: manifest.id, channel: pair.1))
+        do { _ = try await sender.value }
+        catch { XCTFail("Provider-only receive must be admitted: \(error)") }
+        try await eventually { await fixture.runtime.currentSnapshot().received.count == 1 }
+        let received = await fixture.runtime.currentSnapshot().received
+        XCTAssertEqual(received.count, 1)
+        await fixture.runtime.stopForeground()
+    }
+
+    func testProviderWithdrawalCancelsActiveAndPausedDespiteManualMembership() async throws {
+        let fixture = try await RuntimeFixture.make(provider: true)
+        await fixture.persistence.release.open(); await fixture.accounting.release.open()
+        try await fixture.runtime.startForeground()
+        let active = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer)
+        let paused = try await fixture.runtime.send(items: [fixture.file], to: fixture.peer)
+        try await fixture.runtime.pause(paused)
+        let saves = await fixture.trustPersistence.calls
+        try fixture.authorization!.replaceManual([:])
+        do {
+            try await eventually {
+                let owner = await fixture.probe.coordinator!
+                let activePhase = await owner.claimedPhase(for: active)
+                let pausedPhase = await owner.claimedPhase(for: paused)
+                return activePhase == .cancelled && pausedPhase == .cancelled
+            }
+        } catch { XCTFail("Provider-only withdrawal was not observed: \(error)") }
+        let manual = await fixture.repository.currentTrustStore().trustedDeviceIDs
+        XCTAssertTrue(manual.contains(fixture.peer))
+        let savesAfter = await fixture.trustPersistence.calls
+        XCTAssertEqual(savesAfter, saves, "Provider withdrawal must not republish manual trust")
+        await fixture.runtime.stopForeground()
+    }
+
+    func testProviderWithdrawalDuringHiddenAccountingRejectsLateAdmission() async throws {
+        let fixture = try await RuntimeFixture.make(provider: true)
+        try await fixture.runtime.startForeground()
+        let send = Task { try await fixture.runtime.send(items: [fixture.file], to: fixture.peer) }
+        await fixture.persistence.entered.wait()
+        try fixture.authorization!.replaceManual([:])
+        await fixture.persistence.release.open()
+        await fixture.accounting.entered.wait(); await fixture.accounting.release.open()
+        do { _ = try await send.value; XCTFail("Provider withdrawal must reject hidden admission") }
+        catch { XCTAssertEqual(error as? MobileRuntimeError, .interrupted) }
+        await fixture.runtime.stopForeground()
+    }
+
+    func testProviderWithdrawalRebuildsReceivePolicyUsingNewestStateAfterDrain() async throws {
+        let fixture = try await RuntimeFixture.make(provider: true)
+        try await fixture.runtime.startForeground()
+        let source = await fixture.networks.lastSource
+        let channel = RuntimeBlockedChannel()
+        try await source.offer(IncomingTransferConnection(source: fixture.peer, transferID: TransferID(rawValue: UUID()), channel: channel))
+        await channel.entered.wait()
+        let another = try DeviceIdentity.ephemeral()
+        try fixture.authorization!.replaceManual([fixture.peer: fixture.peerKey,
+            another.id: another.publicKey.rawRepresentation])
+        do { try await eventually { await channel.closeEntered.isOpen } }
+        catch {
+            XCTFail("Provider policy change must initiate receive drain")
+            await channel.release.open(); await fixture.runtime.stopForeground(); return
+        }
+        // The pre-drain projection still authorized this peer. Withdrawal while
+        // close is blocked must be included by the new listener's policy.
+        try fixture.authorization!.replaceManual([another.id: another.publicKey.rawRepresentation])
+        await channel.release.open()
+        try await eventually { await source.consumers >= 2 }
+        let pair = RuntimeChannel.pair(), manifest = try TransferManifest.build(from: fixture.file)
+        let sender = Task { try await SendSession(manifest).run(on: pair.0) }
+        try await source.offer(IncomingTransferConnection(source: fixture.peer, transferID: manifest.id, channel: pair.1))
+        do { _ = try await sender.value; XCTFail("Newest withdrawal must deny receive") } catch { }
+        await fixture.runtime.stopForeground()
+    }
     func testTrustSyncCallbacksRetireWithForegroundEpoch() async throws {
         let fixture = try await RuntimeFixture.make()
         try await fixture.runtime.startForeground()
@@ -24,7 +135,15 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         await fixture.runtime.stopForeground()
     }
     func testCompletedSendWinsLateRevocationAccountingWithoutRewritingHistory() async throws {
-        let fixture = try await RuntimeFixture.make()
+        try await completedSendWinsLateRevocation(provider: false)
+    }
+
+    func testCompletedSendWinsLateProviderWithdrawal() async throws {
+        try await completedSendWinsLateRevocation(provider: true)
+    }
+
+    private func completedSendWinsLateRevocation(provider: Bool) async throws {
+        let fixture = try await RuntimeFixture.make(provider: provider, manualPeer: !provider)
         await fixture.persistence.release.open()
         try await fixture.runtime.startForeground()
         let pair = RuntimeChannel.pair()
@@ -37,7 +156,8 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         let id = try XCTUnwrap(snapshots.first?.id)
         _ = try await ReceiveSession(transferID: id, destinationDirectory: fixture.layout.receiveDirectory).run(on: pair.1)
         try await eventually { try await fixture.persistence.database.history().contains { $0.id == id && $0.phase == .completed } }
-        _ = try await fixture.repository.revoke(fixture.peer)
+        if provider { try fixture.authorization!.replaceManual([:]) }
+        else { _ = try await fixture.repository.revoke(fixture.peer) }
         try await fixture.runtime.refreshTrust()
         await fixture.accounting.release.open()
         do { let result = try await send.value; XCTAssertEqual(result, id) }
@@ -173,7 +293,15 @@ final class MobileForegroundRuntimeTests: XCTestCase {
         await fixture.runtime.stopForeground()
     }
     func testHiddenSendHoldsReentryThroughResultAccounting() async throws {
-        let fixture = try await RuntimeFixture.make()
+        try await hiddenSendHoldsReentry(provider: false)
+    }
+
+    func testProviderHiddenSendHoldsReentryThroughResultAccounting() async throws {
+        try await hiddenSendHoldsReentry(provider: true)
+    }
+
+    private func hiddenSendHoldsReentry(provider: Bool) async throws {
+        let fixture = try await RuntimeFixture.make(provider: provider, manualPeer: !provider)
         let runtime = fixture.runtime
         try await runtime.startForeground()
         let send = Task { try await runtime.send(items: [fixture.file], to: fixture.peer) }
@@ -719,6 +847,9 @@ private actor RuntimeNetworks {
 }
 
 private struct RuntimeFixture {
+    let identity: DeviceIdentity
+    let authorization: PeerAuthorizationOwner?
+    let peerKey: Data
     let peer: DeviceID
     let runtime: MobileForegroundRuntime
     let file: URL
@@ -729,13 +860,17 @@ private struct RuntimeFixture {
     let repository: TrustRepository
     let layout: MobileStorageLayout
     let trustPersistence: RuntimeTrustPersistence
-    static func make(corruptIndex: Bool = false) async throws -> Self {
+    static func make(corruptIndex: Bool = false, provider: Bool = false, manualPeer: Bool = true) async throws -> Self {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mobile-runtime-\(UUID())")
         let layout = MobileStorageLayout(applicationSupport: root.appendingPathComponent("Support"), documents: root.appendingPathComponent("Documents"))
         let context = try await MobileIdentityContext.load(layout: layout, secrets: RuntimeSecrets())
         let peer = try DeviceIdentity.loadOrCreate(keychain: RuntimeSecrets(), policy: MobileIdentityPolicy.policy)
-        _ = try await context.repository.issueAuthorization(subject: peer.id,
-            subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        if manualPeer {
+            _ = try await context.repository.issueAuthorization(subject: peer.id,
+                subjectPublicKey: peer.publicKey.rawRepresentation, timestamp: Date())
+        }
+        let authorization = provider ? PeerAuthorizationOwner.live(identity: context.identity) : nil
+        try authorization?.replaceManual([peer.id: peer.publicKey.rawRepresentation])
         if corruptIndex { try Data("invalid".utf8).write(to: layout.receivedOutputIndexFile) }
         let database = try TransferDatabase(url: layout.stateDirectory.appendingPathComponent("transfers.sqlite3"))
         let persistence = RuntimePersistence(database)
@@ -751,17 +886,19 @@ private struct RuntimeFixture {
                 await networks.recordSync(sync)
                 return try await networks.make(state: state)
             },
-            onRestored: { await probe.restored($0) }, beforeSendAccounting: { await accounting.wait() })
-        return Self(peer: peer.id, runtime: runtime, file: file, persistence: persistence, accounting: accounting, networks: networks, probe: probe, repository: context.repository, layout: layout, trustPersistence: trustPersistence)
+            onRestored: { await probe.restored($0) }, beforeSendAccounting: { await accounting.wait() },
+            authorizationProvider: authorization)
+        return Self(identity: context.identity, authorization: authorization, peerKey: peer.publicKey.rawRepresentation, peer: peer.id, runtime: runtime, file: file, persistence: persistence, accounting: accounting, networks: networks, probe: probe, repository: context.repository, layout: layout, trustPersistence: trustPersistence)
     }
 }
 
 private actor RuntimeTrustPersistence {
+    var calls = 0
     let entered = RuntimeGate()
     let release = RuntimeGate()
     var blocked = false
     func block() { blocked = true }
-    func wait() async { if blocked { await entered.open(); await release.wait() } }
+    func wait() async { calls += 1; if blocked { await entered.open(); await release.wait() } }
 }
 
 private struct RuntimeChannel: SecureChannel {

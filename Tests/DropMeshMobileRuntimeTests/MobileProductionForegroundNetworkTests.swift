@@ -6,18 +6,48 @@ import XCTest
 
 final class MobileProductionForegroundNetworkTests: XCTestCase {
     func testProductionGraphReentryWaitsForAcceptanceAndLateCloseAfterSocketAndHTTPShutdown() async throws {
+        try await productionGraphReentry(provider: false)
+    }
+
+    func testProviderProductionGraphReentryJoinsAuthorizedAcceptanceAndLateClose() async throws {
+        try await productionGraphReentry(provider: true)
+    }
+
+    func testProviderProductionConnectorUsesLeaseWithoutManualPeerAndDeniesWithdrawal() async throws {
         let fixture = try await DrainFixture.make()
+        _ = try await fixture.repository.revoke(fixture.remote.id)
+        let owner = PeerAuthorizationOwner.live(identity: fixture.identity)
+        try owner.replaceManual([fixture.remote.id: fixture.remote.publicKey.rawRepresentation])
+        let graphs = DrainGraphs(fixture: fixture, authorization: owner)
+        let graph = try await graphs.make(directory: fixture.directory, state: { _ in }, sync: { _ in }, discovery: { _ in })
+        await fixture.factory.release.open(); await fixture.factory.closeRelease.open()
+        let channel = try await graph.connector.connect(to: fixture.remote.id)
+        let calls = await fixture.factory.authorizedCalls
+        XCTAssertEqual(calls, 1)
+        try owner.replaceManual([:])
+        do { _ = try await graph.connector.connect(to: fixture.remote.id); XCTFail("Withdrawn provider must deny connector") }
+        catch { XCTAssertEqual(error as? ConnectionAttemptError, .authenticationFailed) }
+        var frames = channel.frames().makeAsyncIterator()
+        do { _ = try await frames.next(); XCTFail("Existing channel claim must be invalidated") } catch { }
+        await channel.close(); await graph.stop(); await fixture.session.finish()
+    }
+
+    private func productionGraphReentry(provider: Bool) async throws {
+        let fixture = try await DrainFixture.make()
+        let authorization = provider ? PeerAuthorizationOwner.live(identity: fixture.identity) : nil
+        try authorization?.replaceManual([fixture.remote.id: fixture.remote.publicKey.rawRepresentation])
+        if provider { _ = try await fixture.repository.revoke(fixture.remote.id) }
         let roots = FileManager.default.temporaryDirectory.appendingPathComponent("mobile-production-drain-\(UUID())")
         let layout = MobileStorageLayout(applicationSupport: roots.appendingPathComponent("Support"),
             documents: roots.appendingPathComponent("Documents"))
         try layout.prepare()
         let database = try TransferDatabase(url: layout.stateDirectory.appendingPathComponent("transfers.sqlite3"))
-        let graphs = DrainGraphs(fixture: fixture)
+        let graphs = DrainGraphs(fixture: fixture, authorization: authorization)
         let runtime = MobileForegroundRuntime(identity: fixture.identity, repository: fixture.repository,
             layout: layout, database: database, persistence: database, persistTrust: { },
             makeNetwork: { directory, state, sync, discovery in
                 try await graphs.make(directory: directory, state: state, sync: sync, discovery: discovery)
-            })
+            }, authorizationProvider: authorization)
         try await runtime.startForeground()
         await graphs.socketEntered.wait()
         try await fixture.offer()
@@ -44,6 +74,8 @@ final class MobileProductionForegroundNetworkTests: XCTestCase {
         XCTAssertEqual(countBeforeClose, 1)
         await fixture.factory.closeRelease.open()
         await stopping.value; try await restarting.value
+        let authorizedCalls = await fixture.factory.authorizedCalls
+        XCTAssertEqual(authorizedCalls, provider ? 1 : 0)
         let countAfterClose = await graphs.count
         XCTAssertEqual(countAfterClose, 2)
         await runtime.stopForeground()
@@ -166,9 +198,12 @@ private actor DrainSocket: PresenceWebSocket {
 
 private actor DrainGraphs {
     let fixture: DrainFixture
+    let authorization: (any PeerAuthorizationProviding)?
     let socketEntered = DrainGate(), socketClosed = DrainGate(), httpInvalidated = DrainGate()
     private(set) var count = 0
-    init(fixture: DrainFixture) { self.fixture = fixture }
+    init(fixture: DrainFixture, authorization: (any PeerAuthorizationProviding)? = nil) {
+        self.fixture = fixture; self.authorization = authorization
+    }
     func make(directory: DeviceDirectory,
               state: @escaping @Sendable (MobilePresenceState) async -> Void,
               sync: @escaping @Sendable (PresenceTrustSyncState) async -> Void,
@@ -180,6 +215,13 @@ private actor DrainGraphs {
             onTrustSyncState: sync)
         let session = URLSession(configuration: .ephemeral, delegate: DrainHTTPDelegate(httpInvalidated), delegateQueue: nil)
         let signaling = count == 1 ? fixture.signaling : RendezvousWebRTCSignaling(session: presence.bridge)
+        if let authorization {
+            return try MobileProductionForegroundNetwork(identity: fixture.identity, repository: fixture.repository,
+                directory: directory, authorizationProvider: authorization,
+                presence: presence, signaling: signaling,
+                iceProvider: StaticICEConfigurationProvider(ICEConfiguration(stunURLs: [], turnServers: [])),
+                factory: fixture.factory, session: session, onDiscovery: discovery)
+        }
         return try MobileProductionForegroundNetwork(identity: fixture.identity, repository: fixture.repository,
             directory: directory, presence: presence, signaling: signaling,
             iceProvider: StaticICEConfigurationProvider(ICEConfiguration(stunURLs: [], turnServers: [])),
@@ -215,14 +257,35 @@ private actor DrainICE: ICEConfigurationProviding {
     }
 }
 
-private actor DrainFactory: WebRTCChannelFactory {
+private actor DrainFactory: WebRTCChannelFactory, AuthorizedWebRTCChannelFactory {
     let entered = DrainGate(), release = DrainGate()
     let closeEntered = DrainGate(), closeRelease = DrainGate()
     private(set) var closes = 0
+    private(set) var authorizedCalls = 0
+    func connect(localIdentity: DeviceIdentity, remoteDevice: DeviceID,
+                 remotePublicKey: Data, connectionID: UUID, role: WebRTCRole,
+                 route: ConnectionRoute, ice: ICEConfiguration,
+                 signaling: any WebRTCSignalTransport,
+                 authorizationProvider: any PeerAuthorizationProviding,
+                 authorizationLease: PeerAuthorizationLease) async throws -> WebRTCSecureChannel {
+        authorizedCalls += 1
+        let gate = try WebRTCPeerAuthorizationGate(provider: authorizationProvider,
+            lease: authorizationLease, peer: remoteDevice, publicKey: remotePublicKey)
+        return try await makeChannel(localIdentity: localIdentity, remoteDevice: remoteDevice,
+            remotePublicKey: remotePublicKey, connectionID: connectionID, role: role, route: route,
+            authorization: gate)
+    }
     func connect(localIdentity: DeviceIdentity, remoteDevice: DeviceID,
                  remotePublicKey: Data, connectionID: UUID, role: WebRTCRole,
                  route: ConnectionRoute, ice: ICEConfiguration,
                  signaling: any WebRTCSignalTransport) async throws -> WebRTCSecureChannel {
+        try await makeChannel(localIdentity: localIdentity, remoteDevice: remoteDevice,
+            remotePublicKey: remotePublicKey, connectionID: connectionID, role: role, route: route,
+            authorization: WebRTCPeerAuthorizationGate())
+    }
+    private func makeChannel(localIdentity: DeviceIdentity, remoteDevice: DeviceID,
+                             remotePublicKey: Data, connectionID: UUID, role: WebRTCRole,
+                             route: ConnectionRoute, authorization: WebRTCPeerAuthorizationGate) async throws -> WebRTCSecureChannel {
         await entered.open(); await release.wait()
         // A local unopened RTC data channel: no SDP, ICE gathering or network.
         let factory = RTCPeerConnectionFactory()
@@ -235,7 +298,7 @@ private actor DrainFactory: WebRTCChannelFactory {
                 await self.closing()
                 peer.close()
                 _ = factory
-            }, testOnlyGenerateLocalCandidate: { })
+            }, testOnlyGenerateLocalCandidate: { }, authorization: authorization)
     }
     private func closing() async {
         closes += 1
