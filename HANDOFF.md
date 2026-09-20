@@ -2,6 +2,30 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+CURRENT accepted checkpoints: nativeUIc86119f, servicecompositionc20bd0a,
+approvaldraftd7b0efd, each independently reviewed. Root fresh final draft checks
+Swift5/0fail +GoPASS1.117s and exactfixture digests. git diff --check clean.
+All agents/test processes released; rootSQLfixture STOPPED, verified no server.
+Next: make pending-device-approval outline executable and implement transactional
+pending workflow, then authenticatedHTTP/sharednative/UI/physicalacceptance and
+separate trust provenance/invitations. Nothing new enabled/installed remotely.
+Do not repeat accepted components or call this full auto-pairing completion.
+
+LATEST approval draft implementation d7b0efd complete; account_ios_review active
+on e0774e8..d7b0efd, report approval-draft-protocol-report.md. Go+Swift cache
+released. Root checked Swift33pass0skip and package-race PASS1.479s logs; Go28pass
+17 opt-in skips expected/no SQL. Fixture stopped, no active test processes.
+Next pending-device-approval outline includes exact-session historical-ID schema
+caveat, receipt-vs-membership retry, lock-order and atomicity boundaries. It is
+NOT an executable dispatched plan yet. No remote enablement/install.
+
+ACTIVE approval-draft protocol native_first_device_ui (reused agent due thread
+limit), basee0774e8. Brief task-1-brief.md now draft protocol, full constraints in
+2026-09-20-approval-draft-protocol.md. Agent owns sole Go+Swift cache; root no
+tests/code. Report approval-draft-protocol-report.md. No SQL required. Fixture
+STOPPED. Root appended exact-session refresh/pending lifecycle seam to ignored
+pending-join-integration-notes.md. No phone/server activation yet.
+
 CURRENT service composition accepted throughc20bd0a, independent re-review clean.
 Root verified durable focusedSQLracePASS and restored schemas, fixture STOPPED.
 Next approval-draft protocol plan is ready and feasibility checked. No remote

@@ -1,5 +1,23 @@
 # iPhone continuation ledger
 
+Task approval-draft-protocol: complete (commitse0774e8..d7b0efd, review clean).
+Independent account_ios_review Approved/spec compliant/no findings. Root fresh
+swift test --filter AccountGroupApprovalDraftTests PASS5/0fail and Go focused
+TestApprovalDraft|TestWire PASS1.117s, exact mixed64/65 fixture digests verified.
+git diff --check clean; SQL fixture no server running. No active agent/test/cache
+owner. Pending lifecycle/HTTP/nativeapproval/trustprovenance/invitations remain
+unfinished; outline2026-09-20-pending-device-approval.md is NOT executable task yet.
+
+2026-09-20 approval draft implementation DONE d7b0efd; independent account_ios_review
+active frozen e0774e8..d7b0efd. Root verifies Swift33pass0skip/Go racePASS logs.
+Cache released, no SQL used, fixture stopped. Pending lifecycle outline prepared
+and checked for exact-session refresh/FK/receipt/lock-order hazards, not dispatched.
+
+2026-09-20 approval-draft-protocol ACTIVE native_first_device_ui basee0774e8,
+soleGo/Swiftcache, noSQL. Current task1brief replaced with draft task; preserve
+until reviewed. Report approval-draft-protocol-report.md. Root fixture down,
+no production/physicalgroupactivation; nextpending-lifecycle notes updated.
+
 Task group-service-composition: complete (commits24a9882..c20bd0a, review clean).
 Independent re-review Approved, both cleanup findings resolved, no remaining
 findings. Root read focused SQL race PASS1.644s and original result excerpts;
