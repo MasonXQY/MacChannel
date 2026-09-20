@@ -52,6 +52,7 @@ type AccountHTTPConfig struct {
 	Login      AccountLogin
 	Sessions   AccountSessions
 	Groups     AccountGroups
+	Enrollment AccountGroupEnrollment
 }
 
 type sourceWindow struct {
@@ -64,6 +65,7 @@ type accountHTTP struct {
 	login      AccountLogin
 	sessions   AccountSessions
 	groups     AccountGroups
+	enrollment AccountGroupEnrollment
 	clock      func() time.Time
 	global     chan struct{}
 	mu         sync.Mutex
@@ -78,6 +80,9 @@ func NewAccountHTTP(config AccountHTTPConfig) (http.Handler, error) {
 	h := &accountHTTP{verifier: config.Verifier, challenges: config.Challenges, login: config.Login, sessions: config.Sessions, clock: time.Now, global: make(chan struct{}, accountGlobalLimit), sources: make(map[string]sourceWindow), completing: make(map[string]bool)}
 	if !nilInterface(config.Groups) {
 		h.groups = config.Groups
+	}
+	if !nilInterface(config.Enrollment) {
+		h.enrollment = config.Enrollment
 	}
 	return h, nil
 }
@@ -96,6 +101,10 @@ func nilInterface(v any) bool {
 
 func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	accountHeaders(w)
+	if (r.URL.Path == "/v1/account/group/discover" || r.URL.Path == "/v1/account/group/bootstrap") && nilInterface(h.enrollment) {
+		writeAccountError(w, http.StatusNotFound, "invalid_request")
+		return
+	}
 	if r.URL.Path == "/v1/account/group/events" && nilInterface(h.groups) {
 		writeAccountError(w, http.StatusNotFound, "invalid_request")
 		return
@@ -145,6 +154,10 @@ func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device := strings.ToLower(envelope.DeviceID)
+	if r.URL.Path == "/v1/account/group/discover" || r.URL.Path == "/v1/account/group/bootstrap" {
+		h.serveGroupEnrollment(w, r, device, purpose, envelope.Payload)
+		return
+	}
 	if r.URL.Path == "/v1/account/group/events" {
 		h.serveGroupEvents(w, r, device, envelope.Payload)
 		return
@@ -170,6 +183,10 @@ func (h *accountHTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func accountPurpose(path string) (string, bool) {
 	switch path {
+	case "/v1/account/group/discover":
+		return "dropmesh.account.group.discover.v1", true
+	case "/v1/account/group/bootstrap":
+		return "dropmesh.account.group.bootstrap.v1", true
 	case "/v1/account/group/events":
 		return "dropmesh.account.group.events.v1", true
 	case "/v1/account/login/challenge":
