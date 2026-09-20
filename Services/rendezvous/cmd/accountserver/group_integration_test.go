@@ -10,9 +10,11 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -47,19 +49,13 @@ func groupAssemblyConfig(t *testing.T, dsn string, enabled bool) config {
 
 func TestGroupAssemblyRequiresSchemaOnlyWhenEnabled(t *testing.T) {
 	dsn, db := guardedGroupDatabase(t)
-	if _, err := db.Exec(`ALTER TABLE account_group_events RENAME TO account_group_events_schema_test`); err != nil {
-		t.Fatal("hide group event schema")
-	}
-	if _, err := db.Exec(`ALTER TABLE account_groups RENAME TO account_groups_schema_test`); err != nil {
-		_, _ = db.Exec(`ALTER TABLE account_group_events_schema_test RENAME TO account_group_events`)
+	restore, err := hideGroupSchema(db)
+	if err != nil {
 		t.Fatal("hide group schema")
 	}
 	t.Cleanup(func() {
-		if _, err := db.Exec(`ALTER TABLE account_groups_schema_test RENAME TO account_groups`); err != nil {
+		if err := restore(); err != nil {
 			t.Errorf("restore group schema: %v", err)
-		}
-		if _, err := db.Exec(`ALTER TABLE account_group_events_schema_test RENAME TO account_group_events`); err != nil {
-			t.Errorf("restore group event schema: %v", err)
 		}
 	})
 	plain, closePlain, err := buildService(context.Background(), groupAssemblyConfig(t, dsn, false))
@@ -73,6 +69,95 @@ func TestGroupAssemblyRequiresSchemaOnlyWhenEnabled(t *testing.T) {
 	}
 	if err == nil || grouped != nil || err.Error() != errStartup.Error() {
 		t.Fatalf("enabled groups without schema = handler=%v close=%v error=%v", grouped, closeGrouped != nil, err)
+	}
+}
+
+func hideGroupSchema(db *sql.DB) (func() error, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	rollback := func(cause error) (func() error, error) {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return nil, errors.Join(cause, rollbackErr)
+		}
+		return nil, cause
+	}
+	if _, err := tx.Exec(`ALTER TABLE account_group_events RENAME TO account_group_events_schema_test`); err != nil {
+		return rollback(err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE account_groups RENAME TO account_groups_schema_test`); err != nil {
+		return rollback(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return func() error {
+		restore, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		fail := func(cause error) error {
+			if rollbackErr := restore.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				return errors.Join(cause, rollbackErr)
+			}
+			return cause
+		}
+		if _, err := restore.Exec(`ALTER TABLE account_groups_schema_test RENAME TO account_groups`); err != nil {
+			return fail(err)
+		}
+		if _, err := restore.Exec(`ALTER TABLE account_group_events_schema_test RENAME TO account_group_events`); err != nil {
+			return fail(err)
+		}
+		return restore.Commit()
+	}, nil
+}
+
+func TestGroupAssemblySchemaCleanupRegression(t *testing.T) {
+	_, db := guardedGroupDatabase(t)
+	if os.Getenv("DROPMESH_SCHEMA_CLEANUP_CHILD") == "1" {
+		restore, err := hideGroupSchema(db)
+		if err != nil {
+			t.Fatal("child hide schema")
+		}
+		t.Cleanup(func() {
+			if err := restore(); err != nil {
+				t.Errorf("child restore schema: %v", err)
+			}
+		})
+		t.Fatal("intentional assertion failure after schema rename")
+	}
+	t.Run("partial rename rolls back", func(t *testing.T) {
+		if _, err := db.Exec(`CREATE TABLE account_groups_schema_test(marker INTEGER)`); err != nil {
+			t.Fatal("create collision")
+		}
+		t.Cleanup(func() {
+			if _, err := db.Exec(`DROP TABLE IF EXISTS account_groups_schema_test`); err != nil {
+				t.Errorf("drop collision: %v", err)
+			}
+		})
+		if restore, err := hideGroupSchema(db); err == nil || restore != nil {
+			t.Fatal("partial rename unexpectedly succeeded")
+		}
+		assertGroupSchemaPresent(t, db)
+		var temporary bool
+		if err := db.QueryRow(`SELECT to_regclass('public.account_group_events_schema_test') IS NOT NULL`).Scan(&temporary); err != nil || temporary {
+			t.Fatalf("partial event rename remained: %v %v", temporary, err)
+		}
+	})
+	command := exec.Command(os.Args[0], "-test.run=^TestGroupAssemblySchemaCleanupRegression$", "-test.count=1")
+	command.Env = append(os.Environ(), "DROPMESH_SCHEMA_CLEANUP_CHILD=1")
+	if output, err := command.CombinedOutput(); err == nil || !bytes.Contains(output, []byte("intentional assertion failure")) {
+		t.Fatalf("cleanup child result err=%v output=%s", err, output)
+	}
+	assertGroupSchemaPresent(t, db)
+}
+
+func assertGroupSchemaPresent(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var groups, events bool
+	if err := db.QueryRow(`SELECT to_regclass('public.account_groups') IS NOT NULL,to_regclass('public.account_group_events') IS NOT NULL`).Scan(&groups, &events); err != nil || !groups || !events {
+		t.Fatalf("group schema present=%v/%v err=%v", groups, events, err)
 	}
 }
 
@@ -158,8 +243,16 @@ func TestGroupAssemblySQLRoutesPersistAndHonorRevocation(t *testing.T) {
 	accessRaw := bytes.Repeat([]byte{7}, 32)
 	accessToken := base64.RawURLEncoding.EncodeToString(accessRaw)
 	accessHash := sha256.Sum256(accessRaw)
+	const sentinelNonce = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	if _, err := db.Exec(`INSERT INTO auth_replay_nonces(nonce_hash,source_hash,device_id,expires_at) VALUES($1,$2,$3,clock_timestamp()+interval '1 day') ON CONFLICT(nonce_hash) DO UPDATE SET expires_at=EXCLUDED.expires_at`, sentinelNonce, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "99999999-9999-4999-8999-999999999999"); err != nil {
+		t.Fatal("seed unrelated replay sentinel")
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec(`DELETE FROM auth_replay_nonces WHERE nonce_hash=$1`, sentinelNonce); err != nil {
+			t.Errorf("clean replay sentinel: %v", err)
+		}
+	})
 	for _, cleanup := range []struct{ query, value string }{
-		{`DELETE FROM auth_replay_nonces WHERE true`, ""},
 		{`DELETE FROM account_group_events WHERE account_id=$1`, accountID},
 		{`DELETE FROM account_groups WHERE account_id=$1`, accountID},
 		{`DELETE FROM account_sessions WHERE family_id=$1`, familyID},
@@ -263,5 +356,9 @@ func TestGroupAssemblySQLRoutesPersistAndHonorRevocation(t *testing.T) {
 	}
 	if err := db.QueryRow(`SELECT count(*) FROM account_group_events WHERE account_id=$1`, accountID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("post-revocation event count=%d err=%v", count, err)
+	}
+	var sentinelCount int
+	if err := db.QueryRow(`SELECT count(*) FROM auth_replay_nonces WHERE nonce_hash=$1`, sentinelNonce).Scan(&sentinelCount); err != nil || sentinelCount != 1 {
+		t.Fatalf("unrelated replay sentinel count=%d err=%v", sentinelCount, err)
 	}
 }

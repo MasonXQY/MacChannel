@@ -83,6 +83,56 @@ go test ./... -count=1
 
 The default run intentionally skipped the opt-in SQL assembly tests because `DROPMESH_ACCOUNT_TEST_DATABASE_URL` was unset; all packages passed. Command output was captured in the task console; no separate log file was created. The coordinator owns the already-running disposable database and its shutdown.
 
+Actual SQL race output excerpt retained from the task result:
+
+```text
+--- PASS: TestGroupAssemblyRequiresSchemaOnlyWhenEnabled (0.02s)
+--- PASS: TestGroupAssemblySQLRoutesPersistAndHonorRevocation (0.04s)
+--- PASS: TestIsolatedSQLAssemblyDurablyRejectsSignedEnvelopeReplay (0.02s)
+PASS
+ok  macchannel/rendezvous/cmd/accountserver  2.332s
+```
+
+Actual default-suite output excerpt retained from the task result:
+
+```text
+ok  macchannel/rendezvous/cmd/accountserver       0.567s
+ok  macchannel/rendezvous/internal/accountauth    14.835s
+ok  macchannel/rendezvous/internal/accountgroup   1.263s
+ok  macchannel/rendezvous/internal/auth           0.582s
+ok  macchannel/rendezvous/internal/ingress        0.802s
+ok  macchannel/rendezvous/internal/turn           8.688s
+```
+
+Because the default command omitted `-v`, Go did not print individual skip lines. The three guarded accountserver tests `TestGroupAssemblyRequiresSchemaOnlyWhenEnabled`, `TestGroupAssemblySQLRoutesPersistAndHonorRevocation`, and the pre-existing `TestIsolatedSQLAssemblyDurablyRejectsSignedEnvelopeReplay` took their explicit no-DSN skip paths in that run.
+
+## Review fixes
+
+Frozen-diff review found two test isolation defects. The original two-step schema rename registered cleanup only after both renames and discarded an emergency restore error; the route fixture also deleted every durable replay nonce. The corrections are test-only:
+
+- schema hiding/restoration now uses checked atomic transactions;
+- a forced second-rename collision proves the first rename rolls back;
+- a subprocess deliberately fails an assertion after a successful rename, and its parent verifies cleanup restored both real table names;
+- route acceptance no longer deletes replay state and proves an unrelated unexpired replay sentinel survives the complete lifecycle.
+
+Focused review-fix command (PASS) and durable log:
+
+```sh
+DROPMESH_ACCOUNT_TEST_DATABASE_URL='postgres://mason@/dropmesh_account_auth_test?host=/private/tmp/dropmesh-group-db.igBdYS&port=55459&sslmode=disable' \
+  go test -race ./cmd/accountserver -run '^TestGroupAssembly' -count=1 -v
+```
+
+Log: `/tmp/group-service-composition-fix-race.log`
+
+```text
+--- PASS: TestGroupAssemblyRequiresSchemaOnlyWhenEnabled (0.02s)
+--- PASS: TestGroupAssemblySchemaCleanupRegression (0.03s)
+    --- PASS: TestGroupAssemblySchemaCleanupRegression/partial_rename_rolls_back (0.00s)
+--- PASS: TestGroupAssemblySQLRoutesPersistAndHonorRevocation (0.05s)
+PASS
+ok  macchannel/rendezvous/cmd/accountserver  1.644s
+```
+
 ## Acceptance limits
 
 This is local source and guarded-runtime verification, not deployment or native acceptance. Groups remain default-off. The three routes do not grant transfer trust and do not implement approved-device workflows, invitation issuance/acceptance, native account deletion, public activation, or phone installation. Those remain separately approved and tested stages.
