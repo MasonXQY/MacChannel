@@ -2,6 +2,22 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+USER PRIORITY UPDATE: mobile needs six-digit code hosting for iPhone-to-iPhone;
+Recreate identity reportedly does nothing. Root verified PairingAttempt/View is
+join-only although DurablePairingSession already supports createCode/approve/reject.
+Recovery alert false binding synchronously cancels confirmation before the Task's
+async confirm guard can run; native callback-order reproducer needed. Brief prepared:
+.superpowers/sdd/mobile-recovery-callback-brief.md. Queue this urgent repair immediately
+after current core implementer releases cache, before account UI. Do not execute a
+real identity reset; preserve files/eligibility and existing manual trust. Read-only
+phone inspection found connected Mason has com.zensystech.dropmesh.iphone.dev 1.0(8).
+iPad mini is connected, iPhone available(paired). No install or device-data changes.
+
+Read-only server route design report completed at account-server-route-design.md:
+socket/session-bound direct account edges, SQL-to-queue admission fencing, manual
+source fallback; TURN allocation teardown and live topology need separate design/
+authority. This is planning evidence, no implementation/deployment claim.
+
 CURRENT controller implementation active from 80e183a; native_device_approval_controller
 owns scoped core files/tests and Swift cache. Intent e163302 independent review is
 Approved with no findings. Root prepares native UI continuation only; no overlapping
