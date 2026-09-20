@@ -108,27 +108,36 @@ type Config struct {
 	TURNSharedSecret        []byte
 	TURNURLs                []string
 	AccountHandler          http.Handler
+	AccountRoutes           *AccountRouteConfig
 }
 
 type Router struct {
-	clock        func() time.Time
-	verifier     *auth.Verifier
-	registry     *auth.TrustRegistry
-	pairings     pairing.Store
-	presence     *presence.Hub
-	signals      *signal.Hub
-	pairingTTL   time.Duration
-	connections  *connectionLimiter
-	sessions     authenticatedSessions
-	upgrader     websocket.Upgrader
-	trustWatchMu sync.Mutex
-	trustWatches int
-	trustStop    chan struct{}
-	turnSecret   []byte
-	turnURLs     []string
+	clock         func() time.Time
+	verifier      *auth.Verifier
+	registry      *auth.TrustRegistry
+	pairings      pairing.Store
+	presence      *presence.Hub
+	signals       *signal.Hub
+	pairingTTL    time.Duration
+	connections   *connectionLimiter
+	sessions      authenticatedSessions
+	upgrader      websocket.Upgrader
+	trustWatchMu  sync.Mutex
+	trustWatches  int
+	trustStop     chan struct{}
+	turnSecret    []byte
+	turnURLs      []string
+	accountRoutes *AccountRouteConfig
 }
 
 func NewRouter(config Config) http.Handler {
+	if config.AccountRoutes != nil && (config.AccountRoutes.Routes == nil || config.AccountRoutes.Sessions == nil) {
+		panic("invalid account route configuration")
+	}
+	var accountRoutes *AccountRouteConfig
+	if config.AccountRoutes != nil {
+		accountRoutes = &AccountRouteConfig{Routes: config.AccountRoutes.Routes, Sessions: config.AccountRoutes.Sessions}
+	}
 	if config.Clock == nil {
 		config.Clock = time.Now
 	}
@@ -168,8 +177,9 @@ func NewRouter(config Config) http.Handler {
 				return webSocketOriginAllowed(request.Header.Get("Origin"), request.Host, allowedOrigins)
 			},
 		},
-		turnSecret: append([]byte(nil), config.TURNSharedSecret...),
-		turnURLs:   append([]string(nil), config.TURNURLs...),
+		turnSecret:    append([]byte(nil), config.TURNSharedSecret...),
+		turnURLs:      append([]string(nil), config.TURNURLs...),
+		accountRoutes: accountRoutes,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", router.health)
@@ -782,6 +792,15 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer releaseConnection()
+	var accountRouteSocket *accountRouteSocket
+	if r.accountRoutes != nil {
+		accountRouteSocket, err = newAccountRouteSocket(r.accountRoutes, deviceID, authentication.Envelope.PublicKey, source, peer)
+		if err != nil {
+			_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
+			return
+		}
+		defer accountRouteSocket.close()
+	}
 	lifetimeDeadline := time.Now().Add(webSocketMaximumLifetime)
 	_ = connection.SetReadDeadline(earlierDeadline(time.Now().Add(webSocketPongWait), lifetimeDeadline))
 	connection.SetPongHandler(func(string) error {
@@ -829,20 +848,58 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 
 	for {
 		var frame struct {
-			Type    string                   `json:"type"`
-			To      string                   `json:"to"`
-			Payload []byte                   `json:"payload"`
-			Records []auth.SignedTrustRecord `json:"trustRecords"`
+			Type     string                   `json:"type"`
+			To       string                   `json:"to"`
+			Payload  []byte                   `json:"payload"`
+			Records  []auth.SignedTrustRecord `json:"trustRecords"`
+			Envelope auth.Envelope            `json:"envelope"`
 		}
 		if err := connection.ReadJSON(&frame); err != nil {
 			return
 		}
 		switch frame.Type {
+		case "account-route-bind-challenge":
+			if accountRouteSocket == nil {
+				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
+				continue
+			}
+			challenge, err := accountRouteSocket.issueChallenge(request.Context(), r.verifier, r.clock())
+			if err != nil {
+				_ = peer.SendJSON(map[string]string{"type": "account-route-bind-error", "code": "unavailable"})
+				continue
+			}
+			_ = peer.SendJSON(map[string]any{"type": "account-route-bind-challenge", "nonce": challenge.Nonce, "expiresAt": challenge.ExpiresAtMillis})
+		case "account-route-bind":
+			if accountRouteSocket == nil {
+				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
+				continue
+			}
+			if accountRouteSocket.bind(request.Context(), r.verifier, r.accountRoutes.Sessions, r.clock(), frame.Envelope) != nil {
+				_ = peer.SendJSON(map[string]string{"type": "account-route-bind-error", "code": "unavailable"})
+				continue
+			}
+			_ = peer.SendJSON(map[string]string{"type": "account-route-bind-ok"})
+		case "account-route-unbind":
+			if accountRouteSocket == nil {
+				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
+				continue
+			}
+			accountRouteSocket.unbind()
+			_ = peer.SendJSON(map[string]string{"type": "account-route-unbind-ok"})
 		case "signal":
-			err := r.signals.Route(deviceID, strings.ToLower(frame.To), frame.Payload)
+			var err error
+			if accountRouteSocket != nil {
+				if len(frame.Payload) == 0 || len(frame.Payload) > signal.MaximumFrameSize {
+					err = signal.ErrFrameLarge
+				} else {
+					_, err = accountRouteSocket.routes.Route(request.Context(), accountRouteSocket.handle, strings.ToLower(frame.To), frame.Payload)
+				}
+			} else {
+				err = r.signals.Route(deviceID, strings.ToLower(frame.To), frame.Payload)
+			}
 			if err != nil {
 				code := "unavailable"
-				if errors.Is(err, signal.ErrForbidden) {
+				if accountRouteSocket == nil && errors.Is(err, signal.ErrForbidden) {
 					code = "forbidden"
 				} else if errors.Is(err, signal.ErrFrameLarge) {
 					code = "invalid_frame"

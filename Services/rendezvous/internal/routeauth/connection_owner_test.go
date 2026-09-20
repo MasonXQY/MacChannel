@@ -339,6 +339,83 @@ func TestOwnerQueueBoundBusyOwnershipAndClose(t *testing.T) {
 	}
 }
 
+func TestOwnerNotificationsDrainAndCloseExactGeneration(t *testing.T) {
+	o, from, to := ownerFixture(t, 2)
+	ready, err := o.Notifications(to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, ok := o.snapshot(from, to.deviceID, false)
+	if !ok || !o.enqueue(pair, signal.Frame{Payload: []byte("one")}, false) ||
+		!o.enqueue(pair, signal.Frame{Payload: []byte("two")}, false) {
+		t.Fatal("enqueue")
+	}
+	select {
+	case _, open := <-ready:
+		if !open {
+			t.Fatal("notification closed while live")
+		}
+	default:
+		t.Fatal("missing notification")
+	}
+	for _, want := range []string{"one", "two"} {
+		frame, state := o.Dequeue(to)
+		if state != QueueReady || string(frame.Payload) != want {
+			t.Fatalf("dequeue %q: %v %q", want, state, frame.Payload)
+		}
+	}
+	if _, state := o.Dequeue(to); state != QueueEmpty {
+		t.Fatal("queue not empty", state)
+	}
+	if err := o.Close(to); err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	for range 3 {
+		select {
+		case _, open := <-ready:
+			if !open {
+				closed = true
+			}
+		default:
+		}
+	}
+	if !closed {
+		t.Fatal("closed generation notification remained open")
+	}
+	if _, err := o.Notifications(to); err != ErrConnectionUnavailable {
+		t.Fatal("stale handle notifications", err)
+	}
+}
+
+func TestOwnerNotificationABADoesNotWakeReplacement(t *testing.T) {
+	o, _, old := ownerFixture(t, 1)
+	oldReady, err := o.Notifications(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, key := identity(2, false)
+	if err := o.Close(old); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := o.Register(id, key, "source-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newReady, err := o.Notifications(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, open := <-oldReady; open {
+		t.Fatal("old generation notification open")
+	}
+	select {
+	case <-newReady:
+		t.Fatal("replacement spuriously notified")
+	default:
+	}
+}
+
 func TestOwnerConcurrentCloseRegistration(t *testing.T) {
 	o, _ := NewConnectionOwner(1)
 	id, key := identity(1, true)

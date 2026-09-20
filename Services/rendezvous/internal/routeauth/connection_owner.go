@@ -53,6 +53,7 @@ type connection struct {
 	bindingVersion           uint64
 	source                   string
 	queue                    []signal.Frame
+	notifications            chan struct{}
 	head, count, queuedBytes int
 }
 type connectionSnapshot struct {
@@ -103,7 +104,7 @@ func (o *ConnectionOwner) Register(id string, key []byte, source string) (Connec
 	}
 	o.nextGeneration++
 	h := ConnectionHandle{o, id, o.nextGeneration}
-	o.connections[id] = &connection{handle: h, publicKey: append([]byte(nil), key...), source: source, queue: make([]signal.Frame, o.queueCapacity)}
+	o.connections[id] = &connection{handle: h, publicKey: append([]byte(nil), key...), source: source, queue: make([]signal.Frame, o.queueCapacity), notifications: make(chan struct{}, 1)}
 	o.sources[source]++
 	return h, nil
 }
@@ -157,6 +158,7 @@ func (o *ConnectionOwner) Close(h ConnectionHandle) error {
 	}
 	o.queuedBytes -= c.queuedBytes
 	delete(o.connections, h.deviceID)
+	close(c.notifications)
 	o.sources[c.source]--
 	if o.sources[c.source] == 0 {
 		delete(o.sources, c.source)
@@ -174,6 +176,36 @@ func (o *ConnectionOwner) TryDequeue(h ConnectionHandle) (signal.Frame, QueueSta
 		return signal.Frame{}, QueueBusy
 	}
 	defer o.mu.Unlock()
+	return o.dequeueLocked(h)
+}
+
+// Notifications returns the exact generation's coalesced queue wake-up. Close
+// closes this channel; a replacement connection always owns a different one.
+func (o *ConnectionOwner) Notifications(h ConnectionHandle) (<-chan struct{}, error) {
+	if o == nil {
+		return nil, ErrConnectionUnavailable
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	c := o.current(h)
+	if c == nil {
+		return nil, ErrConnectionUnavailable
+	}
+	return c.notifications, nil
+}
+
+// Dequeue waits only for the short in-process owner lock. It never performs
+// callbacks or network I/O while holding that lock.
+func (o *ConnectionOwner) Dequeue(h ConnectionHandle) (signal.Frame, QueueState) {
+	if o == nil {
+		return signal.Frame{}, QueueClosed
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.dequeueLocked(h)
+}
+
+func (o *ConnectionOwner) dequeueLocked(h ConnectionHandle) (signal.Frame, QueueState) {
 	c := o.current(h)
 	if c == nil {
 		return signal.Frame{}, QueueClosed
@@ -187,6 +219,12 @@ func (o *ConnectionOwner) TryDequeue(h ConnectionHandle) (signal.Frame, QueueSta
 	c.count--
 	c.queuedBytes -= len(f.Payload)
 	o.queuedBytes -= len(f.Payload)
+	if c.count > 0 {
+		select {
+		case c.notifications <- struct{}{}:
+		default:
+		}
+	}
 	return f, QueueReady
 }
 func (o *ConnectionOwner) snapshot(h ConnectionHandle, target string, bound bool) (pairSnapshot, bool) {
@@ -224,6 +262,10 @@ func (o *ConnectionOwner) enqueue(pair pairSnapshot, frame signal.Frame, bound b
 	to.count++
 	to.queuedBytes += len(frame.Payload)
 	o.queuedBytes += len(frame.Payload)
+	select {
+	case to.notifications <- struct{}{}:
+	default:
+	}
 	return true
 }
 
