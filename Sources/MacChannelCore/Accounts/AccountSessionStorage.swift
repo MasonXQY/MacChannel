@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public struct AccountSessionBinding: Equatable, Sendable {
@@ -59,32 +60,66 @@ public actor KeychainAccountSessionStorage: AccountSessionStorage {
     static let account = "session-v1"
     private let store: any SecretStore & Sendable
     private let removeRecord: @Sendable () throws -> Void
+    private let recordPolicy: KeychainPolicy
+    private let expectedBinding: AccountSessionBinding?
 
     public init() {
         let dedicated = KeychainStore(policy: Self.policy)
         store = dedicated
+        recordPolicy = Self.policy
+        expectedBinding = nil
         removeRecord = { try dedicated.removeAll() }
     }
 
-    init(store: any SecretStore & Sendable, remove: @escaping @Sendable () throws -> Void) {
+    /// Separate candidate origins never load, migrate or delete the legacy slot.
+    public init(binding: AccountSessionBinding) {
+        let policy = Self.scopedPolicy(binding)
+        let dedicated = KeychainStore(policy: policy)
+        store = dedicated
+        recordPolicy = policy
+        expectedBinding = binding
+        removeRecord = { try dedicated.removeAll() }
+    }
+
+    init(store: any SecretStore & Sendable, binding: AccountSessionBinding? = nil,
+         remove: @escaping @Sendable () throws -> Void) {
         self.store = store
+        recordPolicy = binding.map(Self.scopedPolicy) ?? Self.policy
+        expectedBinding = binding
         removeRecord = remove
+    }
+
+    static func scopedPolicy(_ binding: AccountSessionBinding) -> KeychainPolicy {
+        var bytes = Data()
+        for value in [binding.origin.absoluteString, binding.audience, binding.deviceID.uuidString.lowercased()] {
+            let field = Data(value.utf8)
+            bytes.append(Data("\(field.count):".utf8)); bytes.append(field)
+        }
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        return KeychainPolicy(service: Self.policy.service + ".bound-v1." + digest,
+            accessGroup: nil, accessibility: .afterFirstUnlockThisDeviceOnly, synchronizable: false)
     }
 
     public func load() async throws -> AccountStoredSession? {
         do {
-            guard let data = try store.data(for: Self.account, policy: Self.policy) else { return nil }
-            return try Self.decode(data)
+            guard let data = try store.data(for: Self.account, policy: recordPolicy) else { return nil }
+            let record = try Self.decode(data)
+            guard expectedBinding == nil || record.binding == expectedBinding else { throw AccountSessionControllerError.secureStorage }
+            return record
         } catch { throw AccountSessionControllerError.secureStorage }
     }
 
     public func save(_ record: AccountStoredSession) async throws {
         do {
             // A failed read/decode must never turn into an overwrite of protected data.
-            if let previous = try store.data(for: Self.account, policy: Self.policy) { _ = try Self.decode(previous) }
+            guard expectedBinding == nil || record.binding == expectedBinding else { throw AccountSessionControllerError.secureStorage }
+            if let previous = try store.data(for: Self.account, policy: recordPolicy) {
+                let decoded = try Self.decode(previous)
+                guard expectedBinding == nil || decoded.binding == expectedBinding else { throw AccountSessionControllerError.secureStorage }
+            }
             let data = try JSONEncoder().encode(RecordDTO(record))
             guard data.count <= 16_384 else { throw AccountSessionControllerError.secureStorage }
-            try store.store(data, for: Self.account, policy: Self.policy)
+            try store.store(data, for: Self.account, policy: recordPolicy)
         } catch { throw AccountSessionControllerError.secureStorage }
     }
 

@@ -3,6 +3,56 @@ import XCTest
 @testable import MacChannelCore
 
 final class AccountSessionStorageTests: XCTestCase {
+    func testRemovingCandidateLeavesLegacySessionUntouched() async throws {
+        let secrets = NamespacedSessionSecrets()
+        let record = try record()
+        let candidatePolicy = KeychainAccountSessionStorage.scopedPolicy(record.binding)
+        let legacy = KeychainAccountSessionStorage(store: secrets, remove: {
+            secrets.remove(policy: KeychainAccountSessionStorage.policy)
+        })
+        let candidate = KeychainAccountSessionStorage(store: secrets, binding: record.binding, remove: {
+            secrets.remove(policy: candidatePolicy)
+        })
+        try await legacy.save(record)
+        let initiallyAbsent = try await candidate.load()
+        XCTAssertNil(initiallyAbsent)
+        try await candidate.save(record)
+        try await candidate.remove()
+        let legacyAfter = try await legacy.load()
+        let candidateAfter = try await candidate.load()
+        XCTAssertEqual(legacyAfter?.tokens.accessToken, record.tokens.accessToken)
+        XCTAssertNil(candidateAfter)
+    }
+    func testBoundNamespaceSeparatesOriginAudienceAndDevice() throws {
+        let device = UUID()
+        let a = try AccountSessionBinding(deviceID: device, audience: "app", origin: URL(string: "https://example.com")!)
+        let equivalent = try AccountSessionBinding(deviceID: device, audience: "app", origin: URL(string: "HTTPS://EXAMPLE.COM:443/")!)
+        XCTAssertEqual(KeychainAccountSessionStorage.scopedPolicy(a), KeychainAccountSessionStorage.scopedPolicy(equivalent))
+        for b in [
+            try AccountSessionBinding(deviceID: device, audience: "app", origin: URL(string: "https://candidate.example.com")!),
+            try AccountSessionBinding(deviceID: device, audience: "other", origin: a.origin),
+            try AccountSessionBinding(deviceID: UUID(), audience: "app", origin: a.origin)
+        ] {
+            XCTAssertNotEqual(KeychainAccountSessionStorage.scopedPolicy(a), KeychainAccountSessionStorage.scopedPolicy(b))
+        }
+        XCTAssertNotEqual(KeychainAccountSessionStorage.scopedPolicy(a), KeychainAccountSessionStorage.policy)
+    }
+
+    func testBoundStoreRejectsWrongBindingWithoutOverwrite() async throws {
+        let secret = SessionSecretStore()
+        let first = try record()
+        let store = KeychainAccountSessionStorage(store: secret, binding: first.binding, remove: { secret.remove() })
+        try await store.save(first)
+        let bytes = secret.bytes
+        do { try await store.save(record()); XCTFail("wrong binding saved") } catch {}
+        XCTAssertEqual(secret.bytes, bytes)
+        XCTAssertEqual(secret.writes.count, 1)
+        let wrong = KeychainAccountSessionStorage(store: secret, binding: try record().binding, remove: { secret.remove() })
+        do { _ = try await wrong.load(); XCTFail("wrong binding read") } catch {}
+        XCTAssertEqual(secret.removals, 0)
+        XCTAssertTrue(secret.policies.allSatisfy { $0.service != KeychainAccountSessionStorage.policy.service })
+    }
+
     func testDedicatedPolicyAndAtomicSingleRecordRoundTrip() async throws {
         let secret = SessionSecretStore()
         let store = KeychainAccountSessionStorage(store: secret, remove: { secret.remove() })
@@ -85,6 +135,20 @@ final class AccountSessionStorageTests: XCTestCase {
         return try AccountStoredSession(binding: binding, tokens: .init(
             identity: .init(accountID: UUID(), sessionID: UUID(), deviceID: binding.deviceID, audience: binding.audience),
             accessToken: token(1), refreshToken: token(2), accessExpiresAt: Date(timeIntervalSince1970: 2_000_000_000), refreshExpiresAt: Date(timeIntervalSince1970: 2_000_001_000)))
+    }
+}
+
+private final class NamespacedSessionSecrets: SecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    func data(for account: String, policy: KeychainPolicy) throws -> Data? {
+        lock.withLock { values[policy.service + "/" + account] }
+    }
+    func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
+        lock.withLock { values[policy.service + "/" + account] = data }
+    }
+    func remove(policy: KeychainPolicy) {
+        lock.withLock { values = values.filter { !$0.key.hasPrefix(policy.service + "/") } }
     }
 }
 
