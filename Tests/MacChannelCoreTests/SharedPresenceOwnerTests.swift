@@ -96,6 +96,7 @@ final class SharedPresenceOwnerTests: XCTestCase {
         let stream = await supervisor.bridge.signalFrames()
         await supervisor.start()
         try await eventually { await supervisor.state == .online }
+        try await eventually { await first.waitingForFrame }
         await first.failReceive()
         try await eventually {
             let count = await factory.count
