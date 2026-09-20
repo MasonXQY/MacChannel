@@ -46,13 +46,18 @@ public actor AccountSessionController {
     private let binding: AccountSessionBinding
     private let groupVerifier: AccountGroupHistoryVerifier?
     private let firstDeviceEnrollment: AccountFirstDeviceEnrollment?
+    private let deviceApprovalConfiguration: AccountDeviceApproval?
+    private var deviceApprovalTicket: ApprovalAttempt?
     private var groupSyncInProgress = false
     private var firstDeviceAttempt: FirstDeviceAttempt?
     private var groupVerificationAuthorization: AccountGroupVerificationAuthorization?
     private var operationRevision = UUID() {
         // Revoke synchronously at lifecycle intent, before any suspension or
         // publication of the new session revision.
-        willSet { groupVerificationAuthorization?.invalidate() }
+        willSet {
+            groupVerificationAuthorization?.invalidate()
+            deviceApprovalTicket = nil
+        }
     }
     private let now: @Sendable () -> Date
     private let operationObserver: (@Sendable (AccountSessionOperation) -> Void)?
@@ -69,10 +74,12 @@ public actor AccountSessionController {
 
     public init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
                 groupVerifier: AccountGroupHistoryVerifier? = nil,
-                firstDeviceEnrollment: AccountFirstDeviceEnrollment? = nil) {
+                firstDeviceEnrollment: AccountFirstDeviceEnrollment? = nil,
+                deviceApproval: AccountDeviceApproval? = nil) {
         self.service = service; self.storage = storage; self.binding = binding
         self.groupVerifier = groupVerifier
         self.firstDeviceEnrollment = firstDeviceEnrollment
+        self.deviceApprovalConfiguration = deviceApproval
         now = Date.init
         operationObserver = nil
     }
@@ -80,15 +87,138 @@ public actor AccountSessionController {
     init(service: any AccountSessionService, storage: any AccountSessionStorage, binding: AccountSessionBinding,
          groupVerifier: AccountGroupHistoryVerifier? = nil,
          firstDeviceEnrollment: AccountFirstDeviceEnrollment? = nil,
+         deviceApproval: AccountDeviceApproval? = nil,
          now: @escaping @Sendable () -> Date,
          operationObserver: (@Sendable (AccountSessionOperation) -> Void)? = nil) {
         self.service = service; self.storage = storage; self.binding = binding; self.now = now
         self.groupVerifier = groupVerifier
         self.firstDeviceEnrollment = firstDeviceEnrollment
+        self.deviceApprovalConfiguration = deviceApproval
         self.operationObserver = operationObserver
     }
 
     public func snapshot() -> AccountSessionSnapshot { state }
+
+    private struct ApprovalAttempt {
+        let context: EnrollmentSession
+        let candidate: AccountDeviceApprovalFlow.Candidate
+    }
+
+    public func supportsDeviceApproval() -> Bool {
+        guard let configuration = deviceApprovalConfiguration,
+              configuration.identity.id.rawValue == binding.deviceID,
+              (try? AccountGroupEvent.deviceID(publicKey: configuration.identity.publicKey.rawRepresentation)) == binding.deviceID.uuidString.lowercased(),
+              groupVerifier != nil else { return false }
+        return service is any AccountGroupPendingService && service is any AccountGroupService && service is any AccountGroupEnrollmentService
+    }
+
+    private func approvalContext() throws -> EnrollmentSession {
+        guard !busyForLogin, state.phase == .signedIn, let record = current,
+              record.phase == .active, record.binding == binding else { throw AccountDeviceApprovalError.sessionChanged }
+        let context = EnrollmentSession(record: record, revision: operationRevision)
+        try requireEnrollmentSession(context)
+        return context
+    }
+
+    private func withApproval<T: Sendable>(fresh: Bool = false, attempt: ApprovalAttempt? = nil,
+        _ operation: @Sendable (AccountDeviceApprovalFlow) async throws -> T) async throws -> (T, EnrollmentSession) {
+        guard supportsDeviceApproval(), let configuration = deviceApprovalConfiguration,
+              let pending = service as? any AccountGroupPendingService,
+              let enrollment = service as? any AccountGroupEnrollmentService,
+              let history = service as? any AccountGroupService, let verifier = groupVerifier else { throw AccountDeviceApprovalError.unavailable }
+        try beginGroupOperation()
+        defer { groupSyncInProgress = false }
+        let context = try await (fresh ? enrollmentSession() : approvalContext())
+        if let attempt {
+            guard attempt.context.revision == context.revision,
+                  attempt.context.record.tokens.identity == context.record.tokens.identity else { throw AccountDeviceApprovalError.invalidTicket }
+        }
+        let authorization = beginVerification(accessExpiresAt: context.record.tokens.accessExpiresAt,
+            confirmationExpiresAt: attempt?.candidate.ticket.expiresAt)
+        defer { authorization.invalidate(); groupVerificationAuthorization = nil }
+        let flow = AccountDeviceApprovalFlow(configuration: configuration, pending: pending, enrollment: enrollment,
+            historyService: history, verifier: verifier, session: context.record, authorization: authorization, now: now)
+        do {
+            let result = try await operation(flow)
+            try requireEnrollmentSession(context)
+            try authorization.requireCurrent()
+            return (result, context)
+        } catch {
+            try requireEnrollmentSession(context)
+            if error as? AccountFirstDeviceEnrollmentError == .invalidAttempt { throw AccountDeviceApprovalError.invalidTicket }
+            throw error
+        }
+    }
+
+    private func prepareApprovalTicket(_ operation: @Sendable (AccountDeviceApprovalFlow) async throws -> AccountDeviceApprovalFlow.Candidate,
+                                       fresh: Bool = false) async throws -> AccountDeviceApprovalTicket {
+        // Opening either consent flow invalidates the other callback synchronously.
+        firstDeviceAttempt = nil; deviceApprovalTicket = nil
+        let (candidate, context) = try await withApproval(fresh: fresh, operation)
+        try requireEnrollmentSession(context)
+        deviceApprovalTicket = ApprovalAttempt(context: context, candidate: candidate)
+        return candidate.ticket
+    }
+
+    private func consumeApproval(_ id: UUID, operations: [AccountDeviceApprovalTicket.Operation]) throws -> ApprovalAttempt {
+        try Task.checkCancellation()
+        guard let attempt = deviceApprovalTicket, attempt.candidate.ticket.id == id,
+              operations.contains(attempt.candidate.ticket.operation) else { throw AccountDeviceApprovalError.invalidTicket }
+        deviceApprovalTicket = nil
+        guard attempt.context.revision == operationRevision, attempt.candidate.ticket.expiresAt > (try validNow()),
+              state.phase == .signedIn, current?.tokens.identity == attempt.context.record.tokens.identity else { throw AccountDeviceApprovalError.invalidTicket }
+        return attempt
+    }
+
+    public func pendingDeviceApprovals() async throws -> [AccountGroupPendingSummary] {
+        try await withApproval { try await $0.list() }.0
+    }
+    public func deviceApproval(requestID: String) async throws -> AccountDeviceApprovalView {
+        try await withApproval { try await $0.read(requestID) }.0
+    }
+    public func prepareDeviceJoin() async throws -> AccountDeviceApprovalTicket {
+        try await prepareApprovalTicket({ try await $0.prepareJoin() }, fresh: true)
+    }
+    public func confirmDeviceJoin(ticketID: UUID) async throws -> AccountDeviceApprovalView {
+        let attempt = try consumeApproval(ticketID, operations: [.requestJoin])
+        guard case .request(let intent) = attempt.candidate.value else { throw AccountDeviceApprovalError.invalidTicket }
+        return try await withApproval(attempt: attempt) { try await $0.confirmJoin(intent) }.0
+    }
+    public func prepareDeviceApproval(requestID: String) async throws -> AccountDeviceApprovalTicket {
+        try await prepareApprovalTicket { try await $0.prepareApproval(requestID) }
+    }
+    public func confirmDeviceApproval(ticketID: UUID, joiningCode: String) async throws -> AccountDeviceApprovalView {
+        let attempt = try consumeApproval(ticketID, operations: [.approveJoin])
+        guard case .proposal(let request, let event, let anchor) = attempt.candidate.value else { throw AccountDeviceApprovalError.invalidTicket }
+        return try await withApproval(attempt: attempt) { try await $0.confirmApproval(request, event, anchor, code: joiningCode) }.0
+    }
+    public func prepareDeviceJoinConfirmation(requestID: String, memberCode: String) async throws -> AccountDeviceApprovalTicket {
+        try await prepareApprovalTicket { try await $0.prepareConfirmation(requestID, code: memberCode) }
+    }
+    public func confirmDeviceJoinConfirmation(ticketID: UUID) async throws -> AccountDeviceApprovalView {
+        let attempt = try consumeApproval(ticketID, operations: [.confirmJoin, .verifyCommitted])
+        return try await withApproval(attempt: attempt) { flow in
+            switch attempt.candidate.value {
+            case .countersign(let intent, let proof): return try await flow.confirmSubject(intent, proof)
+            case .committed(let request, let proof): return try await flow.confirmCommitted(request, proof)
+            default: throw AccountDeviceApprovalError.invalidTicket
+            }
+        }.0
+    }
+    public func resumeDeviceApproval(requestID: String) async throws -> AccountDeviceApprovalView {
+        try await withApproval { try await $0.resume(requestID) }.0
+    }
+    public func cancelDeviceJoin(requestID: String) async throws -> AccountDeviceApprovalView {
+        operationRevision = UUID(); firstDeviceAttempt = nil
+        return try await withApproval { try await $0.cancel(requestID) }.0
+    }
+    public func rejectDeviceJoin(requestID: String) async throws -> AccountDeviceApprovalView {
+        operationRevision = UUID(); firstDeviceAttempt = nil
+        return try await withApproval { try await $0.reject(requestID) }.0
+    }
+    public func dismissDeviceApprovalTicket(ticketID: UUID) {
+        if deviceApprovalTicket?.candidate.ticket.id == ticketID { deviceApprovalTicket = nil }
+    }
 
     /// Credential-free capability only; it does not discover or authorize membership.
     public func supportsFirstDeviceEnrollment() -> Bool {
@@ -110,6 +240,7 @@ public actor AccountSessionController {
     /// Returns an expiring, single-use ticket for a separately confirmed action.
     /// An existing foreign group requires trusted-device approval instead.
     public func prepareFirstDeviceJoin() async throws -> UUID {
+        deviceApprovalTicket = nil
         let dependencies = try enrollmentDependencies()
         try beginGroupOperation()
         defer { groupSyncInProgress = false }

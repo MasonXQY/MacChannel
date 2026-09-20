@@ -4,6 +4,46 @@ import XCTest
 @testable import MacChannelCore
 
 final class AccountGroupHistoryVerifierTests: XCTestCase, @unchecked Sendable {
+    func testIndependentInspectionNeverWritesAndChecksExistingHighWater() async throws {
+        let fixture = try CheckpointHistory()
+        let secret = CheckpointSecretStore()
+        let verifier = AccountGroupHistoryVerifier(storage: KeychainAccountGroupCheckpointStorage(store: secret))
+        let authorization = AccountGroupVerificationAuthorization(accessExpiresAt: .distantFuture, now: Date.init)
+        func inspect(_ events: [AccountGroupEvent]) async throws -> AccountGroupSnapshot {
+            try await verifier.inspect(history: events, binding: fixture.binding, accountID: groupAccount,
+                groupID: groupID, expectedGeneration: 1, expectedAnchorHash: fixture.events[0].digest(), authorization: authorization)
+        }
+        let result = try await inspect(fixture.events)
+        XCTAssertEqual(result.sequence, 3)
+        XCTAssertEqual(secret.writes, 0)
+        _ = try await fixture.confirm(verifier)
+        _ = try await fixture.accept(verifier, fixture.events)
+        let writes = secret.writes
+        await checkpointFailure(.invalidHistory) { try await inspect(Array(fixture.events.prefix(2))) }
+        _ = try await inspect(fixture.events)
+        XCTAssertEqual(secret.writes, writes)
+        secret.failReads(true)
+        await checkpointFailure(.secureStorage) { try await inspect(fixture.events) }
+    }
+
+    func testInspectionRetainsAdmissionUntilInvalidatedLoadSettles() async throws {
+        let fixture = try CheckpointHistory()
+        let storage = SuspendedCheckpointStorage()
+        let verifier = AccountGroupHistoryVerifier(storage: storage)
+        let authorization = AccountGroupVerificationAuthorization(accessExpiresAt: .distantFuture, now: Date.init)
+        await storage.suspendNext(.read)
+        let task = Task { try await verifier.inspect(history: fixture.events, binding: fixture.binding,
+            accountID: groupAccount, groupID: groupID, expectedGeneration: 1,
+            expectedAnchorHash: fixture.events[0].digest(), authorization: authorization) }
+        await storage.waitUntilSuspended()
+        authorization.invalidate()
+        await checkpointFailure(.operationInProgress) { try await fixture.confirm(verifier) }
+        await storage.resume()
+        do { _ = try await task.value; XCTFail("Invalidated inspection published") }
+        catch { XCTAssertEqual(error as? AccountSessionControllerError, .needsSignIn) }
+        let persisted = try await storage.persisted(binding: fixture.binding)
+        XCTAssertNil(persisted)
+    }
     func testMissingPinAndEmptyOrOversizedHistoryFailClosed() async throws {
         let fixture = try CheckpointHistory()
         let secret = CheckpointSecretStore()

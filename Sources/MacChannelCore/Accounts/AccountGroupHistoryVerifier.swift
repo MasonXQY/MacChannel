@@ -54,22 +54,8 @@ public actor AccountGroupHistoryVerifier {
         guard let checkpoint = try await load(binding: binding, accountID: accountID, groupID: groupID, authorization: authorization) else {
             throw AccountGroupCheckpointError.missingCheckpoint
         }
-        guard checkpoint.binding == binding, checkpoint.accountID == accountID, checkpoint.groupID == groupID,
-              UInt64(history.count) >= checkpoint.sequence else { throw AccountGroupCheckpointError.invalidHistory }
-        var state: AccountGroupState
-        do {
-            state = try AccountGroupState(anchor: history[0], expectedAccountID: accountID, expectedGroupID: groupID,
-                expectedGeneration: checkpoint.generation, expectedAnchorHash: checkpoint.anchorHash)
-            for (index, event) in history.enumerated() {
-                if index > 0 { try state.apply(event) }
-                // The old head must appear at its exact sequence, even when the
-                // candidate ends later. Final sequence alone cannot detect forks.
-                if state.snapshot.sequence == checkpoint.sequence {
-                    guard state.snapshot.headHash == checkpoint.headHash else { throw AccountGroupCheckpointError.invalidHistory }
-                }
-            }
-        } catch { throw AccountGroupCheckpointError.invalidHistory }
-        let snapshot = state.snapshot
+        let snapshot = try replay(history: history, binding: binding, accountID: accountID, groupID: groupID,
+            generation: checkpoint.generation, anchorHash: checkpoint.anchorHash, checkpoint: checkpoint)
         let next = try AccountGroupCheckpoint(binding: binding, accountID: accountID, groupID: groupID,
             generation: snapshot.generation, anchorHash: checkpoint.anchorHash,
             sequence: snapshot.sequence, headHash: snapshot.headHash)
@@ -77,6 +63,46 @@ public actor AccountGroupHistoryVerifier {
         if next != checkpoint { try await save(next, authorization: authorization) }
         try requireCurrent(authorization)
         return snapshot
+    }
+
+    /// Independently supplied evidence may be inspected without adopting a pin.
+    /// Existing storage still constrains high-water and forks; errors are not absence.
+    func inspect(history: [AccountGroupEvent], binding: AccountSessionBinding, accountID: String,
+                 groupID: String, expectedGeneration: UInt64, expectedAnchorHash: Data,
+                 authorization: AccountGroupVerificationAuthorization) async throws -> AccountGroupSnapshot {
+        try beginOperation()
+        defer { operationInProgress = false }
+        try requireCurrent(authorization)
+        let checkpoint = try await load(binding: binding, accountID: accountID, groupID: groupID, authorization: authorization)
+        let snapshot = try replay(history: history, binding: binding, accountID: accountID, groupID: groupID,
+            generation: expectedGeneration, anchorHash: expectedAnchorHash, checkpoint: checkpoint)
+        try requireCurrent(authorization)
+        return snapshot
+    }
+
+    private func replay(history: [AccountGroupEvent], binding: AccountSessionBinding, accountID: String,
+                        groupID: String, generation: UInt64, anchorHash: Data,
+                        checkpoint: AccountGroupCheckpoint?) throws -> AccountGroupSnapshot {
+        guard !history.isEmpty, history.count <= 8192 else { throw AccountGroupCheckpointError.invalidHistory }
+        if let checkpoint {
+            guard checkpoint.binding == binding, checkpoint.accountID == accountID, checkpoint.groupID == groupID,
+                  checkpoint.generation == generation, checkpoint.anchorHash == anchorHash,
+                  UInt64(history.count) >= checkpoint.sequence else { throw AccountGroupCheckpointError.invalidHistory }
+        }
+        var state: AccountGroupState
+        do {
+            state = try AccountGroupState(anchor: history[0], expectedAccountID: accountID, expectedGroupID: groupID,
+                expectedGeneration: generation, expectedAnchorHash: anchorHash)
+            for (index, event) in history.enumerated() {
+                if index > 0 { try state.apply(event) }
+                // The old head must appear at its exact sequence, even when the
+                // candidate ends later. Final sequence alone cannot detect forks.
+                if let checkpoint, state.snapshot.sequence == checkpoint.sequence {
+                    guard state.snapshot.headHash == checkpoint.headHash else { throw AccountGroupCheckpointError.invalidHistory }
+                }
+            }
+        } catch { throw AccountGroupCheckpointError.invalidHistory }
+        return state.snapshot
     }
 
     private func beginOperation() throws {
@@ -122,7 +148,7 @@ final class AccountGroupVerificationAuthorization: @unchecked Sendable {
     private let lock = NSLock()
     private var invalidated = false
     private let accessExpiresAt: Date
-    private let confirmationExpiresAt: Date?
+    private var confirmationExpiresAt: Date?
     private let now: @Sendable () -> Date
 
     init(accessExpiresAt: Date, confirmationExpiresAt: Date? = nil, now: @escaping @Sendable () -> Date) {
@@ -132,6 +158,12 @@ final class AccountGroupVerificationAuthorization: @unchecked Sendable {
     }
 
     func invalidate() { lock.withLock { invalidated = true } }
+
+    /// A retained approval can only shorten the captured operation's authority.
+    /// Nested verifier/storage awaits share this same deadline, including resume.
+    func restrict(to deadline: Date) {
+        lock.withLock { confirmationExpiresAt = min(confirmationExpiresAt ?? deadline, deadline) }
+    }
 
     func requireCurrent() throws {
         try lock.withLock {
