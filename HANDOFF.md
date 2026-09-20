@@ -2,6 +2,42 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+HTTPloggingfixb476a4f ready; pending_http_review rereviewactive onlyfixdiff.
+Root inspected responsebody→bodylength change and focusedSQLPASS1.114s; new
+fixture stoppedagain/no server verified. Bothfixtures now stopped. Nextnative
+transport plan and intent/verification plan prepared; controllercontract report
+is designonly. No source/nativeinstallation beyond acceptedbackendcomponents.
+
+REVIEW HTTPd5bd647: oneImportant testassertion could print fullresponseproofbody
+on unexpectedstatus; pending_http_log_fix owns test-only redaction+focusedSQLrun.
+Root restarted disposable2gDzbz UNIX55460 for thattest; must stop again. No
+production finding. Rereviewrequired afterfix. Go cacheowned byfixagent.
+
+LATEST HTTPd5bd647 DONE; pending_http_review active frozend90c454..d5bd647.
+Root read finalrace logs177pass5documentedskip/accountauth33.717s/server2.949s;
+freshSQL confirms pending0 andschema restored. Both rootfixtures now STOPPED,
+pg_ctl reports no server. Cache released. Native sharedtransport plan ready;
+waitreview before dispatch. Nativecontroller designreport includes two-stage
+independent verification and per-binding/account bounded Keychain collection
+instead of impossible per-key enumeration. No live/installed changes.
+
+FIXTURE UPDATE for HTTP: old/private/tmp/dropmesh-group-db.igBdYS STOPPED;
+root created fresh/private/tmp/dropmesh-pending-http-db.2gDzbz UNIX55460,
+UTF8 dropmesh_account_auth_test with001..011, verified allaccount/session/pending/
+replayrows0 before handing to HTTPagent. This disposable cluster alone may run
+existing fullsuite broadcleanup; originalfixture rows preserved. Root owns shutdown
+of newcluster before ending. No liveDB. HTTPfocused4SQLtests reportedPASS awaiting
+fullrace. Nativecontroller report ready native-approval-controller-contract.md.
+
+CURRENT pendingstore review accepted650007a; HTTPimplementation active
+pending_approval_http based90c454, soleGo cache. Brief task-1-brief.md nowHTTP,
+report pending-approval-http-report.md. RootSQLfixture running; agent may apply011
+to guarded authfixture (groupfixture already011). Native transport plan prepared
+uncommitted; native_approval_contract is read-only architecture with sole report
+output, not implementation. Root UI skill routed swiftui-ui-patterns and fully
+read componentindex/asyncstate/sheets/form refs from official skill repository.
+No actual UI edits yet. Do not repeat approved store; continueHTTPreview thenSwift.
+
 LATEST pendingstore650007a DONE, pending_store_review active on frozen
 96f708a..650007a. Root inspected finalSQLrace log PASS46.867s,61pass/3opt-in
 skips; guardedSQL confirms pending rows0 after cleanup, diffcheckclean. Go cache
