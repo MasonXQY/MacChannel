@@ -19,7 +19,7 @@
 
 ### Task 1: Optional executable group composition with real SQL route acceptance
 
-**Files:** modify `Services/rendezvous/cmd/accountserver/config.go`, `config_test.go`, `server.go`, `server_test.go`, `README.md`; create `group_integration_test.go`. Preserve existing integration test and use its local conventions; narrowly extract request-signing test helper only if needed to avoid duplicate envelope signing. No production accountauth/accountgroup changes expected.
+**Files:** modify `Services/rendezvous/cmd/accountserver/config.go`, `config_test.go`, `server.go`, `server_test.go`, `README.md`; create `group_integration_test.go`. Also update the existing `ingress_test.go` newServiceMux call with `false` for the explicit signature (coordinator clarification). Preserve existing integration test and use its local conventions; narrowly extract request-signing test helper only if needed to avoid duplicate envelope signing. No production accountauth/accountgroup changes expected.
 
 **Interfaces:**
 

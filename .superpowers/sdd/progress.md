@@ -1,5 +1,29 @@
 # iPhone continuation ledger
 
+Task group-service-composition: complete (commits24a9882..c20bd0a, review clean).
+Independent re-review Approved, both cleanup findings resolved, no remaining
+findings. Root read focused SQL race PASS1.644s and original result excerpts;
+verified restored schemas/no rename leftovers; stopped fixture and verified down.
+Next approval-draft-protocol plan, not deployed. NativeUI warning Minor remains
+for final branch review; no physical group/approval/invitation claim.
+
+2026-09-20 service review NEEDS FIXES (production composition compliant): checked
+partial schema-rename restoration and scoped replay-nonce cleanup required.
+account_service_assembly fixing group_integration_test.go with focused regression;
+root restarted same UNIX fixture, agent soleGo cache. Must re-review fix and stop
+fixture before ending. No live operations or new task dispatch yet.
+
+2026-09-20 service composition ae790de DONE, independent review active. Root SQL
+read-only check verified both group tables restored and temporary renamed tables
+absent. Fixture stopped+pg_ctl no server. SQL race/fullGo PASS reported; requested
+durable output excerpts from implementer. Next approval-draft plan feasible with
+explicit zero-value/returned-slice/key-representation security regression cases.
+
+2026-09-20 group-service-composition ACTIVE account_service_assembly base24a9882;
+sole Go cache. Allowed narrow ingress_test.go signature update. Root owns UNIX
+test DB lifecycle, no parallel tests. New later approval-draft-protocol plan only,
+no implementation; retain current task1 brief until service review finishes.
+
 Task native-first-device-ui: complete (commits3c1c037..c86119f, review clean).
 Independent account_ios_review Approved/spec compliant; no blocking findings.
 Minor existing AppIntents/document-picker warnings retained for final review.

@@ -2,6 +2,25 @@
 
 ## Native enrollment continuation — 2026-09-20
 
+CURRENT service composition accepted throughc20bd0a, independent re-review clean.
+Root verified durable focusedSQLracePASS and restored schemas, fixture STOPPED.
+Next approval-draft protocol plan is ready and feasibility checked. No remote
+rollout/native flag/installation occurred. New functionality remains default-off.
+
+LATEST service implementation ae790de DONE; independent account_revocation_review
+active on24a9882..ae790de. Source report group-service-composition-report.md.
+Root verified both SQL group tables restored, rename-test tables absent; stopped
+UNIX fixture /private/tmp/dropmesh-group-db.igBdYS and pg_ctl confirms no server.
+No active cache owners. Next approval-draft plan feasibility checked: no blocker;
+added zero-value/return-alias/key-representation regressions. Not dispatched yet.
+
+ACTIVE service composition account_service_assembly base24a9882, sole Go cache;
+brief task-1-brief.md (now service task), report group-service-composition-report.md.
+Root owns local SQL fixture lifecycle. Allowed one-token ingress_test.go call-site
+update in addition to brief files. No parallel implementation. Root prepared next
+approval-draft-protocol plan (uncommitted), not dispatched; do not overwrite brief
+until current task reviewed. Native UI independent gate already clean.
+
 CURRENT UI c86119f accepted: independent review Approved/no blocking findings.
 Root verified logs/build and EN/ZH native evidence; existing warning noise noted.
 Next default-off service composition plan is ready. SQL fixture remains running;
