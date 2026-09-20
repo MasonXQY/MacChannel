@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AACC00000000000000000005 /* MobileAccountGroupSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000014 /* MobileAccountGroupSection.swift */; };
+		AACC00000000000000000006 /* MobileAccountGroupSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000014 /* MobileAccountGroupSection.swift */; };
+		AACC00000000000000000003 /* MobileAccountGroupModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000013 /* MobileAccountGroupModel.swift */; };
+		AACC00000000000000000004 /* MobileAccountGroupModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000013 /* MobileAccountGroupModel.swift */; };
+		AACC00000000000000000001 /* AccountGroupEvidenceFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000011 /* AccountGroupEvidenceFixture.swift */; };
+		AACC00000000000000000002 /* MobileAccountGroupModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AACC00000000000000000012 /* MobileAccountGroupModelTests.swift */; };
 		00932389C62792458B54AFA6 /* InertMobileSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E3E1B0829229AE158713DE8 /* InertMobileSession.swift */; };
 		01C56A94E7CC9DBB515C661E /* MobileSendModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFDB0E813C60BF2268A4F4BD /* MobileSendModelTests.swift */; };
 		02DF26D41EF56898A3EA7E58 /* MobileAccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C37739B28C549DF82BFD6C83 /* MobileAccountView.swift */; };
@@ -143,6 +149,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AACC00000000000000000014 /* MobileAccountGroupSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountGroupSection.swift; sourceTree = "<group>"; };
+		AACC00000000000000000013 /* MobileAccountGroupModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountGroupModel.swift; sourceTree = "<group>"; };
+		AACC00000000000000000011 /* AccountGroupEvidenceFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountGroupEvidenceFixture.swift; sourceTree = "<group>"; };
+		AACC00000000000000000012 /* MobileAccountGroupModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccountGroupModelTests.swift; sourceTree = "<group>"; };
 		005D821FDE939BCC0EB4B8C7 /* DropMeshTestHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropMeshTestHostApp.swift; sourceTree = "<group>"; };
 		036FD6FFF32E6D7FB5244D36 /* MobileHistoryModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileHistoryModelTests.swift; sourceTree = "<group>"; };
 		074547827062A225FCBBFA7D /* MobileSendModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSendModel.swift; sourceTree = "<group>"; };
@@ -288,6 +298,7 @@
 				005D821FDE939BCC0EB4B8C7 /* DropMeshTestHostApp.swift */,
 				9E3E1B0829229AE158713DE8 /* InertMobileSession.swift */,
 				4AED8A868C374E1E4B76F08A /* MobileAccountEvidenceHost.swift */,
+				AACC00000000000000000011 /* AccountGroupEvidenceFixture.swift */,
 				0C901B8A5C15A0EFA153DE2C /* MobileSendEvidenceHost.swift */,
 				FF61613CBA096998676453B5 /* MobileShareEvidenceHost.swift */,
 			);
@@ -310,6 +321,7 @@
 			children = (
 				81188DB21EB24FF02F4CA32D /* MobileAccountConfigurationTests.swift */,
 				BAEA71CF681C4AE0661C22FE /* MobileAccountModelTests.swift */,
+				AACC00000000000000000012 /* MobileAccountGroupModelTests.swift */,
 				FE2D42DBF1B282C2BECB8EDC /* MobileAppleAuthorizationTests.swift */,
 				D1CE3FC3CBFF98252640663E /* MobileAppModelTests.swift */,
 				0D830D4E4878EAB29F83D454 /* MobileDurableTrustTests.swift */,
@@ -347,7 +359,9 @@
 				503A0FD49848BCA492205AC0 /* Info.plist */,
 				FC3655A3AFE863787840E786 /* MobileAccountConfiguration.swift */,
 				415111FE526C1B2127C1B5B1 /* MobileAccountModel.swift */,
+				AACC00000000000000000013 /* MobileAccountGroupModel.swift */,
 				C37739B28C549DF82BFD6C83 /* MobileAccountView.swift */,
+				AACC00000000000000000014 /* MobileAccountGroupSection.swift */,
 				6CD0D43C24BBDF5C8ADBFB2F /* MobileAppleAuthorization.swift */,
 				64F5B8A4EC69151ED61B7BAE /* MobileAppModel.swift */,
 				17B9B64B8A170F0B09D616B0 /* MobileAppSession.swift */,
@@ -572,7 +586,9 @@
 				29077D85A5871BA30317975A /* DropMeshApp.swift in Sources */,
 				86D38CAF883B9C43550F499F /* MobileAccountConfiguration.swift in Sources */,
 				5EADA2ACEE3CF6E45AB09EED /* MobileAccountModel.swift in Sources */,
+				AACC00000000000000000003 /* MobileAccountGroupModel.swift in Sources */,
 				BF1CF04A5B0185731F29D9C3 /* MobileAccountView.swift in Sources */,
+				AACC00000000000000000005 /* MobileAccountGroupSection.swift in Sources */,
 				5F0B3EF8DB407DF7DB976939 /* MobileAppModel.swift in Sources */,
 				2D2460AEB748F70ECBFE33A1 /* MobileAppSession.swift in Sources */,
 				252E674DB7C6704D349927CF /* MobileAppleAuthorization.swift in Sources */,
@@ -604,6 +620,7 @@
 			files = (
 				BC6723426B9285A2249A8F11 /* MobileAccountConfigurationTests.swift in Sources */,
 				6A45A465B325A24D7F7025B8 /* MobileAccountModelTests.swift in Sources */,
+				AACC00000000000000000002 /* MobileAccountGroupModelTests.swift in Sources */,
 				CFAEEAE1A060A1F3F7C7B176 /* MobileAppModelTests.swift in Sources */,
 				F603D0F550604955E6F0A300 /* MobileAppleAuthorizationTests.swift in Sources */,
 				814B96CE1865C30E735D2BBB /* MobileDurableTrustTests.swift in Sources */,
@@ -628,8 +645,11 @@
 				00932389C62792458B54AFA6 /* InertMobileSession.swift in Sources */,
 				6971AE59DDB11A917A76100F /* MobileAccountConfiguration.swift in Sources */,
 				1E08A6B9EA026DD0B219B406 /* MobileAccountEvidenceHost.swift in Sources */,
+				AACC00000000000000000001 /* AccountGroupEvidenceFixture.swift in Sources */,
 				EC91FD8DBEEA61D8A6169FC4 /* MobileAccountModel.swift in Sources */,
+				AACC00000000000000000004 /* MobileAccountGroupModel.swift in Sources */,
 				02DF26D41EF56898A3EA7E58 /* MobileAccountView.swift in Sources */,
+				AACC00000000000000000006 /* MobileAccountGroupSection.swift in Sources */,
 				D2B45C770C12B8ED96E26B1D /* MobileAppModel.swift in Sources */,
 				3CE0239CCB871945A20F156F /* MobileAppSession.swift in Sources */,
 				FF48E6B17261BECC0D43DF79 /* MobileAppleAuthorization.swift in Sources */,

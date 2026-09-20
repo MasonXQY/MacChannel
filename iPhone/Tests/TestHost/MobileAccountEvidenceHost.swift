@@ -12,6 +12,20 @@ struct MobileAccountEvidenceHost: View {
         let state = arguments.firstIndex(of: "-account-evidence-state")
             .flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil } ?? "signed-out"
         let loader: @Sendable () async throws -> AccountSessionController? = {
+            if state.hasPrefix("group-") {
+                let fixture = try AccountGroupEvidenceFixture()
+                switch state {
+                case "group-joined": try await fixture.seed([fixture.event()], pinned: true)
+                case "group-approval":
+                    try await fixture.seed([fixture.event(identity: AccountGroupEvidenceFixture.syntheticIdentity())])
+                case "group-error": await fixture.service.fail("discover")
+                case "group-removed":
+                    let anchor = try fixture.event()
+                    try await fixture.seed([anchor, fixture.event(previous: anchor)], pinned: true)
+                default: break
+                }
+                return fixture.controller()
+            }
             if state == "disabled" { return nil }
             if state == "unavailable" { throw AccountSessionControllerError.unavailable }
             if state == "storage-error" { throw AccountSessionControllerError.secureStorage }

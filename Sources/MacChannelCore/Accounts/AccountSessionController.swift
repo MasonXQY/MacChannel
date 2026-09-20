@@ -90,6 +90,14 @@ public actor AccountSessionController {
 
     public func snapshot() -> AccountSessionSnapshot { state }
 
+    /// Credential-free capability only; it does not discover or authorize membership.
+    public func supportsFirstDeviceEnrollment() -> Bool {
+        guard let configuration = firstDeviceEnrollment,
+              configuration.identity.id.rawValue == binding.deviceID,
+              groupVerifier != nil else { return false }
+        return service is any AccountGroupEnrollmentService && service is any AccountGroupService
+    }
+
     /// Informational only: discovery never persists intent or authorizes a pin.
     public func discoverAccountGroup() async throws -> AccountGroupDiscovery {
         let dependencies = try enrollmentDependencies()

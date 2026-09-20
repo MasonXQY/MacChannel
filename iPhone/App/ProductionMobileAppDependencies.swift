@@ -105,7 +105,11 @@ actor ProductionMobileAppDependencies: MobileAppSession {
         let binding = try AccountSessionBinding(deviceID: context.identity.id.rawValue,
             audience: configuration.audience, origin: configuration.origin)
         let controller = AccountSessionController(service: service,
-            storage: KeychainAccountSessionStorage(), binding: binding)
+            storage: KeychainAccountSessionStorage(), binding: binding,
+            groupVerifier: configuration.groupsEnabled
+                ? AccountGroupHistoryVerifier(storage: KeychainAccountGroupCheckpointStorage()) : nil,
+            firstDeviceEnrollment: configuration.groupsEnabled
+                ? AccountFirstDeviceEnrollment(identity: context.identity) : nil)
         cachedAccountController = controller
         return controller
     }

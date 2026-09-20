@@ -20,9 +20,15 @@ struct MobileAccountView: View {
                         .accessibilityIdentifier("account-status")
                 }
             }
+            if model.phase == .signedIn, let group = model.group {
+                MobileAccountGroupSection(model: group)
+            }
         }
         .navigationTitle("account.title")
         .task { if model.phase == .loading { await model.load() } }
+        .task(id: model.group.map(ObjectIdentifier.init)) {
+            if model.phase == .signedIn, let group = model.group { await group.load() }
+        }
         .onDisappear { model.cancel() }
         .confirmationDialog("account.sign-out.confirm.title", isPresented: $confirmsSignOut,
                             titleVisibility: .visible) {

@@ -11,6 +11,7 @@ enum MobileAccountViewPhase: Equatable {
 final class MobileAccountModel {
     private(set) var phase: MobileAccountViewPhase = .disabled
     private(set) var messageKey: String?
+    private(set) var group: MobileAccountGroupModel?
     private let loadController: @Sendable () async throws -> AccountSessionController?
     private let apple: any MobileAppleAuthorizing
     private let attemptHandoff: @Sendable () async -> Void
@@ -41,7 +42,8 @@ final class MobileAccountModel {
         phase = .loading; messageKey = nil
         do {
             let loaded = try await loadController()
-            guard let loaded else { controller = nil; phase = .disabled; return }
+            guard let loaded else { group?.cancel(); group = nil; controller = nil; phase = .disabled; return }
+            if controller !== loaded { group?.cancel(); group = nil }
             controller = loaded
             await loaded.restore()
             apply(await loaded.snapshot())
@@ -95,6 +97,7 @@ final class MobileAccountModel {
     }
 
     func cancel() {
+        group?.cancel()
         guard phase != .signingIn, phase != .signingOut else { return }
         operation?.cancel()
         apple.cancel()
@@ -102,6 +105,7 @@ final class MobileAccountModel {
 
     func signOut() async {
         guard operation == nil, let controller else { return }
+        group?.cancel(); group = nil
         let id = UUID()
         let task = Task {
             phase = .signingOut; messageKey = nil
@@ -116,6 +120,9 @@ final class MobileAccountModel {
 
     private func apply(_ snapshot: AccountSessionSnapshot) {
         messageKey = nil
+        if snapshot.phase == .signedIn, let controller {
+            if group == nil { group = MobileAccountGroupModel(controller: controller) }
+        } else { group?.cancel(); group = nil }
         switch snapshot.phase {
         case .signedOut, .needsSignIn: phase = .signedOut
         case .restoring, .preparingLogin, .refreshing: phase = .loading
