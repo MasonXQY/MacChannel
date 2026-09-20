@@ -3,6 +3,470 @@ import XCTest
 @testable import MacChannelCore
 
 final class ConnectionCoordinatorTests: XCTestCase {
+    func testProviderOnlyOutboundUsesExactAuthorizedFactoryOverload() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let factory = AuthorizedAttemptFactory { _, provider in
+            XCTAssertTrue((provider as? PeerAuthorizationOwner) === fixture.owner)
+            throw WebRTCFactoryError.timeout
+        }
+        let attempts = fixture.attempts(factory: factory)
+        let transfer = TransferID(rawValue: UUID())
+        do {
+            _ = try await attempts.connect(to: fixture.remote.id, route: .relay, transferID: transfer)
+            XCTFail("Recording factory must fail")
+        } catch { XCTAssertEqual(error as? WebRTCFactoryError, .timeout) }
+        let calls = await factory.calls
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.peer, fixture.remote.id)
+        XCTAssertEqual(calls.first?.key, fixture.remote.publicKey.rawRepresentation)
+        XCTAssertEqual(calls.first?.connectionID, transfer.rawValue)
+        XCTAssertEqual(calls.first?.role, .offerer)
+        XCTAssertEqual(calls.first?.route, .relay)
+        XCTAssertEqual(calls.first?.lease.owner, try fixture.owner.acquire(for: fixture.remote.id).owner)
+        let legacy = await factory.legacyCalls
+        XCTAssertEqual(legacy, 0)
+    }
+
+    func testProviderOnlyInboundUsesAuthorizedFactoryWithoutRepositoryMembership() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let factory = AuthorizedAttemptFactory()
+        let listener = fixture.listener(factory: factory)
+        _ = await listener.connections()
+        let id = UUID()
+        try await fixture.offer(connectionID: id)
+        await fulfillment(of: [factory.entered], timeout: 2)
+        await listener.stopAndWait()
+        let calls = await factory.calls
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.connectionID, id)
+        XCTAssertEqual(calls.first?.role, .answerer)
+        let legacy = await factory.legacyCalls
+        XCTAssertEqual(legacy, 0)
+    }
+
+    func testProviderWithdrawalDuringICESuccessAndErrorNeverStartsFactoryOrFallback() async throws {
+        for fail in [false, true] {
+            let fixture = try AttemptAuthorizationFixture()
+            let barrier = AttemptBarrier()
+            defer { barrier.release() }
+            let factory = AuthorizedAttemptFactory()
+            let connector = ConnectionCoordinator(attempts: fixture.attempts(factory: factory,
+                ice: BarrierICEProvider(barrier: barrier, fail: fail)))
+            let task = Task { try await connector.connect(to: fixture.remote.id) }
+            defer { task.cancel() }
+            await fulfillment(of: [barrier.entered], timeout: 2)
+            try fixture.owner.replaceManual([:])
+            barrier.release()
+            do { _ = try await task.value; XCTFail("Withdrawn ICE attempt succeeded") }
+            catch { XCTAssertEqual(error as? ConnectionAttemptError, .authenticationFailed) }
+            let calls = await factory.calls
+            XCTAssertTrue(calls.isEmpty)
+        }
+    }
+
+    func testProviderWithdrawalDuringFactoryErrorStopsRouteFallback() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let factory = AuthorizedAttemptFactory { _, _ in
+            await barrier.wait()
+            throw WebRTCFactoryError.timeout
+        }
+        let connector = ConnectionCoordinator(attempts: fixture.attempts(factory: factory))
+        let task = Task { try await connector.connect(to: fixture.remote.id) }
+        defer { task.cancel() }
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        try fixture.owner.replaceManual([:])
+        barrier.release()
+        do { _ = try await task.value; XCTFail("Withdrawn factory error retried") }
+        catch { XCTAssertEqual(error as? ConnectionAttemptError, .authenticationFailed) }
+        let count = await factory.calls.count
+        XCTAssertEqual(count, 1)
+    }
+
+    func testProviderRemoveAndRegrantSameKeyCannotReplaceSuspendedLease() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let factory = AuthorizedAttemptFactory()
+        let attempts = fixture.attempts(factory: factory, ice: BarrierICEProvider(barrier: barrier))
+        let task = Task { try await attempts.connect(to: fixture.remote.id, route: .relay) }
+        defer { task.cancel() }
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        try fixture.owner.replaceManual([:])
+        try fixture.owner.replaceManual([fixture.remote.id: fixture.remote.publicKey.rawRepresentation])
+        barrier.release()
+        do { _ = try await task.value; XCTFail("New continuity replaced original attempt lease") }
+        catch { XCTAssertEqual(error as? ConnectionAttemptError, .authenticationFailed) }
+        let count = await factory.calls.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testProviderCancellationDuringICEPreservesCancellation() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let factory = AuthorizedAttemptFactory()
+        let attempts = fixture.attempts(factory: factory, ice: BarrierICEProvider(barrier: barrier, fail: true))
+        let task = Task { try await attempts.connect(to: fixture.remote.id, route: .relay) }
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        task.cancel()
+        barrier.release()
+        do { _ = try await task.value; XCTFail("Cancelled attempt returned") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let count = await factory.calls.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testProviderLateOutboundResultIsClosedOnCancellationOrWithdrawal() async throws {
+        for cancel in [false, true] {
+            let fixture = try AttemptAuthorizationFixture()
+            let pair = try await fixture.loopback()
+            let barrier = AttemptBarrier()
+            defer { barrier.release() }
+            let factory = AuthorizedAttemptFactory { _, _ in await barrier.wait(); return pair.left }
+            let attempts = fixture.attempts(factory: factory)
+            let task = Task { try await attempts.connect(to: fixture.remote.id, route: .relay) }
+            await fulfillment(of: [barrier.entered], timeout: 2)
+            if cancel { task.cancel() } else { try fixture.owner.replaceManual([:]) }
+            barrier.release()
+            do { _ = try await task.value; XCTFail("Late result escaped") }
+            catch {
+                if cancel { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ConnectionAttemptError, .authenticationFailed) }
+            }
+            await assertClosed(pair.left)
+            await pair.right.close()
+        }
+    }
+
+    func testProviderDeniedAndWrongPeerLeaseNeverReachFactory() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let original = try fixture.owner.acquire(for: fixture.remote.id)
+        let forged = PeerAuthorizationLease(peer: fixture.local.id, publicKey: original.publicKey,
+            owner: original.owner, continuity: original.continuity)
+        let factory = AuthorizedAttemptFactory()
+        let wrong = WebRTCConnectionAttempts(directory: fixture.directory, identity: fixture.local,
+            authorizationProvider: SubstitutingAttemptProvider(owner: fixture.owner, lease: forged),
+            signaling: fixture.signaling, ice: ICEConfiguration(stunURLs: [], turnServers: []), factory: factory)
+        do { _ = try await wrong.connect(to: fixture.remote.id, route: .relay); XCTFail("Wrong peer admitted") }
+        catch { XCTAssertEqual(error as? ConnectionAttemptError, .authenticationFailed) }
+        try fixture.owner.replaceManual([:])
+        do { _ = try await fixture.attempts(factory: factory).connect(to: fixture.remote.id, route: .relay); XCTFail("Denied peer admitted") }
+        catch { XCTAssertEqual(error as? ConnectionAttemptError, .authenticationFailed) }
+        let count = await factory.calls.count
+        XCTAssertEqual(count, 0)
+    }
+
+    func testProviderInboundWithdrawalDuringICEIsCheckedBeforeFactory() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let rejected = expectation(description: "inbound validates withdrawn lease")
+        let probe = AttemptProviderProbe(owner: fixture.owner) { valid in if !valid { rejected.fulfill() } }
+        let factory = AuthorizedAttemptFactory()
+        let listener = fixture.listener(factory: factory, ice: BarrierICEProvider(barrier: barrier), provider: probe)
+        _ = await listener.connections()
+        try await fixture.offer()
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        try fixture.owner.replaceManual([:])
+        barrier.release()
+        await fulfillment(of: [rejected], timeout: 2)
+        await listener.stopAndWait()
+        let calls = await factory.calls.count
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testProviderInboundLateWithdrawalRejectsBothConsumerModes() async throws {
+        for legacy in [false, true] {
+            let fixture = try AttemptAuthorizationFixture()
+            let pair = try await fixture.loopback()
+            let barrier = AttemptBarrier()
+            defer { barrier.release() }
+            let rejected = expectation(description: "late inbound lease rejected")
+            let probe = AttemptProviderProbe(owner: fixture.owner) { valid in if !valid { rejected.fulfill() } }
+            let factory = AuthorizedAttemptFactory { _, _ in await barrier.wait(); return pair.left }
+            let listener = fixture.listener(factory: factory, provider: probe)
+            if legacy { _ = await listener.channels() } else { _ = await listener.connections() }
+            try await fixture.offer()
+            await fulfillment(of: [barrier.entered], timeout: 2)
+            try fixture.owner.replaceManual([:])
+            barrier.release()
+            await fulfillment(of: [rejected], timeout: 2)
+            await listener.stopAndWait()
+            await assertClosed(pair.left)
+            await pair.right.close()
+        }
+    }
+
+    func testProviderStopAndWaitOwnsCancellationIgnoringLateFactoryAndClose() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let pair = try await fixture.loopback()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let returned = PeerTestBox(false)
+        let factory = AuthorizedAttemptFactory { _, _ in
+            await barrier.wait()
+            returned.update { $0 = true }
+            return pair.left
+        }
+        let listener = fixture.listener(factory: factory)
+        _ = await listener.channels()
+        try await fixture.offer()
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        await listener.stop()
+        let joinStarted = expectation(description: "join requested")
+        let join = Task {
+            joinStarted.fulfill()
+            await listener.stopAndWait()
+            XCTAssertTrue(returned.value, "Drain returned before owned factory completed")
+            do { _ = try await pair.left.exportKey(label: "closed", context: Data(), length: 32); XCTFail("Drain returned before channel close") }
+            catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        }
+        await fulfillment(of: [joinStarted], timeout: 2)
+        // stop remains idempotent while the exact old task is still retired.
+        await listener.stop()
+        barrier.release()
+        await join.value
+        await listener.stopAndWait()
+        let calls = await factory.calls.count
+        XCTAssertEqual(calls, 1)
+        await pair.right.close()
+    }
+
+    func testProviderStopDuringICESuccessAndErrorNeverStartsFactory() async throws {
+        for fail in [false, true] {
+            let fixture = try AttemptAuthorizationFixture()
+            let barrier = AttemptBarrier()
+            defer { barrier.release() }
+            let factory = AuthorizedAttemptFactory()
+            let listener = fixture.listener(factory: factory, ice: BarrierICEProvider(barrier: barrier, fail: fail))
+            _ = await listener.connections()
+            try await fixture.offer()
+            await fulfillment(of: [barrier.entered], timeout: 2)
+            await listener.stop()
+            barrier.release()
+            await listener.stopAndWait()
+            let calls = await factory.calls.count
+            XCTAssertEqual(calls, 0)
+        }
+    }
+
+    func testProviderInboundTransferConsumerRealChannelDeliverySmoke() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let pair = try await fixture.loopback()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let factory = AuthorizedAttemptFactory { _, _ in await barrier.wait(); return pair.left }
+        let listener = fixture.listener(factory: factory)
+        let stream = await listener.connections()
+        // This starts the reader but is not proof of a registered zero-buffer
+        // waiter. Actual delivery is a bounded smoke; rejection tests above use
+        // deterministic admission barriers instead.
+        let waiting = expectation(description: "receiver task starts")
+        let delivered = expectation(description: "receiver finishes")
+        let receiver = Task {
+            defer { delivered.fulfill() }
+            var iterator = stream.makeAsyncIterator()
+            waiting.fulfill()
+            return try await iterator.next()
+        }
+        defer { receiver.cancel() }
+        do {
+            let id = UUID()
+            try await fixture.offer(connectionID: id)
+            await fulfillment(of: [barrier.entered, waiting], timeout: 2)
+            barrier.release()
+            await fulfillment(of: [delivered], timeout: 2)
+            // Finish the stream even if delivery was dropped; never hang on
+            // receiver.value after the bounded smoke reports a failure.
+            await listener.stopAndWait()
+            let value = try await receiver.value
+            let accepted = try XCTUnwrap(value)
+            XCTAssertEqual(accepted.source, fixture.remote.id)
+            XCTAssertEqual(accepted.transferID.rawValue, id)
+            let key = try await accepted.channel.exportKey(label: "usable", context: Data(), length: 32)
+            XCTAssertEqual(key.count, 32)
+            await accepted.channel.close()
+        } catch {
+            barrier.release()
+            receiver.cancel()
+            await listener.stopAndWait()
+            _ = try? await receiver.value
+            await pair.left.close(); await pair.right.close()
+            throw error
+        }
+        receiver.cancel()
+        _ = try? await receiver.value
+        await pair.left.close(); await pair.right.close()
+    }
+
+    func testProviderInboundNoWaitingOrTerminatedTransferConsumerClosesResult() async throws {
+        for terminate in [false, true] {
+            let fixture = try AttemptAuthorizationFixture()
+            let pair = try await fixture.loopback()
+            let delivered = expectation(description: "final publication check")
+            let validations = PeerTestBox(0)
+            let probe = AttemptProviderProbe(owner: fixture.owner) { _ in
+                validations.update { $0 += 1 }
+                if validations.value == 3 { delivered.fulfill() }
+            }
+            let factory = AuthorizedAttemptFactory { _, _ in return pair.left }
+            let listener = fixture.listener(factory: factory, provider: probe)
+            let stream = await listener.connections()
+            if terminate {
+                let reader = Task { var iterator = stream.makeAsyncIterator(); return try await iterator.next() }
+                reader.cancel()
+                _ = try? await reader.value
+            }
+            try await fixture.offer()
+            await fulfillment(of: [delivered], timeout: 2)
+            await listener.stopAndWait()
+            await assertClosed(pair.left)
+            await pair.right.close()
+        }
+    }
+
+    func testProviderSameKeyAccountOverlapPreservesSuspendedAttemptThenFinalRemovalCloses() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let pair = try await fixture.loopback()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let factory = AuthorizedAttemptFactory { _, _ in return pair.left }
+        let attempts = fixture.attempts(factory: factory, ice: BarrierICEProvider(barrier: barrier))
+        let task = Task { try await attempts.connect(to: fixture.remote.id, route: .relay) }
+        defer { task.cancel() }
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        let epoch = try fixture.installAccount()
+        try fixture.owner.replaceManual([:])
+        barrier.release()
+        let result = try await task.value
+        let key = try await result.exportKey(label: "overlap", context: Data(), length: 32)
+        XCTAssertEqual(key.count, 32)
+        fixture.owner.invalidateAccount(epoch)
+        await assertClosed(pair.left)
+        await pair.right.close()
+    }
+
+    func testProviderAccountExpiryDuringICESuccessAndErrorIsTerminal() async throws {
+        for fail in [false, true] {
+            let clock = PeerTestBox(Date(timeIntervalSince1970: 1_800_000_000))
+            let fixture = try AttemptAuthorizationFixture(clock: clock)
+            _ = try fixture.installAccount()
+            try fixture.owner.replaceManual([:])
+            let barrier = AttemptBarrier()
+            defer { barrier.release() }
+            let factory = AuthorizedAttemptFactory()
+            let attempts = fixture.attempts(factory: factory, ice: BarrierICEProvider(barrier: barrier, fail: fail))
+            let task = Task { try await attempts.connect(to: fixture.remote.id, route: .relay) }
+            defer { task.cancel() }
+            await fulfillment(of: [barrier.entered], timeout: 2)
+            clock.update { $0 = $0.addingTimeInterval(31) }
+            barrier.release()
+            do { _ = try await task.value; XCTFail("Expired account admitted") }
+            catch { XCTAssertEqual(error as? ConnectionAttemptError, .authenticationFailed) }
+            let calls = await factory.calls.count
+            XCTAssertEqual(calls, 0)
+        }
+    }
+
+    func testProviderStopDuringOfferReaderStartupJoinsAndNeverRestarts() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let barrier = AttemptBarrier()
+        defer { barrier.release() }
+        let session = StartupBarrierSignalSession(barrier: barrier)
+        let factory = AuthorizedAttemptFactory()
+        let listener = WebRTCConnectionListener(directory: fixture.directory, identity: fixture.local,
+            authorizationProvider: fixture.owner, signaling: RendezvousWebRTCSignaling(session: session),
+            ice: ICEConfiguration(stunURLs: [], turnServers: []), factory: factory)
+        _ = await listener.connections()
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        await listener.stop()
+        barrier.release()
+        await listener.stopAndWait()
+        _ = await listener.connections()
+        _ = await listener.channels()
+        let requests = await session.requests
+        let calls = await factory.calls.count
+        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testProviderLegacyChannelBufferOverflowClosesOnlyDroppedResult() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        var pairs: [(left: WebRTCSecureChannel, right: WebRTCSecureChannel)] = []
+        for _ in 0..<33 { pairs.append(try await fixture.loopback()) }
+        let ids = (0..<33).map { _ in UUID() }
+        let channels = Dictionary(uniqueKeysWithValues: zip(ids, pairs.map(\.left)))
+        let publications = (0..<33).map { expectation(description: "publication \($0)") }
+        let validations = PeerTestBox(0)
+        let probe = AttemptProviderProbe(owner: fixture.owner) { valid in
+            XCTAssertTrue(valid)
+            validations.update { $0 += 1 }
+            let count = validations.value
+            if count % 3 == 0 { publications[count / 3 - 1].fulfill() }
+        }
+        let factory = AuthorizedAttemptFactory { call, _ in try XCTUnwrap(channels[call.connectionID]) }
+        let listener = fixture.listener(factory: factory, provider: probe)
+        let stream = await listener.channels()
+        for index in 0..<33 {
+            try await fixture.offer(connectionID: ids[index])
+            await fulfillment(of: [publications[index]], timeout: 2)
+        }
+        await listener.stopAndWait()
+        await assertClosed(pairs[32].left)
+        let stillAdmitted = try await pairs[0].left.exportKey(label: "buffered", context: Data(), length: 32)
+        XCTAssertEqual(stillAdmitted.count, 32, "stop does not retract prior handoff objects")
+        var iterator = stream.makeAsyncIterator()
+        var count = 0
+        while let channel = try await iterator.next() {
+            XCTAssertFalse(channel === pairs[32].left)
+            count += 1
+            await channel.close()
+        }
+        XCTAssertEqual(count, 32)
+        for pair in pairs { await pair.left.close(); await pair.right.close() }
+    }
+
+    func testProviderAcceptanceCapsRemainEightGlobalAndTwoPerPeer() async throws {
+        let fixture = try AttemptAuthorizationFixture()
+        let peers = try (0..<5).map { _ in try DeviceIdentity.ephemeral() }
+        try fixture.owner.replaceManual(Dictionary(uniqueKeysWithValues: peers.map { ($0.id, $0.publicKey.rawRepresentation) }))
+        let barrier = AttemptBarrier()
+        barrier.entered.expectedFulfillmentCount = 8
+        defer { barrier.release() }
+        let factory = AuthorizedAttemptFactory { _, _ in await barrier.wait(); throw WebRTCFactoryError.timeout }
+        let listener = fixture.listener(factory: factory)
+        _ = await listener.channels()
+        for peer in peers {
+            for _ in 0..<3 { try await fixture.offer(peer: peer.id) }
+        }
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        await waitForSignalingToProcess(15, signaling: fixture.signaling)
+        let calls = await factory.calls
+        XCTAssertEqual(calls.count, 8)
+        let counts = Dictionary(grouping: calls, by: \.peer).mapValues(\.count)
+        XCTAssertTrue(counts.values.allSatisfy { $0 <= 2 })
+        barrier.release()
+        // A positive subsequent entry demonstrates recovery after the held
+        // acceptances throw. Bound probes; no sleep is nondelivery evidence.
+        for _ in 0..<32 {
+            if await factory.calls.count > 8 { break }
+            try await fixture.offer(peer: peers[0].id)
+            await Task.yield()
+        }
+        let recovered = await factory.calls.count
+        XCTAssertGreaterThan(recovered, 8)
+        await listener.stop()
+        await listener.stopAndWait()
+    }
+
+    private func assertClosed(_ channel: WebRTCSecureChannel, file: StaticString = #filePath, line: UInt = #line) async {
+        do { _ = try await channel.exportKey(label: "closed", context: Data(), length: 32); XCTFail("Channel was not closed", file: file, line: line) }
+        catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed, file: file, line: line) }
+        await channel.close()
+    }
+
     func testProductionAttemptsResolveFreshICEForEveryFallbackRoute() async throws {
         let local = try DeviceIdentity.ephemeral()
         let remote = try DeviceIdentity.ephemeral()
@@ -692,6 +1156,197 @@ private func streamTerminatesWithin<Element: Sendable>(
         let result = await group.next() ?? false
         group.cancelAll()
         return result
+    }
+}
+
+private struct AttemptAuthorizationFixture {
+    let local: DeviceIdentity
+    let remote: DeviceIdentity
+    let owner: PeerAuthorizationOwner
+    let directory: DeviceDirectory
+    let session: MemoryRendezvousSignalSession
+    let signaling: RendezvousWebRTCSignaling
+    let clock: PeerTestBox<Date>?
+
+    init(clock: PeerTestBox<Date>? = nil) throws {
+        self.clock = clock
+        local = try DeviceIdentity.ephemeral()
+        remote = try DeviceIdentity.ephemeral()
+        if let clock {
+            owner = PeerAuthorizationOwner(local: local.id, now: { clock.value }, schedule: { _, _ in {} })
+        } else { owner = PeerAuthorizationOwner.live(identity: local) }
+        try owner.replaceManual([remote.id: remote.publicKey.rawRepresentation])
+        directory = DeviceDirectory(trust: .allowing(local.id))
+        session = MemoryRendezvousSignalSession()
+        signaling = RendezvousWebRTCSignaling(session: session)
+    }
+
+    func attempts(factory: any AuthorizedWebRTCChannelFactory,
+                  ice: any ICEConfigurationProviding = StaticICEConfigurationProvider(ICEConfiguration(stunURLs: [], turnServers: []))) -> WebRTCConnectionAttempts {
+        WebRTCConnectionAttempts(directory: directory, identity: local, authorizationProvider: owner,
+            signaling: signaling, iceProvider: ice, factory: factory)
+    }
+
+    func listener(factory: any AuthorizedWebRTCChannelFactory,
+                  ice: any ICEConfigurationProviding = StaticICEConfigurationProvider(ICEConfiguration(stunURLs: [], turnServers: [])),
+                  provider: (any PeerAuthorizationProviding)? = nil) -> WebRTCConnectionListener {
+        WebRTCConnectionListener(directory: directory, identity: local, authorizationProvider: provider ?? owner,
+            signaling: signaling, iceProvider: ice, factory: factory)
+    }
+
+    func offer(connectionID: UUID = UUID(), peer: DeviceID? = nil) async throws {
+        let sender = peer ?? remote.id
+        try await signaling.send(.offer(sdp: "v=0\r\n", route: .relay), to: sender, connectionID: connectionID)
+        let data = await session.lastSentPayload()
+        await session.deliver(RendezvousSignalFrame(from: sender, payload: try XCTUnwrap(data)))
+    }
+
+    func loopback() async throws -> (left: WebRTCSecureChannel, right: WebRTCSecureChannel) {
+        let bus = InMemoryWebRTCSignalBus(), id = UUID()
+        let factory = WebRTCFactory(connectionTimeout: .seconds(5))
+        let ice = ICEConfiguration(stunURLs: [], turnServers: [])
+        async let left = factory.connect(localIdentity: local, remoteDevice: remote.id,
+            remotePublicKey: remote.publicKey.rawRepresentation, connectionID: id, role: .offerer,
+            route: .lan, ice: ice, signaling: bus.endpoint(for: local.id),
+            authorizationProvider: owner, authorizationLease: owner.acquire(for: remote.id))
+        async let right = factory.connect(localIdentity: remote, remoteDevice: local.id,
+            remotePublicKey: local.publicKey.rawRepresentation, connectionID: id, role: .answerer,
+            route: .lan, ice: ice, signaling: bus.endpoint(for: remote.id))
+        return try await (left, right)
+    }
+
+    func installAccount() throws -> PeerAccountEpoch {
+        let date = clock?.value ?? Date()
+        let binding = try AccountSessionBinding(deviceID: local.id.rawValue, audience: "test",
+            origin: URL(string: "https://example.com")!)
+        let account = UUID().uuidString.lowercased()
+        let epoch = try owner.beginAccountSession(binding: binding, accountID: account,
+            sessionID: UUID().uuidString.lowercased(), localPublicKey: local.publicKey.rawRepresentation,
+            accessExpiresAt: date.addingTimeInterval(100))
+        try owner.install(VerifiedPeerAccountEvidence(epoch: epoch, binding: binding,
+            snapshot: AccountGroupSnapshot(accountID: account, groupID: UUID().uuidString.lowercased(),
+                generation: 1, sequence: 1, headHash: Data(repeating: 1, count: 32),
+                members: [local, remote].map { AccountGroupMember(deviceID: $0.id.rawValue.uuidString.lowercased(),
+                    publicKey: $0.publicKey.rawRepresentation) }), freshUntil: date.addingTimeInterval(30)))
+        return epoch
+    }
+}
+
+private actor StartupBarrierSignalSession: RendezvousSignalSession {
+    let barrier: AttemptBarrier
+    private(set) var requests = 0
+    init(barrier: AttemptBarrier) { self.barrier = barrier }
+    func signalFrames() async -> AsyncStream<RendezvousSignalFrame> {
+        requests += 1
+        await barrier.wait()
+        return AsyncStream { $0.finish() }
+    }
+    func protocolErrors() async -> AsyncStream<RendezvousProtocolError> { AsyncStream { $0.finish() } }
+    func sendSignal(_ payload: Data, to device: DeviceID) async throws {}
+}
+
+private struct SubstitutingAttemptProvider: PeerAuthorizationProviding {
+    let owner: PeerAuthorizationOwner
+    let lease: PeerAuthorizationLease
+    func acquire(for peer: DeviceID) throws -> PeerAuthorizationLease { lease }
+    func validate(_ lease: PeerAuthorizationLease) throws { try owner.validate(lease) }
+    func claim(_ lease: PeerAuthorizationLease, onInvalidation: @escaping @Sendable () -> Void) throws -> PeerAuthorizationRegistration {
+        try owner.claim(lease, onInvalidation: onInvalidation)
+    }
+    func snapshot() -> PeerAuthorizationSnapshot { owner.snapshot() }
+    func updates() -> AsyncStream<PeerAuthorizationSnapshot> { owner.updates() }
+}
+
+private struct AttemptProviderProbe: PeerAuthorizationProviding {
+    let owner: PeerAuthorizationOwner
+    let observed: @Sendable (Bool) -> Void
+    func acquire(for peer: DeviceID) throws -> PeerAuthorizationLease { try owner.acquire(for: peer) }
+    func validate(_ lease: PeerAuthorizationLease) throws {
+        do { try owner.validate(lease) }
+        catch { observed(false); throw error }
+        observed(true)
+    }
+    func claim(_ lease: PeerAuthorizationLease, onInvalidation: @escaping @Sendable () -> Void) throws -> PeerAuthorizationRegistration {
+        try owner.claim(lease, onInvalidation: onInvalidation)
+    }
+    func snapshot() -> PeerAuthorizationSnapshot { owner.snapshot() }
+    func updates() -> AsyncStream<PeerAuthorizationSnapshot> { owner.updates() }
+}
+
+private actor AuthorizedAttemptFactory: AuthorizedWebRTCChannelFactory {
+    struct Call: Sendable {
+        let peer: DeviceID
+        let key: Data
+        let connectionID: UUID
+        let role: WebRTCRole
+        let route: ConnectionRoute
+        let lease: PeerAuthorizationLease
+    }
+    nonisolated let entered = XCTestExpectation(description: "authorized factory entered")
+    private(set) var calls: [Call] = []
+    private(set) var legacyCalls = 0
+    private let operation: @Sendable (Call, any PeerAuthorizationProviding) async throws -> WebRTCSecureChannel
+
+    init(operation: @escaping @Sendable (Call, any PeerAuthorizationProviding) async throws -> WebRTCSecureChannel = { _, _ in throw WebRTCFactoryError.timeout }) {
+        self.operation = operation
+    }
+
+    func connect(localIdentity: DeviceIdentity, remoteDevice: DeviceID, remotePublicKey: Data,
+                 connectionID: UUID, role: WebRTCRole, route: ConnectionRoute,
+                 ice: ICEConfiguration, signaling: any WebRTCSignalTransport) async throws -> WebRTCSecureChannel {
+        legacyCalls += 1
+        XCTFail("Provider path called legacy factory")
+        throw WebRTCFactoryError.timeout
+    }
+
+    func connect(localIdentity: DeviceIdentity, remoteDevice: DeviceID, remotePublicKey: Data,
+                 connectionID: UUID, role: WebRTCRole, route: ConnectionRoute,
+                 ice: ICEConfiguration, signaling: any WebRTCSignalTransport,
+                 authorizationProvider: any PeerAuthorizationProviding,
+                 authorizationLease: PeerAuthorizationLease) async throws -> WebRTCSecureChannel {
+        let call = Call(peer: remoteDevice, key: remotePublicKey, connectionID: connectionID,
+                        role: role, route: route, lease: authorizationLease)
+        calls.append(call)
+        entered.fulfill()
+        return try await operation(call, authorizationProvider)
+    }
+}
+
+/// Deliberately ignores task cancellation until the test releases ownership.
+private final class AttemptBarrier: @unchecked Sendable {
+    let entered = XCTestExpectation(description: "dependency entered")
+    private let lock = NSLock()
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let resume = lock.withLock {
+                guard !released else { return true }
+                waiters.append(continuation)
+                return false
+            }
+            entered.fulfill()
+            if resume { continuation.resume() }
+        }
+    }
+    func release() {
+        let pending = lock.withLock {
+            released = true
+            let pending = waiters
+            waiters.removeAll()
+            return pending
+        }
+        pending.forEach { $0.resume() }
+    }
+}
+
+private struct BarrierICEProvider: ICEConfigurationProviding {
+    let barrier: AttemptBarrier
+    var fail = false
+    func configuration(for route: ConnectionRoute) async throws -> ICEConfiguration {
+        await barrier.wait()
+        if fail { throw WebRTCFactoryError.timeout }
+        return ICEConfiguration(stunURLs: [], turnServers: [])
     }
 }
 

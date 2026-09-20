@@ -977,7 +977,7 @@ private struct CandidateFloodSignalTransport: WebRTCSignalTransport {
     }
 }
 
-private actor InMemoryWebRTCSignalBus {
+actor InMemoryWebRTCSignalBus {
     struct Key: Hashable {
         let recipient: DeviceID
         let sender: DeviceID
@@ -1073,7 +1073,7 @@ private actor CancellableCandidateSendGate {
     }
 }
 
-private struct InMemoryWebRTCSignalEndpoint: WebRTCSignalTransport {
+struct InMemoryWebRTCSignalEndpoint: WebRTCSignalTransport {
     let localDevice: DeviceID
     let bus: InMemoryWebRTCSignalBus
 
