@@ -108,9 +108,19 @@ final class MeshConnectionListenerTests: XCTestCase {
                 )
             )
         }
-        for connection in connections {
+        for (index, connection) in connections.prefix(34).enumerated() {
             await transport.accept(connection)
-            try await waitUntil { await connection.readCount() > 0 }
+            try await waitUntil {
+                let active = await listener.activeHandshakeCount()
+                let retained = await listener.retainedConnectionCount()
+                return active == 0 && retained == index + 1
+            }
+        }
+        await transport.accept(connections[34])
+        try await waitUntil {
+            let closes = await connections[34].closeCount()
+            let retained = await listener.retainedConnectionCount()
+            return closes == 1 && retained == 34
         }
 
         let rejectedCloseCount = await connections[34].closeCount()

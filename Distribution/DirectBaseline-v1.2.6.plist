@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>product</key>
+    <string>DropMesh</string>
+    <key>bundleIdentifier</key>
+    <string>com.mason.macchannel</string>
+    <key>bundleExecutable</key>
+    <string>MacChannelApp</string>
+    <key>version</key>
+    <string>1.2.6</string>
+    <key>build</key>
+    <string>21</string>
+    <key>sparkleVersion</key>
+    <string>2.9.6</string>
+    <key>feedURL</key>
+    <string>https://github.com/MasonXQY/MacChannel/releases/latest/download/appcast.xml</string>
+    <key>sparklePublicKeySHA256</key>
+    <string>af99474825b137ad2f262bd75c3b763984e7ce6a249208a408bc9719bc74d807</string>
+</dict>
+</plist>

@@ -4,6 +4,7 @@ import Foundation
 import XCTest
 
 @testable import MacChannelCore
+@testable import MacChannelAppKit
 
 private actor IncomingResultRecorder {
     private var results: [TransferReceiveResult?] = []
@@ -18,6 +19,303 @@ private actor IncomingResultRecorder {
 }
 
 final class TransferCoordinatorTests: XCTestCase {
+    func testTwoSourcesRejectDuplicateWhileFirstWaitsForResource() async throws {
+        let resources = BoundedChannelResourceRegistry.shared
+        var held: [BoundedChannelResourceRegistry.Token] = []
+        for _ in 0..<BoundedChannelResourceRegistry.maximumPerDirection {
+            let token = await resources.reserve(.inbound, onReleased: {})
+            held.append(try XCTUnwrap(token))
+        }
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let peer = DeviceID(rawValue: UUID())
+        let id = TransferID(rawValue: UUID())
+        let gate = CancellationInsensitiveFrameGate()
+        let first = PullCountingIncomingSource(total: 1) { _ in
+            IncomingTransferConnection(source: peer, transferID: id,
+                channel: CancellationInsensitiveFramesChannel(gate: gate))
+        }
+        let second = MemoryIncomingTransferSource()
+        let listener = IncomingTransferListener(sources: [first, second],
+            policy: ReceivePolicy(trustedSources: [peer]),
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")),
+            inactivityTimeout: .seconds(30))
+        await listener.start()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await first.pullCount() == 0, ContinuousClock.now < deadline { await Task.yield() }
+        try await Task.sleep(for: .milliseconds(50))
+        await second.offer(IncomingTransferConnection(source: peer, transferID: id,
+            channel: CancellationInsensitiveFramesChannel(gate: gate)))
+        try await Task.sleep(for: .milliseconds(50))
+        let queued = await listener.queuedConnectionCount()
+        XCTAssertEqual(queued, 0, "Identity must remain reserved during the resource wait")
+        for token in held { await resources.finishWithoutClose(token) }
+        try await gate.waitUntilStarted(1)
+        try await Task.sleep(for: .milliseconds(50))
+        let readers = await gate.startedCount()
+        XCTAssertEqual(readers, 1)
+        let stopping = Task { await listener.stop() }
+        await gate.release()
+        await stopping.value
+    }
+
+    func testEndedSourceDoesNotStopOtherPlane() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let peer = DeviceID(rawValue: UUID())
+        let gate = CancellationInsensitiveFrameGate()
+        let empty = PullCountingIncomingSource(total: 0) { _ in fatalError("Empty source cannot yield") }
+        let active = PullCountingIncomingSource(total: 1) { _ in
+            IncomingTransferConnection(source: peer, transferID: TransferID(rawValue: UUID()),
+                channel: CancellationInsensitiveFramesChannel(gate: gate))
+        }
+        let listener = IncomingTransferListener(sources: [empty, active],
+            policy: ReceivePolicy(trustedSources: [peer]),
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")))
+        await listener.start()
+        try await gate.waitUntilStarted(1)
+        let count = await active.pullCount()
+        XCTAssertEqual(count, 1)
+        let stop = Task { await listener.stop() }
+        await gate.release()
+        await stop.value
+    }
+    func testSendUsesImmutableOutgoingPackage() async throws {
+        let fixture = try CoordinatorFixture(twoPeers: false)
+        defer { fixture.removeTemporaryFiles() }
+        let calls = ScopeCalls()
+        let scoped = SourceAccessTransferCoordinator(coordinator: fixture.sender, access: UserSelectedSourceAccess(start: { calls.start($0); return true }, stop: { calls.stop($0) }))
+        let id = try await scoped.send(items: [fixture.file], to: fixture.peerA)
+        XCTAssertEqual(calls.counts, [1, 1])
+        try FileManager.default.removeItem(at: fixture.file)
+        try await fixture.waitUntilCompleted(id)
+        XCTAssertEqual(try fixture.receivedData(on: fixture.peerA), fixture.sourceData)
+        await fixture.sender.shutdownForRestart()
+    }
+
+    func testDestinationScopeIsHeldThroughListenerOwnedIODrain() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let identity = try DeviceIdentity.ephemeral()
+        let trust = try TrustRepository(ownerIdentity: identity, trustStore: TrustStore(owner: identity.id), persistedGeneration: 0)
+        let source = MemoryIncomingTransferSource()
+        let frames = CancellationInsensitiveFrameGate()
+        let closes = BlockingCloseGate()
+        let pipe = Pipe()
+        let calls = ScopeCalls()
+        let settings = ListenerAuthorizedSettings(calls: calls, peer: identity.id)
+        let controller = IncomingRuntimeController(source: source, trustRepository: trust, settings: settings,
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")),
+            incomingDirectory: root.appendingPathComponent("Incoming"), ownerID: DeviceID(rawValue: UUID()), onReceiveFinished: { _ in })
+        await controller.start()
+        await source.offer(IncomingTransferConnection(source: identity.id, transferID: TransferID(rawValue: UUID()), channel: StopBoundaryChannel(frames: frames, closes: closes, handle: pipe.fileHandleForReading)))
+        try await frames.waitUntilStarted(1)
+        let stopping = Task { await controller.stop() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await closes.hasStarted()) {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            await Task.yield()
+        }
+        XCTAssertEqual(calls.counts, [1, 0])
+        await closes.release()
+        for _ in 0..<30 { await Task.yield() }
+        XCTAssertEqual(calls.counts, [1, 0], "Close completion alone must not release a scope still used by frame I/O")
+        await frames.release()
+        await stopping.value
+        XCTAssertEqual(calls.counts, [1, 1])
+        await controller.stop()
+        XCTAssertEqual(calls.counts, [1, 1])
+    }
+    func testIncomingOwnerDrainDoesNotWaitForAnotherOwnersSuspendedClose() async throws {
+        let registry = IncomingChannelCloseRegistry.shared
+        let owner = UUID()
+        let unrelatedOwner = UUID()
+        let ownGate = BlockingCloseGate()
+        let otherGate = BlockingCloseGate()
+        let ownPermit = await registry.acquire(owner: owner)
+        let otherPermit = await registry.acquire(owner: unrelatedOwner)
+        await registry.close(BlockingCloseChannel(base: CloseTrackingSilentChannel(), gate: ownGate),
+                             permit: try XCTUnwrap(ownPermit), timeout: .milliseconds(10))
+        await registry.close(BlockingCloseChannel(base: CloseTrackingSilentChannel(), gate: otherGate),
+                             permit: try XCTUnwrap(otherPermit), timeout: .milliseconds(10))
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            let ownStarted = await ownGate.hasStarted()
+            let otherStarted = await otherGate.hasStarted()
+            if ownStarted && otherStarted { break }
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            await Task.yield()
+        }
+        let completion = IncomingStopCompletion()
+        let draining = Task { await registry.waitForDrain(owner: owner); await completion.finish() }
+        await ownGate.release()
+        while !(await completion.finished), ContinuousClock.now < deadline { await Task.yield() }
+        let completed = await completion.finished
+        XCTAssertTrue(completed, "An unrelated owner's close must not delay this scope")
+        await otherGate.release()
+        await draining.value
+        await registry.waitForDrain(owner: unrelatedOwner)
+    }
+
+    func testTwoIncomingSourcesSharePermitBoundAndDrain() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let peer = DeviceID(rawValue: UUID())
+        let gate = CancellationInsensitiveFrameGate()
+        let sources = (0..<2).map { _ in PullCountingIncomingSource(total: 100) { _ in
+            IncomingTransferConnection(source: peer, transferID: TransferID(rawValue: UUID()),
+                channel: CancellationInsensitiveFramesChannel(gate: gate))
+        } }
+        let listener = IncomingTransferListener(sources: sources,
+            policy: ReceivePolicy(trustedSources: [peer]),
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")),
+            inactivityTimeout: .seconds(30))
+        await listener.start()
+        let deadline = ContinuousClock.now + .seconds(5)
+        var pulls = 0
+        repeat {
+            pulls = await sources[0].pullCount() + sources[1].pullCount()
+            if pulls >= 34 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        } while ContinuousClock.now < deadline
+        try await Task.sleep(for: .milliseconds(50))
+        pulls = await sources[0].pullCount() + sources[1].pullCount()
+        XCTAssertEqual(pulls, 34)
+        let active = await listener.activeReceiveCount()
+        XCTAssertEqual(active, 2)
+        let stop = Task { await listener.stop() }
+        await gate.release()
+        await stop.value
+        let retained = await IncomingChannelCloseRegistry.shared.admittedChannelCount()
+        XCTAssertEqual(retained, 0)
+    }
+
+    func testTwoIncomingSourcesStopWithoutPullingWhenAllPermitsHeld() async throws {
+        let registry = IncomingChannelCloseRegistry.shared
+        var permits: [IncomingChannelCloseRegistry.Permit] = []
+        for _ in 0..<IncomingTransferCapacity.maximumAdmittedChannels {
+            let permit = await registry.acquire()
+            permits.append(try XCTUnwrap(permit))
+        }
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let sources = (0..<2).map { _ in PullCountingIncomingSource(total: 1) { _ in
+            IncomingTransferConnection(source: DeviceID(rawValue: UUID()), transferID: TransferID(rawValue: UUID()),
+                channel: CoordinatorMemoryChannelPair.make(route: .lan).sender)
+        } }
+        let listener = IncomingTransferListener(sources: sources, policy: ReceivePolicy(trustedSources: []),
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")))
+        await listener.start()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await registry.waitingReaderCount() < 2, ContinuousClock.now < deadline { await Task.yield() }
+        await listener.stop()
+        let pulls = await sources[0].pullCount() + sources[1].pullCount()
+        XCTAssertEqual(pulls, 0)
+        for permit in permits { await registry.releaseUnused(permit) }
+    }
+
+    func testIncomingStopCancelsAdmissionWaitWithoutWaitingForUnrelatedPermits() async throws {
+        let registry = IncomingChannelCloseRegistry.shared
+        var permits: [IncomingChannelCloseRegistry.Permit] = []
+        for _ in 0..<IncomingTransferCapacity.maximumAdmittedChannels {
+            let permit = await registry.acquire()
+            permits.append(try XCTUnwrap(permit))
+        }
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let listener = IncomingTransferListener(source: MemoryIncomingTransferSource(),
+            policy: ReceivePolicy(trustedSources: []),
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")))
+        await listener.start()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await registry.waitingReaderCount() == 0 {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            await Task.yield()
+        }
+        let completion = IncomingStopCompletion()
+        let stopping = Task { await listener.stop(); await completion.finish() }
+        while !(await completion.finished), ContinuousClock.now < deadline { await Task.yield() }
+        let completed = await completion.finished
+        XCTAssertTrue(completed, "A channel-free admission waiter must cancel without waiting for others")
+        for permit in permits { await registry.releaseUnused(permit) }
+        await stopping.value
+    }
+
+    func testCancelledResourceWaitDoesNotWaitForUnrelatedReservations() async throws {
+        let registry = BoundedChannelResourceRegistry()
+        var held: [BoundedChannelResourceRegistry.Token] = []
+        for _ in 0..<BoundedChannelResourceRegistry.maximumPerDirection {
+            let token = await registry.reserve(.inbound, onReleased: {})
+            held.append(try XCTUnwrap(token))
+        }
+        let completion = IncomingStopCompletion()
+        let waiter = Task {
+            let token = await registry.reserveWhenAvailable(.inbound, onReleased: {})
+            await completion.finish()
+            return token
+        }
+        for _ in 0..<50 { await Task.yield() }
+        waiter.cancel()
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await completion.finished), ContinuousClock.now < deadline { await Task.yield() }
+        let completed = await completion.finished
+        XCTAssertTrue(completed)
+        for token in held { await registry.finishWithoutClose(token) }
+        let result = await waiter.value
+        if let result { await registry.finishWithoutClose(result) }
+        XCTAssertNil(result)
+    }
+
+    func testIncomingStopAwaitsOwnedFrameIOCloseAndReceiveCallback() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let source = MemoryIncomingTransferSource()
+        let peer = DeviceID(rawValue: UUID())
+        let frames = CancellationInsensitiveFrameGate()
+        let closes = BlockingCloseGate()
+        let callbacks = BlockingCloseGate()
+        let pipe = Pipe()
+        let descriptor = pipe.fileHandleForReading.fileDescriptor
+        let completion = IncomingStopCompletion()
+        let listener = IncomingTransferListener(
+            source: source, policy: ReceivePolicy(trustedSources: [peer]),
+            database: try TransferDatabase(url: root.appendingPathComponent("history.sqlite")),
+            incomingDirectory: root.appendingPathComponent("incoming"),
+            onReceiveFinished: { _ in await callbacks.waitForRelease() }
+        )
+        await listener.start()
+        await source.offer(IncomingTransferConnection(source: peer, transferID: TransferID(rawValue: UUID()),
+            channel: StopBoundaryChannel(frames: frames, closes: closes, handle: pipe.fileHandleForReading)))
+        try await frames.waitUntilStarted(1)
+        let stopping = Task { await listener.stop(); await completion.finish() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await closes.hasStarted()) {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            await Task.yield()
+        }
+        for _ in 0..<50 { await Task.yield() }
+        let beforeClose = await completion.finished
+        XCTAssertFalse(beforeClose, "stop returned while its close operation was suspended")
+        await closes.release()
+        for _ in 0..<50 { await Task.yield() }
+        let beforeIO = await completion.finished
+        XCTAssertFalse(beforeIO, "stop returned while its cancellation-insensitive frame I/O owned a descriptor")
+        XCTAssertNotEqual(fcntl(descriptor, F_GETFD), -1)
+        await frames.release()
+        while !(await callbacks.hasStarted()) {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            await Task.yield()
+        }
+        for _ in 0..<50 { await Task.yield() }
+        let beforeCallback = await completion.finished
+        XCTAssertFalse(beforeCallback, "stop returned while a receive callback was suspended")
+        await callbacks.release()
+        await stopping.value
+        XCTAssertEqual(fcntl(descriptor, F_GETFD), -1)
+        let owned = await listener.activeReceiveCount()
+        XCTAssertEqual(owned, 0)
+    }
+
     func testCoordinatorSendsOneItemToExactlyOnePeer() async throws {
         let fixture = try CoordinatorFixture(twoPeers: true)
         defer { fixture.removeTemporaryFiles() }
@@ -945,8 +1243,9 @@ final class TransferCoordinatorTests: XCTestCase {
         XCTAssertEqual(activeTransfers, IncomingTransferCapacity.maximumActiveTransfers)
         XCTAssertEqual(queuedConnections, IncomingTransferCapacity.maximumQueuedConnections)
 
-        await listener.stop()
+        let stopping = Task { await listener.stop() }
         await gate.release()
+        await stopping.value
         let cleanupDeadline = ContinuousClock.now + .seconds(5)
         while await IncomingChannelCloseRegistry.shared.admittedChannelCount() != 0 {
             guard ContinuousClock.now < cleanupDeadline else {
@@ -1048,7 +1347,8 @@ final class TransferCoordinatorTests: XCTestCase {
             IncomingTransferCapacity.maximumEstablishedConnections,
             IncomingTransferCapacity.maximumAdmittedChannels
         )
-        for (listener, _) in lifecycles { await listener.stop() }
+        let stopping = lifecycles.map { listener, _ in Task { await listener.stop() } }
+        while await IncomingChannelCloseRegistry.shared.waitingReaderCount() > 0 { await Task.yield() }
         for (_, source) in lifecycles { await source.releaseYield() }
 
         try await gate.waitUntilStarted(BoundedChannelResourceRegistry.maximumPerDirection)
@@ -1076,6 +1376,7 @@ final class TransferCoordinatorTests: XCTestCase {
         )
 
         await gate.release()
+        for task in stopping { await task.value }
         let deadline = ContinuousClock.now + .seconds(5)
         while true {
             let retained = await BoundedChannelResourceRegistry.shared.counts()
@@ -1203,9 +1504,10 @@ final class TransferCoordinatorTests: XCTestCase {
         let stuckExportCloseCount = await stuckExport.closeCount()
         XCTAssertGreaterThanOrEqual(stuckSendCloseCount, 1)
         XCTAssertGreaterThanOrEqual(stuckExportCloseCount, 1)
-        await listener.stop()
+        let stopping = Task { await listener.stop() }
         await stuckSend.releaseOperation()
         await stuckExport.releaseOperation()
+        await stopping.value
         let releaseDeadline = ContinuousClock.now + .seconds(5)
         while await listener.retainedResourceCount() != 0 {
             guard ContinuousClock.now < releaseDeadline else {
@@ -1657,6 +1959,7 @@ final class TransferCoordinatorTests: XCTestCase {
         let id = try await first.send(items: [payload], to: receiverDevice)
         try await firstConnector.waitUntilSenderHasSent(4)
         await first.shutdownForRestart()
+        try FileManager.default.removeItem(at: payload)
         try await waitForDatabasePhase(.failed, id: id, database: receiveDatabase)
 
         let secondConnector = CancellationMemoryConnector(
@@ -3373,6 +3676,47 @@ private actor RouteEscalatingMemoryConnector: RouteEscalatingPeerConnector {
     func failedRouteHints() -> [ConnectionRoute?] {
         hints
     }
+}
+
+private actor IncomingStopCompletion {
+    private(set) var finished = false
+    func finish() { finished = true }
+}
+
+private struct ListenerAuthorizedSettings: RuntimeReceiveSettingsProviding {
+    let calls: ScopeCalls
+    let peer: DeviceID
+    func current() async -> SettingsSurfaceSnapshot {
+        SettingsSurfaceSnapshot(defaultDirectory: nil, devices: [DeviceSetting(device: DeviceSummary(id: peer, displayName: "Peer", availability: .lan))])
+    }
+    func downloadDirectory() async -> DownloadDirectory { DownloadDirectory() }
+    func authorizeReceiveDirectories() async throws -> AuthorizedReceiveDirectories {
+        let url = URL(fileURLWithPath: "/tmp/authorized-test-destination")
+        calls.start(url)
+        return AuthorizedReceiveDirectories(directories: DownloadDirectory(), leases: [SecurityScopeLease(urls: [url], stop: { calls.stop($0) })])
+    }
+}
+
+private final class StopBoundaryChannel: SecureChannel, @unchecked Sendable {
+    let route: ConnectionRoute = .lan
+    let frameGate: CancellationInsensitiveFrameGate
+    let closeGate: BlockingCloseGate
+    let handle: FileHandle
+    init(frames: CancellationInsensitiveFrameGate, closes: BlockingCloseGate, handle: FileHandle) {
+        frameGate = frames; closeGate = closes; self.handle = handle
+    }
+    func send(_ frame: Data) async throws {}
+    func frames() -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream(unfolding: { [frameGate, handle] in
+            await frameGate.startAndWait()
+            try handle.close()
+            return nil
+        })
+    }
+    func exportKey(label: String, context: Data, length: Int) async throws -> Data {
+        Data(repeating: 7, count: length)
+    }
+    func close() async { await closeGate.waitForRelease() }
 }
 
 private actor MemoryIncomingTransferSource: IncomingTransferConnectionSource {

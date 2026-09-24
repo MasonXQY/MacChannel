@@ -2,8 +2,20 @@ import XCTest
 
 @testable import MacChannelCore
 @testable import MacChannelAppKit
+@testable import MacChannelDirectDistribution
 
 final class SoftwareUpdateTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     func testInstalledVersionUsesBundleValuesAndFallsBackWithoutCrashing() {
         XCTAssertEqual(
             InstalledAppVersion(info: [
@@ -20,11 +32,28 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertEqual(SoftwareUpdatePhase.checking.statusText, "正在检查更新…")
         XCTAssertEqual(SoftwareUpdatePhase.upToDate.statusText, "当前已是最新版本。")
         XCTAssertEqual(SoftwareUpdatePhase.available(version: "1.2.1").statusText, "发现新版本 1.2.1。")
+        XCTAssertEqual(SoftwareUpdatePhase.managedByAppStore.statusText, "更新由 Mac App Store 管理。")
         XCTAssertEqual(SoftwareUpdatePhase.failed.statusText, "暂时无法检查更新，请稍后重试。")
         XCTAssertTrue(SoftwareUpdatePhase.available(version: "1.2.1").hasAvailableUpdate)
         XCTAssertTrue(SoftwareUpdatePhase.downloading.hasAvailableUpdate)
         XCTAssertTrue(SoftwareUpdatePhase.installDeferred.hasAvailableUpdate)
+        XCTAssertTrue(SoftwareUpdatePhase.managedByAppStore.hasAvailableUpdate)
         XCTAssertFalse(SoftwareUpdatePhase.securityFailure.hasAvailableUpdate)
+    }
+
+    func testAppStorePresentationUsesManagedCopyAndProductPageAction() {
+        let snapshot = SoftwareUpdateSnapshot(
+            installedVersion: InstalledAppVersion(info: [:]),
+            phase: .managedByAppStore,
+            canCheck: true,
+            lastCheckedAt: nil
+        )
+
+        let presentation = SoftwareUpdateSectionPresentation(snapshot: snapshot)
+
+        XCTAssertEqual(presentation.guidanceText, "更新由 Mac App Store 管理。")
+        XCTAssertEqual(presentation.actionTitle, "在 Mac App Store 中查看")
+        XCTAssertNil(presentation.statusText)
     }
 
     func testAvailableUpdateActionCapabilityMatchesSparkleForegroundValidation() {
@@ -55,6 +84,7 @@ final class SoftwareUpdateTests: XCTestCase {
             lastCheckedAt: Date(timeIntervalSince1970: 0)
         )
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh-Hans")
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -517,7 +547,7 @@ final class SoftwareUpdateTests: XCTestCase {
         )
 
         XCTAssertTrue(source.contains("updateLaunch.prepare(transfers: container.transferSnapshots)"))
-        XCTAssertTrue(source.contains("if case .startupError = status"))
+        XCTAssertTrue(source.contains("if status.isStartupFailure"))
         XCTAssertGreaterThanOrEqual(source.components(separatedBy: "updateLaunch.prepare(transfers: nil)").count - 1, 2)
         XCTAssertFalse(source.contains("updateController.start()"))
     }

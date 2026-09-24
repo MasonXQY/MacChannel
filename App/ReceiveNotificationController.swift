@@ -180,6 +180,55 @@ private final class ReceiveAuthorizationOperationWaiters: @unchecked Sendable {
             task = nil
         }
     }
+
+    func cancel() {
+        let taskToCancel: Task<Void, Never>? = lock.withLock {
+            completed = true
+            defer { task = nil }
+            return task
+        }
+        taskToCancel?.cancel()
+    }
+}
+
+struct ExpiringReceiveNotificationIdentifiers {
+    private struct Entry {
+        let createdAt: Date
+        let order: UInt64
+    }
+
+    private var entries: [String: Entry] = [:]
+    private var order: UInt64 = 0
+    let capacity: Int
+    let ttl: TimeInterval
+
+    init(capacity: Int, ttl: TimeInterval) {
+        self.capacity = max(1, capacity)
+        self.ttl = max(0, ttl)
+    }
+
+    mutating func insert(_ identifier: String, now: Date) {
+        prune(now: now)
+        while entries.count >= capacity,
+              let oldest = entries.min(by: { $0.value.order < $1.value.order })?.key
+        {
+            entries.removeValue(forKey: oldest)
+        }
+        order &+= 1
+        entries[identifier] = Entry(createdAt: now, order: order)
+    }
+
+    mutating func contains(_ identifier: String, now: Date) -> Bool {
+        prune(now: now)
+        return entries[identifier] != nil
+    }
+
+    var count: Int { entries.count }
+
+    private mutating func prune(now: Date) {
+        let expiry = now.addingTimeInterval(-ttl)
+        entries = entries.filter { $0.value.createdAt >= expiry }
+    }
 }
 
 @MainActor
@@ -197,6 +246,7 @@ final class ReceiveNotificationController {
 
     private struct DeliveryOperation {
         let id: UUID
+        let identifier: String
         let signal: ReceiveNotificationOperationSignal<DeliveryOutcome>
         let task: Task<Void, Never>
     }
@@ -268,6 +318,12 @@ final class ReceiveNotificationController {
     private var authorizationRequestOperation: AuthorizationOperation?
     private var deliveryOperation: DeliveryOperation?
     private var snapshot = ReceiveNotificationSnapshot(authorizationState: .notDetermined)
+    private var pendingReceiveNotifications: [TransferReceiveResult] = []
+    private var notificationWorker: Task<Void, Never>?
+    private var notificationWorkerID: UUID?
+    private var invalidatedNotificationIdentifiers: ExpiringReceiveNotificationIdentifiers
+    private var rejectUnregisteredDeliveredResponsesUntil: Date?
+    private let pendingReceiveNotificationLimit = 64
 
     var onReceiveOpened: ((TransferID) -> Void)?
 
@@ -299,6 +355,10 @@ final class ReceiveNotificationController {
         self.authorizationPromptTimeout = authorizationPromptTimeout
         self.deliveryTimeout = deliveryTimeout
         self.now = now
+        invalidatedNotificationIdentifiers = ExpiringReceiveNotificationIdentifiers(
+            capacity: notificationTargetCapacity,
+            ttl: notificationTargetTTL
+        )
 
         center.setDeliveredResponseHandler { [weak self] identifier in
             await self?.openDeliveredNotification(identifier: identifier)
@@ -311,17 +371,7 @@ final class ReceiveNotificationController {
             _ = await awaitAuthorizationRequest()
             return
         }
-
-        guard let state = await awaitAuthorizationQuery(), !Task.isCancelled else { return }
-
-        if authorizationRequestOperation != nil {
-            _ = await awaitAuthorizationRequest()
-            return
-        }
-
-        if state == .notDetermined, !didRequestAuthorization {
-            _ = await awaitAuthorizationRequest()
-        }
+        _ = await awaitAuthorizationQuery()
     }
 
     func refreshAuthorizationState() async {
@@ -336,6 +386,9 @@ final class ReceiveNotificationController {
         guard !Task.isCancelled, !result.receivedURLs.isEmpty else { return }
 
         await prepare()
+        if snapshot.authorizationState == .notDetermined, !didRequestAuthorization {
+            _ = await awaitAuthorizationRequest()
+        }
         guard !Task.isCancelled, snapshot.authorizationState.canDeliverNotifications else { return }
 
         let urls = result.receivedURLs
@@ -346,7 +399,7 @@ final class ReceiveNotificationController {
         let request = ReceiveNotificationRequest(
             identifier: identifier,
             content: ReceiveNotificationContent(
-                title: "已收到新文件",
+                title: L10n.text(.receiveNotificationTitle),
                 body: notificationBody(for: urls)
             )
         )
@@ -377,6 +430,52 @@ final class ReceiveNotificationController {
             operation.task.cancel()
             publishDeliveryState(.temporarilyUnavailable)
             return
+        }
+    }
+
+    func enqueue(receive result: TransferReceiveResult) {
+        guard pendingReceiveNotifications.count < pendingReceiveNotificationLimit else { return }
+        pendingReceiveNotifications.append(result)
+        guard notificationWorker == nil else { return }
+        let workerID = UUID()
+        notificationWorkerID = workerID
+        notificationWorker = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, !self.pendingReceiveNotifications.isEmpty {
+                let next = self.pendingReceiveNotifications.removeFirst()
+                await self.notify(receive: next)
+            }
+            guard self.notificationWorkerID == workerID else { return }
+            self.notificationWorker = nil
+            self.notificationWorkerID = nil
+        }
+    }
+
+    func stopPendingNotifications() {
+        notificationWorker?.cancel()
+        notificationWorker = nil
+        notificationWorkerID = nil
+        pendingReceiveNotifications.removeAll()
+        authorizationQueryOperation?.waiters.cancel()
+        authorizationQueryOperation = nil
+        if authorizationRequestOperation != nil {
+            didRequestAuthorization = false
+        }
+        authorizationRequestOperation?.waiters.cancel()
+        authorizationRequestOperation = nil
+        if let deliveryOperation {
+            let invalidatedAt = now()
+            invalidatedNotificationIdentifiers.insert(
+                deliveryOperation.identifier,
+                now: invalidatedAt
+            )
+            let rejectionDeadline = invalidatedAt.addingTimeInterval(notificationTargetTTL)
+            rejectUnregisteredDeliveredResponsesUntil = max(
+                rejectUnregisteredDeliveredResponsesUntil ?? .distantPast,
+                rejectionDeadline
+            )
+            deliveryOperation.task.cancel()
+            self.deliveryOperation = nil
         }
     }
 
@@ -422,9 +521,18 @@ final class ReceiveNotificationController {
         identifier: String,
         trustsDeliveredResponse: Bool
     ) async {
+        guard !invalidatedNotificationIdentifiers.contains(identifier, now: now()) else { return }
         pruneNotificationTargets()
         guard let requestedIdentity = NotificationIdentity(identifier: identifier) else { return }
         guard !handledNotificationTransferIDs.contains(requestedIdentity.transferID) else { return }
+
+        if trustsDeliveredResponse,
+           let deadline = rejectUnregisteredDeliveredResponsesUntil,
+           now() <= deadline,
+           deliveredNotificationIdentities[requestedIdentity.transferID] != requestedIdentity
+        {
+            return
+        }
 
         let deliveredIdentity: NotificationIdentity
         if trustsDeliveredResponse {
@@ -585,7 +693,12 @@ final class ReceiveNotificationController {
             )
             await signal.resolve(outcome)
         }
-        let operation = DeliveryOperation(id: id, signal: signal, task: task)
+        let operation = DeliveryOperation(
+            id: id,
+            identifier: request.identifier,
+            signal: signal,
+            task: task
+        )
         deliveryOperation = operation
         return operation
     }
@@ -597,7 +710,11 @@ final class ReceiveNotificationController {
         source: DeviceID?,
         urls: [URL]
     ) {
-        guard deliveryOperation?.id == id else { return }
+        guard deliveryOperation?.id == id else {
+            let identity = NotificationIdentity(transferID: transferID, source: source)
+            center.removeDeliveredNotifications(withIdentifiers: [identity.identifier])
+            return
+        }
         deliveryOperation = nil
         switch outcome {
         case .delivered:
@@ -617,9 +734,9 @@ final class ReceiveNotificationController {
 
     private func notificationBody(for urls: [URL]) -> String {
         if urls.count == 1 {
-            return "\(urls[0].lastPathComponent) 已保存到接收文件夹"
+            return L10n.text(.receiveNotificationSingle, String(urls[0].lastPathComponent))
         }
-        return "已收到 \(urls.count) 个文件，已保存到接收文件夹"
+        return L10n.text(.receiveNotificationMultiple, Int64(urls.count))
     }
 
     private func storeNotificationTarget(

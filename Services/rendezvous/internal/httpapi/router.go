@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -106,26 +107,40 @@ type Config struct {
 	AllowedWebSocketOrigins []string
 	TURNSharedSecret        []byte
 	TURNURLs                []string
+	AccountHandler          http.Handler
+	AccountRoutes           *AccountRouteConfig
 }
 
 type Router struct {
-	clock        func() time.Time
-	verifier     *auth.Verifier
-	registry     *auth.TrustRegistry
-	pairings     pairing.Store
-	presence     *presence.Hub
-	signals      *signal.Hub
-	pairingTTL   time.Duration
-	connections  *connectionLimiter
-	upgrader     websocket.Upgrader
-	trustWatchMu sync.Mutex
-	trustWatches int
-	trustStop    chan struct{}
-	turnSecret   []byte
-	turnURLs     []string
+	clock         func() time.Time
+	verifier      *auth.Verifier
+	registry      *auth.TrustRegistry
+	pairings      pairing.Store
+	presence      *presence.Hub
+	signals       *signal.Hub
+	pairingTTL    time.Duration
+	connections   *connectionLimiter
+	sessions      authenticatedSessions
+	upgrader      websocket.Upgrader
+	trustWatchMu  sync.Mutex
+	trustWatches  int
+	trustStop     chan struct{}
+	turnSecret    []byte
+	turnURLs      []string
+	accountRoutes *AccountRouteConfig
 }
 
 func NewRouter(config Config) http.Handler {
+	if config.AccountRoutes != nil && (config.AccountRoutes.Routes == nil || config.AccountRoutes.Sessions == nil) {
+		panic("invalid account route configuration")
+	}
+	var accountRoutes *AccountRouteConfig
+	if config.AccountRoutes != nil {
+		accountRoutes = &AccountRouteConfig{Routes: config.AccountRoutes.Routes, Sessions: config.AccountRoutes.Sessions}
+		if hub := accountRoutes.Routes.PresenceHub(); hub != nil && hub != config.Presence {
+			panic("incoherent account presence configuration")
+		}
+	}
 	if config.Clock == nil {
 		config.Clock = time.Now
 	}
@@ -165,8 +180,9 @@ func NewRouter(config Config) http.Handler {
 				return webSocketOriginAllowed(request.Header.Get("Origin"), request.Host, allowedOrigins)
 			},
 		},
-		turnSecret: append([]byte(nil), config.TURNSharedSecret...),
-		turnURLs:   append([]string(nil), config.TURNURLs...),
+		turnSecret:    append([]byte(nil), config.TURNSharedSecret...),
+		turnURLs:      append([]string(nil), config.TURNURLs...),
+		accountRoutes: accountRoutes,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", router.health)
@@ -188,6 +204,9 @@ func NewRouter(config Config) http.Handler {
 	mux.HandleFunc("POST /v1/pairing/sessions/{sessionID}/peer-authorization/status", router.peerAuthorizationStatus)
 	mux.HandleFunc("GET /v1/ws", router.webSocket)
 	mux.HandleFunc("POST /v1/turn-credentials", router.turnCredentials)
+	if config.AccountHandler != nil {
+		mux.Handle("/v1/account/", config.AccountHandler)
+	}
 	return securityHeaders(mux)
 }
 
@@ -736,22 +755,55 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 	}
 	var authentication auth.WebSocketAuthentication
 	if err := connection.ReadJSON(&authentication); err != nil {
+		log.Print("websocket_auth_rejected category=decode")
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
 		return
 	}
-	if err := r.verifier.VerifyChallengeFrom(request.Context(), authentication.Envelope, source); err != nil ||
-		!bytes.Equal(authentication.Envelope.Payload, webSocketAuthPayload) ||
-		r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, authentication.TrustRecords) != nil {
+	if err := r.verifier.VerifyChallengeFrom(request.Context(), authentication.Envelope, source); err != nil {
+		log.Printf("websocket_auth_rejected category=%s", envelopeRejectionCategory(err))
+		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
+		return
+	}
+	if !bytes.Equal(authentication.Envelope.Payload, webSocketAuthPayload) {
+		log.Print("websocket_auth_rejected category=payload")
+		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
+		return
+	}
+	catchupRecords := authentication.TrustRecords
+	trustErr := r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, catchupRecords)
+	if errors.Is(trustErr, auth.ErrInvalidTrust) && len(catchupRecords) > 0 {
+		// Older clients attach cached pairing proofs to every login. Reject
+		// that atomic batch without rejecting a separately valid identity.
+		// Recheck the registry pin and persistent state; never bypass them.
+		trustErr = r.registry.AuthenticateDevice(authentication.Envelope.DeviceID, authentication.Envelope.PublicKey, nil)
+		catchupRecords = nil
+		if trustErr == nil {
+			log.Print("websocket_legacy_trust_rejected category=trust_invalid identity_authenticated=true")
+		}
+	}
+	if err := trustErr; err != nil {
+		log.Printf("websocket_auth_rejected category=%s", trustRejectionCategory(err))
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "authentication_failed"})
 		return
 	}
 	deviceID := strings.ToLower(authentication.Envelope.DeviceID)
-	releaseConnection, err := r.connections.Acquire(source, deviceID)
+	releaseConnection, err := r.sessions.acquire(request.Context(), source, deviceID,
+		func() { _ = connection.Close() }, r.connections)
 	if err != nil {
+		log.Print("websocket_auth_rejected category=capacity")
 		_ = peer.SendJSON(map[string]string{"type": "auth-error", "code": "capacity_reached"})
 		return
 	}
 	defer releaseConnection()
+	var accountRouteSocket *accountRouteSocket
+	if r.accountRoutes != nil {
+		accountRouteSocket, err = newAccountRouteSocket(r.accountRoutes, deviceID, authentication.Envelope.PublicKey, source, peer)
+		if err != nil {
+			_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
+			return
+		}
+		defer accountRouteSocket.close()
+	}
 	lifetimeDeadline := time.Now().Add(webSocketMaximumLifetime)
 	_ = connection.SetReadDeadline(earlierDeadline(time.Now().Add(webSocketPongWait), lifetimeDeadline))
 	connection.SetPongHandler(func(string) error {
@@ -783,36 +835,94 @@ func (r *Router) webSocket(writer http.ResponseWriter, request *http.Request) {
 	if err := peer.SendJSON(map[string]string{"type": "auth-ok", "deviceID": deviceID}); err != nil {
 		return
 	}
-	for _, record := range r.registry.RecordsForGraph(deviceID, authentication.TrustRecords) {
+	for _, record := range r.registry.RecordsForGraph(deviceID, catchupRecords) {
 		if err := peer.SendJSON(map[string]any{"type": "trust-record", "record": record}); err != nil {
 			return
 		}
 	}
-	disconnectPresence, err := r.presence.Connect(deviceID, source, peer)
-	if err != nil {
-		_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
-		return
+	if accountRouteSocket != nil && accountRouteSocket.routes.PresenceHub() != nil {
+		if err := accountRouteSocket.routes.AttachPresence(accountRouteSocket.handle, peer); err != nil {
+			_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
+			return
+		}
+	} else {
+		disconnectPresence, err := r.presence.Connect(deviceID, source, peer)
+		if err != nil {
+			_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "capacity_reached"})
+			return
+		}
+		defer disconnectPresence()
 	}
-	defer disconnectPresence()
 	releaseTrustWatch := r.retainTrustWatch()
 	defer releaseTrustWatch()
 
 	for {
-		var frame struct {
-			Type    string                   `json:"type"`
-			To      string                   `json:"to"`
-			Payload []byte                   `json:"payload"`
-			Records []auth.SignedTrustRecord `json:"trustRecords"`
+		var rawFrame json.RawMessage
+		if err := connection.ReadJSON(&rawFrame); err != nil {
+			return
 		}
-		if err := connection.ReadJSON(&frame); err != nil {
+		var frame struct {
+			Type     string                   `json:"type"`
+			To       string                   `json:"to"`
+			Payload  []byte                   `json:"payload"`
+			Records  []auth.SignedTrustRecord `json:"trustRecords"`
+			Envelope json.RawMessage          `json:"envelope"`
+		}
+		if err := json.Unmarshal(rawFrame, &frame); err != nil {
 			return
 		}
 		switch frame.Type {
+		case "account-route-bind-challenge":
+			if accountRouteSocket == nil {
+				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
+				continue
+			}
+			if !strictAccountRouteControl(rawFrame, "account-route-bind-challenge") {
+				_ = peer.SendJSON(map[string]string{"type": "account-route-bind-error", "code": "unavailable"})
+				continue
+			}
+			challenge, err := accountRouteSocket.issueChallenge(request.Context(), r.verifier, r.clock())
+			if err != nil {
+				_ = peer.SendJSON(map[string]string{"type": "account-route-bind-error", "code": "unavailable"})
+				continue
+			}
+			_ = peer.SendJSON(map[string]any{"type": "account-route-bind-challenge", "nonce": challenge.Nonce, "expiresAt": challenge.ExpiresAtMillis})
+		case "account-route-bind":
+			if accountRouteSocket == nil {
+				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
+				continue
+			}
+			envelope, err := strictAccountRouteBind(rawFrame)
+			if err != nil || accountRouteSocket.bind(request.Context(), r.verifier, r.accountRoutes.Sessions, r.clock(), envelope) != nil {
+				_ = peer.SendJSON(map[string]string{"type": "account-route-bind-error", "code": "unavailable"})
+				continue
+			}
+			_ = peer.SendJSON(map[string]string{"type": "account-route-bind-ok"})
+		case "account-route-unbind":
+			if accountRouteSocket == nil {
+				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "unknown_frame"})
+				continue
+			}
+			if !strictAccountRouteControl(rawFrame, "account-route-unbind") {
+				_ = peer.SendJSON(map[string]string{"type": "protocol-error", "code": "invalid_frame"})
+				continue
+			}
+			accountRouteSocket.unbind()
+			_ = peer.SendJSON(map[string]string{"type": "account-route-unbind-ok"})
 		case "signal":
-			err := r.signals.Route(deviceID, strings.ToLower(frame.To), frame.Payload)
+			var err error
+			if accountRouteSocket != nil {
+				if len(frame.Payload) == 0 || len(frame.Payload) > signal.MaximumFrameSize {
+					err = signal.ErrFrameLarge
+				} else {
+					_, err = accountRouteSocket.routes.Route(request.Context(), accountRouteSocket.handle, strings.ToLower(frame.To), frame.Payload)
+				}
+			} else {
+				err = r.signals.Route(deviceID, strings.ToLower(frame.To), frame.Payload)
+			}
 			if err != nil {
 				code := "unavailable"
-				if errors.Is(err, signal.ErrForbidden) {
+				if accountRouteSocket == nil && errors.Is(err, signal.ErrForbidden) {
 					code = "forbidden"
 				} else if errors.Is(err, signal.ErrFrameLarge) {
 					code = "invalid_frame"
@@ -929,6 +1039,10 @@ func (p *webSocketPeer) SendJSON(value any) error {
 	defer p.mu.Unlock()
 	_ = p.connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return p.connection.WriteJSON(value)
+}
+
+func (p *webSocketPeer) Close() error {
+	return p.connection.Close()
 }
 
 func (p *webSocketPeer) SendPing() error {

@@ -4,6 +4,32 @@ import XCTest
 @testable import MacChannelCore
 
 final class RendezvousPairingShutdownTests: XCTestCase {
+    func testHostPollNetworkFailureIsScopedAndClearedByRemoval() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailingHostURLProtocol.self]
+        let identity = try DeviceIdentity.ephemeral()
+        let transport = try RendezvousPairingTransport(identity: identity,
+            origin: URL(string: "https://pairing.test")!, session: URLSession(configuration: configuration))
+        addTeardownBlock { await transport.stop() }
+        let key = P256.KeyAgreement.PrivateKey()
+        let offer = PairingOffer(code: "012345", expiresAt: Date().addingTimeInterval(60),
+            hostID: identity.id, hostIdentityPublicKey: identity.publicKey.rawRepresentation,
+            hostEphemeralPublicKey: key.publicKey.rawRepresentation, hostDisplayName: "Host")
+        try await transport.publish(offer, endpoint: BlockingPairingEndpoint())
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while await transport.hostFailure(for: offer.code) == nil, ContinuousClock.now < deadline { await Task.yield() }
+        let failure = await transport.hostFailure(for: offer.code)
+        XCTAssertEqual(failure, .pairingHandshakeFailed)
+        let unrelated = await transport.hostFailure(for: "999999")
+        XCTAssertNil(unrelated)
+        await transport.remove(code: offer.code)
+        let removed = await transport.hostFailure(for: offer.code)
+        XCTAssertNil(removed)
+        await transport.stop()
+        let stopped = await transport.hostFailure(for: offer.code)
+        XCTAssertNil(stopped)
+    }
+
     func testPublicRendezvousTransportRequiresBilateralAuthorization() async throws {
         let transport = try RendezvousPairingTransport(
             identity: try DeviceIdentity.ephemeral(),
@@ -110,6 +136,24 @@ final class RendezvousPairingShutdownTests: XCTestCase {
         let finished = await completion.isFinished()
         XCTAssertTrue(finished)
     }
+}
+
+private final class FailingHostURLProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let url = request.url else { return }
+        if url.path.hasSuffix("/host") {
+            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+            return
+        }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url,
+            statusCode: url.path == "/v1/pairing" ? 201 : 204,
+            httpVersion: "HTTP/1.1", headerFields: [:])!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
 
 private actor BlockingPairingEndpoint: PairingHostEndpoint {

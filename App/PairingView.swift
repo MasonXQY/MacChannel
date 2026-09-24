@@ -27,9 +27,19 @@ protocol PairingSurfaceServicing: AnyObject {
     func awaitHostApproval() async throws -> SurfaceActionResult
     func cancel() async throws
     func pendingPeer() async -> DeviceSummary?
+    var usesDurableStates: Bool { get }
+    func currentDurableState() async -> DurablePairingState?
+    func retrySaving() async throws
+    func startObservation() async
+    func stopObservation() async
 }
 
 extension PairingSurfaceServicing {
+    var usesDurableStates: Bool { false }
+    func currentDurableState() async -> DurablePairingState? { nil }
+    func retrySaving() async throws { throw PairingSurfaceError.unavailable }
+    func startObservation() async {}
+    func stopObservation() async {}
     var codeLifetime: TimeInterval { 300 }
     func pendingPeer() async -> DeviceSummary? { nil }
     func approve() async throws -> SurfaceActionResult { throw PairingSurfaceError.unavailable }
@@ -42,13 +52,20 @@ extension PairingSurfaceServicing {
 @MainActor
 final class PairingSurfaceModel: ObservableObject {
     @Published var state: PairingState
+    @Published private(set) var durableState: DurablePairingState?
     @Published var hostedCode: String?
     @Published var entryCode: String
     @Published var pendingPeer: DeviceSummary?
-    @Published var actionError: String?
+    @Published var actionErrorContent: LocalizedContent?
+    var actionError: String? {
+        get { actionErrorContent?.text }
+        set { actionErrorContent = newValue.map(LocalizedContent.verbatim) }
+    }
     @Published var hostedCodeLifetimeMinutes: Int = 5
     private let announcer: any AccessibilityAnnouncing
     private var approvalTask: Task<Void, Never>?
+    private var invalidatedSuccessPeers: Set<DeviceID> = []
+    private var retired = false
 
     init(
         state: PairingState = .idle,
@@ -62,7 +79,7 @@ final class PairingSurfaceModel: ObservableObject {
         self.hostedCode = hostedCode.map(PairingCodeInput.sanitize)
         self.entryCode = PairingCodeInput.sanitize(entryCode)
         self.pendingPeer = pendingPeer
-        self.actionError = actionError
+        self.actionErrorContent = actionError.map(LocalizedContent.verbatim)
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
     }
 
@@ -72,11 +89,12 @@ final class PairingSurfaceModel: ObservableObject {
         actionError = nil
         do {
             let code = try await service.createCode()
+            guard !retired else { return }
             hostedCode = PairingCodeInput.sanitize(code)
             hostedCodeLifetimeMinutes = max(1, Int(service.codeLifetime / 60))
             state = .displayingCode(expiresAt: Date().addingTimeInterval(service.codeLifetime))
         } catch {
-            publishError("无法生成配对码，请检查网络后重试。")
+            publishError(.pairingGenerateFailed)
         }
     }
 
@@ -86,24 +104,29 @@ final class PairingSurfaceModel: ObservableObject {
         actionError = nil
         do {
             let result = try await service.join(code: code)
+            guard !retired else { return }
             pendingPeer = result.peer
             state = .awaitingHostApproval(result.peer)
             approvalTask?.cancel()
             approvalTask = Task { [weak self, service] in
                 do {
                     let outcome = try await service.awaitHostApproval()
-                    guard !Task.isCancelled else { return }
-                    self?.state = .confirmed(result.peer)
-                    self?.publishWarning(outcome.warning)
+                    guard !Task.isCancelled, self?.retired == false else { return }
+                    if service.usesDurableStates {
+                        if let state = await service.currentDurableState() { self?.updateDurableState(state) }
+                    } else { self?.state = .confirmed(result.peer) }
+                    self?.publishWarning(outcome.warningContent)
                 } catch is CancellationError {
                     return
                 } catch {
                     guard !Task.isCancelled else { return }
-                    self?.publishError("未能完成配对，请在两台 Mac 上重试。")
+                    if let state = await service.currentDurableState() { self?.updateDurableState(state) }
+                    if case .saveFailed = self?.durableState { return }
+                    self?.publishError(.pairingCompleteFailed)
                 }
             }
         } catch {
-            publishError("无法验证配对码，请检查网络后重试。")
+            publishError(.pairingVerifyFailed)
         }
     }
 
@@ -113,62 +136,122 @@ final class PairingSurfaceModel: ObservableObject {
         if let peer { state = .committing(peer) }
         do {
             let result = try await service.approve()
-            publishWarning(result.warning)
+            if let state = await service.currentDurableState() { updateDurableState(state) }
+            publishWarning(result.warningContent)
         } catch {
-            if let peer { state = .approvalRequested(peer) }
-            publishError("无法允许这台 Mac，请检查网络后重试。")
+            if let state = await service.currentDurableState() { updateDurableState(state) }
+            if case .saveFailed = durableState { return }
+            if !service.usesDurableStates, let peer { state = .approvalRequested(peer) }
+            publishError(.pairingAllowFailed)
         }
     }
 
     func reject(using service: any PairingSurfaceServicing) async {
         actionError = nil
         approvalTask?.cancel()
+        await approvalTask?.value
         approvalTask = nil
         do {
             try await service.reject()
             pendingPeer = nil
             state = .idle
         } catch {
-            publishError("无法拒绝这次配对，请检查网络后重试。")
+            publishError(.pairingRejectFailed)
         }
     }
 
     func cancel(using service: any PairingSurfaceServicing) async -> Bool {
         actionError = nil
         approvalTask?.cancel()
+        await approvalTask?.value
         approvalTask = nil
         do {
             try await service.cancel()
             resetToIdle()
             return true
         } catch {
-            publishError("无法取消配对，请稍后重试。")
+            if let state = await service.currentDurableState() { updateDurableState(state) }
+            if case .saveFailed = durableState { return false }
+            publishError(.pairingCancelFailed)
             return false
         }
     }
 
     func resetToIdle() {
+        if case let .confirmed(peer) = state { invalidatedSuccessPeers.insert(peer.id) }
         approvalTask?.cancel()
         approvalTask = nil
         state = .idle
+        durableState = nil
         hostedCode = nil
         entryCode = ""
         pendingPeer = nil
         actionError = nil
     }
 
-    private func publishError(_ message: String) {
-        actionError = message
-        announcer.announce(message)
+    func updateDurableState(_ next: DurablePairingState) {
+        guard !retired else { return }
+        if case let .paired(peer) = next, invalidatedSuccessPeers.contains(peer.id) { return }
+        if case let .active(.approvalRequested(peer)) = next { invalidatedSuccessPeers.remove(peer.id) }
+        if case let .active(.awaitingHostApproval(peer)) = next { invalidatedSuccessPeers.remove(peer.id) }
+        durableState = next
+        switch next {
+        case let .active(raw):
+            // A raw confirmation is never a durable success, including test adapters.
+            if case let .confirmed(peer) = raw {
+                durableState = .saveFailed(peer)
+                state = .committing(peer)
+                publishError(.pairingSaveFailed)
+            } else { state = raw }
+        case let .saving(peer):
+            state = .committing(peer)
+            actionError = nil
+        case let .saveFailed(peer):
+            state = .committing(peer)
+            publishError(.pairingSaveFailed)
+        case let .paired(peer):
+            state = .confirmed(peer)
+            actionError = nil
+        }
     }
 
-    private func publishWarning(_ warning: String?) {
+    func invalidateSuccess(for id: DeviceID) {
+        invalidatedSuccessPeers.insert(id)
+        if case let .confirmed(peer) = state, peer.id == id { resetToIdle() }
+    }
+
+    func retire() async {
+        retired = true
+        let task = approvalTask
+        task?.cancel()
+        await task?.value
+        resetToIdle()
+    }
+
+    func retrySaving(using service: any PairingSurfaceServicing) async {
+        guard case let .saveFailed(peer) = durableState else { return }
+        updateDurableState(.saving(peer))
+        do { try await service.retrySaving() }
+        catch { updateDurableState(.saveFailed(peer)) }
+        if let state = await service.currentDurableState() { updateDurableState(state) }
+    }
+
+    private func publishError(_ key: LocalizedKey) {
+        guard !retired else { return }
+        actionErrorContent = .keys([key])
+        announcer.announce(L10n.text(key))
+    }
+
+    private func publishWarning(_ warning: LocalizedContent?) {
+        guard !retired else { return }
         guard let warning else { return }
-        publishError(warning)
+        actionErrorContent = warning
+        announcer.announce(warning.text)
     }
 }
 
 struct PairingView: View {
+    @EnvironmentObject private var localization: LocalizationController
     @ObservedObject var model: PairingSurfaceModel
     let service: any PairingSurfaceServicing
     let onDismiss: () -> Void
@@ -178,13 +261,13 @@ struct PairingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Label("配对设备", systemImage: "link.badge.plus")
+                Label(L10n.text(.pairingTitle), systemImage: "link.badge.plus")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                Button("关闭", systemImage: "xmark", action: dismiss)
+                Button(L10n.text(.commonClose), systemImage: "xmark", action: dismiss)
                     .labelStyle(.iconOnly)
                     .frame(minWidth: 40, minHeight: 40)
-                    .accessibilityLabel("关闭配对")
+                    .accessibilityLabel(L10n.text(.pairingClose))
                     .keyboardShortcut(.cancelAction)
             }
 
@@ -211,11 +294,24 @@ struct PairingView: View {
     private var content: some View {
         if !service.isAvailable {
             ContentUnavailableView(
-                "配对服务尚未配置",
+                L10n.text(.pairingUnavailable),
                 systemImage: "link.badge.plus",
-                description: Text("请先完成安全身份与配对传输服务配置。当前不会执行空操作。")
+                description: Text(L10n.text(.pairingUnavailableHelp))
             )
             .frame(minHeight: 180)
+        } else if case .saving = model.durableState {
+            ProgressView(L10n.text(.pairingSaving))
+                .frame(maxWidth: .infinity, minHeight: 80)
+        } else if case .saveFailed = model.durableState {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(L10n.text(.pairingSaveRecoveryHelp))
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(L10n.text(.pairingRetrySaving)) {
+                    Task { await model.retrySaving(using: service) }
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(minHeight: 40)
+            }
         } else {
             switch model.state {
             case .idle:
@@ -223,25 +319,25 @@ struct PairingView: View {
             case .displayingCode:
                 hostedCodeContent
             case .joining:
-                Label("正在验证配对码…", systemImage: "arrow.triangle.2.circlepath")
+                Label(L10n.text(.pairingVerifying), systemImage: "arrow.triangle.2.circlepath")
                     .frame(maxWidth: .infinity, minHeight: 80)
-                    .accessibilityLabel("正在验证配对码")
+                    .accessibilityLabel(L10n.text(.pairingVerifyingAccessibility))
             case let .approvalRequested(device):
                 approvalContent(device)
             case let .awaitingHostApproval(device):
-                Label("等待 \(device.displayName) 允许…", systemImage: "hourglass")
+                Label(L10n.text(.pairingWaitingApproval, String(device.displayName)), systemImage: "hourglass")
                     .frame(maxWidth: .infinity, minHeight: 80)
             case let .committing(device):
-                Label("正在安全连接 \(device.displayName)…", systemImage: "lock.shield")
+                Label(L10n.text(.pairingConnecting, String(device.displayName)), systemImage: "lock.shield")
                     .frame(maxWidth: .infinity, minHeight: 80)
             case .awaitingFingerprint:
-                Label("正在更新旧配对会话…", systemImage: "arrow.triangle.2.circlepath")
+                Label(L10n.text(.pairingRefreshing), systemImage: "arrow.triangle.2.circlepath")
                     .frame(maxWidth: .infinity, minHeight: 80)
             case let .confirmed(device):
                 VStack(spacing: 8) {
-                    Label("本机已信任 \(device.displayName)", systemImage: "checkmark.shield.fill")
+                    Label(L10n.text(.pairingTrusted, String(device.displayName)), systemImage: "checkmark.shield.fill")
                         .foregroundStyle(.green)
-                    Text("请确认另一台 Mac 也显示配对成功。")
+                    Text(L10n.text(.pairingConfirmOtherMac))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -254,26 +350,37 @@ struct PairingView: View {
 
     private var idleContent: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("在另一台 Mac 上显示配对码，然后在这里输入。旧 Mac 允许一次即可。")
+            Text(L10n.text(.pairingEnterInstructions))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            TextField("六位配对码", text: codeBinding)
-                .font(.system(size: 26, weight: .semibold, design: .monospaced))
+            TextField(L10n.text(.pairingSixDigitCode), text: codeBinding)
+                .font(model.entryCode.isEmpty ? .body : .system(size: 26, weight: .semibold, design: .monospaced))
                 .multilineTextAlignment(.center)
-                .textFieldStyle(.roundedBorder)
-                .frame(minHeight: 40)
+                // A native rounded bezel constrains the text cell to 22pt.
+                // A plain field lets AppKit fit the full 30pt digit line.
+                .textFieldStyle(.plain)
+                .frame(minHeight: 32)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(codeFieldFocused ? Color.accentColor : Color.secondary.opacity(0.4),
+                                      lineWidth: codeFieldFocused ? 2 : 1)
+                        .allowsHitTesting(false)
+                }
                 .focused($codeFieldFocused)
                 .onSubmit(join)
-                .accessibilityLabel("六位配对码")
+                .accessibilityLabel(L10n.text(.pairingSixDigitCode))
                 .accessibilityValue(PairingCodeInput.spaced(model.entryCode))
 
             HStack(spacing: 10) {
-                Button("输入配对码", systemImage: "arrow.right.circle", action: join)
+                Button(L10n.text(.pairingEnterCode), systemImage: "arrow.right.circle", action: join)
                     .buttonStyle(.borderedProminent)
                     .disabled(!PairingCodeInput.isComplete(model.entryCode))
                     .frame(minHeight: 40)
-                Button("在本机生成配对码", systemImage: "number") {
+                Button(L10n.text(.pairingGenerateCode), systemImage: "number") {
                     Task { await model.createCode(using: service) }
                 }
                 .frame(minHeight: 40)
@@ -283,14 +390,14 @@ struct PairingView: View {
 
     private var hostedCodeContent: some View {
         VStack(spacing: 12) {
-            Text("在另一台 Mac 上输入")
+            Text(L10n.text(.pairingEnterOnOtherMac))
                 .foregroundStyle(.secondary)
             Text(PairingCodeInput.spaced(model.hostedCode ?? ""))
                 .font(.system(size: 32, weight: .bold, design: .monospaced))
                 .textSelection(.enabled)
-                .accessibilityLabel("本机配对码")
+                .accessibilityLabel(L10n.text(.pairingLocalCode))
                 .accessibilityValue(PairingCodeInput.spaced(model.hostedCode ?? ""))
-            Label("配对码将在\(model.hostedCodeLifetimeMinutes)分钟内过期，且只能使用一次", systemImage: "clock")
+            Label(L10n.text(.pairingExpires, Int64(model.hostedCodeLifetimeMinutes)), systemImage: "clock")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -299,18 +406,18 @@ struct PairingView: View {
 
     private func approvalContent(_ peer: DeviceSummary) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("\(peer.displayName) 想要加入", systemImage: "desktopcomputer.and.arrow.down")
+            Label(L10n.text(.pairingJoinRequest, String(peer.displayName)), systemImage: "desktopcomputer.and.arrow.down")
                 .font(.headline)
-            Text("只在你正在另一台 Mac 上配对时允许。允许后，这几台 Mac 就能互相发送文件。")
+            Text(L10n.text(.pairingApprovalInstructions))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("拒绝", role: .destructive) {
+                Button(L10n.text(.commonReject), role: .destructive) {
                     Task { await model.reject(using: service) }
                 }
                 .frame(minHeight: 40)
                 Spacer()
-                Button("允许", systemImage: "checkmark.shield") {
+                Button(L10n.text(.commonAllow), systemImage: "checkmark.shield") {
                     Task { await model.approve(using: service) }
                 }
                 .buttonStyle(.borderedProminent)
@@ -324,7 +431,7 @@ struct PairingView: View {
         VStack(alignment: .leading, spacing: 12) {
             Label(pairingErrorText(error), systemImage: "exclamationmark.triangle")
                 .foregroundStyle(.red)
-            Button("返回", systemImage: "chevron.backward") {
+            Button(L10n.text(.commonBack), systemImage: "chevron.backward") {
                 model.state = .idle
                 codeFieldFocused = true
             }
@@ -357,14 +464,14 @@ struct PairingView: View {
 
     private func pairingErrorText(_ error: MacChannelError) -> String {
         switch error {
-        case .pairingInvalidCode: "配对码无效"
-        case .pairingCodeExpired: "配对码已过期"
-        case .pairingCodeAlreadyUsed: "配对码已使用"
-        case .pairingRateLimited: "尝试次数过多，请稍后再试"
-        case .pairingRejected: "另一台 Mac 拒绝了配对"
-        case .pairingFingerprintMismatch: "旧设备验证信息不一致"
-        case .pairingSessionExpired: "配对会话已过期"
-        default: "无法完成配对"
+        case .pairingInvalidCode: L10n.text(.pairingInvalidCode)
+        case .pairingCodeExpired: L10n.text(.pairingExpiredCode)
+        case .pairingCodeAlreadyUsed: L10n.text(.pairingUsedCode)
+        case .pairingRateLimited: L10n.text(.pairingRateLimited)
+        case .pairingRejected: L10n.text(.pairingRejected)
+        case .pairingFingerprintMismatch: L10n.text(.pairingFingerprintMismatch)
+        case .pairingSessionExpired: L10n.text(.pairingSessionExpired)
+        default: L10n.text(.pairingFailed)
         }
     }
 }

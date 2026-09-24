@@ -6,7 +6,7 @@ extension DeviceSummary {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             let suffix = id.rawValue.uuidString.prefix(4).uppercased()
-            return "已配对 Mac \(suffix)"
+            return L10n.text(.devicePairedWithSuffix, String(suffix))
         }
         return trimmed
     }

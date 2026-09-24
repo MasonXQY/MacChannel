@@ -12,6 +12,7 @@ notary_profile="${MACCHANNEL_NOTARY_PROFILE:-}"
 release_notes="${MACCHANNEL_RELEASE_NOTES:-}"
 signing_home="${HOME:?}"
 signing_tmp="${TMPDIR:-/tmp}"
+developer_dir="${DEVELOPER_DIR:-}"
 volume_name="DropMesh"
 source "$repo_root/Scripts/update-test-paths.sh"
 [[ "$signing_home" == /* && -d "$signing_home" && ! -L "$signing_home" ]] || exit 2
@@ -207,6 +208,7 @@ inject_failure() {
 }
 
 env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
+    DEVELOPER_DIR="$developer_dir" \
     MACCHANNEL_UPDATE_TESTING=0 \
     MACCHANNEL_BUILD_CONFIGURATION=release \
     MACCHANNEL_CODESIGN_IDENTITY="$identity" \
@@ -377,6 +379,7 @@ if [[ -n "$release_notes" && "$release_state" == notarized ]]; then
     MACCHANNEL_VERSION="$version" \
     MACCHANNEL_BUILD_NUMBER="$build_number" \
     MACCHANNEL_RELEASE_NOTES="$release_notes" \
+    MACCHANNEL_SPARKLE_GENERATE_APPCAST="${MACCHANNEL_SPARKLE_GENERATE_APPCAST:-}" \
         bash Scripts/build-update-feed.sh
 fi
 published=1

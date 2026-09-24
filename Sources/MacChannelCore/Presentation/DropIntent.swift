@@ -1,4 +1,6 @@
+#if canImport(AppKit)
 import AppKit
+#endif
 import Foundation
 
 public enum DropItem: Equatable, Sendable {
@@ -35,6 +37,7 @@ public struct DropIntent: Equatable, Sendable {
         return host.caseInsensitiveCompare("localhost") == .orderedSame
     }
 
+    #if canImport(AppKit)
     @MainActor
     public init(pasteboard: NSPasteboard) throws {
         let options: [NSPasteboard.ReadingOptionKey: Any] = [
@@ -46,6 +49,7 @@ public struct DropIntent: Equatable, Sendable {
         ) as? [NSURL] ?? []
         try self.init(items: values.map { .fileURL($0 as URL) })
     }
+    #endif
 }
 
 public enum StatusItemPhase: Equatable, Sendable {

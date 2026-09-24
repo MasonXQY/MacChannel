@@ -1,0 +1,146 @@
+[0/1] Planning build
+Building for debugging...
+[0/10] Write sources
+[2/10] Write swift-version-239F2A40393FBBF.txt
+[4/12] Compiling MacChannelCore AccountSessionController.swift
+[5/12] Emitting module MacChannelCore
+[5/13] Write Objects.LinkFileList
+[7/20] Linking MacChannelApp
+[7/20] Linking DropMeshAppStore
+[9/20] Applying MacChannelApp
+[9/20] Applying DropMeshAppStore
+error: emit-module command failed with exit code 1 (use -v to see invocation)
+[12/20] Compiling MacChannelCoreTests AccountSessionGroupTests.swift
+[13/20] Compiling MacChannelCoreTests AccountSessionControllerTests.swift
+[14/20] Compiling MacChannelCoreTests GoGroupEnrollmentInteropTests.swift
+[15/20] Compiling MacChannelCoreTests GoAccountInteropTests.swift
+[16/20] Compiling MacChannelCoreTests AccountFirstDeviceEnrollmentTests.swift
+[17/20] Emitting module MacChannelCoreTests
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:13:29: error: cannot find 'AccountGroupApprovalDraft' in scope
+11 |                 previous: Data(repeating: 42, count: 32), raw65: raw65)
+12 |             let partial = try replacingSignatures(full, subject: Data())
+13 |             let draft = try AccountGroupApprovalDraft(event: partial)
+   |                             `- error: cannot find 'AccountGroupApprovalDraft' in scope
+14 |             XCTAssertThrowsError(try draft.event.validate())
+15 |             let wire = try draft.wireDraft()
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:16:31: error: cannot find 'AccountGroupApprovalDraft' in scope
+14 |             XCTAssertThrowsError(try draft.event.validate())
+15 |             let wire = try draft.wireDraft()
+16 |             let decoded = try AccountGroupApprovalDraft(wire: wire)
+   |                               `- error: cannot find 'AccountGroupApprovalDraft' in scope
+17 |             let final = try decoded.finalize(subjectSignature: full.subjectSignature)
+18 |             XCTAssertEqual(final, full)
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:23:32: error: cannot find 'AccountGroupWireApprovalDraft' in scope
+21 |             XCTAssertEqual(final.actorPublicKey.count, raw65 ? 65 : 64)
+22 |             XCTAssertEqual(final.subjectPublicKey.count, raw65 ? 65 : 64)
+23 |             XCTAssertEqual(try AccountGroupWireApprovalDraft.decodeJSON(JSONEncoder().encode(wire)), wire)
+   |                                `- error: cannot find 'AccountGroupWireApprovalDraft' in scope
+24 |             for signature in [Data(), Data([1]), full.signature] {
+25 |                 XCTAssertThrowsError(try draft.finalize(subjectSignature: signature))
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:27:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+25 |                 XCTAssertThrowsError(try draft.finalize(subjectSignature: signature))
+26 |             }
+27 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: full))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+28 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data())))
+29 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data([1]))))
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:28:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+26 |             }
+27 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: full))
+28 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data())))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+29 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data([1]))))
+30 |             let bootstrap = try groupEvent(actor: a, subject: a)
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:29:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+27 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: full))
+28 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data())))
+29 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data([1]))))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+30 |             let bootstrap = try groupEvent(actor: a, subject: a)
+31 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: bootstrap))
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:31:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+29 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data([1]))))
+30 |             let bootstrap = try groupEvent(actor: a, subject: a)
+31 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: bootstrap))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+32 |             let remove = try groupEvent(actor: a, subject: b, action: "remove", sequence: 2, previous: Data(repeating: 42, count: 32))
+33 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: remove))
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:33:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+31 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: bootstrap))
+32 |             let remove = try groupEvent(actor: a, subject: b, action: "remove", sequence: 2, previous: Data(repeating: 42, count: 32))
+33 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: remove))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+34 |         }
+35 |     }
+[18/20] Compiling MacChannelCoreTests AccountGroupApprovalDraftTests.swift
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:13:29: error: cannot find 'AccountGroupApprovalDraft' in scope
+11 |                 previous: Data(repeating: 42, count: 32), raw65: raw65)
+12 |             let partial = try replacingSignatures(full, subject: Data())
+13 |             let draft = try AccountGroupApprovalDraft(event: partial)
+   |                             `- error: cannot find 'AccountGroupApprovalDraft' in scope
+14 |             XCTAssertThrowsError(try draft.event.validate())
+15 |             let wire = try draft.wireDraft()
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:16:31: error: cannot find 'AccountGroupApprovalDraft' in scope
+14 |             XCTAssertThrowsError(try draft.event.validate())
+15 |             let wire = try draft.wireDraft()
+16 |             let decoded = try AccountGroupApprovalDraft(wire: wire)
+   |                               `- error: cannot find 'AccountGroupApprovalDraft' in scope
+17 |             let final = try decoded.finalize(subjectSignature: full.subjectSignature)
+18 |             XCTAssertEqual(final, full)
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:23:32: error: cannot find 'AccountGroupWireApprovalDraft' in scope
+21 |             XCTAssertEqual(final.actorPublicKey.count, raw65 ? 65 : 64)
+22 |             XCTAssertEqual(final.subjectPublicKey.count, raw65 ? 65 : 64)
+23 |             XCTAssertEqual(try AccountGroupWireApprovalDraft.decodeJSON(JSONEncoder().encode(wire)), wire)
+   |                                `- error: cannot find 'AccountGroupWireApprovalDraft' in scope
+24 |             for signature in [Data(), Data([1]), full.signature] {
+25 |                 XCTAssertThrowsError(try draft.finalize(subjectSignature: signature))
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:27:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+25 |                 XCTAssertThrowsError(try draft.finalize(subjectSignature: signature))
+26 |             }
+27 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: full))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+28 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data())))
+29 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data([1]))))
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:28:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+26 |             }
+27 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: full))
+28 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data())))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+29 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data([1]))))
+30 |             let bootstrap = try groupEvent(actor: a, subject: a)
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:29:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+27 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: full))
+28 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data())))
+29 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data([1]))))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+30 |             let bootstrap = try groupEvent(actor: a, subject: a)
+31 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: bootstrap))
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:31:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+29 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: replacingSignatures(partial, actor: Data([1]))))
+30 |             let bootstrap = try groupEvent(actor: a, subject: a)
+31 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: bootstrap))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+32 |             let remove = try groupEvent(actor: a, subject: b, action: "remove", sequence: 2, previous: Data(repeating: 42, count: 32))
+33 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: remove))
+
+/Users/mason/Documents/ChatGPT/Deepseek/MacChannel/.worktrees/dropmesh-iphone/Tests/MacChannelCoreTests/AccountGroupApprovalDraftTests.swift:33:38: error: cannot find 'AccountGroupApprovalDraft' in scope
+31 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: bootstrap))
+32 |             let remove = try groupEvent(actor: a, subject: b, action: "remove", sequence: 2, previous: Data(repeating: 42, count: 32))
+33 |             XCTAssertThrowsError(try AccountGroupApprovalDraft(event: remove))
+   |                                      `- error: cannot find 'AccountGroupApprovalDraft' in scope
+34 |         }
+35 |     }
+error: fatalError

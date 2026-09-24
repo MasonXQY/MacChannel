@@ -10,6 +10,18 @@ public protocol IssuerSequenceReserving: Sendable {
     func reserveIssuerSequence(after floor: UInt64) throws -> UInt64
 }
 
+/// Eligible proofs and a bounded indication that current proofs still await a
+/// successful local checkpoint. This is publication state, not routing rights.
+public struct TrustPublicationSnapshot: Sendable {
+    public let records: [SignedTrustRecord]
+    public let pendingPersistence: Bool
+
+    public init(records: [SignedTrustRecord], pendingPersistence: Bool = false) {
+        self.records = records
+        self.pendingPersistence = pendingPersistence
+    }
+}
+
 /// Shared, actor-isolated trust state. Every mutation also advances and signs
 /// the durable snapshot, so issuer sequences and trusted peers cannot be lost
 /// when a coordinator is replaced.
@@ -22,6 +34,7 @@ public actor TrustRepository {
     public nonisolated let ownerID: DeviceID
 
     private let ownerIdentity: DeviceIdentity
+    private let authorizationSource: PeerSourceAttachment?
     private let issuerSequenceReserver: (any IssuerSequenceReserving)?
     private var store: TrustStore
     private var latestSnapshot: TrustStoreSnapshot?
@@ -33,7 +46,8 @@ public actor TrustRepository {
         trustStore: TrustStore,
         persistedGeneration: UInt64,
         authenticationRecords: [SignedTrustRecord] = [],
-        issuerSequenceReserver: (any IssuerSequenceReserving)? = nil
+        issuerSequenceReserver: (any IssuerSequenceReserving)? = nil,
+        authorizationOwner: PeerAuthorizationOwner? = nil
     ) throws {
         guard trustStore.isOwned(by: ownerIdentity) else {
             throw TrustRepositoryError.invalidOwner
@@ -42,6 +56,7 @@ public actor TrustRepository {
             throw TrustRepositoryError.generationMismatch
         }
         self.ownerID = ownerIdentity.id
+        self.authorizationSource = try authorizationOwner?.attachManual(identity: ownerIdentity, store: trustStore)
         self.ownerIdentity = ownerIdentity
         self.issuerSequenceReserver = issuerSequenceReserver
         self.store = trustStore
@@ -51,7 +66,7 @@ public actor TrustRepository {
             // be safely discarded when an older app persisted them out of sync.
             guard (try? record.validated()) != nil else { continue }
             guard
-                Self.isAuthenticationRecord(
+                Self.isRetainedRecord(
                     record,
                     consistentWith: trustStore,
                     ownerIdentity: ownerIdentity
@@ -85,12 +100,42 @@ public actor TrustRepository {
     }
 
     public func authenticationRecords() -> [SignedTrustRecord] {
-        authenticationRecordsByPair.values.sorted {
+        // The server accepts a revocation only from its issuer. Received peer
+        // withdrawals remain durable evidence, but are not presenter proofs.
+        retainedRecords().filter { $0.action != .revoke || $0.issuer == ownerID }
+    }
+
+    private func retainedRecords() -> [SignedTrustRecord] {
+        // Persist only owner-related proofs, including received withdrawals.
+        // Graph catch-up edges stay in memory for ingestion idempotence. Apply
+        // the same signed-store consistency rule used when restoring proofs.
+        authenticationRecordsByPair.values.filter {
+            Self.isRetainedRecord($0, consistentWith: store, ownerIdentity: ownerIdentity)
+        }.sorted {
             if $0.issuerSequence != $1.issuerSequence {
                 return $0.issuerSequence < $1.issuerSequence
             }
             return $0.issuer.rawValue.uuidString < $1.issuer.rawValue.uuidString
         }
+    }
+
+    /// Intersect one acknowledged checkpoint with current eligible records in
+    /// this actor turn. A stale receipt can never resurrect removed trust; a
+    /// newer mutation need not withhold unrelated, already saved proofs.
+    public func publicationSnapshot(persisted receipt: AuthenticatedTrustState?) -> TrustPublicationSnapshot {
+        let current = authenticationRecords()
+        let retained = retainedRecords()
+        guard let receipt,
+              receipt.snapshot.owner == ownerID,
+              receipt.snapshot.ownerPublicKey == ownerIdentity.publicKey.rawRepresentation,
+              receipt.snapshot.generation <= store.persistedGeneration
+        else {
+            return TrustPublicationSnapshot(records: [], pendingPersistence: !retained.isEmpty)
+        }
+        let saved = Set(receipt.authenticationRecords)
+        let eligible = current.filter { saved.contains($0) }
+        return TrustPublicationSnapshot(records: eligible,
+            pendingPersistence: retained.contains { !saved.contains($0) })
     }
 
     /// Verified state changes only. Consumers receive the current store first,
@@ -125,6 +170,7 @@ public actor TrustRepository {
         )
         try candidate.authorize(authorization)
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(authorization)
@@ -203,6 +249,7 @@ public actor TrustRepository {
         try candidate.bootstrapFromConfirmedPairing(peerAuthorization, localIdentity: ownerIdentity)
         try candidate.authorize(localAuthorization)
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(localAuthorization)
@@ -214,6 +261,7 @@ public actor TrustRepository {
         var candidate = store
         try candidate.bootstrapFromConfirmedPairing(record, localIdentity: ownerIdentity)
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(record)
@@ -234,6 +282,7 @@ public actor TrustRepository {
             timestamp: timestamp
         )
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(record)
@@ -253,23 +302,28 @@ public actor TrustRepository {
     @discardableResult
     public func ingestIfNew(_ record: SignedTrustRecord) throws -> Bool {
         let key = RecordKey(issuer: record.issuer, subject: record.subject)
-        if authenticationRecordsByPair[key]?.signature == record.signature {
+        if authenticationRecordsByPair[key] == record {
             return false
         }
         var candidate = store
         do {
-            try candidate.ingest(record)
+            if record.action == .revoke, record.subject == ownerID, record.issuer != ownerID {
+                try candidate.ingestPeerWithdrawal(record, localIdentity: ownerIdentity)
+            } else {
+                try candidate.ingest(record)
+            }
         } catch TrustStoreError.nonIncreasingSequence(let issuer)
             where issuer == record.issuer
         {
-            // `TrustStore.apply` reaches this error only after validating the
-            // signature, issuer trust and pinned key. A graph catch-up may
+            // Both store paths reach this error only after validating the
+            // signature and locally known, identity-bound issuer. A graph catch-up may
             // legitimately resend a third-party edge whose effect is already
             // covered by the persisted issuer high-water, even though that
             // auxiliary proof was intentionally not retained after restart.
             return false
         }
         let snapshot = try candidate.snapshot(signedBy: ownerIdentity)
+        try authorizationSource?.replaceManual(candidate)
         store = candidate
         latestSnapshot = snapshot
         recordAuthenticationProof(record)
@@ -278,6 +332,12 @@ public actor TrustRepository {
     }
 
     private func recordAuthenticationProof(_ record: SignedTrustRecord) {
+        if record.action == .revoke, record.subject == ownerID, record.issuer != ownerID {
+            // The former positive half must not reappear after a durable reload
+            // or make an old bilateral confirmation look already committed.
+            authenticationRecordsByPair.removeValue(forKey:
+                RecordKey(issuer: ownerID, subject: record.issuer))
+        }
         if record.action == .revoke, record.issuer == ownerID {
             authenticationRecordsByPair = authenticationRecordsByPair.filter { key, _ in
                 key.issuer != record.subject && key.subject != record.subject
@@ -294,7 +354,7 @@ public actor TrustRepository {
         ] = record
     }
 
-    private static func isAuthenticationRecord(
+    private static func isRetainedRecord(
         _ record: SignedTrustRecord,
         consistentWith store: TrustStore,
         ownerIdentity: DeviceIdentity
@@ -310,9 +370,14 @@ public actor TrustRepository {
                 return !store.isTrusted(record.subject)
             }
         }
-        if record.subject == owner, record.issuer != owner, record.action == .authorize {
-            return record.subjectPublicKey == ownerKey
-                && store.trustedPublicKey(for: record.issuer) == record.issuerPublicKey
+        if record.subject == owner, record.issuer != owner {
+            guard record.subjectPublicKey == ownerKey else { return false }
+            switch record.action {
+            case .authorize:
+                return store.trustedPublicKey(for: record.issuer) == record.issuerPublicKey
+            case .revoke:
+                return store.containsPeerWithdrawal(record)
+            }
         }
         return false
     }
@@ -331,7 +396,7 @@ public actor TrustRepository {
         guard let latestSnapshot else {
             throw TrustRepositoryError.noPersistedSnapshot
         }
-        return (latestSnapshot, authenticationRecords())
+        return (latestSnapshot, retainedRecords())
     }
 
     private func removeUpdateSubscriber(_ id: UUID) {

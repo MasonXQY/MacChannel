@@ -512,6 +512,23 @@ public actor TransferDatabase {
         try history(limit: limit)
     }
 
+    /// Unbounded administrative enumeration. Presentation callers should keep
+    /// using persistedHistory(limit:); mobile history deletion needs every row.
+    public func persistedAllHistory() throws -> [TransferHistoryRecord] {
+        let query = try statement(
+            """
+            SELECT id, peer_id, display_filename, aggregate_size, completed_bytes,
+                   created_at, updated_at, route, phase, direction
+            FROM transfers ORDER BY updated_at DESC
+            """)
+        defer { sqlite3_finalize(query) }
+        var records: [TransferHistoryRecord] = []
+        var result = sqlite3_step(query)
+        while result == SQLITE_ROW { records.append(try transferHistoryRecord(from: query)); result = sqlite3_step(query) }
+        guard result == SQLITE_DONE else { throw ReceiveStoreError.databaseFailure }
+        return records
+    }
+
     public func persistedTransfer(id: TransferID) throws -> TransferHistoryRecord? {
         let query = try statement(
             """

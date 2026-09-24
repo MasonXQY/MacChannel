@@ -449,11 +449,11 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         }
 
         if let imageData = pngDataFromPasteboard() {
-            return try materialize(imageData, kind: "图片", fileExtension: "png")
+            return try materialize(imageData, kind: L10n.text(.clipboardImage), fileExtension: "png")
         }
 
         if let text = pasteboard.string(forType: .string), !text.isEmpty {
-            return try materialize(Data(text.utf8), kind: "文字", fileExtension: "txt")
+            return try materialize(Data(text.utf8), kind: L10n.text(.clipboardText), fileExtension: "txt")
         }
 
         throw ClipboardTransferPreparationError.noSupportedContent
@@ -737,7 +737,7 @@ final class NativeClipboardTransferPreparer: ClipboardTransferPreparing {
         rootDescriptor: Int32
     ) throws -> FileReservation {
         let timestamp = Self.filenameDateFormatter.string(from: now())
-        let baseName = "剪贴板\(kind) \(timestamp)"
+        let baseName = L10n.text(.clipboardFileName, String(kind), String(timestamp))
         var ordinal = 1
         while true {
             let name = candidateName(

@@ -1,8 +1,32 @@
 import AppKit
 import MacChannelCore
 
+enum StatusItemBaseIconStyle: Equatable, Sendable {
+    case direct
+    case appStore
+
+    init(distributionChannel: DistributionChannel) {
+        self = distributionChannel == .appStore ? .appStore : .direct
+    }
+}
+
 @MainActor
 final class StatusItemButton: NSStatusBarButton {
+    static let appStoreOutlineSVGPoints: [NSPoint] = [
+        NSPoint(x: 20, y: 4),
+        NSPoint(x: 4, y: 10.5),
+        NSPoint(x: 10.5, y: 13.5),
+        NSPoint(x: 13.5, y: 20),
+    ]
+    static let appStoreFoldSVGPoints: [NSPoint] = [
+        NSPoint(x: 20, y: 4),
+        NSPoint(x: 10.5, y: 13.5),
+    ]
+
+    var baseIconStyle: StatusItemBaseIconStyle = .direct {
+        didSet { render() }
+    }
+
     var phase: StatusItemPhase = .idle {
         didSet { render() }
     }
@@ -84,10 +108,16 @@ final class StatusItemButton: NSStatusBarButton {
 
     override var acceptsFirstResponder: Bool { true }
 
+    func refreshLocalization() {
+        setAccessibilityLabel(L10n.text(.appAccessibilityLabel))
+        setAccessibilityHelp(L10n.text(.appAccessibilityHelp))
+        render()
+    }
+
     var preferredWidth: CGFloat {
         switch phase {
         case .idle: 30
-        case .ready: 72
+        case .ready: max(72, ceil((L10n.text(.sendReady) as NSString).size(withAttributes: [.font: NSFont.menuBarFont(ofSize: 0)]).width) + 24)
         case .transferring: 30
         }
     }
@@ -178,21 +208,23 @@ final class StatusItemButton: NSStatusBarButton {
         registerForDraggedTypes([.fileURL])
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel("DropMesh 文件传输")
-        setAccessibilityHelp("打开状态菜单，或将本地文件拖到这里选择接收设备。")
+        setAccessibilityLabel(L10n.text(.appAccessibilityLabel))
+        setAccessibilityHelp(L10n.text(.appAccessibilityHelp))
         render()
     }
 
     private func render() {
         let presentation = phase.presentation
-        title = presentation.progress == nil ? presentation.title : ""
+        title = phase == .ready ? L10n.text(.sendReady) : ""
         alignment = .center
         let symbolName = presentation.symbolName ?? "paperplane"
-        image = {
+        if phase == .idle, baseIconStyle == .appStore {
+            image = Self.appStoreBaseImage
+        } else {
             let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
             symbol?.isTemplate = true
-            return symbol
-        }()
+            image = symbol
+        }
         // Keep status-bar symbols as untinted templates so AppKit can choose
         // the correct contrasting color for the current menu-bar material and
         // highlighted state. Semantic label colors can resolve to black even
@@ -201,16 +233,42 @@ final class StatusItemButton: NSStatusBarButton {
         var accessibilityParts = [phase.localizedAccessibilityValue]
         if updateAvailable {
             let updateValue = updateActionEnabled
-                ? "有新版本可用"
-                : "有新版本可用，暂时无法查看"
+                ? L10n.text(.updateAvailable)
+                : L10n.text(.updateAvailableUnavailable)
             accessibilityParts.append(updateValue)
         }
-        if hasUnreadReceive { accessibilityParts.append("有新接收文件") }
-        let accessibilityValue = accessibilityParts.joined(separator: "，")
+        if hasUnreadReceive { accessibilityParts.append(L10n.text(.receiveUnread)) }
+        let accessibilityValue = accessibilityParts.joined(separator: L10n.text(.presentationListSeparator))
         setAccessibilityValue(accessibilityValue)
         toolTip = accessibilityValue
         needsDisplay = true
     }
+
+    private static let appStoreBaseImage: NSImage = {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            // NSImage's drawing handler presents the SVG-compatible flipped canvas
+            // used here, so the approved 24-point coordinates map without a y flip.
+            func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+                NSPoint(x: x * 0.75, y: y * 0.75)
+            }
+            let outline = NSBezierPath()
+            outline.move(to: point(appStoreOutlineSVGPoints[0].x, appStoreOutlineSVGPoints[0].y))
+            for sourcePoint in appStoreOutlineSVGPoints.dropFirst() {
+                outline.line(to: point(sourcePoint.x, sourcePoint.y))
+            }
+            outline.close()
+            outline.move(to: point(appStoreFoldSVGPoints[0].x, appStoreFoldSVGPoints[0].y))
+            outline.line(to: point(appStoreFoldSVGPoints[1].x, appStoreFoldSVGPoints[1].y))
+            outline.lineWidth = 1.125
+            outline.lineJoinStyle = .round
+            outline.lineCapStyle = .round
+            NSColor.black.setStroke()
+            outline.stroke()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 
     private func indicatorRect(
         diameter: CGFloat,
@@ -237,11 +295,11 @@ extension StatusItemPhase {
     var localizedAccessibilityValue: String {
         switch self {
         case .idle:
-            "空闲"
+            L10n.text(.statusIdle)
         case .ready:
-            presentation.accessibilityValue
+            L10n.text(.sendReadyAccessibility)
         case .transferring:
-            "正在传输，\(presentation.title)"
+            L10n.text(.statusTransferring, String(presentation.title))
         }
     }
 }

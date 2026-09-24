@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+macchannel_app_store_default_version=1.3.0
+macchannel_app_store_default_build_number=1
+macchannel_app_store_bundle_identifier=com.zensystech.dropmesh
+macchannel_app_store_executable=DropMeshAppStore
+macchannel_app_store_team_identifier=XKAZ67HN45
+macchannel_app_store_application_identifier=XKAZ67HN45.com.zensystech.dropmesh
+macchannel_app_store_keychain_group=XKAZ67HN45.com.zensystech.dropmesh
+macchannel_app_store_default_output=dist-app-store/DropMesh.app

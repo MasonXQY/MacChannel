@@ -1,0 +1,5 @@
+--- FAIL: TestApprovalDraftSyntheticCrossLanguageFixture (0.00s)
+    approval_draft_test.go:78: open ../../../../Fixtures/account-group-approval-v1.json: no such file or directory
+FAIL
+FAIL	macchannel/rendezvous/internal/accountgroup	1.209s
+FAIL

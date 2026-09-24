@@ -103,18 +103,51 @@ public protocol WebRTCChannelFactory: Sendable {
     ) async throws -> WebRTCSecureChannel
 }
 
-public final class WebRTCFactory: WebRTCChannelFactory, @unchecked Sendable {
+public protocol AuthorizedWebRTCChannelFactory: WebRTCChannelFactory {
+    func connect(
+        localIdentity: DeviceIdentity, remoteDevice: DeviceID, remotePublicKey: Data,
+        connectionID: UUID, role: WebRTCRole, route: ConnectionRoute,
+        ice: ICEConfiguration, signaling: any WebRTCSignalTransport,
+        authorizationProvider: any PeerAuthorizationProviding,
+        authorizationLease: PeerAuthorizationLease
+    ) async throws -> WebRTCSecureChannel
+}
+
+public final class WebRTCFactory: AuthorizedWebRTCChannelFactory, @unchecked Sendable {
+    public func connect(
+        localIdentity: DeviceIdentity, remoteDevice: DeviceID, remotePublicKey: Data,
+        connectionID: UUID, role: WebRTCRole, route: ConnectionRoute,
+        ice: ICEConfiguration, signaling: any WebRTCSignalTransport,
+        authorizationProvider: any PeerAuthorizationProviding,
+        authorizationLease: PeerAuthorizationLease
+    ) async throws -> WebRTCSecureChannel {
+        let gate = try WebRTCPeerAuthorizationGate(provider: authorizationProvider,
+            lease: authorizationLease, peer: remoteDevice, publicKey: remotePublicKey)
+        return try await connect(localIdentity: localIdentity, remoteDevice: remoteDevice,
+            remotePublicKey: remotePublicKey, connectionID: connectionID, role: role,
+            route: route, ice: ice, signaling: signaling, authorization: gate)
+    }
+
     private static let didInitializeSSL: Bool = {
         RTCInitializeSSL()
     }()
 
     private let factory: RTCPeerConnectionFactory
     private let connectionTimeout: Duration
+    private let beforeAuthorizedReturn: @Sendable () async -> Void
 
     public init(connectionTimeout: Duration = .seconds(12)) {
         _ = Self.didInitializeSSL
         factory = RTCPeerConnectionFactory()
         self.connectionTimeout = connectionTimeout
+        beforeAuthorizedReturn = {}
+    }
+
+    init(connectionTimeout: Duration, beforeAuthorizedReturn: @escaping @Sendable () async -> Void) {
+        _ = Self.didInitializeSSL
+        factory = RTCPeerConnectionFactory()
+        self.connectionTimeout = connectionTimeout
+        self.beforeAuthorizedReturn = beforeAuthorizedReturn
     }
 
     static func routePlan(for route: ConnectionRoute, ice: ICEConfiguration) -> WebRTCRoutePlan {
@@ -159,6 +192,17 @@ public final class WebRTCFactory: WebRTCChannelFactory, @unchecked Sendable {
         ice: ICEConfiguration,
         signaling: any WebRTCSignalTransport
     ) async throws -> WebRTCSecureChannel {
+        try await connect(localIdentity: localIdentity, remoteDevice: remoteDevice,
+            remotePublicKey: remotePublicKey, connectionID: connectionID, role: role,
+            route: route, ice: ice, signaling: signaling, authorization: nil)
+    }
+
+    private func connect(
+        localIdentity: DeviceIdentity, remoteDevice: DeviceID, remotePublicKey: Data,
+        connectionID: UUID, role: WebRTCRole, route: ConnectionRoute,
+        ice: ICEConfiguration, signaling: any WebRTCSignalTransport,
+        authorization: WebRTCPeerAuthorizationGate?
+    ) async throws -> WebRTCSecureChannel {
         let driver = try WebRTCPeerDriver(
             factory: factory,
             localIdentity: localIdentity,
@@ -168,11 +212,12 @@ public final class WebRTCFactory: WebRTCChannelFactory, @unchecked Sendable {
             role: role,
             route: route,
             ice: ice,
-            signaling: signaling
+            signaling: signaling,
+            authorization: authorization
         )
         await driver.retainForLifetime()
         do {
-            return try await withTaskCancellationHandler {
+            let channel = try await withTaskCancellationHandler {
                 try await withThrowingTaskGroup(of: WebRTCSecureChannel.self) { group in
                     group.addTask { try await driver.establish() }
                     group.addTask { [connectionTimeout] in
@@ -191,7 +236,18 @@ public final class WebRTCFactory: WebRTCChannelFactory, @unchecked Sendable {
             } onCancel: {
                 Task { await driver.abort() }
             }
+            if authorization != nil {
+                await beforeAuthorizedReturn()
+                try Task.checkCancellation()
+            }
+            do { try authorization?.requireCurrent() }
+            catch {
+                await channel.close()
+                throw WebRTCSecureChannelError.authenticationFailed
+            }
+            return channel
         } catch {
+            authorization?.terminate()
             await driver.abort()
             if Task.isCancelled { throw CancellationError() }
             throw error
@@ -227,7 +283,8 @@ private final class WebRTCPeerDriver: NSObject, RTCPeerConnectionDelegate, @unch
         role: WebRTCRole,
         route: ConnectionRoute,
         ice: ICEConfiguration,
-        signaling: any WebRTCSignalTransport
+        signaling: any WebRTCSignalTransport,
+        authorization: WebRTCPeerAuthorizationGate?
     ) throws {
         factoryOwner = factory
         let configuration = RTCConfiguration()
@@ -256,10 +313,19 @@ private final class WebRTCPeerDriver: NSObject, RTCPeerConnectionDelegate, @unch
             role: role,
             route: route,
             routePlan: routePlan,
-            signaling: signaling
+            signaling: signaling,
+            authorization: authorization
         )
         super.init()
+        do { try authorization?.requireCurrent() }
+        catch {
+            peer.close()
+            throw WebRTCSecureChannelError.authenticationFailed
+        }
         peer.delegate = self
+        authorization?.onInvalidation { [weak state] in
+            Task { await state?.authorizationInvalidated() }
+        }
     }
 
     func establish() async throws -> WebRTCSecureChannel { try await state.establish() }
@@ -314,6 +380,7 @@ private actor WebRTCPeerState {
     private let route: ConnectionRoute
     private let routePlan: WebRTCRoutePlan
     private let signaling: any WebRTCSignalTransport
+    private let authorization: WebRTCPeerAuthorizationGate?
     private var secureChannel: WebRTCSecureChannel?
     private var channelWaiters: [CheckedContinuation<WebRTCSecureChannel, Error>] = []
     private var pendingRemoteCandidates: [RTCIceCandidate] = []
@@ -335,7 +402,8 @@ private actor WebRTCPeerState {
         role: WebRTCRole,
         route: ConnectionRoute,
         routePlan: WebRTCRoutePlan,
-        signaling: any WebRTCSignalTransport
+        signaling: any WebRTCSignalTransport,
+        authorization: WebRTCPeerAuthorizationGate?
     ) {
         self.peer = peer
         self.localIdentity = localIdentity
@@ -346,10 +414,13 @@ private actor WebRTCPeerState {
         self.route = route
         self.routePlan = routePlan
         self.signaling = signaling
+        self.authorization = authorization
     }
 
     func establish() async throws -> WebRTCSecureChannel {
+        try requireAuthorization()
         let messages = await signaling.messages(from: remoteDevice, connectionID: connectionID)
+        try requireAuthorization()
         signalTask = Task { [weak self] in
             do {
                 for try await message in messages {
@@ -376,13 +447,16 @@ private actor WebRTCPeerState {
             }
             openedDataChannel(FactoryDataChannelBox(dataChannel))
             let offer = try await createOffer()
+            try requireAuthorization()
             try await setLocalDescription(offer)
+            try requireAuthorization()
             try await signaling.send(.offer(sdp: offer.sdp, route: route), to: remoteDevice, connectionID: connectionID)
         }
 
         let channel = try await waitForChannel()
         do {
             try await channel.authenticate()
+            try requireAuthorization()
             return channel
         } catch {
             await close()
@@ -392,6 +466,21 @@ private actor WebRTCPeerState {
 
     func retainDriver(_ driver: WebRTCPeerDriver) {
         driverOwner = driver
+    }
+
+    private func requireAuthorization() throws {
+        do { try authorization?.requireCurrent() }
+        catch { throw WebRTCSecureChannelError.authenticationFailed }
+    }
+
+    func authorizationInvalidated() async {
+        if let secureChannel { await secureChannel.authorizationInvalidated() }
+        else {
+            let waiters = channelWaiters
+            channelWaiters.removeAll()
+            waiters.forEach { $0.resume(throwing: WebRTCSecureChannelError.authenticationFailed) }
+            await close()
+        }
     }
 
     func generatedCandidate(sdp: String, lineIndex: Int32, mid: String?) {
@@ -445,6 +534,11 @@ private actor WebRTCPeerState {
             fail(.dataChannelCreationFailed)
             return
         }
+        guard (try? requireAuthorization()) != nil else {
+            dataChannel.value.close()
+            fail(.trustForbidden)
+            return
+        }
         let channel = WebRTCSecureChannel(
             connectionID: connectionID,
             role: role,
@@ -460,7 +554,8 @@ private actor WebRTCPeerState {
                     lineIndex: 0,
                     mid: "0"
                 )
-            }
+            },
+            authorization: authorization ?? WebRTCPeerAuthorizationGate()
         )
         secureChannel = channel
         let waiters = channelWaiters
@@ -608,6 +703,7 @@ private actor WebRTCPeerState {
 
     private func beginTeardown() -> Task<Void, Never> {
         if let teardownTask { return teardownTask }
+        authorization?.terminate()
         closed = true
         var tasks: [Task<Void, Never>] = []
         if let signalTask { tasks.append(signalTask) }

@@ -26,6 +26,7 @@ fi
 
 Scripts/check-sensitive-logging.sh >/dev/null
 Scripts/test-privacy-audit.sh >/dev/null
+Scripts/test-app-store-privacy-manifest.sh >/dev/null
 
 coturn_block="$({
   awk '/^  coturn:/{inside=1; next} inside && (/^  [[:alnum:]_-]+:/ || /^[^ ]/){exit} inside{print}' \
@@ -45,7 +46,7 @@ rg -q '^no-stdout-log$' Infrastructure/coturn/turnserver.conf
 printf '%s\n' "${coturn_block}" | rg -q '^    read_only: true$'
 printf '%s\n' "${coturn_block}" | rg -q '^    tmpfs:$'
 
-echo "privacy STATIC PASS: schema, sensitive-log mutants, and coturn persistence contract"
+echo "privacy STATIC PASS: schema, sensitive-log mutants, Store manifest draft, and coturn persistence contract"
 if [[ "${mode}" == static ]]; then exit 0; fi
 echo "privacy RUNTIME BLOCKED: trusted producer and verifier are NOT IMPLEMENTED; runtime evidence is not read" >&2
 exit 2

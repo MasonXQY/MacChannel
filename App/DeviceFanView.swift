@@ -62,7 +62,7 @@ enum DeviceFanTarget: Hashable {
     var title: String {
         switch self {
         case let .device(device): device.userFacingDisplayName
-        case .more: "更多"
+        case .more: L10n.text(.deviceMore)
         }
     }
 
@@ -70,12 +70,12 @@ enum DeviceFanTarget: Hashable {
         switch self {
         case let .device(device):
             switch device.availability {
-            case .lan: "局域网在线"
-            case .internet: "互联网在线"
-            case .offline: "离线"
+            case .lan: L10n.text(.deviceLan)
+            case .internet: L10n.text(.deviceInternet)
+            case .offline: L10n.text(.deviceOffline)
             }
         case let .more(hiddenCount):
-            "另外 \(hiddenCount) 台设备"
+            L10n.text(.deviceHiddenCount, Int64(hiddenCount))
         }
     }
 
@@ -88,15 +88,15 @@ enum DeviceFanTarget: Hashable {
 
     var accessibilityLabel: String {
         switch self {
-        case .device: "发送到\(title)，\(statusText)"
+        case .device: L10n.text(.deviceSendAccessibility, String(title), String(statusText))
         case .more: "\(title)，\(statusText)"
         }
     }
 
     var accessibilityHelp: String {
         switch self {
-        case .device: "松开发送"
-        case .more: "展开全部在线设备"
+        case .device: L10n.text(.sendRelease)
+        case .more: L10n.text(.deviceExpandAll)
         }
     }
 
@@ -256,6 +256,7 @@ final class DeviceFanViewModel: ObservableObject {
 }
 
 struct DeviceFanView: View {
+    @ObservedObject var localization = LocalizationController.shared
     @ObservedObject var model: DeviceFanViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -281,7 +282,7 @@ struct DeviceFanView: View {
         )
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("选择接收设备")
+        .accessibilityLabel(L10n.text(.sendChooseDevice))
     }
 }
 
@@ -304,7 +305,7 @@ private struct DeviceFanTargetView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Label(isHovered && target.deviceID != nil ? "松开发送" : target.statusText,
+                Label(isHovered && target.deviceID != nil ? L10n.text(.sendRelease) : target.statusText,
                       systemImage: statusSymbol)
                     .font(.caption2)
                     .foregroundStyle(isHovered ? Color.blue : .secondary)
@@ -332,7 +333,7 @@ private struct DeviceFanTargetView: View {
         .contentShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(target.accessibilityLabel)
-        .accessibilityValue(isHovered && target.deviceID != nil ? "松开发送" : target.statusText)
+        .accessibilityValue(isHovered && target.deviceID != nil ? L10n.text(.sendRelease) : target.statusText)
         .accessibilityHint(target.accessibilityHelp)
     }
 

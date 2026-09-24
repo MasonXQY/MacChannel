@@ -4,8 +4,44 @@ import XCTest
 
 @testable import MacChannelAppKit
 @testable import MacChannelCore
+@testable import DropMeshAppStoreDistribution
 
 final class AppRuntimeTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
+    @MainActor
+    func testDistributionNamespacesAreDisjoint() throws {
+        let direct = RuntimeNamespace.direct
+        let store = AppStoreDistribution(info: [:], openURL: { _ in true }).runtimeNamespace
+        XCTAssertEqual(direct.applicationSupportComponent, "MacChannel")
+        XCTAssertEqual(direct.identityPolicy.service, "com.mason.macchannel.identity")
+        XCTAssertNil(direct.identityPolicy.accessGroup)
+        XCTAssertEqual(direct.defaultReceiveFolderName, "Mac 通道")
+        XCTAssertNotEqual(direct, store)
+        XCTAssertEqual(store.identityPolicy.accessGroup, "XKAZ67HN45.com.zensystech.dropmesh")
+        XCTAssertEqual(KeychainStore(policy: store.identityPolicy).recordQuery(account: "identity")[kSecAttrAccessGroup] as? String,
+                       "XKAZ67HN45.com.zensystech.dropmesh")
+        let legacy = try ProductionRuntimeConfiguration.current(namespace: direct, environment: [:], arguments: [])
+        let sandbox = try ProductionRuntimeConfiguration.current(namespace: store, environment: [:], arguments: [])
+        XCTAssertEqual(legacy.dataDirectory.lastPathComponent, "MacChannel")
+        XCTAssertEqual(sandbox.dataDirectory.lastPathComponent, "DropMesh")
+        XCTAssertEqual(sandbox.identityPolicy, store.identityPolicy)
+        XCTAssertEqual(legacy.identityPolicy, KeychainStore.identityPolicy)
+        for configuration in [legacy, sandbox] {
+            XCTAssertEqual(configuration.incomingDirectory, configuration.dataDirectory.appendingPathComponent("Incoming", isDirectory: true))
+            XCTAssertEqual(configuration.outgoingDirectory, configuration.dataDirectory.appendingPathComponent("Outgoing", isDirectory: true))
+        }
+    }
+
     func testFailedInitialPublicConnectRetriesWithoutRebuildingLocalRuntime() async throws {
         let connector = SequencedPublicServiceConnector(connectResults: [false, true])
         let lifecycle = PublicServiceLifecycle(
@@ -78,6 +114,7 @@ final class AppRuntimeTests: XCTestCase {
 
     func testNormalLaunchUsesPackagedEndpointAndOnlyIsolatedLaunchCanOverrideIt() throws {
         let normal = try ProductionRuntimeConfiguration.current(
+            namespace: .direct,
             environment: [
                 "MACCHANNEL_RENDEZVOUS_URL": "wss://example.test/v1/ws",
             ],
@@ -94,6 +131,7 @@ final class AppRuntimeTests: XCTestCase {
 
         let marker = "/tmp/macchannel-endpoint-\(UUID().uuidString)"
         let isolated = try ProductionRuntimeConfiguration.current(
+            namespace: .direct,
             environment: [
                 "MACCHANNEL_RENDEZVOUS_URL": "wss://example.test/v1/ws",
                 "MACCHANNEL_STUN_URLS": "stun:a.test, stun:b.test",
@@ -109,6 +147,7 @@ final class AppRuntimeTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try ProductionRuntimeConfiguration.current(
+                namespace: .direct,
                 environment: ["MACCHANNEL_RENDEZVOUS_URL": "ws://example.test/v1/ws"],
                 arguments: ["MacChannel", "--production-launch-test", marker]
             )
@@ -118,6 +157,7 @@ final class AppRuntimeTests: XCTestCase {
     func testIsolatedLaunchKeepsOutgoingRecoveryInsideItsRuntimeDirectory() throws {
         let marker = "/tmp/macchannel-storage-\(UUID().uuidString)"
         let configuration = try ProductionRuntimeConfiguration.current(
+            namespace: .direct,
             environment: [:],
             arguments: ["MacChannel", "--production-launch-test", marker]
         )
@@ -129,7 +169,7 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     func testPackagedConfigurationProvidesFixedOfficialEndpointWithoutEnvironment() throws {
-        let configuration = try ProductionRuntimeConfiguration.current(environment: [:])
+        let configuration = try ProductionRuntimeConfiguration.current(namespace: .direct, environment: [:])
 
         XCTAssertEqual(
             configuration.rendezvousWebSocketURL?.absoluteString,
@@ -211,6 +251,88 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
+    func testRuntimeBootstrapDoesNotStartLocalNetworkUntilRelevantAction() async {
+        let runtime = RuntimeLifecycleSpy()
+        let host = AppRuntimeHost(builder: RuntimeBuilderStub(result: .success(
+            AppRuntimeLaunch(runtime: runtime, status: .ready)
+        )))
+
+        await host.bootstrap()
+        XCTAssertEqual(runtime.localNetworkStartCount, 0)
+
+        await host.startLocalNetwork()
+        XCTAssertEqual(runtime.localNetworkStartCount, 1)
+    }
+
+    @MainActor
+    func testRetiredPresenceStreamCannotUpdateReplacementRuntime() async {
+        let first = RuntimeLifecycleSpy(), second = RuntimeLifecycleSpy()
+        let host = AppRuntimeHost(builder: SequencedRuntimeBuilder(results: [
+            .success(AppRuntimeLaunch(runtime: first, status: .ready)),
+            .success(AppRuntimeLaunch(runtime: second, status: .ready))
+        ]))
+        await host.bootstrap()
+        first.presenceSource.updatePresence(.online)
+        first.presenceSource.updateTrustSync(.synchronized)
+        for _ in 0..<100 where !host.presence.authenticated { await Task.yield() }
+        XCTAssertTrue(host.presence.authenticated)
+        await host.stopCurrentRuntime()
+        XCTAssertEqual(host.presence, RuntimePresenceSnapshot())
+        await host.bootstrap()
+        first.presenceSource.updateTrustSync(.needsAttention)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(host.presence, RuntimePresenceSnapshot())
+        await host.shutdown()
+    }
+
+    @MainActor
+    func testStoreRelaunchRestoresOnlyPersistedLocalNetworkActivation() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let activation = LocalNetworkActivationStore(defaults: defaults)
+        let virginRuntime = RuntimeLifecycleSpy()
+        let virginHost = AppRuntimeHost(builder: RuntimeBuilderStub(result: .success(
+            AppRuntimeLaunch(runtime: virginRuntime, status: .ready)
+        )))
+        let virginDelegate = MacChannelApplicationDelegate(
+            initialContainer: .loadingShell(), initialStatus: .loading,
+            runtimeHost: virginHost, distributionChannel: .appStore,
+            localNetworkActivationStore: activation,
+            receiveNotificationController: ReceiveNotificationController(
+                center: ApplicationShellNotificationCenter(),
+                revealer: ApplicationShellReceiveTargetRevealer()
+            ),
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+
+        virginDelegate.applicationDidFinishLaunching(Notification(name: .init("test")))
+        for _ in 0..<1_000 where virginHost.status != .ready { await Task.yield() }
+        XCTAssertEqual(virginRuntime.localNetworkStartCount, 0)
+        virginDelegate.applicationWillTerminate(Notification(name: .init("test")))
+
+        activation.activate()
+        let restoredRuntime = RuntimeLifecycleSpy()
+        let restoredHost = AppRuntimeHost(builder: RuntimeBuilderStub(result: .success(
+            AppRuntimeLaunch(runtime: restoredRuntime, status: .ready)
+        )))
+        let restoredDelegate = MacChannelApplicationDelegate(
+            initialContainer: .loadingShell(), initialStatus: .loading,
+            runtimeHost: restoredHost, distributionChannel: .appStore,
+            localNetworkActivationStore: activation,
+            receiveNotificationController: ReceiveNotificationController(
+                center: ApplicationShellNotificationCenter(),
+                revealer: ApplicationShellReceiveTargetRevealer()
+            ),
+            statusItemControllerFactory: makeApplicationShellStatusController
+        )
+
+        restoredDelegate.applicationDidFinishLaunching(Notification(name: .init("test")))
+        for _ in 0..<1_000 where restoredRuntime.localNetworkStartCount == 0 { await Task.yield() }
+        XCTAssertEqual(restoredRuntime.localNetworkStartCount, 1)
+        restoredDelegate.applicationWillTerminate(Notification(name: .init("test")))
+    }
+
+    @MainActor
     func testRuntimeHostPublishesChineseErrorWithoutFakeReadyContainer() async {
         let host = AppRuntimeHost(
             builder: RuntimeBuilderStub(result: .failure(RuntimeTestError.failed))
@@ -221,10 +343,10 @@ final class AppRuntimeTests: XCTestCase {
 
         await host.bootstrap()
 
-        guard case let .startupError(message, canRetry) = host.status else {
+        guard case let .startupFailure(key, canRetry) = host.status else {
             return XCTFail("expected error state")
         }
-        XCTAssertTrue(message.contains("无法启动"))
+        XCTAssertEqual(key, .statusStartupStorage)
         XCTAssertTrue(canRetry)
         XCTAssertFalse(receivedContainer)
     }
@@ -245,10 +367,10 @@ final class AppRuntimeTests: XCTestCase {
         }
 
         await host.bootstrap()
-        guard case let .startupError(message, canRetry) = host.status else {
+        guard case let .startupFailure(key, canRetry) = host.status else {
             return XCTFail("expected recoverable keychain error")
         }
-        XCTAssertTrue(message.contains("钥匙串"))
+        XCTAssertEqual(key, .statusStartupKeychain)
         XCTAssertTrue(canRetry)
 
         await host.bootstrap()
@@ -540,7 +662,7 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testProductionPairingCombinesAuthorizationAndPersistenceWarningsAfterTrustCommit()
+    func testProductionPairingDoesNotReportCommittedWhenLocalSaveFails()
         async throws
     {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -566,7 +688,7 @@ final class AppRuntimeTests: XCTestCase {
             repository: repository,
             peerIdentity: peerIdentity,
             peer: peer,
-            throwsAfterMutation: true
+            throwsAfterMutation: false
         )
         let service = PersistingPairingSurfaceService(
             coordinator: coordinator,
@@ -575,15 +697,14 @@ final class AppRuntimeTests: XCTestCase {
             trustRepository: repository
         )
 
-        let result = try await service.approve()
-
-        let warning = try XCTUnwrap(result.warning)
-        XCTAssertTrue(warning.contains("对端授权确认未完成"))
-        XCTAssertTrue(warning.contains("本地信任记录未保存"))
+        do {
+            _ = try await service.approve()
+            XCTFail("Local save failure must fail completion, never return committed with warnings")
+        } catch { }
         let isTrusted = await repository.isTrusted(peer.id)
         XCTAssertTrue(isTrusted)
         let snapshot = await settings.current()
-        XCTAssertEqual(snapshot.devices.first?.id, peer.id)
+        XCTAssertTrue(snapshot.devices.isEmpty)
     }
 
     @MainActor
@@ -618,7 +739,8 @@ final class AppRuntimeTests: XCTestCase {
             trustRepository: repository
         )
 
-        _ = try await service.approve()
+        let approval = Task { try await service.approve() }
+        for _ in 0..<100 { await Task.yield() }
         let beforeCommit = await settings.current()
         XCTAssertTrue(beforeCommit.devices.isEmpty)
 
@@ -627,6 +749,7 @@ final class AppRuntimeTests: XCTestCase {
             subjectPublicKey: peerIdentity.publicKey.rawRepresentation,
             timestamp: Date()
         )
+        _ = try await approval.value
         for _ in 0..<100 {
             if !(await settings.current()).devices.isEmpty { break }
             await Task.yield()
@@ -634,6 +757,88 @@ final class AppRuntimeTests: XCTestCase {
 
         let afterCommit = await settings.current()
         XCTAssertEqual(afterCommit.devices.first?.displayName, "远端 Mac")
+    }
+
+    @MainActor
+    func testPairingSettingsWriteFailureRequiresRetryWithoutNewAuthorization() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settingsURL = root.appendingPathComponent("settings.json")
+        let owner = try DeviceIdentity.ephemeral()
+        let remote = try DeviceIdentity.ephemeral()
+        let peer = DeviceSummary(id: remote.id, displayName: "Phone", availability: .internet)
+        let repository = try TrustRepository(ownerIdentity: owner, trustStore: TrustStore(owner: owner.id), persistedGeneration: 0)
+        let settings = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [])
+        let coordinator = MutatingProductionPairingCoordinator(repository: repository, peerIdentity: remote, peer: peer)
+        let service = PersistingPairingSurfaceService(coordinator: coordinator, settings: settings,
+            trustStore: RecordingTrustSnapshotPersister(), trustRepository: repository)
+        // A directory at the file destination deterministically fails the atomic settings write.
+        if FileManager.default.fileExists(atPath: settingsURL.path) { try FileManager.default.removeItem(at: settingsURL) }
+        try FileManager.default.createDirectory(at: settingsURL, withIntermediateDirectories: false)
+        do { _ = try await service.approve(); XCTFail("Settings are part of local completion") } catch { }
+        let failed = await service.currentDurableState()
+        XCTAssertEqual(failed, .saveFailed(peer))
+        let proofs = await repository.authenticationRecords()
+        try FileManager.default.removeItem(at: settingsURL)
+        try await service.retrySaving()
+        let saved = await service.currentDurableState()
+        XCTAssertEqual(saved, .paired(peer))
+        let retriedProofs = await repository.authenticationRecords()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(try encoder.encode(retriedProofs), try encoder.encode(proofs))
+    }
+
+    @MainActor
+    func testMacContainerReplacementJoinsHostPairingPersistenceBeforeLoadingStorage() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settingsURL = root.appendingPathComponent("settings.json")
+        let owner = try DeviceIdentity.ephemeral()
+        let remote = try DeviceIdentity.ephemeral()
+        let peer = DeviceSummary(id: remote.id, displayName: "Phone", availability: .internet)
+        let repository = try TrustRepository(ownerIdentity: owner, trustStore: TrustStore(owner: owner.id), persistedGeneration: 0)
+        let settings = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [])
+        let persister = BlockingPairingTrustPersister()
+        let service = PersistingPairingSurfaceService(
+            coordinator: MutatingProductionPairingCoordinator(repository: repository, peerIdentity: remote, peer: peer),
+            settings: settings, trustStore: persister, trustRepository: repository)
+        var staleCallbacks = 0
+        service.onReceiveConfigurationChanged = { staleCallbacks += 1 }
+        let base = AppContainer.localShell()
+        let shell = MacChannelApplicationDelegate(initialContainer: base, initialStatus: .ready, runtimeHost: nil,
+            receiveNotificationController: ReceiveNotificationController(
+                center: ApplicationShellNotificationCenter(),
+                revealer: ApplicationShellReceiveTargetRevealer(revealResult: false)),
+            statusItemControllerFactory: makeApplicationShellStatusController)
+        _ = await shell.replace(AppContainer(deviceDirectory: base.deviceDirectory,
+            transferCoordinator: base.transferCoordinator, pairingSurfaceService: service,
+            durablePairingStates: service.durableStates), status: .ready)
+        let approval = Task { try await service.approve() }
+        await persister.waitUntilSaving()
+        var replacementLoadedStorage = false
+        let replacement = Task { @MainActor in
+            _ = await shell.replace(.loadingShell(), status: .loading)
+            let reloaded = try RuntimeSettingsStore(url: settingsURL, trustedDevices: [peer.id])
+            replacementLoadedStorage = true
+            return await reloaded.current()
+        }
+        var retirementEntered = false
+        for _ in 0..<1000 {
+            do { _ = try await service.createCode(); XCTFail("Retirement cannot admit new work") }
+            catch PairingError.staleOperation { retirementEntered = true; break }
+            catch PairingError.operationInProgress { await Task.yield() }
+        }
+        XCTAssertTrue(retirementEntered)
+        XCTAssertFalse(replacementLoadedStorage)
+        await persister.release()
+        _ = try await approval.value
+        let reloaded = try await replacement.value
+        XCTAssertEqual(reloaded.devices.first?.id, peer.id)
+        XCTAssertEqual(staleCallbacks, 0)
+        shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
     }
 
     func testSuccessfulReceivePublishesAfterHistoryRecording() async {
@@ -698,14 +903,26 @@ final class AppRuntimeTests: XCTestCase {
             contentsOf: repositoryRoot.appendingPathComponent("Package.swift"),
             encoding: .utf8
         )
-        let sourceRoots = SwiftPackageProductionSourceInventory.sourceRoots(
+        let packageSourceRoots = SwiftPackageProductionSourceInventory.sourceRoots(
             from: packageManifest
         )
         XCTAssertEqual(
-            sourceRoots,
-            ["App", "Sources/MacChannelApp", "Sources/MacChannelCore"]
+            packageSourceRoots,
+            [
+                "App",
+                "Sources/DropMeshAppStore",
+                "Sources/DropMeshAppStoreDistribution",
+                "Sources/DropMeshMobileRuntime",
+                "Sources/MacChannelApp",
+                "Sources/MacChannelCore",
+                "Sources/MacChannelDirectDistribution",
+            ]
         )
 
+        // The native iPhone target is generated by XcodeGen, not SwiftPM.
+        // Keep it inside the same fail-closed audit instead of silently omitting
+        // the new application's clipboard access surface.
+        let sourceRoots = packageSourceRoots + ["iPhone/App", "iPhone/Shared", "iPhone/ShareExtension"]
         var inventoriedSources: [String: String] = [:]
         for sourceRoot in sourceRoots {
             let rootURL = repositoryRoot.appendingPathComponent(sourceRoot, isDirectory: true)
@@ -719,12 +936,13 @@ final class AppRuntimeTests: XCTestCase {
                 )
             }
         }
-        let everyProductionSwiftPath = try ["App", "Sources"].flatMap { sourceRoot in
+        let everyProductionSwiftPath = try ["App", "Sources", "iPhone"].flatMap { sourceRoot in
             try FileManager.default.subpathsOfDirectory(
                 atPath: repositoryRoot.appendingPathComponent(sourceRoot).path
             )
             .filter { $0.hasSuffix(".swift") }
             .map { "\(sourceRoot)/\($0)" }
+            .filter { !$0.hasPrefix("iPhone/Tests/") }
         }
         XCTAssertEqual(Set(inventoriedSources.keys), Set(everyProductionSwiftPath))
 
@@ -732,7 +950,10 @@ final class AppRuntimeTests: XCTestCase {
         XCTAssertTrue(
             SwiftPasteboardSourceAuditor.satisfiesFailClosedPolicy(
                 in: inventoriedSources,
-                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift"
+                allowingSingleExplicitAccessAt: "App/ClipboardTransferSource.swift",
+                allowingWriteOnlyApprovalCopyAt: "Sources/DropMeshMobileRuntime/ExplicitApprovalCodeCopy.swift",
+                calledFrom: "iPhone/App/MobileAccountApprovalDetailView.swift",
+                invitationCalledFrom: "iPhone/App/MobileAccountModel.swift"
             ),
             "Unexpected .general accesses: \(accesses)"
         )
@@ -1289,7 +1510,7 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testReceiveWorkerBackpressuresBurstWhileSystemDeliveryIsBlocked() async {
+    func testBlockedNotificationDeliveryDoesNotStallReceiveHistoryOrUnreadDot() async {
         let events = RuntimeReceiveEventSource(bufferCapacity: 2)
         let notificationCenter = BlockingApplicationShellNotificationCenter()
         let notifier = ReceiveNotificationController(
@@ -1336,10 +1557,16 @@ final class AppRuntimeTests: XCTestCase {
         await notificationCenter.waitUntilDeliveryStarts()
         for _ in 0..<100 { await Task.yield() }
 
-        XCTAssertEqual(shell.observedReceiveEventCount, 1)
-        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [expected[0].transferID])
+        for _ in 0..<1_000 where shell.observedReceiveEventCount < expected.count {
+            await Task.yield()
+        }
+        XCTAssertEqual(shell.observedReceiveEventCount, expected.count)
+        XCTAssertEqual(
+            shell.recentReceiveSnapshot.visible.map(\.id),
+            expected.suffix(RecentReceiveStore.maximumVisibleCount).reversed().map(\.transferID)
+        )
         let completedBeforeRelease = await publisherFinished.isFinished()
-        XCTAssertFalse(completedBeforeRelease)
+        XCTAssertTrue(completedBeforeRelease)
         XCTAssertTrue(shell.hasUnreadReceive)
 
         notificationCenter.releaseFirstDelivery()
@@ -1461,7 +1688,13 @@ final class AppRuntimeTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(events.completionState.latestSequence, 4)
-        XCTAssertEqual(shell.recentReceiveSnapshot.visible.map(\.id), [receivedResults[0].transferID])
+        for _ in 0..<1_000 where shell.observedReceiveEventCount < receivedResults.count {
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            shell.recentReceiveSnapshot.visible.map(\.id),
+            receivedResults.reversed().map(\.transferID)
+        )
         XCTAssertTrue(shell.hasUnreadReceive)
 
         statusController?.prepareToOpenStatusMenu()
@@ -1495,17 +1728,20 @@ final class AppRuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testApplicationShellReplacementDoesNotWaitForBlockedNotificationOperation()
+    func testApplicationShellReplacementInvalidatesBlockedNotificationAndAcceptsNewReceives()
         async throws
     {
         let firstEvents = ApplicationShellReceiveEventSource()
         let currentEvents = ApplicationShellReceiveEventSource()
         let notificationCenter = BlockingApplicationShellNotificationCenter()
+        let revealer = ApplicationShellReceiveTargetRevealer()
         let notifier = ReceiveNotificationController(
             center: notificationCenter,
-            revealer: ApplicationShellReceiveTargetRevealer(),
+            revealer: revealer,
             deliveryTimeout: .seconds(30)
         )
+        var openedTransferIDs: [TransferID] = []
+        notifier.onReceiveOpened = { openedTransferIDs.append($0) }
         let shell = MacChannelApplicationDelegate(
             initialContainer: AppContainer.localShell(),
             initialStatus: .ready,
@@ -1550,6 +1786,30 @@ final class AppRuntimeTests: XCTestCase {
         await currentEvents.waitUntilSubscribed()
         let currentSubscribed = await currentEvents.isSubscribed()
         XCTAssertTrue(currentSubscribed)
+
+        for _ in 0..<1_000 where notificationCenter.removedIdentifiers.isEmpty {
+            await Task.yield()
+        }
+        XCTAssertEqual(notificationCenter.deliveredCount, 0)
+        let staleIdentifier = try XCTUnwrap(notificationCenter.firstAttemptedIdentifier)
+        XCTAssertEqual(notificationCenter.removedIdentifiers, [staleIdentifier])
+        await notificationCenter.emitDeliveredResponse(identifier: staleIdentifier)
+        XCTAssertTrue(revealer.revealedURLs.isEmpty)
+        XCTAssertTrue(openedTransferIDs.isEmpty)
+
+        let currentResult = TransferReceiveResult(
+            transferID: TransferID(rawValue: UUID()),
+            receivedURLs: [URL(fileURLWithPath: "/tmp/current.pdf")]
+        )
+        await currentEvents.publish(currentResult)
+        for _ in 0..<1_000 where notificationCenter.deliveredCount < 1 {
+            await Task.yield()
+        }
+        XCTAssertEqual(notificationCenter.deliveredCount, 1)
+        XCTAssertEqual(
+            notificationCenter.deliveredIdentifiers.first,
+            "dropmesh.receive.v1.\(currentResult.transferID.rawValue.uuidString.lowercased()).unknown"
+        )
 
         shell.applicationWillTerminate(Notification(name: Notification.Name("test")))
         await currentEvents.waitUntilCancelled()
@@ -2179,14 +2439,19 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
     private var deliveryStartContinuation: CheckedContinuation<Void, Never>?
     private var deliveryReleaseContinuation: CheckedContinuation<Void, Never>?
     private(set) var deliveredIdentifiers: [String] = []
+    private(set) var attemptedIdentifiers: [String] = []
+    private(set) var removedIdentifiers: [String] = []
+    private var deliveredResponseHandler: ((String) async -> Void)?
     private var activeDeliveries = 0
     private(set) var maximumConcurrentDeliveries = 0
     var deliveredCount: Int { deliveredIdentifiers.count }
+    var firstAttemptedIdentifier: String? { attemptedIdentifiers.first }
 
     func authorizationState() async -> ReceiveNotificationAuthorizationState { .authorized }
     func requestAuthorization() async -> ReceiveNotificationAuthorizationState { .authorized }
 
     func deliver(_ request: ReceiveNotificationRequest) async throws {
+        attemptedIdentifiers.append(request.identifier)
         activeDeliveries += 1
         maximumConcurrentDeliveries = max(maximumConcurrentDeliveries, activeDeliveries)
         defer { activeDeliveries -= 1 }
@@ -2200,6 +2465,19 @@ private final class BlockingApplicationShellNotificationCenter: ReceiveNotificat
             }
         }
         deliveredIdentifiers.append(request.identifier)
+    }
+
+    func setDeliveredResponseHandler(_ handler: @escaping (String) async -> Void) {
+        deliveredResponseHandler = handler
+    }
+
+    func emitDeliveredResponse(identifier: String) async {
+        await deliveredResponseHandler?(identifier)
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
+        removedIdentifiers.append(contentsOf: identifiers)
+        deliveredIdentifiers.removeAll { identifiers.contains($0) }
     }
 
     func waitUntilDeliveryStarts() async {
@@ -2255,6 +2533,17 @@ private actor FailingTrustSnapshotPersister: TrustSnapshotPersisting {
 
 private actor RecordingTrustSnapshotPersister: TrustSnapshotPersisting {
     func persistLatest(from repository: TrustRepository) async throws {}
+}
+
+private actor BlockingPairingTrustPersister: TrustSnapshotPersisting {
+    private var saving = false
+    private var released = false
+    func persistLatest(from repository: TrustRepository) async throws {
+        saving = true
+        while !released { await Task.yield() }
+    }
+    func waitUntilSaving() async { while !saving { await Task.yield() } }
+    func release() { released = true }
 }
 
 private actor BlockingReceiveHistoryRecorder {
@@ -2319,6 +2608,8 @@ private actor ReceiveEventPublisherRecorder {
 }
 
 private actor DeferredProductionPairingCoordinator: ProductionPairingCoordinating {
+    nonisolated let states = AsyncStream<PairingState> { _ in }
+    func isTrusted(_ id: DeviceID) async -> Bool { await repository.isTrusted(id) }
     private let repository: TrustRepository
     private let peerIdentity: DeviceIdentity
     private let peer: DeviceSummary
@@ -2342,9 +2633,14 @@ private actor DeferredProductionPairingCoordinator: ProductionPairingCoordinatin
     func awaitHostApproval() async throws -> SignedTrustRecord { throw RuntimeTestError.failed }
     func cancelPendingPairing() async throws {}
     func pendingPeerSummary() async -> DeviceSummary? { peer }
+    func currentState() async -> PairingState {
+        await repository.isTrusted(peer.id) ? .confirmed(peer) : .committing(peer)
+    }
 }
 
 private actor MutatingProductionPairingCoordinator: ProductionPairingCoordinating {
+    nonisolated let states = AsyncStream<PairingState> { _ in }
+    func isTrusted(_ id: DeviceID) async -> Bool { await repository.isTrusted(id) }
     private let repository: TrustRepository
     private let peerIdentity: DeviceIdentity
     private let peer: DeviceSummary
@@ -2377,6 +2673,9 @@ private actor MutatingProductionPairingCoordinator: ProductionPairingCoordinatin
     func awaitHostApproval() async throws -> SignedTrustRecord { throw RuntimeTestError.failed }
     func cancelPendingPairing() async throws {}
     func pendingPeerSummary() async -> DeviceSummary? { peer }
+    func currentState() async -> PairingState {
+        await repository.isTrusted(peer.id) ? .confirmed(peer) : .approvalRequested(peer)
+    }
 }
 
 private actor CancellationInsensitivePresenceGate {
@@ -2417,8 +2716,15 @@ private actor CancellationInsensitivePresenceGate {
 
 @MainActor
 private final class RuntimeLifecycleSpy: AppRuntimeLifecycle {
+    let presenceSource = RuntimeStatusSource()
+    func presenceUpdates() -> AsyncStream<RuntimePresenceSnapshot>? { presenceSource.presenceStream }
     let container = AppContainer.localShell()
     private(set) var shutdownCount = 0
+    private(set) var localNetworkStartCount = 0
+
+    func startLocalNetwork() async {
+        localNetworkStartCount += 1
+    }
 
     func shutdown() async {
         shutdownCount += 1

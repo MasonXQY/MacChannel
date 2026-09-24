@@ -4,6 +4,7 @@ import Foundation
 import MacChannelCore
 
 struct ProductionRuntimeConfiguration {
+    let namespace: RuntimeNamespace
     let dataDirectory: URL
     let rendezvousWebSocketURL: URL?
     let rendezvousHTTPOrigin: URL?
@@ -12,13 +13,19 @@ struct ProductionRuntimeConfiguration {
     let ice: ICEConfiguration
     let bonjourPort: UInt16
     let identityPolicy: KeychainPolicy
+    let account: MacAccountRuntimeConfiguration?
     let isIsolatedLaunchTest: Bool
 
     var outgoingDirectory: URL {
         dataDirectory.appendingPathComponent("Outgoing", isDirectory: true)
     }
 
+    var incomingDirectory: URL {
+        dataDirectory.appendingPathComponent("Incoming", isDirectory: true)
+    }
+
     static func current(
+        namespace: RuntimeNamespace,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default,
         arguments: [String] = ProcessInfo.processInfo.arguments
@@ -34,17 +41,18 @@ struct ProductionRuntimeConfiguration {
         let directory =
             launchTestMarker.map {
                 URL(fileURLWithPath: $0).appendingPathExtension("runtime")
-            } ?? applicationSupport.appendingPathComponent("MacChannel", isDirectory: true)
+            } ?? applicationSupport.appendingPathComponent(namespace.applicationSupportComponent, isDirectory: true)
         let identityPolicy =
             launchTestMarker.map { marker in
                 let suffix = URL(fileURLWithPath: marker).lastPathComponent
                     .filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }
                 return KeychainPolicy(
-                    service: "com.mason.macchannel.identity.launch-test.\(suffix)",
+                    service: "\(namespace.identityPolicy.service).launch-test.\(suffix)",
+                    accessGroup: namespace.identityPolicy.accessGroup,
                     accessibility: .afterFirstUnlockThisDeviceOnly,
                     synchronizable: false
                 )
-            } ?? KeychainStore.identityPolicy
+            } ?? namespace.identityPolicy
         let resource =
             Bundle.module.url(
                 forResource: "RuntimeConfig",
@@ -52,11 +60,16 @@ struct ProductionRuntimeConfiguration {
                 subdirectory: "Resources"
             ) ?? Bundle.module.url(forResource: "RuntimeConfig", withExtension: "json")
         guard let resource else { throw ProductionRuntimeError.missingRuntimeConfiguration }
-        struct RuntimeConfigWire: Decodable { let rendezvousURL: String }
-        let packaged = try JSONDecoder().decode(
+        struct RuntimeConfigWire: Decodable {
+            let rendezvousURL: String
+            let accountServiceOrigin: String?
+            let accountAudience: String?
+        }
+        let wire = try JSONDecoder().decode(
             RuntimeConfigWire.self,
             from: Data(contentsOf: resource)
-        ).rendezvousURL
+        )
+        let packaged = wire.rendezvousURL
         let environmentURL = launchTestMarker == nil
             ? nil
             : environment["MACCHANNEL_RENDEZVOUS_URL"]
@@ -67,7 +80,20 @@ struct ProductionRuntimeConfiguration {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty } ?? []
         let port = environment["MACCHANNEL_BONJOUR_PORT"].flatMap(UInt16.init) ?? 45_873
+        let account: MacAccountRuntimeConfiguration?
+        if let rawOrigin = wire.accountServiceOrigin, let audience = wire.accountAudience,
+            !isLaunchTest(arguments)
+        {
+            guard let origin = URL(string: rawOrigin) else {
+                throw ProductionRuntimeError.missingRuntimeConfiguration
+            }
+            account = try MacAccountRuntimeConfiguration(
+                origin: origin, audience: audience)
+        } else {
+            account = nil
+        }
         return ProductionRuntimeConfiguration(
+            namespace: namespace,
             dataDirectory: directory,
             rendezvousWebSocketURL: endpoints.webSocketURL,
             rendezvousHTTPOrigin: endpoints.httpOrigin,
@@ -76,8 +102,13 @@ struct ProductionRuntimeConfiguration {
             ice: ICEConfiguration(stunURLs: stunURLs, turnServers: []),
             bonjourPort: port,
             identityPolicy: identityPolicy,
+            account: account,
             isIsolatedLaunchTest: launchTestMarker != nil
         )
+    }
+
+    private static func isLaunchTest(_ arguments: [String]) -> Bool {
+        arguments.contains("--production-launch-test")
     }
 
     func endpoints() throws -> RendezvousEndpointConfiguration {
@@ -141,8 +172,8 @@ final class ProductionAppRuntimeBuilder: AppRuntimeBuilding {
         self.configuration = configuration
     }
 
-    convenience init() throws {
-        try self.init(configuration: .current())
+    convenience init(namespace: RuntimeNamespace) throws {
+        try self.init(configuration: .current(namespace: namespace))
     }
 
     func build() async throws -> AppRuntimeLaunch {
@@ -162,12 +193,17 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let historySource: RuntimeHistorySource
     private let receiveEvents: RuntimeReceiveEventSource
     private let statusSource: RuntimeStatusSource
-    private let publicServiceLifecycle: PublicServiceLifecycle?
+    private let publicServiceLifecycle: AuthenticatedPresenceSupervisor?
+    private let accountServiceLifecycle: AuthenticatedPresenceSupervisor?
+    private let accountLifecycle: AccountForegroundLifecycle?
+    private let dualPlaneProjection: MacDualPlaneProjection?
+    private let dualPlaneConnector: MacDualPlaneConnector?
     private let publicServiceStatusTask: Task<Void, Never>?
     private let publicServiceTrustTask: Task<Void, Never>?
-    private let signalSession: ReconnectableRendezvousSignalSession?
+    private let signalSession: PresenceSignalBridge?
     private let pairingTransport: RendezvousPairingTransport?
     private let connectionListener: WebRTCConnectionListener?
+    private let accountConnectionListener: WebRTCConnectionListener?
     private let incomingController: IncomingRuntimeController?
     private let transferCoordinator: TransferCoordinator?
     private let trustRepository: TrustRepository
@@ -175,8 +211,10 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     private let launchTestKeychain: KeychainStore?
     private let launchTestDataDirectory: URL?
     private var stopped = false
+    private let trustSaveRetry = RuntimeTrustSaveRetry()
+    private var localNetworkStarted = false
 
-    private init(
+    init(
         container: AppContainer,
         initialStatus: AppRuntimeStatus,
         browser: BonjourPeerBrowser?,
@@ -185,12 +223,17 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         historySource: RuntimeHistorySource,
         receiveEvents: RuntimeReceiveEventSource,
         statusSource: RuntimeStatusSource,
-        publicServiceLifecycle: PublicServiceLifecycle?,
+        publicServiceLifecycle: AuthenticatedPresenceSupervisor?,
+        accountServiceLifecycle: AuthenticatedPresenceSupervisor? = nil,
+        accountLifecycle: AccountForegroundLifecycle? = nil,
+        dualPlaneProjection: MacDualPlaneProjection? = nil,
+        dualPlaneConnector: MacDualPlaneConnector? = nil,
         publicServiceStatusTask: Task<Void, Never>?,
         publicServiceTrustTask: Task<Void, Never>?,
-        signalSession: ReconnectableRendezvousSignalSession?,
+        signalSession: PresenceSignalBridge?,
         pairingTransport: RendezvousPairingTransport?,
         connectionListener: WebRTCConnectionListener?,
+        accountConnectionListener: WebRTCConnectionListener? = nil,
         incomingController: IncomingRuntimeController?,
         transferCoordinator: TransferCoordinator?,
         trustRepository: TrustRepository,
@@ -207,11 +250,16 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         self.receiveEvents = receiveEvents
         self.statusSource = statusSource
         self.publicServiceLifecycle = publicServiceLifecycle
+        self.accountServiceLifecycle = accountServiceLifecycle
+        self.accountLifecycle = accountLifecycle
+        self.dualPlaneProjection = dualPlaneProjection
+        self.dualPlaneConnector = dualPlaneConnector
         self.publicServiceStatusTask = publicServiceStatusTask
         self.publicServiceTrustTask = publicServiceTrustTask
         self.signalSession = signalSession
         self.pairingTransport = pairingTransport
         self.connectionListener = connectionListener
+        self.accountConnectionListener = accountConnectionListener
         self.incomingController = incomingController
         self.transferCoordinator = transferCoordinator
         self.trustRepository = trustRepository
@@ -254,19 +302,25 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             keychain: keychain,
             policy: configuration.identityPolicy
         )
+        let authorizationOwner = PeerAuthorizationOwner.live(identity: identity)
         let trustStore = AuthenticatedTrustSnapshotStore(
             url: configuration.dataDirectory.appendingPathComponent("trust.json"),
             secrets: keychain,
             policy: configuration.identityPolicy
         )
-        let trustRepository = try await trustStore.load(identity: identity)
+        let trustRepository = try await trustStore.load(
+            identity: identity, authorizationOwner: authorizationOwner)
         let currentTrust = await trustRepository.currentTrustStore()
         let directory = DeviceDirectory(trust: currentTrust)
-        await directory.observeTrust(trustRepository)
+        await directory.observeAuthorization(authorizationOwner)
+        let manualDirectory = DeviceDirectory(trust: currentTrust)
+        await manualDirectory.observeTrust(trustRepository)
 
         let settingsStore = try RuntimeSettingsStore(
             url: configuration.dataDirectory.appendingPathComponent("settings.json"),
-            trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id])
+            trustedDevices: currentTrust.trustedDeviceIDs.subtracting([identity.id]),
+            authorization: SecurityScopedDirectoryStore(mode: configuration.namespace.directoryAuthorizationMode, namespace: configuration.namespace.applicationSupportComponent),
+            defaultReceiveFolderName: configuration.namespace.defaultReceiveFolderName
         )
         let settingsSnapshot = await settingsStore.current()
         let database = try TransferDatabase(
@@ -293,8 +347,7 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             directory: directory,
             trust: DeviceTrust(trustedIDs: currentTrust.trustedDeviceIDs)
         )
-        browser.observeTrust(trustRepository)
-        browser.start()
+        browser.observeAuthorization(authorizationOwner)
         cleanup.push { await browser.stop() }
         let advertiser = try BonjourPeerAdvertiser(
             device: identity.id,
@@ -304,7 +357,6 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             // advertised TCP endpoint is discovery evidence only.
             connection.cancel()
         }
-        advertiser.start()
         cleanup.push { await advertiser.stopAndWait() }
 
         let trustPersistenceTask = Task {
@@ -313,8 +365,9 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
                 guard !Task.isCancelled else { return }
                 do {
                     try await trustStore.persistLatest(from: trustRepository)
+                    statusSource.clearTrustSaveFailure()
                 } catch {
-                    statusSource.yield(.error("无法保存设备信任状态；请检查本地存储权限。"))
+                    statusSource.yield(.serviceError(.statusTrustSaveFailed))
                 }
             }
         }
@@ -348,37 +401,56 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             trustRepository: trustRepository
         )
 
-        let presenceClient = PresenceClient(directory: directory)
-        let signalSession = ReconnectableRendezvousSignalSession()
-        cleanup.push { await signalSession.finish() }
-        let publicServiceLifecycle = PublicServiceLifecycle(
-            connectionFactory: {
-                let token = UUID()
-                let socket = try URLSessionPresenceWebSocket(origin: webSocketURL)
-                let session = try AuthenticatedPresenceSession(
-                    identity: identity,
-                    origin: webSocketURL,
-                    socket: socket,
-                    client: presenceClient,
-                    trustRepository: trustRepository
-                )
-                return PublicServiceConnection(
-                    connect: {
-                        try await RuntimePresenceConnect.withTimeout(
-                            .seconds(5),
-                            session: session
-                        )
-                        await signalSession.install(session, token: token)
-                    },
-                    run: { try await session.run() },
-                    stop: {
-                        await signalSession.remove(token: token)
-                        await session.stop()
-                    }
-                )
-            }
+        let accountRuntime = try configuration.account.map {
+            try MacAccountRuntime.make(
+                configuration: $0, identity: identity, authorizationOwner: authorizationOwner)
+        }
+        let accountDirectory = accountRuntime.map { _ in
+            DeviceDirectory(trust: DeviceTrust(trustedIDs: []))
+        }
+        if let accountDirectory { await accountDirectory.observeAuthorization(authorizationOwner) }
+        let dualPlaneProjection = accountDirectory.map {
+            MacDualPlaneProjection(manual: manualDirectory, account: $0, destination: directory)
+        }
+        await dualPlaneProjection?.start()
+        cleanup.push { await dualPlaneProjection?.stop() }
+
+        let publicServiceLifecycle = AuthenticatedPresenceSupervisor(
+            identity: identity, repository: trustRepository, directory: manualDirectory,
+            origin: webSocketURL,
+            makeSocket: { try URLSessionPresenceWebSocket(origin: webSocketURL) },
+            sleep: { try await Task.sleep(for: $0) },
+            onState: { state in
+                await MainActor.run { statusSource.updatePresence(state, account: false) }
+            },
+            onTrustSyncState: { state in
+                await MainActor.run { statusSource.updateTrustSync(state) }
+            },
+            publication: { await trustRepository.publicationSnapshot(persisted: trustStore.persistedState()) },
+            persistedUpdates: { await trustStore.persistedUpdates() }
         )
+        let signalSession = publicServiceLifecycle.bridge
         cleanup.push { await publicServiceLifecycle.stop() }
+
+        let accountServiceLifecycle: AuthenticatedPresenceSupervisor?
+        if let accountConfiguration = configuration.account,
+            let accountRuntime, let accountDirectory
+        {
+            let accountOrigin = accountConfiguration.webSocketOrigin
+            accountServiceLifecycle = AuthenticatedPresenceSupervisor(
+                identity: identity, repository: trustRepository, directory: accountDirectory,
+                origin: accountOrigin,
+                makeSocket: { try URLSessionPresenceWebSocket(origin: accountOrigin) },
+                sleep: { try await Task.sleep(for: $0) },
+                onState: { state in
+                    await MainActor.run { statusSource.updatePresence(state, account: true) }
+                },
+                publication: { TrustPublicationSnapshot(records: []) },
+                accountController: accountRuntime.controller)
+            cleanup.push { await accountServiceLifecycle?.stop() }
+        } else {
+            accountServiceLifecycle = nil
+        }
 
         let signaling = RendezvousWebRTCSignaling(session: signalSession)
         let turnClient = try RendezvousTURNCredentialClient(
@@ -390,15 +462,39 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             base: configuration.ice,
             fetcher: turnClient
         )
-        let connector = ConnectionCoordinator(
-            directory: directory,
-            identity: identity,
-            trustRepository: trustRepository,
-            signaling: signaling,
-            iceProvider: iceProvider
-        )
+        let manualConnector = ConnectionCoordinator(attempts: WebRTCConnectionAttempts(
+            directory: directory, identity: identity,
+            authorizationProvider: authorizationOwner,
+            signaling: signaling, iceProvider: iceProvider))
+        let accountConnectionListener: WebRTCConnectionListener?
+        let dualPlaneConnector: MacDualPlaneConnector?
+        let selectedConnector: any RouteEscalatingPeerConnector
+        if let accountRuntime, let accountServiceLifecycle {
+            let accountSignaling = RendezvousWebRTCSignaling(session: accountServiceLifecycle.bridge)
+            let accountICE = MacAccountICEProvider(
+                fetcher: AccountTURNCredentialFetcher(controller: accountRuntime.controller))
+            let accountConnector = ConnectionCoordinator(attempts: WebRTCConnectionAttempts(
+                directory: directory, identity: identity,
+                authorizationProvider: authorizationOwner,
+                signaling: accountSignaling, iceProvider: accountICE))
+            let selector = MacDualPlaneConnector(
+                repository: trustRepository, authorization: authorizationOwner,
+                manual: manualConnector, account: accountConnector)
+            dualPlaneConnector = selector
+            selectedConnector = selector
+            let listener = WebRTCConnectionListener(
+                directory: directory, identity: identity,
+                authorizationProvider: authorizationOwner,
+                signaling: accountSignaling, iceProvider: accountICE)
+            accountConnectionListener = listener
+            cleanup.push { await listener.stop() }
+        } else {
+            dualPlaneConnector = nil
+            selectedConnector = manualConnector
+            accountConnectionListener = nil
+        }
         let transferCoordinator = try await TransferCoordinator.restoring(
-            connector: connector,
+            connector: selectedConnector,
             database: database,
             outgoingDirectory: configuration.outgoingDirectory
         )
@@ -406,16 +502,21 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         let connectionListener = WebRTCConnectionListener(
             directory: directory,
             identity: identity,
-            trustRepository: trustRepository,
+            authorizationProvider: authorizationOwner,
             signaling: signaling,
             iceProvider: iceProvider
         )
         cleanup.push { await connectionListener.stop() }
+        let incomingSources: [any IncomingTransferConnectionSource] = accountConnectionListener.map {
+            [connectionListener, $0]
+        } ?? [connectionListener]
         let incoming = IncomingRuntimeController(
-            source: connectionListener,
+            sources: incomingSources,
             trustRepository: trustRepository,
+            authorizationProvider: authorizationOwner,
             settings: settingsStore,
             database: database,
+            incomingDirectory: configuration.incomingDirectory,
             ownerID: identity.id,
             onReceiveFinished: makeReceiveFinishedHandler(
                 recordInboundResult: { result in await history.recordInboundResult(result) },
@@ -426,47 +527,9 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
         cleanup.push { await incoming.stop() }
         settingsService.onReceiveConfigurationChanged = { await incoming.restart() }
         pairingService.onReceiveConfigurationChanged = { await incoming.restart() }
-        let publicServiceStatusTask = Task {
-            for await state in publicServiceLifecycle.states {
-                guard !Task.isCancelled else { return }
-                switch state {
-                case .connecting:
-                    statusSource.yield(.offline("正在恢复安全服务；局域网和设置仍可使用。"))
-                case .online:
-                    statusSource.yield(.ready)
-                case .degraded:
-                    statusSource.yield(.offline("安全服务暂时不可用；正在后台重试。"))
-                case .offline:
-                    statusSource.yield(.offline("安全服务离线；局域网和设置仍可使用。"))
-                }
-            }
-        }
-        let publicServiceTrustTask = Task {
-            let updates = await trustRepository.updates()
-            var isInitialSnapshot = true
-            for await _ in updates {
-                guard !Task.isCancelled else { return }
-                if isInitialSnapshot {
-                    isInitialSnapshot = false
-                    continue
-                }
-                let records = await trustRepository.authenticationRecords()
-                guard !records.isEmpty else { continue }
-                do {
-                    try await signalSession.sendTrustUpdate(records)
-                } catch {
-                    await publicServiceLifecycle.reconnectNow()
-                }
-            }
-        }
-        cleanup.push {
-            publicServiceTrustTask.cancel()
-            publicServiceStatusTask.cancel()
-            await publicServiceLifecycle.stop()
-            await publicServiceTrustTask.value
-            await publicServiceStatusTask.value
-        }
+        await accountRuntime?.lifecycle.start()
         await publicServiceLifecycle.start()
+        await accountServiceLifecycle?.start()
         await history.start(snapshots: { await transferCoordinator.snapshots() })
         cleanup.push { await history.stop() }
         let container = AppContainer(
@@ -475,17 +538,21 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             pairingSurfaceService: pairingService,
             settingsSurfaceService: settingsService,
             transferSnapshots: { await transferCoordinator.snapshots() },
-            pairingStates: pairingCoordinator.states,
+            durablePairingStates: pairingService.durableStates,
             initialSettingsSnapshot: settingsSnapshot,
             settingsSnapshots: { await settingsStore.snapshots() },
             transferHistory: { await history.stream() },
             receiveEvents: { await receiveEvents.stream() },
             receiveCompletionState: receiveEvents.completionState,
-            runtimeIdentityID: identity.id
+            runtimeIdentityID: identity.id,
+            accountController: accountRuntime?.controller,
+            localNetworkState: { (browser.state(), advertiser.state()) },
+            localNetworkStates: { (browser.states(), advertiser.states()) },
+            sourceAccess: configuration.namespace.directoryAuthorizationMode == .securityScopedBookmarks ? UserSelectedSourceAccess() : nil
         )
         return ProductionAppRuntime(
             container: container,
-            initialStatus: .offline("正在连接安全服务；局域网和设置已经可用。"),
+            initialStatus: .serviceOffline(.statusServiceConnecting),
             browser: browser,
             advertiser: advertiser,
             trustPersistenceTask: trustPersistenceTask,
@@ -493,11 +560,16 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
             receiveEvents: receiveEvents,
             statusSource: statusSource,
             publicServiceLifecycle: publicServiceLifecycle,
-            publicServiceStatusTask: publicServiceStatusTask,
-            publicServiceTrustTask: publicServiceTrustTask,
+            accountServiceLifecycle: accountServiceLifecycle,
+            accountLifecycle: accountRuntime?.lifecycle,
+            dualPlaneProjection: dualPlaneProjection,
+            dualPlaneConnector: dualPlaneConnector,
+            publicServiceStatusTask: nil,
+            publicServiceTrustTask: nil,
             signalSession: signalSession,
             pairingTransport: pairingTransport,
             connectionListener: connectionListener,
+            accountConnectionListener: accountConnectionListener,
             incomingController: incoming,
             transferCoordinator: transferCoordinator,
             trustRepository: trustRepository,
@@ -512,22 +584,29 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     func shutdown() async {
         guard !stopped else { return }
         stopped = true
+        await trustSaveRetry.stop()
+        await container.pairingSurfaceService.stopObservation()
         await receiveEvents.finish()
         await historySource.stop()
         publicServiceTrustTask?.cancel()
+        await dualPlaneConnector?.stop()
         await publicServiceLifecycle?.stop()
+        await accountServiceLifecycle?.stop()
+        await accountLifecycle?.stop()
+        await dualPlaneProjection?.stop()
         await publicServiceTrustTask?.value
         publicServiceStatusTask?.cancel()
         await publicServiceStatusTask?.value
         if let incomingController { await incomingController.stop() }
         if let connectionListener { await connectionListener.stop() }
+        if let accountConnectionListener { await accountConnectionListener.stop() }
         if let transferCoordinator { await transferCoordinator.shutdownForRestart() }
         await signalSession?.finish()
         if let pairingTransport { await pairingTransport.stop() }
         do {
             try await trustStore.persistLatest(from: trustRepository)
         } catch {
-            statusSource.yield(.error("无法保存设备信任状态；请检查本地存储权限。"))
+            statusSource.yield(.serviceError(.statusTrustSaveFailed))
         }
         trustPersistenceTask.cancel()
         await trustPersistenceTask.value
@@ -541,72 +620,139 @@ final class ProductionAppRuntime: AppRuntimeLifecycle {
     }
 
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { statusSource.stream }
+    func presenceUpdates() -> AsyncStream<RuntimePresenceSnapshot>? { statusSource.presenceStream }
 
     func reconnectPublicService() async {
-        await publicServiceLifecycle?.reconnectNow()
-    }
-}
-
-enum RuntimePresenceConnect {
-    static func withTimeout(
-        _ timeout: Duration,
-        session: AuthenticatedPresenceSession
-    ) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { try await session.connect() }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                await session.stop()
-                throw AuthenticatedPresenceError.transport("connection_timeout")
-            }
-            defer { group.cancelAll() }
-            guard let first = try await group.next() else {
-                throw AuthenticatedPresenceError.transport("connection_cancelled")
-            }
-            return first
+        await publicServiceLifecycle?.retryConnection()
+        await accountServiceLifecycle?.retryConnection()
+        if localNetworkStarted {
+            browser?.start()
+            advertiser?.start()
         }
     }
+
+    func retryTrustPersistence() async {
+        guard !stopped else { return }
+        await trustSaveRetry.run(save: { [trustStore, trustRepository] in
+            try await trustStore.persistLatest(from: trustRepository)
+        }, completed: { [weak self] saved in
+            guard let self, !self.stopped else { return }
+            if saved {
+                self.statusSource.clearTrustSaveFailure()
+                await self.publicServiceLifecycle?.refreshTrust()
+            } else { self.statusSource.yield(.serviceError(.statusTrustSaveFailed)) }
+        })
+    }
+
+    func startLocalNetwork() async {
+        guard !stopped else { return }
+        localNetworkStarted = true
+        browser?.start()
+        advertiser?.start()
+    }
 }
 
-private final class RuntimeStatusSource: @unchecked Sendable {
+final class RuntimeStatusSource: @unchecked Sendable {
+    let presenceStream: AsyncStream<RuntimePresenceSnapshot>
+    private let presenceContinuation: AsyncStream<RuntimePresenceSnapshot>.Continuation
+    @MainActor private var presence = RuntimePresenceSnapshot()
+    @MainActor private var manualPresence: PresenceSessionState = .inactive
+    @MainActor private var accountPresence: PresenceSessionState = .inactive
     let stream: AsyncStream<AppRuntimeStatus>
     private let continuation: AsyncStream<AppRuntimeStatus>.Continuation
 
     init() {
+        let presencePair = AsyncStream<RuntimePresenceSnapshot>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        presenceStream = presencePair.stream
+        presenceContinuation = presencePair.continuation
+        presenceContinuation.yield(RuntimePresenceSnapshot())
         let pair = AsyncStream<AppRuntimeStatus>.makeStream(bufferingPolicy: .bufferingNewest(1))
         stream = pair.stream
         continuation = pair.continuation
     }
 
-    func yield(_ status: AppRuntimeStatus) { continuation.yield(status) }
-    func finish() { continuation.finish() }
+    @MainActor func yield(_ status: AppRuntimeStatus) {
+        if status == .serviceError(.statusTrustSaveFailed) {
+            presence.trustSaveFailed = true
+            presenceContinuation.yield(presence)
+        }
+        continuation.yield(status)
+    }
+    @MainActor func clearTrustSaveFailure() {
+        guard presence.trustSaveFailed else { return }
+        presence.trustSaveFailed = false
+        presenceContinuation.yield(presence)
+        continuation.yield(presence.authenticated ? .ready : .serviceOffline(.statusServiceRecovering))
+    }
+    @MainActor func updatePresence(_ state: PresenceSessionState, account: Bool = false) {
+        if account { accountPresence = state } else { manualPresence = state }
+        presence.authenticated = manualPresence == .online || accountPresence == .online
+        if !presence.authenticated { presence.trustSync = .idle }
+        presenceContinuation.yield(presence)
+        if presence.authenticated {
+            continuation.yield(.ready)
+        } else if manualPresence == .connecting || manualPresence == .reconnecting
+                    || accountPresence == .connecting || accountPresence == .reconnecting {
+            continuation.yield(.serviceOffline(.statusServiceRecovering))
+        } else {
+            continuation.yield(.serviceOffline(.statusServiceOffline))
+        }
+    }
+    @MainActor func updateTrustSync(_ state: PresenceTrustSyncState) {
+        presence.trustSync = state
+        presenceContinuation.yield(presence)
+    }
+    func finish() { continuation.finish(); presenceContinuation.finish() }
 }
 
-actor RuntimeSettingsStore {
+protocol RuntimeReceiveSettingsProviding: Sendable {
+    func current() async -> SettingsSurfaceSnapshot
+    func downloadDirectory() async -> DownloadDirectory
+    func authorizeReceiveDirectories() async throws -> AuthorizedReceiveDirectories
+    func reportDirectoryAuthorizationError(_ message: String?) async
+}
+
+extension RuntimeReceiveSettingsProviding {
+    func authorizeReceiveDirectories() async throws -> AuthorizedReceiveDirectories {
+        AuthorizedReceiveDirectories(directories: await downloadDirectory(), leases: [])
+    }
+    func reportDirectoryAuthorizationError(_ message: String?) async {}
+}
+
+actor RuntimeSettingsStore: RuntimeReceiveSettingsProviding {
     private struct DeviceWire: Codable {
         var displayName: String
         var autoAccept: Bool
         var maximumBytes: UInt64?
         var directoryPath: String?
+        var directoryReference: StoredDirectoryReference?
     }
     private struct Wire: Codable {
         var schemaVersion: Int?
         var localDisplayName: String?
         var defaultDirectoryPath: String?
+        var defaultDirectoryReference: StoredDirectoryReference?
         var autoReceive: Bool?
         var launchAtLogin: Bool?
         var devices: [UUID: DeviceWire]
     }
 
     private let url: URL
+    nonisolated let authorization: SecurityScopedDirectoryStore
+    private let defaultReceiveFolderName: String
     private var wire: Wire
+    private var directoryAuthorizationError: String?
     private var subscribers: [UUID: AsyncStream<SettingsSurfaceSnapshot>.Continuation] = [:]
 
     init(
         url: URL,
-        trustedDevices: Set<DeviceID>
+        trustedDevices: Set<DeviceID>,
+        authorization: SecurityScopedDirectoryStore = SecurityScopedDirectoryStore(mode: .directPath, namespace: "MacChannel"),
+        defaultReceiveFolderName: String = "Mac 通道"
     ) throws {
         self.url = url
+        self.authorization = authorization
+        self.defaultReceiveFolderName = defaultReceiveFolderName
         let existed = FileManager.default.fileExists(atPath: url.path)
         if existed {
             wire = try JSONDecoder().decode(Wire.self, from: Data(contentsOf: url))
@@ -620,7 +766,15 @@ actor RuntimeSettingsStore {
                 devices: [:]
             )
         }
-        wire.schemaVersion = 2
+        wire.schemaVersion = 3
+        if wire.defaultDirectoryReference == nil, let path = wire.defaultDirectoryPath {
+            wire.defaultDirectoryReference = StoredDirectoryReference(path: path, bookmark: nil)
+        }
+        for id in wire.devices.keys {
+            if wire.devices[id]?.directoryReference == nil, let path = wire.devices[id]?.directoryPath {
+                wire.devices[id]?.directoryReference = StoredDirectoryReference(path: path, bookmark: nil)
+            }
+        }
         if wire.localDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             != false
         {
@@ -630,7 +784,7 @@ actor RuntimeSettingsStore {
         if wire.launchAtLogin == nil { wire.launchAtLogin = false }
         for device in trustedDevices where wire.devices[device.rawValue] == nil {
             wire.devices[device.rawValue] = DeviceWire(
-                displayName: "已配对 Mac",
+                displayName: "",
                 autoAccept: true,
                 maximumBytes: nil,
                 directoryPath: nil
@@ -676,7 +830,16 @@ actor RuntimeSettingsStore {
     }
 
     func updateDefaultDirectory(_ directory: URL) throws {
-        try mutate { $0.defaultDirectoryPath = directory.standardizedFileURL.path }
+        try updateDefaultDirectoryReference(authorization.select(directory, settingKey: "default"))
+    }
+
+    func updateDefaultDirectoryReference(_ reference: StoredDirectoryReference) throws {
+        let validated = try authorization.resolve(reference, settingKey: "default")
+        defer { validated.lease.release() }
+        try mutate {
+            $0.defaultDirectoryPath = validated.reference.path
+            $0.defaultDirectoryReference = validated.reference
+        }
     }
 
     func updateLocalDisplayName(_ name: String) throws {
@@ -694,11 +857,18 @@ actor RuntimeSettingsStore {
     }
 
     func updateDirectory(_ directory: URL?, for id: DeviceID) throws {
+        try updateDirectoryReference(directory.map { try authorization.select($0, settingKey: id.rawValue.uuidString) }, for: id)
+    }
+
+    func updateDirectoryReference(_ reference: StoredDirectoryReference?, for id: DeviceID) throws {
+        let validated = try reference.map { try authorization.resolve($0, settingKey: id.rawValue.uuidString) }
+        defer { validated?.lease.release() }
         try mutate { candidate in
             guard candidate.devices[id.rawValue] != nil else {
                 throw SettingsStoreError.unknownDevice
             }
-            candidate.devices[id.rawValue]?.directoryPath = directory?.standardizedFileURL.path
+            candidate.devices[id.rawValue]?.directoryPath = validated?.reference.path
+            candidate.devices[id.rawValue]?.directoryReference = validated?.reference
         }
     }
 
@@ -707,11 +877,12 @@ actor RuntimeSettingsStore {
             let previous = candidate.devices[device.id.rawValue]
             candidate.devices[device.id.rawValue] = DeviceWire(
                 displayName: device.displayName.isEmpty
-                    ? (previous?.displayName ?? "已配对 Mac")
+                    ? (previous?.displayName ?? "")
                     : device.displayName,
                 autoAccept: previous?.autoAccept ?? true,
                 maximumBytes: previous?.maximumBytes,
-                directoryPath: previous?.directoryPath
+                directoryPath: previous?.directoryPath,
+                directoryReference: previous?.directoryReference
             )
         }
     }
@@ -722,8 +893,44 @@ actor RuntimeSettingsStore {
             perSource: Dictionary(
                 uniqueKeysWithValues: wire.devices.compactMap { id, value in
                     value.directoryPath.map { (DeviceID(rawValue: id), URL(fileURLWithPath: $0)) }
-                })
+                }),
+            defaultFolderName: defaultReceiveFolderName
         )
+    }
+
+    func authorizeReceiveDirectories() async throws -> AuthorizedReceiveDirectories {
+        var candidate = wire
+        var leases: [any UserSelectedSourceLease] = []
+        do {
+            if let reference = candidate.defaultDirectoryReference {
+                let resolved = try authorization.resolve(reference, settingKey: "default")
+                leases.append(resolved.lease)
+                candidate.defaultDirectoryReference = resolved.reference
+                candidate.defaultDirectoryPath = resolved.reference.path
+            }
+            for id in candidate.devices.keys {
+                if let reference = candidate.devices[id]?.directoryReference {
+                    let resolved = try authorization.resolve(reference, settingKey: id.uuidString)
+                    leases.append(resolved.lease)
+                    candidate.devices[id]?.directoryReference = resolved.reference
+                    candidate.devices[id]?.directoryPath = resolved.reference.path
+                }
+            }
+            // Commit all stale refreshes as a single durable settings transaction.
+            try persist(candidate)
+            wire = candidate
+            return AuthorizedReceiveDirectories(directories: downloadDirectory(), leases: leases)
+        } catch {
+            leases.forEach { $0.release() }
+            throw error
+        }
+    }
+
+    func reportDirectoryAuthorizationError(_ message: String?) {
+        guard directoryAuthorizationError != message else { return }
+        directoryAuthorizationError = message
+        let value = snapshot(wire)
+        subscribers.values.forEach { $0.yield(value) }
     }
 
     private func mutate(_ body: (inout Wire) throws -> Void) throws {
@@ -773,7 +980,8 @@ actor RuntimeSettingsStore {
     private func snapshot(_ wire: Wire) -> SettingsSurfaceSnapshot {
         SettingsSurfaceSnapshot(
             localDisplayName: wire.localDisplayName ?? "Mac",
-            defaultDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:)),
+            defaultDirectory: wire.defaultDirectoryPath.map(URL.init(fileURLWithPath:))
+                ?? (authorization.mode == .securityScopedBookmarks ? DownloadDirectory(defaultFolderName: defaultReceiveFolderName).defaultDirectory : nil),
             autoReceive: wire.autoReceive ?? true,
             launchAtLogin: wire.launchAtLogin ?? false,
             devices: wire.devices.map { id, value in
@@ -789,7 +997,8 @@ actor RuntimeSettingsStore {
                 )
             }.sorted {
                 $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
-            }
+            },
+            directoryAuthorizationError: directoryAuthorizationError
         )
     }
 
@@ -844,9 +1053,7 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
         }
         await onReceiveConfigurationChanged?()
         if hadPersistenceFailure {
-            return .committedWithWarning(
-                "设备信任已撤销，但部分本地记录未保存；请检查存储权限后重启确认。"
-            )
+            return SurfaceActionResult(warningKeys: [.trustRevokePartial])
         }
         return .committed
     }
@@ -855,36 +1062,28 @@ final class ProductionDeviceSettingsService: DeviceSettingsServicing {
         await onReceiveConfigurationChanged?()
     }
     func updateDefaultDirectory(_ directory: URL) async throws {
-        try await store.updateDefaultDirectory(directory)
+        let reference = try store.authorization.selectedOnMainActor(directory, settingKey: "default")
+        try await store.updateDefaultDirectoryReference(reference)
         await onReceiveConfigurationChanged?()
     }
     func updateDirectory(_ directory: URL?, for id: DeviceID) async throws {
-        try await store.updateDirectory(directory, for: id)
+        let reference = try directory.map { try store.authorization.selectedOnMainActor($0, settingKey: id.rawValue.uuidString) }
+        try await store.updateDirectoryReference(reference, for: id)
         await onReceiveConfigurationChanged?()
     }
 }
 
-protocol ProductionPairingCoordinating: Sendable {
-    func createCode() async throws -> String
-    func join(code: String) async throws -> PairingJoinResult
-    func approvePendingPairing() async throws -> SignedTrustRecord
-    func rejectPendingPairing() async throws
-    func awaitHostApproval() async throws -> SignedTrustRecord
-    func cancelPendingPairing() async throws
-    func pendingPeerSummary() async -> DeviceSummary?
-}
-
-extension PairingCoordinator: ProductionPairingCoordinating {}
+typealias ProductionPairingCoordinating = DurablePairingCoordinating
 
 @MainActor
 final class PersistingPairingSurfaceService: PairingSurfaceServicing {
     let isAvailable = true
     let codeLifetime: TimeInterval = 300
     var onReceiveConfigurationChanged: (() async -> Void)?
-    private let coordinator: any ProductionPairingCoordinating
-    private let settings: RuntimeSettingsStore
-    private let trustStore: any TrustSnapshotPersisting
-    private let trustRepository: TrustRepository
+    private let session: DurablePairingSession
+    private var retired = false
+    var durableStates: AsyncStream<DurablePairingState> { session.states }
+    var usesDurableStates: Bool { true }
 
     init(
         coordinator: any ProductionPairingCoordinating,
@@ -892,87 +1091,39 @@ final class PersistingPairingSurfaceService: PairingSurfaceServicing {
         trustStore: any TrustSnapshotPersisting,
         trustRepository: TrustRepository
     ) {
-        self.coordinator = coordinator
-        self.settings = settings
-        self.trustStore = trustStore
-        self.trustRepository = trustRepository
+        self.session = DurablePairingSession(coordinator: coordinator) { device in
+            try await trustStore.persistLatest(from: trustRepository)
+            guard await trustRepository.isTrusted(device.id) else { throw PairingError.staleOperation }
+            try await settings.recordPaired(device)
+        }
     }
 
-    func createCode() async throws -> String { try await coordinator.createCode() }
+    func createCode() async throws -> String { try await session.createCode() }
     func join(code: String) async throws -> PairingJoinResult {
-        return try await coordinator.join(code: code)
+        return try await session.join(code: code)
     }
     func approve() async throws -> SurfaceActionResult {
-        let pendingPeer = await coordinator.pendingPeerSummary()
-        var warnings: [String] = []
-        do {
-            _ = try await coordinator.approvePendingPairing()
-        } catch {
-            guard let pendingPeer,
-                await trustRepository.isTrusted(pendingPeer.id)
-            else { throw error }
-            warnings.append("本机信任已建立，但对端授权确认未完成；请在设置中撤销后重新配对。")
-        }
-        do {
-            try await trustStore.persistLatest(from: trustRepository)
-        } catch {
-            warnings.append("设备信任已建立，但本地信任记录未保存；请检查存储权限后重启确认。")
-        }
-        if let device = pendingPeer,
-            await trustRepository.isTrusted(device.id)
-        {
-            do {
-                try await settings.recordPaired(device)
-            } catch {
-                warnings.append("设备信任已建立，但设备设置未保存；请检查存储权限后重试。")
-            }
-        } else if let device = pendingPeer {
-            persistWhenBilateralTrustCommits(device)
-        }
-        await onReceiveConfigurationChanged?()
-        guard !warnings.isEmpty else { return .committed }
-        return .committedWithWarning(warnings.joined(separator: " "))
+        _ = try await session.approve()
+        if !retired { await onReceiveConfigurationChanged?() }
+        return .committed
     }
-    func reject() async throws { try await coordinator.rejectPendingPairing() }
+    func reject() async throws { try await session.reject() }
     func awaitHostApproval() async throws -> SurfaceActionResult {
-        let pendingPeer = await coordinator.pendingPeerSummary()
-        _ = try await coordinator.awaitHostApproval()
-        var warnings: [String] = []
-        do {
-            try await trustStore.persistLatest(from: trustRepository)
-        } catch {
-            warnings.append("设备信任已建立，但本地信任记录未保存；请检查存储权限后重启确认。")
-        }
-        if let device = pendingPeer, await trustRepository.isTrusted(device.id) {
-            do {
-                try await settings.recordPaired(device)
-            } catch {
-                warnings.append("设备信任已建立，但设备设置未保存；请检查存储权限后重试。")
-            }
-        }
-        await onReceiveConfigurationChanged?()
-        guard !warnings.isEmpty else { return .committed }
-        return .committedWithWarning(warnings.joined(separator: " "))
+        _ = try await session.awaitApproval()
+        if !retired { await onReceiveConfigurationChanged?() }
+        return .committed
     }
-    func cancel() async throws { try await coordinator.cancelPendingPairing() }
-    func pendingPeer() async -> DeviceSummary? { await coordinator.pendingPeerSummary() }
-
-    private func persistWhenBilateralTrustCommits(_ device: DeviceSummary) {
-        let settings = self.settings
-        let trustStore = self.trustStore
-        let trustRepository = self.trustRepository
-        let onReceiveConfigurationChanged = self.onReceiveConfigurationChanged
-        Task {
-            let updates = await trustRepository.updates()
-            for await trust in updates {
-                guard !Task.isCancelled else { return }
-                guard trust.isTrusted(device.id) else { continue }
-                try? await trustStore.persistLatest(from: trustRepository)
-                try? await settings.recordPaired(device)
-                await onReceiveConfigurationChanged?()
-                return
-            }
-        }
+    func cancel() async throws { try await session.cancel() }
+    func pendingPeer() async -> DeviceSummary? { await session.pendingPeerSummary() }
+    func currentDurableState() async -> DurablePairingState? { await session.currentState() }
+    func startObservation() async { await session.startObservation() }
+    func stopObservation() async {
+        retired = true
+        await session.stopObservation()
+    }
+    func retrySaving() async throws {
+        _ = try await session.retrySaving()
+        if !retired { await onReceiveConfigurationChanged?() }
     }
 }
 
@@ -1013,67 +1164,136 @@ func makeReceiveFinishedHandler(
     }
 }
 
-private actor IncomingRuntimeController {
-    private let source: any IncomingTransferConnectionSource
+actor IncomingRuntimeController {
+    private let sources: [any IncomingTransferConnectionSource]
     private let trustRepository: TrustRepository
-    private let settings: RuntimeSettingsStore
+    private let authorizationProvider: (any PeerAuthorizationProviding)?
+    private let settings: any RuntimeReceiveSettingsProviding
     private let database: TransferDatabase
+    private let incomingDirectory: URL
     private let ownerID: DeviceID
     private let onReceiveFinished: @Sendable (TransferReceiveResult?) async -> Void
     private var listener: IncomingTransferListener?
+    private var directoryAuthorization: AuthorizedReceiveDirectories?
+    private(set) var directoryAuthorizationError: String?
+    private var transitionTask: Task<Void, Never>?
+    private var transitionGeneration = 0
+    private var stopTask: Task<Void, Never>?
     private var stopped = false
 
     init(
         source: any IncomingTransferConnectionSource,
         trustRepository: TrustRepository,
-        settings: RuntimeSettingsStore,
+        settings: any RuntimeReceiveSettingsProviding,
         database: TransferDatabase,
+        incomingDirectory: URL,
         ownerID: DeviceID,
         onReceiveFinished: @escaping @Sendable (TransferReceiveResult?) async -> Void
     ) {
-        self.source = source
+        self.init(sources: [source], trustRepository: trustRepository,
+            settings: settings, database: database, incomingDirectory: incomingDirectory,
+            ownerID: ownerID, onReceiveFinished: onReceiveFinished)
+    }
+
+    init(
+        sources: [any IncomingTransferConnectionSource],
+        trustRepository: TrustRepository,
+        authorizationProvider: (any PeerAuthorizationProviding)? = nil,
+        settings: any RuntimeReceiveSettingsProviding,
+        database: TransferDatabase,
+        incomingDirectory: URL,
+        ownerID: DeviceID,
+        onReceiveFinished: @escaping @Sendable (TransferReceiveResult?) async -> Void
+    ) {
+        precondition((1...2).contains(sources.count))
+        self.sources = sources
         self.trustRepository = trustRepository
+        self.authorizationProvider = authorizationProvider
         self.settings = settings
         self.database = database
+        self.incomingDirectory = incomingDirectory
         self.ownerID = ownerID
         self.onReceiveFinished = onReceiveFinished
     }
 
     func start() async {
-        guard listener == nil, !stopped else { return }
-        let created = await makeListener()
-        listener = created
-        await created.start()
+        await configureListener(restart: false)
     }
 
     func restart() async {
+        await configureListener(restart: true)
+    }
+
+    private func configureListener(restart: Bool) async {
         guard !stopped else { return }
-        if let listener { await listener.stop() }
-        listener = nil
-        await start()
+        transitionGeneration += 1
+        let generation = transitionGeneration
+        let previous = transitionTask
+        let task = Task {
+            await previous?.value
+            guard !stopped else { return }
+            if restart {
+                let previousListener = listener
+                listener = nil
+                await previousListener?.stop()
+                directoryAuthorization?.release()
+                directoryAuthorization = nil
+            }
+            guard !stopped, listener == nil else { return }
+            guard let (created, authorized) = await makeListener() else { return }
+            guard !stopped else { authorized.release(); return }
+            listener = created
+            directoryAuthorization = authorized
+            await created.start()
+        }
+        transitionTask = task
+        await task.value
+        if generation == transitionGeneration { transitionTask = nil }
     }
 
     func stop() async {
-        guard !stopped else { return }
+        if let stopTask { await stopTask.value; return }
         stopped = true
-        if let listener { await listener.stop() }
-        listener = nil
+        let pending = transitionTask
+        let task = Task {
+            await pending?.value
+            let previousListener = listener
+            listener = nil
+            await previousListener?.stop()
+            directoryAuthorization?.release()
+            directoryAuthorization = nil
+        }
+        stopTask = task
+        await task.value
     }
 
-    private func makeListener() async -> IncomingTransferListener {
+    private func makeListener() async -> (IncomingTransferListener, AuthorizedReceiveDirectories)? {
         let trust = await trustRepository.currentTrustStore()
         let snapshot = await settings.current()
+        let effective = authorizationProvider.map { Set($0.snapshot().peers.keys) }
+            ?? trust.trustedDeviceIDs
         let policy = RuntimeReceivePolicy.make(
             snapshot: snapshot,
-            trustedSources: trust.trustedDeviceIDs.subtracting([ownerID])
+            trustedSources: effective.subtracting([ownerID])
         )
-        return IncomingTransferListener(
-            source: source,
+        let authorized: AuthorizedReceiveDirectories
+        do {
+            authorized = try await settings.authorizeReceiveDirectories()
+            directoryAuthorizationError = nil
+            await settings.reportDirectoryAuthorizationError(nil)
+        } catch {
+            directoryAuthorizationError = DirectoryAuthorizationError.reselect.localizedDescription
+            await settings.reportDirectoryAuthorizationError(directoryAuthorizationError)
+            return nil
+        }
+        return (IncomingTransferListener(
+            sources: sources,
             policy: policy,
-            directories: await settings.downloadDirectory(),
+            directories: authorized.directories,
             database: database,
+            incomingDirectory: incomingDirectory,
             onReceiveFinished: onReceiveFinished
-        )
+        ), authorized)
     }
 }
 
@@ -1185,7 +1405,7 @@ actor RuntimeHistorySource {
                         totalBytes: Int64(clamping: record.aggregateSize),
                         route: record.route
                     ),
-                    peerName: names[record.peer] ?? "未知设备",
+                    peerName: names[record.peer] ?? "",
                     displayName: record.displayFilename,
                     bytesPerSecond: nil,
                     estimatedTimeRemaining: nil,

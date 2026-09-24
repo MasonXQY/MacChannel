@@ -18,6 +18,88 @@ struct WebRTCHandshakePublicMaterial: Sendable {
     let transcriptHash: Data
 }
 
+/// Check-time admission only: a successful check does not retract bytes already
+/// handed to WebRTC. No lock is held across transport calls or application work.
+final class WebRTCPeerAuthorizationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var unavailable = false
+    private var terminalError: WebRTCSecureChannelError = .transportClosed
+    private var registration: PeerAuthorizationRegistration?
+    private var provider: (any PeerAuthorizationProviding)?
+    private var invalidation: (@Sendable () -> Void)?
+
+    init() {}
+
+    convenience init(provider: any PeerAuthorizationProviding, lease: PeerAuthorizationLease,
+                     peer: DeviceID, publicKey: Data) throws {
+        self.init()
+        guard lease.peer == peer, lease.publicKey == publicKey else {
+            throw WebRTCSecureChannelError.authenticationFailed
+        }
+        do {
+            try provider.validate(lease)
+            self.provider = provider
+            let claimed = try provider.claim(lease) { [weak self] in self?.invalidate() }
+            let rejected = lock.withLock {
+                guard !unavailable else { return true }
+                registration = claimed
+                return false
+            }
+            if rejected { claimed.cancel(); throw PeerAuthorizationError.denied }
+            try requireCurrent()
+        } catch {
+            terminate()
+            throw WebRTCSecureChannelError.authenticationFailed
+        }
+    }
+
+    func onInvalidation(_ action: @escaping @Sendable () -> Void) {
+        let run = lock.withLock {
+            guard !unavailable else { return true }
+            invalidation = action
+            return false
+        }
+        if run { action() }
+    }
+
+    func requireCurrent() throws {
+        let current = try lock.withLock { () throws -> PeerAuthorizationRegistration? in
+            guard !unavailable else { throw terminalError }
+            return registration
+        }
+        do { try current?.requireCurrent() }
+        catch { invalidate(); throw WebRTCSecureChannelError.transportClosed }
+    }
+
+    private func invalidate() {
+        let action = lock.withLock { () -> (@Sendable () -> Void)? in
+            guard !unavailable else { return nil }
+            unavailable = true
+            let action = invalidation
+            invalidation = nil
+            return action
+        }
+        action?()
+    }
+
+    func terminate(_ error: WebRTCSecureChannelError = .transportClosed) {
+        let resources = lock.withLock { () -> (PeerAuthorizationRegistration?, (any PeerAuthorizationProviding)?) in
+            if !unavailable { terminalError = error }
+            unavailable = true
+            invalidation = nil
+            let current = registration
+            let owner = provider
+            registration = nil
+            provider = nil
+            return (current, owner)
+        }
+        // Destruction of external provider/scheduler objects must be unlocked.
+        withExtendedLifetime(resources.1) { resources.0?.cancel() }
+    }
+
+    deinit { terminate() }
+}
+
 /// An authenticated application stream over one ordered, reliable WebRTC data
 /// channel. Handshake frames never escape through `frames()`.
 public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelDelegate, @unchecked Sendable {
@@ -35,6 +117,7 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
     private let frameStream: AsyncThrowingStream<Data, Error>
     private let callbacks: OrderedDataChannelCallbacks
     private let testOnlyGenerateLocalCandidate: @Sendable () async -> Void
+    private let authorization: WebRTCPeerAuthorizationGate
 
     init(
         connectionID: UUID,
@@ -45,11 +128,13 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
         remoteDevice: DeviceID,
         remotePublicKey: Data,
         closeTransport: @escaping @Sendable () async -> Void,
-        testOnlyGenerateLocalCandidate: @escaping @Sendable () async -> Void
+        testOnlyGenerateLocalCandidate: @escaping @Sendable () async -> Void,
+        authorization: WebRTCPeerAuthorizationGate = WebRTCPeerAuthorizationGate()
     ) {
         self.route = route
         self.channel = channel
         self.testOnlyGenerateLocalCandidate = testOnlyGenerateLocalCandidate
+        self.authorization = authorization
         isOrderedReliable = channel.isOrdered
             && channel.maxPacketLifeTime == UInt16.max
             && channel.maxRetransmits == UInt16.max
@@ -72,7 +157,8 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
             remoteDevice: remoteDevice,
             remotePublicKey: remotePublicKey,
             frames: continuation,
-            closeTransport: closeTransport
+            closeTransport: closeTransport,
+            authorization: authorization
         )
         super.init()
         channel.delegate = self
@@ -94,15 +180,39 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
         await state.flushPendingSends()
     }
 
-    public func frames() -> AsyncThrowingStream<Data, Error> { frameStream }
+    public func frames() -> AsyncThrowingStream<Data, Error> {
+        frames(beforeDelivery: nil)
+    }
+
+    private func frames(beforeDelivery: (@Sendable () async -> Void)?) -> AsyncThrowingStream<Data, Error> {
+        // Pull through the existing bounded buffer; no forwarding task or second
+        // buffer can pre-admit elements on behalf of a suspended consumer.
+        AsyncThrowingStream(unfolding: { [frameStream, authorization] in
+            try authorization.requireCurrent()
+            var iterator = frameStream.makeAsyncIterator()
+            let frame = try await iterator.next()
+            if let beforeDelivery { await beforeDelivery() }
+            try authorization.requireCurrent()
+            return frame
+        })
+    }
+
+    func _testOnlyFrames(beforeDelivery: @escaping @Sendable () async -> Void) -> AsyncThrowingStream<Data, Error> {
+        frames(beforeDelivery: beforeDelivery)
+    }
 
     public func exportKey(label: String, context: Data, length: Int) async throws -> Data {
         try await state.exportKey(label: label, context: context, length: length)
     }
 
     public func close() async {
+        authorization.terminate()
         await state.close()
     }
+
+    func authorizationInvalidated() async { await state.authorizationInvalidated() }
+
+    deinit { authorization.terminate() }
 
     /// Bypasses the public send cap only for adversarial transport tests.
     func _testOnlySendRawFrame(_ frame: Data) -> Bool {
@@ -125,6 +235,15 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
         await state._testOnlyBackpressureWaiterCount()
     }
 
+    func _testOnlyQueueOperation(_ operation: @escaping @Sendable () async -> Void) {
+        callbacks.enqueue(operation, onOverflow: { [state] in await state.callbackQueueOverflowed() })
+    }
+
+    func _testOnlyQueueReceive(_ data: Data, completion: @escaping @Sendable (Bool) -> Void) {
+        callbacks.enqueue({ [state] in completion(await state.received(data)) },
+            onOverflow: { [state] in await state.callbackQueueOverflowed(); completion(false) })
+    }
+
     public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         let readyState = dataChannel.readyState.rawValue
         callbacks.enqueue(
@@ -136,7 +255,7 @@ public final class WebRTCSecureChannel: NSObject, SecureChannel, RTCDataChannelD
     public func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
         let data = buffer.data
         callbacks.enqueue(
-            { [state] in await state.received(data) },
+            { [state] in _ = await state.received(data) },
             onOverflow: { [state] in await state.callbackQueueOverflowed() }
         )
     }
@@ -251,6 +370,7 @@ private actor State {
     private let localAgreementKey: P256.KeyAgreement.PrivateKey
     private let frameContinuation: AsyncThrowingStream<Data, Error>.Continuation
     private let closeTransport: @Sendable () async -> Void
+    private let authorization: WebRTCPeerAuthorizationGate
     private var transcript: Data?
     private var remoteAgreementPublicKey: P256.KeyAgreement.PublicKey?
     private var helloSent = false
@@ -276,7 +396,8 @@ private actor State {
         remoteDevice: DeviceID,
         remotePublicKey: Data,
         frames: AsyncThrowingStream<Data, Error>.Continuation,
-        closeTransport: @escaping @Sendable () async -> Void
+        closeTransport: @escaping @Sendable () async -> Void,
+        authorization: WebRTCPeerAuthorizationGate
     ) {
         self.channel = channel
         self.connectionID = connectionID
@@ -289,6 +410,7 @@ private actor State {
         localAgreementKey = P256.KeyAgreement.PrivateKey()
         frameContinuation = frames
         self.closeTransport = closeTransport
+        self.authorization = authorization
     }
 
     func channelStateChanged(_ readyState: RTCDataChannelState) {
@@ -315,23 +437,28 @@ private actor State {
     }
 
     func waitUntilAuthenticated() async throws {
+        try requireAuthorization()
         if authenticated { return }
         if let terminalError { throw terminalError }
         try await withCheckedThrowingContinuation { continuation in
             authenticationWaiters.append(continuation)
         }
+        try requireAuthorization()
     }
 
-    func received(_ data: Data) {
-        guard !closed else { return }
+    @discardableResult
+    func received(_ data: Data) -> Bool {
+        guard !closed else { return false }
+        guard (try? requireAuthorization()) != nil else { return false }
         guard data.count <= WebRTCSecureChannel.maximumMessageBytes else {
             fail(.messageTooLarge)
-            return
+            return false
         }
         if authenticated {
+            guard (try? requireAuthorization()) != nil else { return false }
             switch frameContinuation.yield(data) {
             case .enqueued:
-                break
+                return true
             case .dropped, .terminated:
                 fail(.transportClosed)
             @unknown default:
@@ -342,6 +469,7 @@ private actor State {
         } else {
             fail(.authenticationFailed)
         }
+        return false
     }
 
     func bufferedAmountChanged(_ amount: UInt64) {
@@ -365,19 +493,23 @@ private actor State {
     }
 
     func sendApplication(_ data: Data) async throws {
+        try requireAuthorization()
         guard authenticated else { throw terminalError ?? .notAuthenticated }
         guard !closed else { throw WebRTCSecureChannelError.transportClosed }
         while testOnlyBackpressureForced
                 || channel.value.bufferedAmount > WebRTCSecureChannel.bufferedAmountHighWaterMark {
             try await waitForBackpressure(frameBytes: data.count)
+            try requireAuthorization()
             guard !closed else { throw WebRTCSecureChannelError.transportClosed }
         }
+        try requireAuthorization()
         guard channel.value.sendData(RTCDataBuffer(data: data, isBinary: true)) else {
             throw WebRTCSecureChannelError.sendFailed
         }
     }
 
     func exportKey(label: String, context: Data, length: Int) throws -> Data {
+        try requireAuthorization()
         guard authenticated, let transcript, let remoteAgreementPublicKey else {
             throw WebRTCSecureChannelError.notAuthenticated
         }
@@ -454,6 +586,7 @@ private actor State {
     }
 
     func close() async {
+        authorization.terminate()
         if !closed {
             closed = true
             channel.value.delegate = nil
@@ -594,6 +727,7 @@ private actor State {
 
     private func completeAuthenticationIfReady() {
         guard readySent, remoteReady, !authenticated, !closed else { return }
+        guard (try? requireAuthorization()) != nil else { return }
         authenticated = true
         let waiters = authenticationWaiters
         authenticationWaiters.removeAll()
@@ -601,6 +735,7 @@ private actor State {
     }
 
     private func sendHandshake(_ message: HandshakeMessage) {
+        guard (try? requireAuthorization()) != nil else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         guard let encoded = try? encoder.encode(message) else {
@@ -619,12 +754,27 @@ private actor State {
 
     private func fail(_ error: WebRTCSecureChannelError) {
         guard terminalError == nil, !closed else { return }
+        authorization.terminate(error)
         terminalError = error
         closed = true
         channel.value.delegate = nil
         channel.value.close()
         _ = beginTransportClose()
         finish(error)
+    }
+
+    private func requireAuthorization() throws {
+        do { try authorization.requireCurrent() }
+        catch {
+            let error: WebRTCSecureChannelError = authenticated ? .transportClosed : .authenticationFailed
+            fail(error)
+            throw terminalError ?? error
+        }
+    }
+
+    func authorizationInvalidated() async {
+        fail(authenticated ? .transportClosed : .authenticationFailed)
+        await close()
     }
 
     private func beginTransportClose() -> Task<Void, Never> {

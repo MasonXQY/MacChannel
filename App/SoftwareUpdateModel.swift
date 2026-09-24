@@ -1,58 +1,62 @@
 import Foundation
+import MacChannelCore
 
-struct InstalledAppVersion: Equatable, Sendable {
-    let shortVersion: String?
-    let build: String?
+package struct InstalledAppVersion: Equatable, Sendable {
+    package let shortVersion: String?
+    package let build: String?
 
-    init(info: [String: Any]) {
+    package init(info: [String: Any]) {
         shortVersion = info["CFBundleShortVersionString"] as? String
         build = info["CFBundleVersion"] as? String
     }
 
-    init(bundle: Bundle = .main) {
+    package init(bundle: Bundle = .main) {
         self.init(info: bundle.infoDictionary ?? [:])
     }
 
-    var localizedText: String {
-        guard let shortVersion, let build else { return "DropMesh，版本未知" }
-        return "DropMesh \(shortVersion)（\(build)）"
+    package var localizedText: String {
+        guard let shortVersion, let build else { return L10n.text(.updateVersionUnknown) }
+        return L10n.text(.updateVersion, shortVersion, build)
     }
 }
 
-enum SoftwareUpdatePhase: Equatable, Sendable {
+package enum SoftwareUpdatePhase: Equatable, Sendable {
     case idle
     case checking
     case upToDate
     case available(version: String)
     case downloading
     case installDeferred
+    case managedByAppStore
     case failed
     case securityFailure
 
-    var statusText: String {
+    package var statusText: String {
         switch self {
         case .idle:
-            "每天自动检查一次，是否安装由你决定。"
+            L10n.text(.updateAutomaticExplanation)
         case .checking:
-            "正在检查更新…"
+            L10n.text(.updateChecking)
         case .upToDate:
-            "当前已是最新版本。"
+            L10n.text(.updateUpToDate)
         case let .available(version):
-            "发现新版本 \(version)。"
+            L10n.text(.updateVersionAvailable, String(version))
         case .downloading:
-            "正在下载更新…"
+            L10n.text(.updateDownloading)
         case .installDeferred:
-            "更新已下载，将在退出后安装。"
+            L10n.text(.updateDeferred)
+        case .managedByAppStore:
+            L10n.text(.updateStoreManaged)
         case .failed:
-            "暂时无法检查更新，请稍后重试。"
+            L10n.text(.updateCheckFailed)
         case .securityFailure:
-            "无法验证更新的安全性。"
+            L10n.text(.updateSecurityFailure)
         }
     }
 
-    var hasAvailableUpdate: Bool {
+    package var hasAvailableUpdate: Bool {
         switch self {
-        case .available, .downloading, .installDeferred:
+        case .available, .downloading, .installDeferred, .managedByAppStore:
             true
         case .idle, .checking, .upToDate, .failed, .securityFailure:
             false
@@ -60,19 +64,32 @@ enum SoftwareUpdatePhase: Equatable, Sendable {
     }
 }
 
-struct SoftwareUpdateSnapshot: Equatable, Sendable {
-    let installedVersion: InstalledAppVersion
-    let phase: SoftwareUpdatePhase
-    let canCheck: Bool
-    let lastCheckedAt: Date?
+package struct SoftwareUpdateSnapshot: Equatable, Sendable {
+    package let installedVersion: InstalledAppVersion
+    package let phase: SoftwareUpdatePhase
+    package let canCheck: Bool
+    package let lastCheckedAt: Date?
 
-    var canShowUpdate: Bool {
+    package init(
+        installedVersion: InstalledAppVersion,
+        phase: SoftwareUpdatePhase,
+        canCheck: Bool,
+        lastCheckedAt: Date?
+    ) {
+        self.installedVersion = installedVersion
+        self.phase = phase
+        self.canCheck = canCheck
+        self.lastCheckedAt = lastCheckedAt
+    }
+
+    package var canShowUpdate: Bool {
         phase.hasAvailableUpdate && canCheck
     }
 
-    func lastCheckedText(timeZone: TimeZone = .current) -> String {
-        guard let lastCheckedAt else { return "尚未检查" }
+    package func lastCheckedText(timeZone: TimeZone = .current) -> String {
+        guard let lastCheckedAt else { return L10n.text(.updateNeverChecked) }
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: L10n.language.localeIdentifier())
         formatter.dateStyle = .short
         formatter.timeStyle = .short
         formatter.timeZone = timeZone
@@ -81,8 +98,32 @@ struct SoftwareUpdateSnapshot: Equatable, Sendable {
 }
 
 @MainActor
-protocol SoftwareUpdateServicing: AnyObject {
+package protocol SoftwareUpdateServicing: AnyObject {
     var isAvailable: Bool { get }
     func checkForUpdates()
     func showAvailableUpdate()
+}
+
+@MainActor
+package protocol SoftwareUpdateSnapshotProviding: AnyObject {
+    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { get }
+    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot>
+}
+
+@MainActor
+package protocol SoftwareUpdateLaunchControlling: AnyObject {
+    func observeTransfers(
+        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>,
+        onReady: @escaping @MainActor () -> Void
+    )
+    func start()
+}
+
+@MainActor
+package protocol SoftwareUpdateControlling:
+    SoftwareUpdateServicing,
+    SoftwareUpdateSnapshotProviding,
+    SoftwareUpdateLaunchControlling
+{
+    func stop()
 }

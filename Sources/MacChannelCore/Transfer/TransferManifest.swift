@@ -129,7 +129,10 @@ final class PinnedSource: @unchecked Sendable {
             sourceStatus.st_size >= 0
         else { throw TransferProtocolError.sourceChanged }
 
-        let parent = url.deletingLastPathComponent()
+        // A user-selected file grants access to that file, not permission to
+        // create siblings in its parent. Keep snapshot writes in the app's
+        // temporary directory (inside the container for sandboxed builds).
+        let parent = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
         let parentDescriptor = Darwin.open(
             parent.path,
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
@@ -150,6 +153,16 @@ final class PinnedSource: @unchecked Sendable {
             throw TransferProtocolError.unsupportedSource
         }
         defer { Darwin.close(directoryDescriptor) }
+        var directoryStatus = stat()
+        var namedDirectoryStatus = stat()
+        guard fstat(directoryDescriptor, &directoryStatus) == 0,
+            fstatat(parentDescriptor, directoryName, &namedDirectoryStatus, AT_SYMLINK_NOFOLLOW) == 0,
+            directoryStatus.st_mode & S_IFMT == S_IFDIR,
+            directoryStatus.st_uid == geteuid(),
+            directoryStatus.st_mode & 0o777 == S_IRWXU,
+            directoryStatus.st_dev == namedDirectoryStatus.st_dev,
+            directoryStatus.st_ino == namedDirectoryStatus.st_ino
+        else { throw TransferProtocolError.unsupportedSource }
         let cloneName = "snapshot"
         guard fclonefileat(sourceDescriptor, directoryDescriptor, cloneName, 0) == 0 else {
             throw TransferProtocolError.unsupportedSource

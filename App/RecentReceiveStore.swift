@@ -4,14 +4,23 @@ import MacChannelCore
 struct RecentReceiveSummary: Identifiable, Equatable, Sendable {
     let id: TransferID
     let source: DeviceID?
-    let sourceName: String
+    private let storedSourceName: String
+    var sourceName: String { storedSourceName.isEmpty ? L10n.text(.deviceOther) : storedSourceName }
     let receivedURLs: [URL]
     let completedAt: Date
+
+    init(id: TransferID, source: DeviceID?, sourceName: String, receivedURLs: [URL], completedAt: Date) {
+        self.id = id
+        self.source = source
+        storedSourceName = sourceName
+        self.receivedURLs = receivedURLs
+        self.completedAt = completedAt
+    }
 
     var title: String {
         receivedURLs.count == 1
             ? receivedURLs[0].lastPathComponent
-            : "已收到 \(receivedURLs.count) 个文件"
+            : L10n.text(.receiveFileCount, Int64(receivedURLs.count))
     }
 }
 
@@ -47,7 +56,7 @@ final class RecentReceiveStore {
             RecentReceiveSummary(
                 id: result.transferID,
                 source: result.source,
-                sourceName: sourceName.isEmpty ? "其他设备" : sourceName,
+                sourceName: sourceName,
                 receivedURLs: result.receivedURLs,
                 completedAt: completedAt ?? result.completedAt
             )

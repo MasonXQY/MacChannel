@@ -4,6 +4,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$repo_root"
 source Scripts/update-test-paths.sh
+source Scripts/app-build-defaults.sh
+test "$macchannel_default_version" = 1.2.6
+test "$macchannel_default_build_number" = 21
 test_root="$(macchannel_create_test_root macchannel-build-contract)"
 macchannel_require_canonical_test_root "$test_root"
 output_app="$test_root/output/MacChannel.app"

@@ -39,3 +39,12 @@ still identify the live inspected containers when audited.
 
 Every raw capture is limited to 16 MiB. Collection failures, truncation, unavailable logs, missing
 expiry observation or missing independent signature are BLOCKED, never PASS.
+
+## Separate synthetic fixture tool
+
+`Tools/PrivacyEvidenceVerifier` implements a separate offline integrity checker for synthetic test
+fixtures. Its caller supplies a test trust policy and deterministic time, so even a successful
+`FIXTURE_INTEGRITY_OK_NOT_RELEASE_APPROVAL` result is not production attestation, semantic privacy
+evidence, or release approval. It does not implement the producer, independent production trust
+root, live-container checks, or runtime verifier specified above. This production schema therefore
+remains **NOT IMPLEMENTED** and the existing runtime privacy gates remain BLOCKED.

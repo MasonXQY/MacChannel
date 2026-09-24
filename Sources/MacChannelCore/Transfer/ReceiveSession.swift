@@ -2,22 +2,41 @@ import CryptoKit
 import Darwin
 import Foundation
 
+public struct TransferReceivedItemMetadata: Equatable, Sendable {
+    public let relativePathComponents: [String]
+    public let name: String
+    public let size: UInt64
+    public let isDirectory: Bool
+
+    public init(relativePathComponents: [String], name: String, size: UInt64, isDirectory: Bool) {
+        self.relativePathComponents = relativePathComponents
+        self.name = name
+        self.size = size
+        self.isDirectory = isDirectory
+    }
+}
+
 public struct TransferReceiveResult: Equatable, Sendable {
     public let transferID: TransferID
     public let receivedURLs: [URL]
     public let source: DeviceID?
     public let completedAt: Date
+    /// Sanitized local projection of the verified manifest. Empty preserves
+    /// source compatibility for legacy producers which only report output URLs.
+    public let items: [TransferReceivedItemMetadata]
 
     public init(
         transferID: TransferID,
         receivedURLs: [URL],
         source: DeviceID? = nil,
-        completedAt: Date = Date()
+        completedAt: Date = Date(),
+        items: [TransferReceivedItemMetadata] = []
     ) {
         self.transferID = transferID
         self.receivedURLs = receivedURLs
         self.source = source
         self.completedAt = completedAt
+        self.items = items
     }
 }
 
@@ -422,7 +441,8 @@ public struct ReceiveSession: Sendable {
                         transferID: transferID,
                         receivedURLs: receivedURLs,
                         source: durableStorage?.source,
-                        completedAt: completedAt
+                        completedAt: completedAt,
+                        items: Self.receivedItemMetadata(from: manifest)
                     )
                 case .cancel:
                     throw TransferProtocolError.cancelled
@@ -476,6 +496,22 @@ public struct ReceiveSession: Sendable {
             if closeChannelOnExit { await channel.close() }
             if error is CancellationError { throw TransferProtocolError.cancelled }
             throw error
+        }
+    }
+
+    private static func receivedItemMetadata(from manifest: TransferManifest) -> [TransferReceivedItemMetadata] {
+        guard let root = manifest.entries.first else { return [] }
+        if root.kind == .file {
+            return [TransferReceivedItemMetadata(relativePathComponents: [], name: root.relativePath.components[0],
+                size: root.size, isDirectory: false)]
+        }
+        let rootComponents = root.relativePath.components
+        return manifest.entries.compactMap { entry in
+            let components = entry.relativePath.components
+            guard components.count > rootComponents.count,
+                  components.starts(with: rootComponents) else { return nil }
+            return TransferReceivedItemMetadata(relativePathComponents: Array(components.dropFirst(rootComponents.count)), name: components.last!,
+                size: entry.size, isDirectory: entry.kind == .directory)
         }
     }
 
@@ -1436,9 +1472,7 @@ final class DescriptorStagingTree: @unchecked Sendable {
         let destination = destinationDirectory.standardizedFileURL
         var status = stat()
         guard fstat(descriptor, &status) == 0,
-            status.st_mode & S_IFMT == S_IFDIR,
-            status.st_uid == geteuid(),
-            status.st_mode & S_IWUSR != 0
+            status.st_mode & S_IFMT == S_IFDIR
         else { throw TransferProtocolError.destinationEscape }
         try requireStagingPathIdentity()
 
@@ -1472,6 +1506,9 @@ final class DescriptorStagingTree: @unchecked Sendable {
             if errno == EEXIST {
                 number += 1
                 continue
+            }
+            if errno == EACCES || errno == EPERM || errno == EROFS {
+                throw ReceiveStoreError.destinationNotWritable
             }
             throw TransferProtocolError.destinationEscape
         }

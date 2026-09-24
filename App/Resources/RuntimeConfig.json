@@ -1,3 +1,5 @@
 {
-  "rendezvousURL": "wss://channel.zensys-tech.com/v1/ws"
+  "rendezvousURL": "wss://channel.zensys-tech.com/v1/ws",
+  "accountServiceOrigin": "https://account-dev.zensys-tech.com",
+  "accountAudience": "com.zensystech.dropmesh.web"
 }

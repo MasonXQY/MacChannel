@@ -3,17 +3,6 @@ import MacChannelCore
 import SwiftUI
 
 @MainActor
-protocol SoftwareUpdateSnapshotProviding: AnyObject {
-    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { get }
-    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot>
-}
-
-extension SparkleUpdateController: SoftwareUpdateSnapshotProviding {
-    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { snapshot }
-    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot> { snapshots() }
-}
-
-@MainActor
 protocol ReceiveNotificationServicing: AnyObject {
     func receiveNotificationSnapshots() -> AsyncStream<ReceiveNotificationSnapshot>
     func refreshReceiveNotifications() async
@@ -36,6 +25,8 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     let transferModel: TransferSurfaceModel
     let pairingModel: PairingSurfaceModel
     let settingsModel: SettingsSurfaceModel
+    let localNetworkModel: LocalNetworkPermissionModel
+    let accountModel: MacAccountSettingsModel
     let updateService: any SoftwareUpdateServicing
 
     private let transferService: any TransferSurfaceServicing
@@ -44,7 +35,11 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     private let directorySelector: any DirectorySelecting
     private let notificationService: (any ReceiveNotificationServicing)?
     private let transferSurfacePresentation: ((TransferSurfaceSection) -> Void)?
+    private let sendFailurePresentation: ((String) -> Void)?
     private let onRetryRuntime: () -> Void
+    private let onRetryPresence: () -> Void
+    private let onRetryTrustSave: () -> Void
+    private let onUseLocalNetwork: () -> Void
     private let now: () -> Date
 
     private var activePopover: NSPopover?
@@ -78,10 +73,16 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         transferModel: TransferSurfaceModel = TransferSurfaceModel(),
         pairingModel: PairingSurfaceModel = PairingSurfaceModel(),
         settingsModel: SettingsSurfaceModel = SettingsSurfaceModel(),
+        localNetworkModel: LocalNetworkPermissionModel = LocalNetworkPermissionModel(),
+        accountController: AccountSessionController? = nil,
         updateService: (any SoftwareUpdateServicing)? = nil,
         notificationService: (any ReceiveNotificationServicing)? = nil,
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
+        sendFailurePresentation: ((String) -> Void)? = nil,
         onRetryRuntime: @escaping () -> Void = {},
+        onRetryPresence: @escaping () -> Void = {},
+        onRetryTrustSave: @escaping () -> Void = {},
+        onUseLocalNetwork: @escaping () -> Void = {},
         now: @escaping () -> Date = Date.init
     ) {
         self.fanPanel = fanPanel
@@ -92,15 +93,36 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         self.transferModel = transferModel
         self.pairingModel = pairingModel
         self.settingsModel = settingsModel
+        self.localNetworkModel = localNetworkModel
+        self.accountModel = MacAccountSettingsModel(controller: accountController)
         self.updateService = updateService ?? InactiveSoftwareUpdateService()
         self.notificationService = notificationService
         self.transferSurfacePresentation = transferSurfacePresentation
+        self.sendFailurePresentation = sendFailurePresentation
         self.onRetryRuntime = onRetryRuntime
+        self.onRetryPresence = onRetryPresence
+        self.onRetryTrustSave = onRetryTrustSave
+        self.onUseLocalNetwork = onUseLocalNetwork
         self.now = now
     }
 
     func bind(to controller: StatusItemController) {
         statusController = controller
+        controller.onSendFailure = { [weak self] message in
+            guard let self else { return }
+            if let sendFailurePresentation {
+                sendFailurePresentation(message)
+            } else {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = L10n.text(.transferFailed)
+                alert.informativeText = message
+                alert.addButton(withTitle: L10n.text(.commonClose))
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+        }
+        controller.onUseLocalNetwork = onUseLocalNetwork
         controller.updateDeviceNames(deviceNames)
         if let updates = updateService as? any SoftwareUpdateSnapshotProviding {
             updateSoftwareUpdate(updates.softwareUpdateSnapshot)
@@ -190,6 +212,44 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
         }
     }
 
+    func observeDurablePairingStates(_ states: AsyncStream<DurablePairingState>) {
+        let previous = pairingTask
+        previous?.cancel()
+        pairingTask = Task { [weak self, pairingService] in
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await pairingService.startObservation()
+            for await state in states {
+                guard !Task.isCancelled else { break }
+                self?.updateDurablePairingState(state)
+            }
+            await pairingService.stopObservation()
+        }
+    }
+
+    func updateDurablePairingState(_ state: DurablePairingState) {
+        pairingModel.updateDurableState(state)
+        switch state {
+        case let .active(raw):
+            if case .confirmed = raw { return }
+            updatePairingState(raw)
+        case let .paired(peer):
+            guard pairingModel.state == .confirmed(peer) else { return }
+            updatePairingState(.confirmed(peer))
+        case let .saving(peer), let .saveFailed(peer):
+            pairingModel.pendingPeer = peer
+        }
+    }
+
+    func stopPairingObservation() async {
+        await pairingModel.retire()
+        let task = pairingTask
+        pairingTask = nil
+        task?.cancel()
+        await task?.value
+        await pairingService.stopObservation()
+    }
+
     func observeSettings(
         _ snapshots: @escaping @Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>
     ) {
@@ -265,10 +325,14 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     func updateSettings(_ snapshot: SettingsSurfaceSnapshot) {
+        let removedIDs = Set(settingsModel.devices.map(\.id)).subtracting(snapshot.devices.map(\.id))
+        for id in removedIDs { pairingModel.invalidateSuccess(for: id) }
         settingsModel.localDisplayName = snapshot.localDisplayName
         settingsModel.defaultDirectory = snapshot.defaultDirectory
         settingsModel.autoReceive = snapshot.autoReceive
         settingsModel.launchAtLogin = snapshot.launchAtLogin
+        settingsModel.actionErrorContent = snapshot.directoryAuthorizationError == nil
+            ? nil : .keys([.receiveDirectoryReauthorize])
         updateDeviceSettings(snapshot.devices)
         if case let .confirmed(peer) = pairingModel.state,
            !snapshot.devices.contains(where: { $0.id == peer.id })
@@ -291,6 +355,9 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
 
     func updateRuntimeStatus(_ status: AppRuntimeStatus) {
         settingsModel.runtimeStatus = status
+    }
+    func updateRuntimePresence(_ snapshot: RuntimePresenceSnapshot) {
+        settingsModel.runtimePresence = snapshot
     }
 
     func updateReceiveNotification(
@@ -332,10 +399,10 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 snapshot: snapshot,
                 peerName: persistedHistory[snapshot.id]?.peerName
                     ?? deviceNames[snapshot.peer]
-                    ?? "未知设备",
+                    ?? "",
                 displayName: persistedHistory[snapshot.id]?.displayName
                     ?? liveTerminalHistory[snapshot.id]?.displayName
-                    ?? "文件传输",
+                    ?? "",
                 bytesPerSecond: speed,
                 estimatedTimeRemaining: remaining,
                 outputURL: persistedHistory[snapshot.id]?.outputURL
@@ -390,7 +457,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                     totalBytes: Int64(clamping: record.aggregateSize),
                     route: record.route
                 ),
-                peerName: deviceNames[record.peer] ?? "未知设备",
+                peerName: deviceNames[record.peer] ?? "",
                 displayName: record.displayFilename,
                 bytesPerSecond: nil,
                 estimatedTimeRemaining: nil,
@@ -449,6 +516,7 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
     }
 
     func invalidate() {
+        localNetworkModel.invalidateObservation()
         deviceTask?.cancel()
         deviceTask = nil
         transferTask?.cancel()
@@ -501,25 +569,27 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 service: transferService,
                 initialSection: initialSection,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
-            )
+            ).environmentObject(LocalizationController.shared)
         )
         show(popover, relativeTo: anchor)
     }
 
     private func showPairing(relativeTo anchor: NSView) {
+        onUseLocalNetwork()
         let popover = configuredPopover()
         popover.contentViewController = NSHostingController(
             rootView: PairingView(
                 model: pairingModel,
                 service: pairingService,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
-            )
+            ).environmentObject(LocalizationController.shared)
         )
         show(popover, relativeTo: anchor)
     }
 
     private func showSettings(relativeTo anchor: NSView) {
         startReceiveNotificationRefresh()
+        localNetworkModel.refresh()
         let popover = configuredPopover()
         popover.contentViewController = NSHostingController(
             rootView: SettingsView(
@@ -527,9 +597,13 @@ final class AppSurfaceController: NSObject, NSPopoverDelegate {
                 service: settingsService,
                 directorySelector: directorySelector,
                 updateService: updateService,
+                localNetworkModel: localNetworkModel,
+                accountModel: accountModel,
                 onRetryRuntime: onRetryRuntime,
+                onRetryPresence: onRetryPresence,
+                onRetryTrustSave: onRetryTrustSave,
                 onDismiss: { [weak self] in self?.closeActiveSurface() }
-            )
+            ).environmentObject(LocalizationController.shared)
         )
         show(popover, relativeTo: anchor)
     }

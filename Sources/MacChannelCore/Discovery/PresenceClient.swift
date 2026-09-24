@@ -94,31 +94,53 @@ public final class URLSessionPresenceWebSocket: PresenceWebSocket, @unchecked Se
 public actor PresenceClient {
     public static let heartbeatInterval: TimeInterval = 20
 
-    private let directory: DeviceDirectory
+    private let applyPresence: @Sendable (DevicePresence) async -> Void
+    private let onDeliveryAdmitted: (@Sendable (DevicePresence) -> Void)?
     private let heartbeatInterval: TimeInterval
     private var onlineDevices: Set<DeviceID> = []
+    // Includes offline peers until drain: an older in-flight renewal may still
+    // land after their offline event, so final cleanup must clear them too.
+    private var touchedDevices: Set<DeviceID> = []
     private var heartbeatTask: Task<Void, Never>?
+    private var disconnectTask: Task<Void, Never>?
+    private var generation: UInt64 = 0
+    private var acceptingEvents = true
+    private var deliveries: [UUID: Task<Void, Never>] = [:]
+    private var deliveryTails: [DeviceID: (id: UUID, task: Task<Void, Never>)] = [:]
 
     public init(
         directory: DeviceDirectory,
         heartbeatInterval: TimeInterval = PresenceClient.heartbeatInterval
     ) {
-        self.directory = directory
+        self.applyPresence = { await directory.apply($0) }
+        self.onDeliveryAdmitted = nil
         self.heartbeatInterval = heartbeatInterval
+    }
+
+    /// Internal directory-delivery seam for deterministic actor-hop drain tests.
+    init(heartbeatInterval: TimeInterval,
+         applyPresence: @escaping @Sendable (DevicePresence) async -> Void,
+         onDeliveryAdmitted: (@Sendable (DevicePresence) -> Void)? = nil) {
+        self.heartbeatInterval = heartbeatInterval
+        self.applyPresence = applyPresence
+        self.onDeliveryAdmitted = onDeliveryAdmitted
     }
 
     deinit { heartbeatTask?.cancel() }
 
     func receiveAuthenticated(_ event: RendezvousPresenceEvent) async {
+        guard acceptingEvents else { return }
         switch event {
         case let .availability(device, isOnline):
+            touchedDevices.insert(device)
             if isOnline { onlineDevices.insert(device) } else { onlineDevices.remove(device) }
-            await directory.apply(.internet(device, online: isOnline))
+            await deliver(.internet(device, online: isOnline), for: device)
         }
     }
 
     func startHeartbeats() {
-        guard heartbeatTask == nil else { return }
+        guard heartbeatTask == nil, disconnectTask == nil else { return }
+        acceptingEvents = true
         heartbeatTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
@@ -129,24 +151,63 @@ public actor PresenceClient {
         }
     }
 
-    func stopHeartbeats() {
-        heartbeatTask?.cancel()
+    func stopHeartbeats() async {
+        let heartbeat = heartbeatTask
+        heartbeat?.cancel()
+        await heartbeat?.value
         heartbeatTask = nil
     }
 
     func disconnect() async {
-        stopHeartbeats()
-        let previouslyOnline = onlineDevices
+        if let disconnectTask { await disconnectTask.value; return }
+        // Retire renewal before any directory/heartbeat actor hop. Keep the
+        // handle until joined so concurrent disconnects share the same drain.
+        generation += 1
+        acceptingEvents = false
+        heartbeatTask?.cancel()
+        let pendingDeliveries = Array(deliveries.values)
+        let previouslyOnline = touchedDevices
+        touchedDevices = []
         onlineDevices = []
-        for device in previouslyOnline {
-            await directory.apply(.internet(device, online: false))
+        let drain = Task {
+            await stopHeartbeats()
+            for delivery in pendingDeliveries { await delivery.value }
+            for device in previouslyOnline {
+                await applyPresence(.internet(device, online: false))
+            }
         }
+        disconnectTask = drain
+        await drain.value
+        disconnectTask = nil
     }
 
     func renewOnlinePresence() async {
+        let currentGeneration = generation
         for device in onlineDevices {
-            await directory.apply(.internet(device, online: true))
+            guard generation == currentGeneration, !Task.isCancelled else { return }
+            guard acceptingEvents, onlineDevices.contains(device) else { continue }
+            await deliver(.internet(device, online: true), for: device)
         }
+    }
+
+    /// Preserve admission order per peer across actor hops. A newer offline
+    /// event waits for an already admitted renewal, while unrelated peers can
+    /// still go offline immediately. Disconnect joins every admitted delivery.
+    private func deliver(_ event: DevicePresence, for device: DeviceID) async {
+        let id = UUID()
+        let previous = deliveryTails[device]?.task
+        let delivery = Task {
+            await previous?.value
+            await applyPresence(event)
+        }
+        deliveries[id] = delivery
+        deliveryTails[device] = (id, delivery)
+        // Synchronous internal observation: tests can release a held predecessor
+        // only after this delivery is queued, without introducing an actor hop.
+        onDeliveryAdmitted?(event)
+        await delivery.value
+        deliveries[id] = nil
+        if deliveryTails[device]?.id == id { deliveryTails[device] = nil }
     }
 }
 
@@ -171,6 +232,8 @@ public actor AuthenticatedPresenceSession {
     private var running = false
     private var readerActive = false
     private var livenessTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
+    private var retired = false
     private let presenceStream: AsyncStream<RendezvousPresenceEvent>
     private let signalStream: AsyncStream<RendezvousSignalFrame>
     private let trustResultStream: AsyncStream<RendezvousTrustResult>
@@ -183,6 +246,16 @@ public actor AuthenticatedPresenceSession {
     private let trustRecordContinuation: AsyncStream<SignedTrustRecord>.Continuation
     private var pendingTrustRecords: [SignedTrustRecord] = []
     private var streamsFinished = false
+    private enum AccountPhase { case challenge, bind, unbind }
+    private struct AccountOperation {
+        let id: UUID
+        var phase: AccountPhase
+        var payload: Data?
+        let continuation: CheckedContinuation<Void, Error>
+    }
+    private var accountOperation: AccountOperation?
+    private var accountTimeoutTask: Task<Void, Never>?
+    private var accountSendTasks: [UUID: Task<Void, Never>] = [:]
 
     public init(
         identity: DeviceIdentity, origin: URL, socket: any PresenceWebSocket,
@@ -255,6 +328,132 @@ public actor AuthenticatedPresenceSession {
     public func protocolErrors() -> AsyncStream<RendezvousProtocolError> { protocolErrorStream }
     public func verifiedTrustRecords() -> AsyncStream<SignedTrustRecord> { trustRecordStream }
 
+    /// Requires a connected session with its run loop active. Only one account
+    /// control operation may be pending; admission remains busy until all prior
+    /// sends return, even after acknowledgement. Failure retires the socket because the
+    /// wire acknowledgements have no request IDs. Success grants no local trust.
+    public func bindAccountRoute(accessToken: String, audience: String, groupID: String,
+                                 generation: UInt64, timeout: Duration = .seconds(10)) async throws {
+        guard (1...4096).contains(accessToken.utf8.count), (1...255).contains(audience.utf8.count),
+              let group = UUID(uuidString: groupID), group.uuidString.lowercased() == groupID,
+              generation > 0, generation <= UInt64(Int64.max) else {
+            throw AuthenticatedPresenceError.invalidFrame
+        }
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "type": "account-route-bind-v1", "accessToken": accessToken,
+            "audience": audience, "groupID": groupID, "generation": generation,
+        ], options: [.sortedKeys, .withoutEscapingSlashes])
+        try await performAccountOperation(phase: .challenge, payload: payload, timeout: timeout)
+    }
+
+    /// An acknowledgement confirms only the socket control operation. It grants
+    /// no local trust or transfer authority; callers still use route admission.
+    public func unbindAccountRoute(timeout: Duration = .seconds(10)) async throws {
+        try await performAccountOperation(phase: .unbind, payload: nil, timeout: timeout)
+    }
+
+    private func performAccountOperation(phase: AccountPhase, payload: Data?, timeout: Duration) async throws {
+        try Task.checkCancellation()
+        guard running, readerActive, !retired else {
+            throw AuthenticatedPresenceError.transport("account_route_unavailable")
+        }
+        guard accountOperation == nil, accountSendTasks.isEmpty else {
+            throw AuthenticatedPresenceError.transport("account_route_busy")
+        }
+        guard timeout > .zero, timeout <= .seconds(60) else {
+            throw AuthenticatedPresenceError.invalidFrame
+        }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                accountOperation = AccountOperation(id: id, phase: phase, payload: payload, continuation: continuation)
+                accountTimeoutTask = Task { [weak self] in
+                    do { try await Task.sleep(for: timeout) } catch { return }
+                    await self?.failAccountOperation(id: id, error: AuthenticatedPresenceError.transport("account_route_timeout"))
+                }
+                let frame = Data("{\"type\":\"\(phase == .unbind ? "account-route-unbind" : "account-route-bind-challenge")\"}".utf8)
+                sendAccountFrame(frame, id: id)
+            }
+        } onCancel: {
+            Task { await self.failAccountOperation(id: id, error: CancellationError()) }
+        }
+    }
+
+    private func sendAccountFrame(_ data: Data, id: UUID) {
+        let sendID = UUID()
+        accountSendTasks[sendID] = Task { [weak self, socket] in
+            do {
+                try Task.checkCancellation()
+                try await socket.send(data)
+            } catch {
+                await self?.failAccountOperation(id: id, error: AuthenticatedPresenceError.transport("account_route_send_failed"))
+            }
+            await self?.accountSendFinished(sendID)
+        }
+    }
+
+    private func accountSendFinished(_ id: UUID) {
+        accountSendTasks[id] = nil
+    }
+
+    private func finishAccountOperation(_ result: Result<Void, Error>) {
+        guard let operation = accountOperation else { return }
+        accountOperation = nil
+        accountTimeoutTask?.cancel()
+        accountTimeoutTask = nil
+        operation.continuation.resume(with: result)
+    }
+
+    private func failAccountOperation(id: UUID, error: Error) {
+        guard accountOperation?.id == id else { return }
+        finishAccountOperation(.failure(error))
+        // The protocol has no request IDs: never let a late acknowledgement
+        // from an abandoned operation satisfy a later operation on this socket.
+        _ = beginStop()
+    }
+
+    private func receiveAccountFrame(_ data: Data) throws {
+        guard var operation = accountOperation else { throw AuthenticatedPresenceError.invalidFrame }
+        let object = try strictObject(data, keys: ["type", "nonce", "expiresAt", "code"])
+        let type = object["type"] as? String
+        if type == "account-route-bind-error" {
+            guard Set(object.keys) == ["type", "code"], object["code"] is String else {
+                throw AuthenticatedPresenceError.invalidFrame
+            }
+            failAccountOperation(id: operation.id, error: AuthenticatedPresenceError.transport("account_route_rejected"))
+            return
+        }
+        switch operation.phase {
+        case .challenge:
+            struct WireChallenge: Decodable { let type: String; let nonce: Data; let expiresAt: Int64 }
+            guard Set(object.keys) == ["type", "nonce", "expiresAt"],
+                  let challenge = try? JSONDecoder().decode(WireChallenge.self, from: data),
+                  challenge.type == "account-route-bind-challenge", challenge.nonce.count == 32,
+                  challenge.expiresAt > Int64(Date().timeIntervalSince1970 * 1000),
+                  let payload = operation.payload else { throw AuthenticatedPresenceError.invalidChallenge }
+            let unsigned = RendezvousSignedEnvelope(deviceID: identity.id.rawValue.uuidString.lowercased(),
+                nonce: challenge.nonce, payload: payload, publicKey: identity.publicKey.rawRepresentation,
+                epochMilliseconds: Int64(Date().timeIntervalSince1970 * 1000), signature: Data())
+            let signed = RendezvousSignedEnvelope(deviceID: unsigned.deviceID, nonce: unsigned.nonce,
+                payload: unsigned.payload, publicKey: unsigned.publicKey, epochMilliseconds: unsigned.epochMilliseconds,
+                signature: try identity.sign(unsigned.canonicalPayload()).derRepresentation)
+            struct Bind: Encodable { let type = "account-route-bind"; let envelope: RendezvousSignedEnvelope }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            let frame = try encoder.encode(Bind(envelope: signed))
+            operation.phase = .bind
+            operation.payload = nil
+            accountOperation = operation
+            sendAccountFrame(frame, id: operation.id)
+        case .bind, .unbind:
+            guard Set(object.keys) == ["type"],
+                  type == (operation.phase == .bind ? "account-route-bind-ok" : "account-route-unbind-ok") else {
+                throw AuthenticatedPresenceError.invalidFrame
+            }
+            finishAccountOperation(.success(()))
+        }
+    }
+
     /// Sends opaque WebRTC signaling through the already authenticated socket.
     /// This actor remains the only owner and reader of `/v1/ws`.
     public func sendSignal(_ payload: Data, to device: DeviceID) async throws {
@@ -301,11 +500,20 @@ public actor AuthenticatedPresenceSession {
         }
     }
 
-    public func connect() async throws {
+    /// True only for an explicit service rejection of the nonempty proof batch
+    /// submitted by this attempt; ordinary identity/transport failures differ.
+    public private(set) var trustAuthenticationRejected = false
+    /// Capacity is a retryable service condition, not an identity rejection.
+    public private(set) var authenticationCapacityRejected = false
+
+    public func connect(includeTrustRecords: Bool = true) async throws {
+        guard !retired else { throw AuthenticatedPresenceError.transport("session_retired") }
+        trustAuthenticationRejected = false
+        authenticationCapacityRejected = false
         await client.disconnect()
         let challenge = try decodeChallenge(try await receiveFrame())
         let trustRecords =
-            if let trustRepository {
+            if includeTrustRecords, let trustRepository {
                 await trustRepository.authenticationRecords()
             } else {
                 [SignedTrustRecord]()
@@ -316,16 +524,33 @@ public actor AuthenticatedPresenceSession {
         }
         try await socket.send(auth)
         let confirmation = try decodeFrame(try await receiveFrame())
+        authenticationCapacityRejected = confirmation.type == "auth-error"
+            && confirmation.code == "capacity_reached"
+        trustAuthenticationRejected = !trustRecords.isEmpty
+            && confirmation.type == "auth-error"
+            && confirmation.code == "authentication_failed"
         guard confirmation.type == "auth-ok",
             confirmation.deviceID == identity.id.rawValue.uuidString.lowercased()
         else {
             throw AuthenticatedPresenceError.authenticationRejected
         }
+        guard !retired else { throw AuthenticatedPresenceError.transport("session_retired") }
         running = true
         await client.startHeartbeats()
+        guard !retired else {
+            await client.disconnect()
+            throw AuthenticatedPresenceError.transport("session_retired")
+        }
     }
 
     public func run() async throws {
+        try await run(onStarted: {}, onTrustResult: nil)
+    }
+
+    /// The shared owner starts its writer only after this sole reader is active.
+    /// Internal delivery avoids competing consumers of the public result stream.
+    func run(onStarted: @Sendable () async -> Void,
+             onTrustResult: (@Sendable (RendezvousTrustResult) async -> Void)?) async throws {
         guard running else { throw AuthenticatedPresenceError.authenticationRejected }
         guard !readerActive else {
             throw AuthenticatedPresenceError.transport("reader_already_active")
@@ -333,13 +558,20 @@ public actor AuthenticatedPresenceSession {
         readerActive = true
         startLivenessMonitoring()
         defer {
-            stopLivenessMonitoring()
             readerActive = false
             if !running { finishStreams() }
         }
         do {
+            await onStarted()
             while running {
-                let frame = try decodeFrame(try await receiveFrame())
+                let data = try await receiveFrame()
+                guard running, !retired else { break }
+                if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let type = object["type"] as? String, type.hasPrefix("account-route-") {
+                    try receiveAccountFrame(data)
+                    continue
+                }
+                let frame = try decodeFrame(data)
                 switch frame.type {
                 case "presence":
                     guard let deviceID = frame.deviceID, let availability = frame.availability,
@@ -386,35 +618,61 @@ public actor AuthenticatedPresenceSession {
                     protocolErrorContinuation.yield(
                         RendezvousProtocolError(code: code, device: target)
                     )
-                case "trust-ok": trustResultContinuation.yield(.accepted)
-                case "trust-error": trustResultContinuation.yield(.rejected)
+                case "trust-ok", "trust-error":
+                    let result: RendezvousTrustResult = frame.type == "trust-ok" ? .accepted : .rejected
+                    if let onTrustResult { await onTrustResult(result) }
+                    else { trustResultContinuation.yield(result) }
                 case "protocol-error":
                     guard let code = frame.code else {
                         throw AuthenticatedPresenceError.invalidFrame
                     }
                     protocolErrorContinuation.yield(RendezvousProtocolError(code: code))
+                    if let operation = accountOperation {
+                        failAccountOperation(id: operation.id, error: AuthenticatedPresenceError.transport("account_route_rejected"))
+                    }
                 default:
                     throw AuthenticatedPresenceError.invalidFrame
                 }
             }
         } catch {
-            running = false
-            await client.disconnect()
+            await stop()
             throw error
         }
+        await stop()
     }
 
     public func stop() async {
+        await beginStop().value
+    }
+
+    /// A liveness callback may initiate this cleanup but must not await it:
+    /// the cleanup joins that callback's task. External stop/run callers join.
+    private func beginStop() -> Task<Void, Never> {
+        if let stopTask { return stopTask }
+        retired = true
         running = false
-        stopLivenessMonitoring()
+        finishAccountOperation(.failure(AuthenticatedPresenceError.transport("session_retired")))
+        let accountSends = Array(accountSendTasks.values)
+        accountSendTasks.removeAll()
+        accountSends.forEach { $0.cancel() }
+        let liveness = livenessTask
+        liveness?.cancel()
         pendingTrustRecords.removeAll()
         finishStreams()
-        await client.disconnect()
-        await socket.close()
+        let drain = Task {
+            // Closing first releases production ping/receive continuations.
+            // Cancellation-insensitive transports still keep the drain pending.
+            await socket.close()
+            for send in accountSends { await send.value }
+            await liveness?.value
+            await client.disconnect()
+        }
+        stopTask = drain
+        return drain
     }
 
     private func startLivenessMonitoring() {
-        livenessTask?.cancel()
+        guard !retired, livenessTask == nil else { return }
         let interval = livenessInterval
         let timeout = livenessTimeout
         let socket = socket
@@ -454,16 +712,9 @@ public actor AuthenticatedPresenceSession {
         }
     }
 
-    private func stopLivenessMonitoring() {
-        livenessTask?.cancel()
-        livenessTask = nil
-    }
-
-    private func failStaleConnection() async {
+    private func failStaleConnection() {
         guard running else { return }
-        running = false
-        await socket.close()
-        await client.disconnect()
+        _ = beginStop()
     }
 
     private func ingestMembershipCatchUp(

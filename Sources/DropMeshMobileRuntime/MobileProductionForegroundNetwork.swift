@@ -1,0 +1,189 @@
+import Foundation
+import MacChannelCore
+
+/// Transport seam only. The runtime always owns the real incoming listener,
+/// real transfer coordinator and database even when tests inject this graph.
+protocol MobileForegroundNetwork: Sendable {
+    var connector: any RouteEscalatingPeerConnector { get }
+    var source: any IncomingTransferConnectionSource { get }
+    var sources: [any IncomingTransferConnectionSource] { get }
+    func projectedDevices() async -> AsyncStream<[DeviceSummary]>?
+    func start() async
+    func stop() async
+    func retryConnection() async
+    func refreshTrust() async
+    func setLocalDiscoveryEnabled(_ enabled: Bool) async
+}
+
+extension MobileForegroundNetwork {
+    var sources: [any IncomingTransferConnectionSource] { [source] }
+    func projectedDevices() async -> AsyncStream<[DeviceSummary]>? { nil }
+}
+
+actor MobileProductionForegroundNetwork: MobileForegroundNetwork {
+    private enum Authority {
+        case repository(any WebRTCChannelFactory)
+        case provider(any PeerAuthorizationProviding, any AuthorizedWebRTCChannelFactory)
+    }
+    nonisolated let connector: any RouteEscalatingPeerConnector
+    nonisolated let source: any IncomingTransferConnectionSource
+    private let listener: WebRTCConnectionListener
+    private let presence: MobilePresenceSupervisor
+    private let session: URLSession
+    private let browser: BonjourPeerBrowser
+    private let advertiser: BonjourPeerAdvertiser
+    private let repository: TrustRepository
+    private let authorizationProvider: (any PeerAuthorizationProviding)?
+    private let onDiscovery: @Sendable (Bool) async -> Void
+    private var stopped = false
+    private var drain: Task<Void, Never>?
+    private var discoveryTasks: [Task<Void, Never>] = []
+    private var discoveryRevision: UInt64 = 0
+    private var browserReady = false
+    private var advertiserReady = false
+
+    init(identity: DeviceIdentity, repository: TrustRepository,
+         authorizationProvider: any PeerAuthorizationProviding, directory: DeviceDirectory,
+         publication: @escaping @Sendable () async throws -> TrustPublicationSnapshot,
+         persistedUpdates: @escaping @Sendable () async -> AsyncStream<AuthenticatedTrustState?>,
+         onState: @escaping @Sendable (MobilePresenceState) async -> Void,
+         onTrustSyncState: @escaping @Sendable (PresenceTrustSyncState) async -> Void = { _ in },
+         onDiscovery: @escaping @Sendable (Bool) async -> Void,
+         acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) throws {
+        let session = URLSession(configuration: .ephemeral)
+        let presence = MobilePresenceSupervisor(identity: identity, repository: repository,
+            directory: directory, onState: onState, onTrustSyncState: onTrustSyncState,
+            publication: publication, persistedUpdates: persistedUpdates)
+        let signaling = RendezvousWebRTCSignaling(session: presence.bridge)
+        let turn = try RendezvousTURNCredentialClient(identity: identity,
+            origin: MobileRuntimeConfiguration.httpOrigin, session: session)
+        let ice = RefreshingICEConfigurationProvider(
+            base: ICEConfiguration(stunURLs: [], turnServers: []), fetcher: turn)
+        try self.init(identity: identity, repository: repository, directory: directory,
+            authorizationProvider: authorizationProvider,
+            presence: presence, signaling: signaling, iceProvider: ice,
+            factory: WebRTCFactory(), session: session, onDiscovery: onDiscovery,
+            acceptanceBudget: acceptanceBudget)
+    }
+
+    /// Transport injection keeps the actual connector, listener and shutdown
+    /// composition in use while local tests replace external I/O dependencies.
+    init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+         presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
+         iceProvider: any ICEConfigurationProviding, factory: any WebRTCChannelFactory,
+         session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void,
+         acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) throws {
+        try self.init(identity: identity, repository: repository, directory: directory,
+            authority: .repository(factory), presence: presence, signaling: signaling,
+            iceProvider: iceProvider, session: session, onDiscovery: onDiscovery, acceptanceBudget: acceptanceBudget)
+    }
+
+    /// Explicitly paired provider/factory injection preserves the legacy transport
+    /// seam without casts or falling back to repository admission.
+    init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+         authorizationProvider: any PeerAuthorizationProviding,
+         presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
+         iceProvider: any ICEConfigurationProviding, factory: any AuthorizedWebRTCChannelFactory,
+         session: URLSession, onDiscovery: @escaping @Sendable (Bool) async -> Void,
+         acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) throws {
+        try self.init(identity: identity, repository: repository, directory: directory,
+            authority: .provider(authorizationProvider, factory), presence: presence, signaling: signaling,
+            iceProvider: iceProvider, session: session, onDiscovery: onDiscovery, acceptanceBudget: acceptanceBudget)
+    }
+
+    private init(identity: DeviceIdentity, repository: TrustRepository, directory: DeviceDirectory,
+                 authority: Authority, presence: MobilePresenceSupervisor, signaling: RendezvousWebRTCSignaling,
+                 iceProvider: any ICEConfigurationProviding, session: URLSession,
+                 onDiscovery: @escaping @Sendable (Bool) async -> Void,
+                 acceptanceBudget: WebRTCAcceptanceBudget) throws {
+        self.repository = repository
+        self.onDiscovery = onDiscovery
+        self.session = session
+        self.presence = presence
+        switch authority {
+        case let .repository(factory):
+            authorizationProvider = nil
+            connector = ConnectionCoordinator(directory: directory, identity: identity,
+                trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory)
+            listener = WebRTCConnectionListener(directory: directory, identity: identity,
+                trustRepository: repository, signaling: signaling, iceProvider: iceProvider, factory: factory,
+                acceptanceBudget: acceptanceBudget)
+        case let .provider(provider, factory):
+            authorizationProvider = provider
+            connector = ConnectionCoordinator(attempts: WebRTCConnectionAttempts(directory: directory,
+                identity: identity, authorizationProvider: provider,
+                signaling: signaling, iceProvider: iceProvider, factory: factory))
+            listener = WebRTCConnectionListener(directory: directory, identity: identity,
+                authorizationProvider: provider, signaling: signaling,
+                iceProvider: iceProvider, factory: factory, acceptanceBudget: acceptanceBudget)
+        }
+        source = listener
+        browser = BonjourPeerBrowser(directory: directory, trust: DeviceTrust(trustedIDs: []))
+        advertiser = try BonjourPeerAdvertiser(device: identity.id, port: 45_873) { $0.cancel() }
+    }
+
+    func start() async { guard !stopped else { return }; await presence.start() }
+    func retryConnection() async { guard !stopped else { return }; await presence.retryConnection() }
+    func refreshTrust() async { guard !stopped else { return }; await presence.refreshTrust() }
+
+    func stop() async {
+        if let drain { await drain.value; return }
+        stopped = true
+        discoveryRevision &+= 1
+        let observers = discoveryTasks
+        discoveryTasks = []
+        observers.forEach { $0.cancel() }
+        // HTTP cancellation begins immediately, separately from socket sessions.
+        session.invalidateAndCancel()
+        let task = Task { [listener, presence, browser, advertiser] in
+            // All shutdowns start before any join: socket close and HTTP
+            // invalidation may unblock the listener's ICE/factory dependencies.
+            async let inbound: Void = listener.stopAndWait()
+            async let socket: Void = presence.stop()
+            async let browsing: Void = browser.stop()
+            async let advertising: Void = advertiser.stopAndWait()
+            _ = await (inbound, socket, browsing, advertising)
+            for observer in observers { await observer.value }
+        }
+        drain = task
+        await task.value
+    }
+
+    func setLocalDiscoveryEnabled(_ enabled: Bool) async {
+        guard !stopped else { return }
+        discoveryRevision &+= 1
+        let revision = discoveryRevision
+        let old = discoveryTasks
+        old.forEach { $0.cancel() }
+        discoveryTasks = []
+        browserReady = false; advertiserReady = false
+        async let browsing: Void = browser.stop()
+        async let advertising: Void = advertiser.stopAndWait()
+        _ = await (browsing, advertising)
+        for observer in old { await observer.value }
+        guard !stopped, revision == discoveryRevision else { return }
+        await onDiscovery(false)
+        guard enabled, !stopped, revision == discoveryRevision else { return }
+        if let authorizationProvider { browser.observeAuthorization(authorizationProvider) }
+        else { browser.observeTrust(repository) }
+        let browserStates = browser.states()
+        let advertiserStates = advertiser.states()
+        discoveryTasks = [
+            Task { [weak self] in for await state in browserStates {
+                guard !Task.isCancelled else { return }
+                await self?.discoveryState(state, browser: true, revision: revision)
+            } },
+            Task { [weak self] in for await state in advertiserStates {
+                guard !Task.isCancelled else { return }
+                await self?.discoveryState(state, browser: false, revision: revision)
+            } }
+        ]
+        browser.start(); advertiser.start()
+    }
+
+    private func discoveryState(_ state: BonjourLifecycleState, browser: Bool, revision: UInt64) async {
+        guard !stopped, revision == discoveryRevision else { return }
+        if browser { browserReady = state == .ready } else { advertiserReady = state == .ready }
+        await onDiscovery(browserReady && advertiserReady)
+    }
+}

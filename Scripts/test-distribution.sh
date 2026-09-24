@@ -14,6 +14,8 @@ grep -F 'spctl --assess --type open --context context:primary-signature' \
     Scripts/build-distribution.sh >/dev/null
 grep -F 'MACCHANNEL_RELEASE_NOTES' Scripts/build-distribution.sh >/dev/null
 grep -F 'bash Scripts/build-update-feed.sh' Scripts/build-distribution.sh >/dev/null
+grep -F 'DEVELOPER_DIR="$developer_dir"' Scripts/build-distribution.sh >/dev/null
+grep -F 'MACCHANNEL_SPARKLE_GENERATE_APPCAST="${MACCHANNEL_SPARKLE_GENERATE_APPCAST:-}"' Scripts/build-distribution.sh >/dev/null
 
 clipboard_source="$(<App/ClipboardTransferSource.swift)"
 if ! macchannel_clipboard_cache_compatibility_source_is_valid "$clipboard_source"; then

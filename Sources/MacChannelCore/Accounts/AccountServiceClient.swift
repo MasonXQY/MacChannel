@@ -1,0 +1,608 @@
+import Darwin
+import Foundation
+import Security
+
+public protocol AccountTURNCredentialService: Sendable {
+    func turnCredentials(accessToken: String, groupID: String, generation: UInt64) async throws
+        -> RendezvousTURNCredentials
+}
+
+public struct AccountWebLoginAttempt: Sendable, Equatable {
+    public let attemptID: String
+    public let authorizationURL: URL
+    public let expiresAt: Date
+
+    public init(attemptID: String, authorizationURL: URL, expiresAt: Date) {
+        self.attemptID = attemptID
+        self.authorizationURL = authorizationURL
+        self.expiresAt = expiresAt
+    }
+}
+
+public enum AccountWebLoginPollResult: Sendable {
+    case pending
+    case ready(AccountSessionTokens)
+}
+
+public protocol AccountWebLoginService: Sendable {
+    func beginWebLogin() async throws -> AccountWebLoginAttempt
+    func pollWebLogin(attemptID: String) async throws -> AccountWebLoginPollResult
+}
+
+public struct AccountServiceClient: Sendable, AccountTURNCredentialService, AccountWebLoginService {
+    let identity: DeviceIdentity
+    private let origin: URL
+    let audience: String
+    private let transport: any AccountServiceTransport
+    private let now: @Sendable () -> Date
+    private let nonce: @Sendable () throws -> Data
+
+    func invitationBinding() throws -> AccountSessionBinding {
+        try AccountSessionBinding(deviceID: identity.id.rawValue, audience: audience, origin: origin)
+    }
+
+    public init(identity: DeviceIdentity, origin: URL, audience: String) throws {
+        try self.init(
+            identity: identity,
+            origin: origin,
+            audience: audience,
+            transport: LiveAccountServiceTransport(),
+            now: Date.init,
+            nonce: Self.secureNonce
+        )
+    }
+
+    init(
+        identity: DeviceIdentity,
+        origin: URL,
+        audience: String,
+        transport: any AccountServiceTransport,
+        now: @escaping @Sendable () -> Date,
+        nonce: @escaping @Sendable () throws -> Data
+    ) throws {
+        guard Self.validOrigin(origin), Self.validAudience(audience) else {
+            throw AccountServiceError.invalidConfiguration
+        }
+        self.identity = identity
+        self.origin = origin
+        self.audience = audience
+        self.transport = transport
+        self.now = now
+        self.nonce = nonce
+    }
+
+    public func challenge() async throws -> AccountLoginChallenge {
+        let requestDate = try requestDate()
+        let data = try await send(
+            path: "/v1/account/login/challenge",
+            fields: ["purpose": "dropmesh.account.login.challenge.v1", "audience": audience],
+            requestDate: requestDate
+        )
+        let value: ChallengeResponse = try decode(
+            data, keys: ["challengeID", "nonce", "expiresAt"])
+        guard Self.validToken(value.challengeID), Self.validToken(value.nonce),
+            value.challengeID != value.nonce,
+            let expiry = Self.date(milliseconds: value.expiresAt), expiry > requestDate
+        else { throw AccountServiceError.invalidResponse }
+        return AccountLoginChallenge(
+            challengeID: value.challengeID, nonce: value.nonce, expiresAt: expiry)
+    }
+
+    public func complete(
+        challengeID: String,
+        code: String,
+        identityToken: String
+    ) async throws -> AccountSessionTokens {
+        guard Self.validToken(challengeID), Self.validCredential(code, maximumBytes: 4_096),
+            Self.validCredential(identityToken, maximumBytes: 16_384)
+        else { throw AccountServiceError.invalidRequest }
+        let requestDate = try requestDate()
+        let data = try await send(
+            path: "/v1/account/login/complete",
+            fields: [
+                "purpose": "dropmesh.account.login.complete.v1", "audience": audience,
+                "challengeID": challengeID, "code": code, "identityToken": identityToken,
+            ],
+            requestDate: requestDate
+        )
+        return try decodeTokens(data, requestDate: requestDate)
+    }
+
+    public func beginWebLogin() async throws -> AccountWebLoginAttempt {
+        let requestDate = try requestDate()
+        let data = try await send(
+            path: "/v1/account/login/web/start",
+            fields: ["purpose": "dropmesh.account.login.web.start.v1", "audience": audience],
+            requestDate: requestDate
+        )
+        let value: WebLoginStartResponse = try decode(
+            data, keys: ["attemptID", "authorizationURL", "expiresAt"])
+        guard Self.validToken(value.attemptID),
+            let expiry = Self.date(milliseconds: value.expiresAt), expiry > requestDate,
+            let url = URL(string: value.authorizationURL), validAuthorizationURL(url)
+        else { throw AccountServiceError.invalidResponse }
+        return AccountWebLoginAttempt(
+            attemptID: value.attemptID, authorizationURL: url, expiresAt: expiry)
+    }
+
+    public func pollWebLogin(attemptID: String) async throws -> AccountWebLoginPollResult {
+        guard Self.validToken(attemptID) else { throw AccountServiceError.invalidRequest }
+        let requestDate = try requestDate()
+        let data = try await send(
+            path: "/v1/account/login/web/result",
+            fields: [
+                "purpose": "dropmesh.account.login.web.result.v1", "audience": audience,
+                "attemptID": attemptID,
+            ],
+            requestDate: requestDate
+        )
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            Set(object.keys) == ["status"]
+        {
+            guard object["status"] as? String == "pending" else {
+                throw AccountServiceError.invalidResponse
+            }
+            return .pending
+        }
+        return .ready(try decodeTokens(data, requestDate: requestDate))
+    }
+
+    public func status(accessToken: String) async throws -> AccountSessionIdentity {
+        guard Self.validToken(accessToken) else { throw AccountServiceError.invalidRequest }
+        let requestDate = try requestDate()
+        let data = try await send(
+            path: "/v1/account/session/status",
+            fields: [
+                "purpose": "dropmesh.account.session.status.v1", "audience": audience,
+                "accessToken": accessToken,
+            ],
+            requestDate: requestDate
+        )
+        let response: IdentityResponse = try decode(
+            data, keys: ["accountID", "sessionID", "deviceID", "audience"])
+        return try validatedIdentity(response)
+    }
+
+    public func refresh(refreshToken: String) async throws -> AccountSessionTokens {
+        guard Self.validToken(refreshToken) else { throw AccountServiceError.invalidRequest }
+        let requestDate = try requestDate()
+        let data = try await send(
+            path: "/v1/account/session/refresh",
+            fields: [
+                "purpose": "dropmesh.account.session.refresh.v1", "audience": audience,
+                "refreshToken": refreshToken,
+            ],
+            requestDate: requestDate
+        )
+        return try decodeTokens(data, requestDate: requestDate)
+    }
+
+    public func logout(accessToken: String) async throws {
+        guard Self.validToken(accessToken) else { throw AccountServiceError.invalidRequest }
+        let requestDate = try requestDate()
+        let data = try await send(
+            path: "/v1/account/session/logout",
+            fields: [
+                "purpose": "dropmesh.account.session.logout.v1", "audience": audience,
+                "accessToken": accessToken,
+            ],
+            requestDate: requestDate
+        )
+        let value: LogoutResponse = try decode(data, keys: ["signedOut"])
+        guard value.signedOut else { throw AccountServiceError.invalidResponse }
+    }
+
+    /// Tokens remain private request arguments; no account credentials are cached.
+    /// Issued TURN allocations cannot be recalled by logout. Transfer leases and
+    /// signal authorization must still gate each peer independently.
+    public func turnCredentials(accessToken: String, groupID: String, generation: UInt64) async throws
+        -> RendezvousTURNCredentials
+    {
+        try Task.checkCancellation()
+        guard Self.validToken(accessToken), Self.canonicalUUID(groupID) != nil,
+            generation > 0, generation <= UInt64(Int64.max)
+        else { throw AccountServiceError.invalidRequest }
+        let date = try requestDate()
+        let data: Data
+        do {
+            data = try await send(path: "/v1/account/turn-credentials", fields: [
+                "purpose": "dropmesh.account.turn.credentials.v1", "audience": audience,
+                "accessToken": accessToken, "groupID": groupID, "generation": String(generation),
+            ], requestDate: date)
+        } catch { try Task.checkCancellation(); throw error }
+        try Task.checkCancellation()
+        let received = try requestDate()
+        let value = try AccountTURNResponse(data: data)
+        let formatter = ISO8601DateFormatter()
+        // The server floors to whole seconds; fractions or loose date spellings
+        // must not create a different effective expiry from the coturn username.
+        guard value.expiresAt.utf8.count <= 64,
+            value.expiresAt.range(of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$"#, options: .regularExpression) != nil,
+            let expiry = formatter.date(from: value.expiresAt),
+            expiry > received, expiry.timeIntervalSince(received) <= 300,
+            let seconds = Int64(exactly: expiry.timeIntervalSince1970), seconds > 0,
+            let separator = value.username.firstIndex(of: ":"),
+            String(value.username[..<separator]) == String(seconds),
+            value.username.index(after: separator) < value.username.endIndex,
+            Self.validCredential(value.username, maximumBytes: 256),
+            Self.validCredential(value.credential, maximumBytes: 512),
+            (1...8).contains(value.urls.count), Set(value.urls).count == value.urls.count,
+            value.urls.allSatisfy(Self.validAccountTURNURL)
+        else { throw AccountServiceError.invalidResponse }
+        return RendezvousTURNCredentials(urls: value.urls, username: value.username,
+            credential: value.credential, expiresAt: expiry)
+    }
+
+    private static func validAccountTURNURL(_ value: String) -> Bool {
+        guard Self.validCredential(value, maximumBytes: 2_048),
+            value.unicodeScalars.allSatisfy({ $0.isASCII }),
+            let separator = value.firstIndex(of: ":") else { return false }
+        let scheme = String(value[..<separator])
+        let rest = value[value.index(after: separator)...]
+        guard ["turn", "turns"].contains(scheme), !rest.hasPrefix("//"),
+            let parts = URLComponents(string: scheme + "://" + String(rest)),
+            let rawHost = parts.host, !rawHost.isEmpty,
+            parts.user == nil, parts.password == nil, parts.path.isEmpty, parts.fragment == nil,
+            parts.port.map({ (1...65_535).contains($0) }) ?? true,
+            parts.percentEncodedQuery == nil || parts.percentEncodedQuery == "transport=tcp"
+                || (scheme == "turn" && parts.percentEncodedQuery == "transport=udp")
+        else { return false }
+        let host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host.contains(":") {
+            var address = in6_addr()
+            return host.withCString { inet_pton(AF_INET6, $0, &address) == 1 }
+        }
+        return host.utf8.count <= 253 && host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { label in
+            (1...63).contains(label.utf8.count)
+                && label.first.map({ $0.isLetter || $0.isNumber }) == true
+                && label.last.map({ $0.isLetter || $0.isNumber }) == true
+                && label.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" })
+        }
+    }
+
+    func send(
+        path: String,
+        fields: [String: String],
+        requestDate: Date
+    ) async throws -> Data {
+        let payload: Data
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            payload = try encoder.encode(fields)
+        } catch { throw AccountServiceError.invalidRequest }
+        return try await send(path: path, payload: payload, requestDate: requestDate)
+    }
+
+    func send(path: String, payload: Data, requestDate: Date) async throws -> Data {
+        guard payload.count <= 24_576 else { throw AccountServiceError.invalidRequest }
+        let nonce: Data
+        do { nonce = try self.nonce() } catch { throw AccountServiceError.transport }
+        guard nonce.count == 32 else { throw AccountServiceError.transport }
+        guard let milliseconds = Self.validEpochMilliseconds(requestDate) else {
+            throw AccountServiceError.invalidRequest
+        }
+        let unsigned = RendezvousSignedEnvelope(
+            deviceID: identity.id.rawValue.uuidString.lowercased(), nonce: nonce,
+            payload: payload, publicKey: identity.publicKey.rawRepresentation,
+            epochMilliseconds: milliseconds, signature: Data())
+        let envelope: RendezvousSignedEnvelope
+        do {
+            envelope = RendezvousSignedEnvelope(
+                deviceID: unsigned.deviceID, nonce: nonce, payload: payload,
+                publicKey: unsigned.publicKey, epochMilliseconds: milliseconds,
+                signature: try identity.sign(unsigned.canonicalPayload()).derRepresentation)
+        } catch { throw AccountServiceError.invalidRequest }
+        let body: Data
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            body = try encoder.encode(envelope)
+        } catch { throw AccountServiceError.invalidRequest }
+        guard body.count <= 65_536 else { throw AccountServiceError.invalidRequest }
+        var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)
+        components?.path = path
+        components?.query = nil
+        components?.fragment = nil
+        guard let url = components?.url else { throw AccountServiceError.invalidConfiguration }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let pending = ["create", "get", "list", "propose", "countersign", "commit", "cancel", "reject"]
+            .contains { path == "/v1/account/group/join/\($0)" }
+        let enrollment = path == "/v1/account/group/discover" || path == "/v1/account/group/bootstrap" || pending
+        if enrollment { try Task.checkCancellation() }
+        let result: (Data, HTTPURLResponse)
+        do { result = try await transport.send(request) }
+        catch is CancellationError { throw CancellationError() }
+        catch let error as AccountServiceError { throw error }
+        catch { throw AccountServiceError.transport }
+        if path.hasPrefix("/v1/account/invitation/"), result.1.statusCode == 409 { throw AccountInvitationError.conflict }
+        if (path == "/v1/account/turn-credentials" || path.hasPrefix("/v1/account/deletion/") || path.hasPrefix("/v1/account/invitation/")), result.1.statusCode == 404 {
+            throw AccountServiceError.unavailable
+        }
+        if path == "/v1/account/group/events" {
+            if result.1.statusCode == 404 { throw AccountServiceError.unavailable }
+            if result.1.statusCode == 409 { throw AccountGroupServiceError.changedHead }
+        }
+        if enrollment {
+            if result.1.statusCode == 404 { throw AccountServiceError.unavailable }
+            if result.1.statusCode == 409 { throw AccountGroupEnrollmentError.conflict }
+        }
+        switch result.1.statusCode {
+        case 200: break
+        case 400: throw AccountServiceError.invalidRequest
+        case 401, 403: throw AccountServiceError.authenticationRejected
+        case 429: throw AccountServiceError.rateLimited
+        case 503: throw AccountServiceError.unavailable
+        default: throw AccountServiceError.invalidResponse
+        }
+        guard result.0.count <= 65_536, Self.validJSONContentType(result.1) else {
+            throw AccountServiceError.invalidResponse
+        }
+        return result.0
+    }
+
+    private func decodeTokens(_ data: Data, requestDate: Date) throws -> AccountSessionTokens {
+        let keys: Set<String> = [
+            "accountID", "sessionID", "deviceID", "audience", "accessToken",
+            "refreshToken", "accessExpiresAt", "refreshExpiresAt",
+        ]
+        let value: TokensResponse = try decode(data, keys: keys)
+        let identity = try validatedIdentity(value.identity)
+        guard Self.validToken(value.accessToken), Self.validToken(value.refreshToken),
+            value.accessToken != value.refreshToken,
+            let accessExpiry = Self.date(milliseconds: value.accessExpiresAt),
+            let refreshExpiry = Self.date(milliseconds: value.refreshExpiresAt),
+            accessExpiry > requestDate, refreshExpiry > requestDate,
+            accessExpiry <= refreshExpiry
+        else { throw AccountServiceError.invalidResponse }
+        return AccountSessionTokens(
+            identity: identity, accessToken: value.accessToken,
+            refreshToken: value.refreshToken, accessExpiresAt: accessExpiry,
+            refreshExpiresAt: refreshExpiry)
+    }
+
+    private func validatedIdentity(_ value: IdentityResponse) throws -> AccountSessionIdentity {
+        guard let accountID = Self.canonicalUUID(value.accountID), accountID != Self.zeroUUID,
+            let sessionID = Self.canonicalUUID(value.sessionID), sessionID != Self.zeroUUID,
+            let deviceID = Self.canonicalUUID(value.deviceID),
+            deviceID == identity.id.rawValue, value.audience == audience
+        else { throw AccountServiceError.invalidResponse }
+        return AccountSessionIdentity(
+            accountID: accountID, sessionID: sessionID, deviceID: deviceID, audience: audience)
+    }
+
+    private func validAuthorizationURL(_ value: URL) -> Bool {
+        guard let components = URLComponents(url: value, resolvingAgainstBaseURL: false),
+            components.scheme == "https", components.host == "appleid.apple.com",
+            components.port == nil, components.user == nil, components.password == nil,
+            components.path == "/auth/authorize", components.fragment == nil,
+            let items = components.queryItems, items.count == 7
+        else { return false }
+        var fields: [String: String] = [:]
+        for item in items {
+            guard let value = item.value, fields[item.name] == nil else { return false }
+            fields[item.name] = value
+        }
+        var callback = URLComponents(url: origin, resolvingAgainstBaseURL: false)
+        callback?.path = "/v1/account/login/web/callback"
+        callback?.query = nil
+        callback?.fragment = nil
+        guard Set(fields.keys) == [
+            "client_id", "redirect_uri", "response_type", "response_mode", "scope", "nonce", "state",
+        ], fields["client_id"] == audience,
+            fields["redirect_uri"] == callback?.url?.absoluteString,
+            fields["response_type"] == "code id_token", fields["response_mode"] == "form_post",
+            fields["scope"] == "name email",
+            fields["nonce"].map(Self.validToken) == true,
+            fields["state"].map(Self.validToken) == true
+        else { return false }
+        return true
+    }
+
+    private func decode<T: Decodable>(_ data: Data, keys: Set<String>) throws -> T {
+        do {
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                Set(object.keys) == keys
+            else { throw AccountServiceError.invalidResponse }
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch let error as AccountServiceError { throw error }
+        catch { throw AccountServiceError.invalidResponse }
+    }
+
+    func requestDate() throws -> Date {
+        let value = now()
+        guard value.timeIntervalSince1970.isFinite, value.timeIntervalSince1970 > 0 else {
+            throw AccountServiceError.invalidRequest
+        }
+        return value
+    }
+
+    private static func secureNonce() throws -> Data {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw AccountServiceError.transport
+        }
+        return Data(bytes)
+    }
+
+    static func validOrigin(_ value: URL) -> Bool {
+        guard let components = URLComponents(url: value, resolvingAgainstBaseURL: false),
+            components.scheme?.lowercased() == "https",
+            let rawHost = components.host?.lowercased(), !rawHost.isEmpty,
+            components.user == nil, components.password == nil,
+            components.query == nil, components.fragment == nil,
+            components.path.isEmpty || components.path == "/",
+            components.port == nil || components.port == 443,
+            {
+                var host = rawHost.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                while host.hasSuffix(".") { host.removeLast() }
+                return host != "localhost" && !host.hasSuffix(".localhost")
+                    && host != "127" && !host.hasPrefix("127.")
+                    && !host.isEmpty && !host.contains("%")
+                    && !Self.isLoopbackIPAddress(host)
+            }()
+        else { return false }
+        return true
+    }
+
+    static func validAudience(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 255 && value.unicodeScalars.allSatisfy {
+            !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0)
+        }
+    }
+
+    static func validCredential(_ value: String, maximumBytes: Int) -> Bool {
+        !value.isEmpty && value.utf8.count <= maximumBytes && value.unicodeScalars.allSatisfy {
+            !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0)
+        }
+    }
+
+    static func validToken(_ value: String) -> Bool {
+        guard value.utf8.count == 43, value.unicodeScalars.allSatisfy({
+            $0.isASCII && !$0.properties.isWhitespace
+                && !CharacterSet.controlCharacters.contains($0)
+        }) else { return false }
+        let standard = value.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/") + "="
+        guard let bytes = Data(base64Encoded: standard), bytes.count == 32 else { return false }
+        return bytes.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "") == value
+    }
+
+    private static func validJSONContentType(_ response: HTTPURLResponse) -> Bool {
+        guard let raw = response.value(forHTTPHeaderField: "Content-Type") else { return false }
+        let parts = raw.lowercased().split(separator: ";", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.first == "application/json", parts.count <= 2 else { return false }
+        return parts.count == 1 || parts[1] == "charset=utf-8" || parts[1] == "charset=\"utf-8\""
+    }
+
+    private static func canonicalUUID(_ value: String) -> UUID? {
+        guard value == value.lowercased(), let uuid = UUID(uuidString: value),
+            uuid.uuidString.lowercased() == value
+        else { return nil }
+        return uuid
+    }
+
+    private static func date(milliseconds: Double) -> Date? {
+        guard let value = Int64(exactly: milliseconds), value > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(value) / 1_000)
+    }
+
+    static func validEpochMilliseconds(_ date: Date) -> Int64? {
+        let milliseconds = (date.timeIntervalSince1970 * 1_000).rounded(.towardZero)
+        guard let value = Int64(exactly: milliseconds), value > 0 else { return nil }
+        return value
+    }
+
+    private static func isLoopbackIPAddress(_ host: String) -> Bool {
+        var ipv4 = in_addr()
+        let isIPv4 = host.withCString { inet_aton($0, &ipv4) != 0 }
+        if isIPv4 {
+            let hostOrder = UInt32(bigEndian: ipv4.s_addr)
+            return hostOrder >> 24 == 127
+        }
+
+        var ipv6 = [UInt8](repeating: 0, count: 16)
+        let isIPv6 = host.withCString { inet_pton(AF_INET6, $0, &ipv6) == 1 }
+        guard isIPv6 else { return false }
+        let loopback = ipv6.dropLast() == Array(repeating: 0, count: 15) && ipv6[15] == 1
+        let mappedIPv4Loopback = ipv6.prefix(10).allSatisfy { $0 == 0 }
+            && ipv6[10] == 0xff && ipv6[11] == 0xff && ipv6[12] == 127
+        return loopback || mappedIPv4Loopback
+    }
+
+    private static let zeroUUID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+}
+
+private struct ChallengeResponse: Decodable {
+    let challengeID: String
+    let nonce: String
+    let expiresAt: Double
+}
+
+private struct WebLoginStartResponse: Decodable {
+    let attemptID: String
+    let authorizationURL: String
+    let expiresAt: Double
+}
+
+private struct IdentityResponse: Decodable {
+    let accountID: String
+    let sessionID: String
+    let deviceID: String
+    let audience: String
+}
+
+private struct TokensResponse: Decodable {
+    let accountID: String
+    let sessionID: String
+    let deviceID: String
+    let audience: String
+    let accessToken: String
+    let refreshToken: String
+    let accessExpiresAt: Double
+    let refreshExpiresAt: Double
+
+    var identity: IdentityResponse {
+        IdentityResponse(
+            accountID: accountID, sessionID: sessionID,
+            deviceID: deviceID, audience: audience)
+    }
+}
+
+private struct LogoutResponse: Decodable { let signedOut: Bool }
+
+private struct AccountTURNResponse {
+    let urls: [String]
+    let username: String
+    let credential: String
+    let expiresAt: String
+
+    init(data: Data) throws {
+        do {
+            // Reuse the bounded JSON tokenizer, retaining key uniqueness before
+            // any dictionary or Codable operation could discard duplicate keys.
+            var parser = PageParser(data: data)
+            try parser.token(123)
+            var seen = Set<String>()
+            var values: [String: String] = [:]
+            var urls: [String] = []
+            for field in 0..<4 {
+                if field > 0 { try parser.token(44) }
+                let name = try parser.string()
+                guard ["urls", "username", "credential", "expiresAt"].contains(name),
+                    seen.insert(name).inserted else { throw AccountServiceError.invalidResponse }
+                try parser.token(58)
+                if name == "urls" {
+                    try parser.token(91)
+                    parser.whitespace()
+                    if parser.i < parser.bytes.count, parser.bytes[parser.i] != 93 {
+                        while true {
+                            guard urls.count < 8 else { throw AccountServiceError.invalidResponse }
+                            urls.append(try parser.string())
+                            parser.whitespace()
+                            guard parser.i < parser.bytes.count else { throw AccountServiceError.invalidResponse }
+                            if parser.bytes[parser.i] == 93 { break }
+                            try parser.token(44)
+                        }
+                    }
+                    try parser.token(93)
+                } else { values[name] = try parser.string() }
+            }
+            try parser.token(125)
+            parser.whitespace()
+            guard parser.i == parser.bytes.count,
+                let username = values["username"], let credential = values["credential"],
+                let expiresAt = values["expiresAt"] else { throw AccountServiceError.invalidResponse }
+            self.urls = urls; self.username = username
+            self.credential = credential; self.expiresAt = expiresAt
+        } catch { throw AccountServiceError.invalidResponse }
+    }
+}

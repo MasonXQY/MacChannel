@@ -1,10 +1,43 @@
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 
 @testable import MacChannelCore
 
 final class TransferProtocolTests: XCTestCase {
+    func testManifestReadsFileWithoutWritingItsParentDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer {
+            _ = chmod(directory.path, S_IRWXU)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let source = directory.appendingPathComponent("readable.txt")
+        let bytes = Data("file access does not grant parent writes".utf8)
+        try bytes.write(to: source)
+        XCTAssertEqual(chmod(directory.path, S_IRUSR | S_IXUSR), 0)
+        XCTAssertTrue(FileManager.default.isReadableFile(atPath: source.path))
+        XCTAssertFalse(FileManager.default.isWritableFile(atPath: directory.path))
+        var before = stat()
+        XCTAssertEqual(lstat(directory.path, &before), 0)
+
+        let manifest = try TransferManifest.build(from: source)
+
+        XCTAssertEqual(manifest.entries.count, 1)
+        XCTAssertEqual(manifest.entries[0].digest, Data(SHA256.hash(data: bytes)))
+        let pinned = try XCTUnwrap(manifest.entries[0].pinnedSource)
+        XCTAssertEqual(try pinned.read(offset: 0, length: bytes.count), bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["readable.txt"])
+        var after = stat()
+        XCTAssertEqual(lstat(directory.path, &after), 0)
+        XCTAssertEqual(after.st_mtimespec.tv_sec, before.st_mtimespec.tv_sec)
+        XCTAssertEqual(after.st_mtimespec.tv_nsec, before.st_mtimespec.tv_nsec)
+        XCTAssertEqual(after.st_ctimespec.tv_sec, before.st_ctimespec.tv_sec)
+        XCTAssertEqual(after.st_ctimespec.tv_nsec, before.st_ctimespec.tv_nsec)
+    }
+
     func testReceiveResultDefaultsUnknownSourceForLegacySessions() {
         let beforeCreation = Date()
         let result = TransferReceiveResult(
@@ -48,6 +81,32 @@ final class TransferProtocolTests: XCTestCase {
         XCTAssertEqual(received.source, source)
         XCTAssertGreaterThanOrEqual(received.completedAt, beforeReceive)
         XCTAssertLessThanOrEqual(received.completedAt, Date())
+    }
+
+    func testReceiveResultProjectsVerifiedNestedManifestMetadata() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let source = root.appendingPathComponent("batch", isDirectory: true)
+        let nested = source.appendingPathComponent("folder", isDirectory: true)
+        let destination = root.appendingPathComponent("downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data([1, 2, 3]).write(to: nested.appendingPathComponent("deep.txt"))
+        try Data([4]).write(to: source.appendingPathComponent("top.txt"))
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let manifest = try TransferManifest.build(from: source)
+        let channels = TestSecureChannelPair.make()
+        async let result = ReceiveSession(transferID: manifest.id, destinationDirectory: destination)
+            .run(on: channels.receiver)
+        _ = try await SendSession(manifest).run(on: channels.sender)
+        let received = try await result
+
+        XCTAssertEqual(received.items.map(\.relativePathComponents), [
+            ["folder"], ["top.txt"], ["folder", "deep.txt"],
+        ])
+        XCTAssertEqual(received.items.map(\.name), ["folder", "top.txt", "deep.txt"])
+        XCTAssertEqual(received.items.map(\.isDirectory), [true, false, false])
+        XCTAssertEqual(received.items.map(\.size), [0, 1, 3])
     }
 
     func testManifestBuildsForAFileWithoutLoadingItIntoTheProtocol() throws {

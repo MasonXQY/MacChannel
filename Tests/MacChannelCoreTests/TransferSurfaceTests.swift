@@ -6,6 +6,43 @@ import XCTest
 
 final class TransferSurfaceTests: XCTestCase {
     @MainActor
+    func testSendAdmissionFailureIsBoundToVisiblePresentation() {
+        var messages: [String] = []
+        let surfaces = AppSurfaceController(
+            transferService: StubTransferSurfaceService(),
+            pairingService: UnavailablePairingSurfaceService(),
+            settingsService: UnavailableDeviceSettingsService(),
+            directorySelector: NativeDirectorySelector(),
+            sendFailurePresentation: { messages.append($0) }
+        )
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [], transferCoordinator: SurfaceTransferCoordinator()
+        )
+        surfaces.bind(to: controller)
+        controller.onSendFailure?("Visible failure")
+        XCTAssertEqual(messages, ["Visible failure"])
+    }
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
+    @MainActor
+    func testReceiveAuthorizationFailureIsVisibleAndPreservesSelectedPath() {
+        let surfaces = AppSurfaceController(transferService: StubTransferSurfaceService(), pairingService: UnavailablePairingSurfaceService(), settingsService: UnavailableDeviceSettingsService(), directorySelector: NativeDirectorySelector())
+        let destination = URL(fileURLWithPath: "/tmp/selected")
+        surfaces.updateSettings(SettingsSurfaceSnapshot(defaultDirectory: destination, devices: [], directoryAuthorizationError: "接收目录授权已失效，请重新选择目录。"))
+        XCTAssertEqual(surfaces.settingsModel.defaultDirectory, destination)
+        XCTAssertTrue(surfaces.settingsModel.actionError?.contains("重新选择目录") == true)
+    }
+    @MainActor
     func testTransferPopoverCanStartOnHistory() {
         let view = TransferPopover(
             model: TransferSurfaceModel(),
@@ -92,7 +129,7 @@ final class TransferSurfaceTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(settings.contains("在 Finder 中显示"))
+        XCTAssertTrue(settings.contains("L10n.text(.receiveReveal)"))
         XCTAssertTrue(settings.contains("revealDefaultDirectory"))
     }
 
@@ -270,6 +307,43 @@ final class TransferSurfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testRemovedDurablePeerCannotReturnThroughStaleSuccessWithSameName() {
+        let peer = DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Mac", availability: .offline)
+        let other = DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Mac", availability: .offline)
+        let pairing = PairingSurfaceModel()
+        let surfaces = AppSurfaceController(
+            transferService: NativeTransferSurfaceService(coordinator: SurfaceTransferCoordinator()),
+            pairingService: HostApprovalPairingSurfaceService(peer: peer),
+            settingsService: UnavailableDeviceSettingsService(), directorySelector: NativeDirectorySelector(),
+            pairingModel: pairing, settingsModel: SettingsSurfaceModel(devices: [DeviceSetting(device: peer)]))
+        surfaces.updateDurablePairingState(.paired(peer))
+        surfaces.updateSettings(SettingsSurfaceSnapshot(defaultDirectory: nil, devices: [DeviceSetting(device: other)]))
+        surfaces.updateDurablePairingState(.paired(peer))
+        XCTAssertEqual(pairing.state, .idle)
+    }
+
+    @MainActor
+    func testDurableSurfaceShowsSavingAndRecoverableErrorBeforeGreen() {
+        let peer = DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Phone", availability: .internet)
+        let model = PairingSurfaceModel()
+        model.updateDurableState(.saving(peer))
+        XCTAssertEqual(model.state, .committing(peer))
+        model.updateDurableState(.saveFailed(peer))
+        XCTAssertEqual(model.state, .committing(peer))
+        XCTAssertNotNil(model.actionErrorContent)
+        model.updateDurableState(.paired(peer))
+        XCTAssertEqual(model.state, .confirmed(peer))
+        XCTAssertNil(model.actionErrorContent)
+        for language in [AppLanguage.english, .simplifiedChinese] {
+            for key in [LocalizedKey.pairingSaving, .pairingSaveFailed, .pairingSaveRecoveryHelp, .pairingRetrySaving] {
+                let text = L10n.format(key, arguments: [], language: language)
+                XCTAssertFalse(text.isEmpty)
+                XCTAssertNotEqual(text, key.rawValue)
+            }
+        }
+    }
+
+    @MainActor
     func testLoginItemRegistrationFailureRollsBackVisibleSetting() async {
         let loginItems = StubLoginItemRegistration(error: SurfaceActionFailure.expected)
         let service = RecordingEssentialSettingsService()
@@ -283,6 +357,19 @@ final class TransferSurfaceTests: XCTestCase {
             model.actionError,
             "无法设置登录时启动，请在系统设置中允许后重试。"
         )
+    }
+
+    @MainActor
+    func testLoginItemUnregisterFailureRollsBackEnabledSnapshot() async {
+        let loginItems = StubLoginItemRegistration(error: SurfaceActionFailure.expected)
+        let service = RecordingEssentialSettingsService()
+        let model = SettingsSurfaceModel(launchAtLogin: true)
+
+        await model.updateLaunchAtLogin(false, loginItems: loginItems, using: service)
+
+        XCTAssertTrue(model.launchAtLogin)
+        XCTAssertNil(service.launchAtLogin)
+        XCTAssertNotNil(model.actionError)
     }
 
     @MainActor
@@ -594,10 +681,10 @@ final class TransferSurfaceTests: XCTestCase {
             encoding: .utf8
         )
 
-        for label in ["接收通知", "已允许", "未允许", "打开系统设置"] {
+        for label in [".settingsNotifications", ".permissionAllowed", ".permissionNotAllowed", ".commonSystemSettings"] {
             XCTAssertTrue(settings.contains(label), "missing visible notification label: \(label)")
         }
-        XCTAssertFalse(settings.contains("Toggle(\"接收通知\""))
+        XCTAssertFalse(settings.contains("Toggle(L10n.text(.settingsNotifications)"))
     }
 
     func testSettingsSourceContainsIndependentNativeSoftwareUpdateSection() throws {
@@ -611,9 +698,9 @@ final class TransferSurfaceTests: XCTestCase {
         )
 
         for required in [
-            "软件更新",
-            "检查更新",
-            "最近检查：",
+            ".updateTitle",
+            ".updateCheck",
+            ".updateLastChecked",
             "Text(presentation.guidanceText)",
             ".foregroundStyle(.orange)",
         ] {
@@ -627,7 +714,7 @@ final class TransferSurfaceTests: XCTestCase {
         )
         XCTAssertEqual(
             (settings + updateModel)
-                .components(separatedBy: "每天自动检查一次，是否安装由你决定。").count - 1,
+                .components(separatedBy: "L10n.text(.updateAutomaticExplanation)").count - 1,
             1
         )
         XCTAssertFalse(settings.contains("尚未检查更新"))
@@ -681,8 +768,8 @@ final class TransferSurfaceTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(pairing.contains("本机已信任"))
-        XCTAssertTrue(pairing.contains("请确认另一台 Mac 也显示配对成功"))
+        XCTAssertTrue(pairing.contains("L10n.text(.pairingTrusted,"))
+        XCTAssertTrue(pairing.contains("L10n.text(.pairingConfirmOtherMac)"))
         XCTAssertFalse(pairing.contains("已与 \\(device.displayName) 建立信任"))
     }
 
@@ -697,8 +784,8 @@ final class TransferSurfaceTests: XCTestCase {
         )
 
         XCTAssertTrue(settings.contains("switch model.runtimeStatus"))
-        XCTAssertTrue(settings.contains("正在启动 DropMesh"))
-        XCTAssertTrue(settings.contains("重试启动"))
+        XCTAssertTrue(settings.contains("L10n.text(.statusStartingApp)"))
+        XCTAssertTrue(settings.contains("L10n.text(.statusRetryStartup)"))
     }
 
     @MainActor

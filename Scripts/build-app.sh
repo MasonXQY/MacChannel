@@ -24,7 +24,12 @@ signing_tmp="${TMPDIR:-/tmp}"
 source "$repo_root/Scripts/update-test-paths.sh"
 
 clean_build_tool() {
-    env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C "$@"
+    if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+        env -i DEVELOPER_DIR="$DEVELOPER_DIR" \
+            PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C "$@"
+    else
+        env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C "$@"
+    fi
 }
 clean_codesign() {
     env -i PATH="$PATH" HOME="$signing_home" TMPDIR="$signing_tmp" LANG=C LC_ALL=C \
@@ -323,6 +328,10 @@ plutil -insert CFBundleName -string DropMesh "$localized_info"
 for localization in Base zh-Hans; do
     mkdir -p "$contents_path/Resources/$localization.lproj"
     cp -X "$localized_info" "$contents_path/Resources/$localization.lproj/InfoPlist.strings"
+done
+for localization in en zh-Hans; do
+    cp -X "App/Resources/$localization.lproj/InfoPlist.strings" \
+        "$contents_path/Resources/$localization.lproj/InfoPlist.strings"
 done
 
 if [[ -n "$codesign_identity" ]]; then

@@ -10,6 +10,7 @@ final class AppContainer {
     let directorySelector: any DirectorySelecting
     let transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)?
     let pairingStates: AsyncStream<PairingState>?
+    let durablePairingStates: AsyncStream<DurablePairingState>?
     let initialSettingsSnapshot: SettingsSurfaceSnapshot?
     let settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)?
     let receiveDirectoryConfigurationPending: Bool
@@ -17,6 +18,9 @@ final class AppContainer {
     let receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)?
     let receiveCompletionState: RuntimeReceiveCompletionState?
     let runtimeIdentityID: DeviceID?
+    let accountController: AccountSessionController?
+    let localNetworkState: (() -> (BonjourLifecycleState, BonjourLifecycleState))?
+    let localNetworkStates: (() -> (AsyncStream<BonjourLifecycleState>, AsyncStream<BonjourLifecycleState>))?
 
     init(
         deviceDirectory: DeviceDirectory,
@@ -26,21 +30,31 @@ final class AppContainer {
         directorySelector: any DirectorySelecting = NativeDirectorySelector(),
         transferSnapshots: (@Sendable () async -> AsyncStream<[TransferSnapshot]>)? = nil,
         pairingStates: AsyncStream<PairingState>? = nil,
+        durablePairingStates: AsyncStream<DurablePairingState>? = nil,
         initialSettingsSnapshot: SettingsSurfaceSnapshot? = nil,
         settingsSnapshots: (@Sendable () async -> AsyncStream<SettingsSurfaceSnapshot>)? = nil,
         receiveDirectoryConfigurationPending: Bool = false,
         transferHistory: (@Sendable () async -> AsyncStream<[TransferSurfaceItem]>)? = nil,
         receiveEvents: (@Sendable () async -> RuntimeReceiveEventStream)? = nil,
         receiveCompletionState: RuntimeReceiveCompletionState? = nil,
-        runtimeIdentityID: DeviceID? = nil
+        runtimeIdentityID: DeviceID? = nil,
+        accountController: AccountSessionController? = nil,
+        localNetworkState: (() -> (BonjourLifecycleState, BonjourLifecycleState))? = nil,
+        localNetworkStates: (() -> (AsyncStream<BonjourLifecycleState>, AsyncStream<BonjourLifecycleState>))? = nil,
+        sourceAccess: (any UserSelectedSourceAccessing)? = nil
     ) {
         self.deviceDirectory = deviceDirectory
-        self.transferCoordinator = transferCoordinator
+        if let sourceAccess {
+            self.transferCoordinator = SourceAccessTransferCoordinator(coordinator: transferCoordinator, access: sourceAccess)
+        } else {
+            self.transferCoordinator = transferCoordinator
+        }
         self.pairingSurfaceService = pairingSurfaceService
         self.settingsSurfaceService = settingsSurfaceService
         self.directorySelector = directorySelector
         self.transferSnapshots = transferSnapshots
-        self.pairingStates = pairingStates
+        self.pairingStates = durablePairingStates == nil ? pairingStates : nil
+        self.durablePairingStates = durablePairingStates
         self.initialSettingsSnapshot = initialSettingsSnapshot
         self.settingsSnapshots = settingsSnapshots
         self.receiveDirectoryConfigurationPending = receiveDirectoryConfigurationPending
@@ -48,6 +62,9 @@ final class AppContainer {
         self.receiveEvents = receiveEvents
         self.receiveCompletionState = receiveCompletionState
         self.runtimeIdentityID = runtimeIdentityID
+        self.accountController = accountController
+        self.localNetworkState = localNetworkState
+        self.localNetworkStates = localNetworkStates
     }
 
     static func localShell() -> AppContainer {

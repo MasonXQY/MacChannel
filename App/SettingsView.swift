@@ -65,19 +65,22 @@ struct SettingsSurfaceSnapshot: Equatable, Sendable {
     let autoReceive: Bool
     let launchAtLogin: Bool
     let devices: [DeviceSetting]
+    let directoryAuthorizationError: String?
 
     init(
         localDisplayName: String = Host.current().localizedName ?? "Mac",
         defaultDirectory: URL?,
         autoReceive: Bool = true,
         launchAtLogin: Bool = false,
-        devices: [DeviceSetting]
+        devices: [DeviceSetting],
+        directoryAuthorizationError: String? = nil
     ) {
         self.localDisplayName = localDisplayName
         self.defaultDirectory = defaultDirectory
         self.autoReceive = autoReceive
         self.launchAtLogin = launchAtLogin
         self.devices = devices
+        self.directoryAuthorizationError = directoryAuthorizationError
     }
 }
 
@@ -123,7 +126,7 @@ extension DeviceSettingsServicing {
 private enum DeviceSettingsSurfaceError: Error { case unavailable }
 
 enum SettingsReceiveDirectoryPresentation {
-    static let guidance = "未自定义时，文件保存在上方显示的兼容接收目录；可以随时更改。"
+    static var guidance: String { L10n.text(.receiveDirectoryGuidance) }
 
     static func directory(
         defaultDirectory: URL?,
@@ -137,7 +140,7 @@ enum SettingsReceiveDirectoryPresentation {
         defaultDirectory: URL?,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> String {
-        guard defaultDirectory != nil else { return "下载文件夹内的兼容接收目录" }
+        guard defaultDirectory != nil else { return L10n.text(.receiveDirectoryLegacy) }
         let home = homeDirectory.standardizedFileURL
         let directory = directory(defaultDirectory: defaultDirectory, homeDirectory: home)
         var path = directory.path(percentEncoded: false)
@@ -159,9 +162,14 @@ final class SettingsSurfaceModel: ObservableObject {
     @Published var launchAtLogin: Bool
     @Published var devices: [DeviceSetting]
     @Published var runtimeStatus: AppRuntimeStatus
+    @Published var runtimePresence = RuntimePresenceSnapshot()
     @Published var updateSnapshot: SoftwareUpdateSnapshot
     @Published var receiveNotificationSnapshot: ReceiveNotificationSnapshot
-    @Published var actionError: String?
+    @Published var actionErrorContent: LocalizedContent?
+    var actionError: String? {
+        get { actionErrorContent?.text }
+        set { actionErrorContent = newValue.map(LocalizedContent.verbatim) }
+    }
     @Published var actionNotice: String?
     private let announcer: any AccessibilityAnnouncing
     private var openNotificationSettingsHandler: (() -> Void)?
@@ -193,7 +201,7 @@ final class SettingsSurfaceModel: ObservableObject {
         self.runtimeStatus = runtimeStatus
         self.updateSnapshot = updateSnapshot
         self.receiveNotificationSnapshot = receiveNotificationSnapshot
-        self.actionError = actionError
+        self.actionErrorContent = actionError.map(LocalizedContent.verbatim)
         self.announcer = announcer ?? NativeAccessibilityAnnouncer.shared
     }
 
@@ -210,7 +218,7 @@ final class SettingsSurfaceModel: ObservableObject {
             actionError = nil
         } catch {
             localDisplayName = previous
-            publishError("无法保存本机名称，请稍后重试。")
+            publishError(.settingsSaveNameFailed)
         }
     }
 
@@ -225,7 +233,7 @@ final class SettingsSurfaceModel: ObservableObject {
             actionError = nil
         } catch {
             autoReceive = previous
-            publishError("无法保存自动接收设置，请稍后重试。")
+            publishError(.settingsAutoReceiveFailed)
         }
     }
 
@@ -239,7 +247,7 @@ final class SettingsSurfaceModel: ObservableObject {
             try loginItems.setEnabled(enabled)
         } catch {
             launchAtLogin = previous
-            publishError("无法设置登录时启动，请在系统设置中允许后重试。")
+            publishError(.settingsLoginPermissionFailed)
             return
         }
         do {
@@ -249,7 +257,7 @@ final class SettingsSurfaceModel: ObservableObject {
         } catch {
             try? loginItems.setEnabled(previous)
             launchAtLogin = previous
-            publishError("无法保存登录启动设置，请稍后重试。")
+            publishError(.settingsLoginSaveFailed)
         }
     }
 
@@ -265,7 +273,7 @@ final class SettingsSurfaceModel: ObservableObject {
             mutate(id) { $0.displayName = name }
             actionError = nil
         } catch {
-            publishError("无法保存设备名称，请稍后重试。")
+            publishError(.settingsDeviceNameFailed)
         }
     }
 
@@ -273,9 +281,10 @@ final class SettingsSurfaceModel: ObservableObject {
         do {
             let result = try await service.revoke(id)
             devices.removeAll { $0.id == id }
-            if let warning = result.warning { publishError(warning) } else { actionError = nil }
+            actionErrorContent = result.warningContent
+            if let warning = result.warning { announcer.announce(warning) }
         } catch {
-            publishError("无法撤销设备信任，请稍后重试。")
+            publishError(.settingsRevokeFailed)
         }
     }
 
@@ -297,7 +306,7 @@ final class SettingsSurfaceModel: ObservableObject {
             }
             actionError = nil
         } catch {
-            publishError("无法保存接收策略，请稍后重试。")
+            publishError(.settingsReceivePolicyFailed)
         }
     }
 
@@ -310,7 +319,7 @@ final class SettingsSurfaceModel: ObservableObject {
             defaultDirectory = directory
             actionError = nil
         } catch {
-            publishError("无法保存默认接收目录，请确认目录仍可访问后重试。")
+            publishError(error is DirectoryAuthorizationError ? .receiveDirectoryReauthorize : .receiveDirectoryDefaultSaveFailed)
         }
     }
 
@@ -324,7 +333,7 @@ final class SettingsSurfaceModel: ObservableObject {
             mutate(id) { $0.directory = directory }
             actionError = nil
         } catch {
-            publishError("无法保存接收目录，请确认目录仍可访问后重试。")
+            publishError(error is DirectoryAuthorizationError ? .receiveDirectoryReauthorize : .receiveDirectorySaveFailed)
         }
     }
 
@@ -364,14 +373,14 @@ final class SettingsSurfaceModel: ObservableObject {
             try revealer.revealDirectory(directory)
             actionError = nil
         } catch {
-            publishError("无法在 Finder 中显示接收目录，请确认目录仍可访问后重试。")
+            publishError(.receiveDirectoryRevealFailed)
         }
     }
 
-    private func publishError(_ message: String) {
+    private func publishError(_ key: LocalizedKey) {
         actionNotice = nil
-        actionError = message
-        announcer.announce(message)
+        actionErrorContent = .keys([key])
+        announcer.announce(L10n.text(key))
     }
 
     private func mutate(_ id: DeviceID, _ body: (inout DeviceSetting) -> Void) {
@@ -384,9 +393,9 @@ final class SettingsSurfaceModel: ObservableObject {
 final class NativeDirectorySelector: DirectorySelecting {
     func chooseDirectory(current: URL?) -> URL? {
         let panel = NSOpenPanel()
-        panel.title = "选择接收目录"
-        panel.prompt = "选择"
-        panel.message = "收到的文件将在校验完成后保存到此目录。"
+        panel.title = L10n.text(.receiveDirectoryChoose)
+        panel.prompt = L10n.text(.commonChoose)
+        panel.message = L10n.text(.receiveDirectoryPickerMessage)
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
@@ -410,13 +419,18 @@ final class NativeDirectoryRevealer: DirectoryRevealing {
 }
 
 struct SettingsView: View {
+    @EnvironmentObject private var localization: LocalizationController
     @ObservedObject var model: SettingsSurfaceModel
     let service: any DeviceSettingsServicing
     let directorySelector: any DirectorySelecting
     let directoryRevealer: any DirectoryRevealing
     let updateService: any SoftwareUpdateServicing
+    @ObservedObject var localNetworkModel: LocalNetworkPermissionModel
+    @ObservedObject var accountModel: MacAccountSettingsModel
     let loginItems: any LoginItemRegistering
     let onRetryRuntime: () -> Void
+    let onRetryPresence: () -> Void
+    let onRetryTrustSave: () -> Void
     let onDismiss: () -> Void
     @State private var draftLocalName: String
 
@@ -426,8 +440,12 @@ struct SettingsView: View {
         directorySelector: any DirectorySelecting,
         directoryRevealer: any DirectoryRevealing = NativeDirectoryRevealer.shared,
         updateService: any SoftwareUpdateServicing,
+        localNetworkModel: LocalNetworkPermissionModel = LocalNetworkPermissionModel(),
+        accountModel: MacAccountSettingsModel = MacAccountSettingsModel(controller: nil),
         loginItems: any LoginItemRegistering = LoginItemController.shared,
         onRetryRuntime: @escaping () -> Void = {},
+        onRetryPresence: @escaping () -> Void = {},
+        onRetryTrustSave: @escaping () -> Void = {},
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
@@ -435,8 +453,12 @@ struct SettingsView: View {
         self.directorySelector = directorySelector
         self.directoryRevealer = directoryRevealer
         self.updateService = updateService
+        self.localNetworkModel = localNetworkModel
+        self.accountModel = accountModel
         self.loginItems = loginItems
         self.onRetryRuntime = onRetryRuntime
+        self.onRetryPresence = onRetryPresence
+        self.onRetryTrustSave = onRetryTrustSave
         self.onDismiss = onDismiss
         _draftLocalName = State(initialValue: model.localDisplayName)
     }
@@ -447,14 +469,27 @@ struct SettingsView: View {
             statusMessages
             Divider()
             Form {
+                Section(L10n.text(.settingsLanguage)) {
+                    Picker(L10n.text(.settingsLanguage), selection: Binding(
+                        get: { localization.language },
+                        set: { localization.setLanguage($0) }
+                    )) {
+                        Text(L10n.text(.languageSystem)).tag(AppLanguage.system)
+                        Text(L10n.text(.languageChinese)).tag(AppLanguage.simplifiedChinese)
+                        Text(L10n.text(.languageEnglish)).tag(AppLanguage.english)
+                    }
+                }
+                Section(L10n.text(.accountTitle)) {
+                    MacAccountSettingsSection(model: accountModel)
+                }
                 Group {
-                    Section("这台 Mac") {
+                    Section(L10n.text(.settingsThisMac)) {
                         HStack {
-                            TextField("本机名称", text: $draftLocalName)
+                            TextField(L10n.text(.settingsLocalName), text: $draftLocalName)
                                 .frame(minHeight: 40)
                                 .onSubmit(saveLocalName)
-                                .accessibilityLabel("本机名称")
-                            Button("保存", action: saveLocalName)
+                                .accessibilityLabel(L10n.text(.settingsLocalName))
+                            Button(L10n.text(.commonSave), action: saveLocalName)
                                 .disabled(
                                     draftLocalName.trimmingCharacters(in: .whitespacesAndNewlines)
                                         .isEmpty
@@ -463,18 +498,18 @@ struct SettingsView: View {
                         }
                     }
 
-                    Section("接收文件") {
-                        Toggle("自动接收已配对 Mac 发来的文件", isOn: autoReceiveBinding)
+                    Section(L10n.text(.settingsReceiveFiles)) {
+                        Toggle(L10n.text(.settingsAutoReceive), isOn: autoReceiveBinding)
                             .frame(minHeight: 40)
                         HStack {
                             Label(defaultDirectoryText, systemImage: "folder")
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                                .accessibilityLabel("接收目录，\(defaultDirectoryText)")
+                                .accessibilityLabel(L10n.text(.receiveDirectoryAccessibility, String(defaultDirectoryText)))
                             Spacer()
-                            Button("选择…", action: chooseDefaultDirectory)
+                            Button(L10n.text(.commonChooseEllipsis), action: chooseDefaultDirectory)
                                 .frame(minHeight: 40)
-                            Button("在 Finder 中显示") {
+                            Button(L10n.text(.receiveReveal)) {
                                 model.revealDefaultDirectory(using: directoryRevealer)
                             }
                             .frame(minHeight: 40)
@@ -484,9 +519,9 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Section("已配对的 Mac") {
+                    Section(L10n.text(.settingsPairedMacs)) {
                         if model.devices.isEmpty {
-                            Label("还没有其他 Mac", systemImage: "desktopcomputer")
+                            Label(L10n.text(.settingsNoMacs), systemImage: "desktopcomputer")
                                 .foregroundStyle(.secondary)
                                 .frame(minHeight: 60)
                         } else {
@@ -496,8 +531,8 @@ struct SettingsView: View {
                         }
                     }
 
-                    Section("启动") {
-                        Toggle("登录后自动启动 DropMesh", isOn: launchAtLoginBinding)
+                    Section(L10n.text(.settingsStartup)) {
+                        Toggle(L10n.text(.settingsLaunchAtLogin), isOn: launchAtLoginBinding)
                             .frame(minHeight: 40)
                     }
                 }
@@ -508,15 +543,27 @@ struct SettingsView: View {
                     openSystemSettings: model.openNotificationSettings
                 )
 
+                if localNetworkModel.capability == .unavailable {
+                    Section(L10n.text(.settingsLocalNetwork)) {
+                        Text(localNetworkModel.guidanceText ?? "")
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(localNetworkModel.guidanceText ?? "")
+                        HStack {
+                            Button(L10n.text(.commonSystemSettings), action: localNetworkModel.openSystemSettings)
+                            Button(L10n.text(.settingsRetryLocalNetwork), action: localNetworkModel.retry)
+                        }
+                    }
+                }
+
                 SoftwareUpdateSection(
                     snapshot: model.updateSnapshot,
                     serviceAvailable: updateService.isAvailable,
                     performAction: { model.performUpdateAction(using: updateService) }
                 )
 
-                DisclosureGroup("诊断信息") {
-                    Label("正在使用内置安全服务", systemImage: "lock.shield")
-                    Text("文件只在你的 Mac 之间加密传输，服务端不保存文件内容。")
+                DisclosureGroup(L10n.text(.settingsDiagnostics)) {
+                    Label(L10n.text(.settingsSecureService), systemImage: "lock.shield")
+                    Text(L10n.text(.settingsEncryptionExplanation))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -531,13 +578,13 @@ struct SettingsView: View {
 
     private var header: some View {
         HStack {
-            Label("设置", systemImage: "gearshape")
+            Label(L10n.text(.settingsTitle), systemImage: "gearshape")
                 .font(.title2.weight(.semibold))
             Spacer()
-            Button("关闭", systemImage: "xmark", action: onDismiss)
+            Button(L10n.text(.commonClose), systemImage: "xmark", action: onDismiss)
                 .labelStyle(.iconOnly)
                 .frame(minWidth: 40, minHeight: 40)
-                .accessibilityLabel("关闭设置")
+                .accessibilityLabel(L10n.text(.settingsClose))
                 .keyboardShortcut(.cancelAction)
         }
         .padding(20)
@@ -545,10 +592,32 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var statusMessages: some View {
+        if service.isAvailable {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L10n.text(model.runtimePresence.authenticated ? .statusServiceConnected : .statusServiceRecovering))
+                Text(L10n.text(.presenceServiceExplanation)).font(.caption).foregroundStyle(.secondary)
+                if model.runtimePresence.trustSync == .needsAttention {
+                    Label(L10n.text(.presenceSyncAttention), systemImage: "exclamationmark.triangle")
+                } else if model.runtimePresence.trustSync == .pendingPersistence {
+                    Text(L10n.text(.presencePendingSave))
+                } else if model.runtimePresence.authenticated && model.runtimePresence.trustSync != .synchronized {
+                    Text(L10n.text(.presenceSyncing))
+                }
+                if model.runtimePresence.trustSaveFailed {
+                    Text(L10n.text(.statusTrustSaveFailed))
+                    Button(L10n.text(.presenceRetrySave), action: onRetryTrustSave)
+                }
+                if !model.runtimePresence.authenticated || model.runtimePresence.trustSync == .needsAttention {
+                    Button(L10n.text(.presenceRetryService), action: onRetryPresence)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+        }
         if !service.isAvailable {
             switch model.runtimeStatus {
             case .loading:
-                Label("正在启动 DropMesh…", systemImage: "hourglass")
+                Label(L10n.text(.statusStartingApp), systemImage: "hourglass")
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 12)
@@ -558,7 +627,7 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                     if canRetry {
                         Spacer()
-                        Button("重试启动", action: onRetryRuntime)
+                        Button(L10n.text(.statusRetryStartup), action: onRetryRuntime)
                             .frame(minHeight: 40)
                     }
                 }
@@ -569,8 +638,23 @@ struct SettingsView: View {
                     .foregroundStyle(.orange)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 12)
+            case let .startupFailure(_, canRetry):
+                HStack {
+                    Label(model.runtimeStatus.localizedText, systemImage: "key")
+                        .foregroundStyle(.orange)
+                    if canRetry {
+                        Button(L10n.text(.statusRetryStartup), action: onRetryRuntime)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+            case .serviceError, .serviceOffline:
+                Label(model.runtimeStatus.localizedText, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
             case .ready:
-                Label("设置正在准备，请稍后再试。", systemImage: "hourglass")
+                Label(L10n.text(.settingsPreparing), systemImage: "hourglass")
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 12)
@@ -624,19 +708,20 @@ struct SettingsView: View {
     }
 }
 
-private struct ReceiveNotificationSettingsRow: View {
+struct ReceiveNotificationSettingsRow: View {
+    @EnvironmentObject private var localization: LocalizationController
     let snapshot: ReceiveNotificationSnapshot
     let openSystemSettings: () -> Void
 
     var body: some View {
-        Section("接收通知") {
+        Section(L10n.text(.settingsNotifications)) {
             HStack {
-                Label("接收通知", systemImage: "bell")
+                Label(L10n.text(.settingsNotifications), systemImage: "bell")
                 Spacer()
-                Text(snapshot.authorizationState.canDeliverNotifications ? "已允许" : "未允许")
+                Text(snapshot.authorizationState.canDeliverNotifications ? L10n.text(.permissionAllowed) : L10n.text(.permissionNotAllowed))
                     .foregroundStyle(.secondary)
                 if snapshot.authorizationState == .denied {
-                    Button("打开系统设置", action: openSystemSettings)
+                    Button(L10n.text(.commonSystemSettings), action: openSystemSettings)
                         .buttonStyle(.bordered)
                 }
             }
@@ -649,21 +734,30 @@ struct SoftwareUpdateSectionPresentation: Equatable {
     let statusText: String?
     let guidanceText: String
     let lastCheckedText: String
+    let actionTitle: String
 
     init(snapshot: SoftwareUpdateSnapshot, timeZone: TimeZone = .current) {
-        statusText = snapshot.phase == .idle ? nil : snapshot.phase.statusText
-        guidanceText = SoftwareUpdatePhase.idle.statusText
+        if snapshot.phase == .managedByAppStore {
+            statusText = nil
+            guidanceText = snapshot.phase.statusText
+            actionTitle = L10n.text(.updateViewStore)
+        } else {
+            statusText = snapshot.phase == .idle ? nil : snapshot.phase.statusText
+            guidanceText = SoftwareUpdatePhase.idle.statusText
+            actionTitle = snapshot.phase.hasAvailableUpdate ? L10n.text(.updateView) : L10n.text(.updateCheck)
+        }
         lastCheckedText = snapshot.lastCheckedText(timeZone: timeZone)
     }
 }
 
-private struct SoftwareUpdateSection: View {
+struct SoftwareUpdateSection: View {
+    @EnvironmentObject private var localization: LocalizationController
     let snapshot: SoftwareUpdateSnapshot
     let serviceAvailable: Bool
     let performAction: () -> Void
 
     var body: some View {
-        Section("软件更新") {
+        Section(L10n.text(.updateTitle)) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(snapshot.installedVersion.localizedText)
@@ -677,14 +771,14 @@ private struct SoftwareUpdateSection: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    Text("最近检查：\(presentation.lastCheckedText)")
+                    Text(L10n.text(.updateLastChecked, String(presentation.lastCheckedText)))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(presentation.guidanceText)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if snapshot.phase.hasAvailableUpdate && !snapshot.canShowUpdate {
-                        Text("更新窗口暂时不可用，请稍后再试。")
+                        Text(L10n.text(.updateWindowUnavailable))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -700,7 +794,7 @@ private struct SoftwareUpdateSection: View {
     }
 
     private var actionTitle: String {
-        snapshot.phase.hasAvailableUpdate ? "查看更新" : "检查更新"
+        presentation.actionTitle
     }
 
     private var presentation: SoftwareUpdateSectionPresentation {
@@ -714,13 +808,13 @@ private struct SoftwareUpdateSection: View {
 
     private var actionHint: String {
         snapshot.phase.hasAvailableUpdate
-            ? "打开软件更新窗口，查看版本说明和安装选项"
-            : "立即检查是否有新的 DropMesh 版本"
+            ? L10n.text(.updateViewHint)
+            : L10n.text(.updateCheckHint)
     }
 
     private var actionAccessibilityLabel: String {
         if snapshot.phase.hasAvailableUpdate && !snapshot.canShowUpdate {
-            return "查看更新，暂时不可用"
+            return L10n.text(.updateViewUnavailable)
         }
         return actionTitle
     }
@@ -728,12 +822,14 @@ private struct SoftwareUpdateSection: View {
     private var isFailure: Bool {
         switch snapshot.phase {
         case .failed, .securityFailure: true
-        case .idle, .checking, .upToDate, .available, .downloading, .installDeferred: false
+        case .idle, .checking, .upToDate, .available, .downloading, .installDeferred,
+             .managedByAppStore: false
         }
     }
 }
 
-private struct DeviceSettingRow: View {
+struct DeviceSettingRow: View {
+    @EnvironmentObject private var localization: LocalizationController
     let device: DeviceSetting
     let model: SettingsSurfaceModel
     let service: any DeviceSettingsServicing
@@ -752,45 +848,52 @@ private struct DeviceSettingRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if device.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(PeerConnectionPresentation.displayName(device.displayName, unnamed: L10n.text(.presenceUnnamed)))
+            }
             HStack {
                 Label(statusText, systemImage: statusSymbol)
                     .font(.caption)
                     .foregroundStyle(
-                        device.availability == .offline ? Color.secondary : Color.green
+                        presentation == .online || presentation == .onlineNearby ? Color.green : Color.secondary
                     )
                 Spacer()
-                Button("移除", systemImage: "trash", role: .destructive) {
+                Button(L10n.text(.commonRemove), systemImage: "trash", role: .destructive) {
                     Task { await model.revoke(device.id, using: service) }
                 }
                 .frame(minHeight: 40)
-                .accessibilityHint("移除后，这台 Mac 需要重新配对")
+                .accessibilityHint(L10n.text(.settingsRemoveHint))
             }
             HStack {
-                TextField("设备名称", text: $draftName)
+                TextField(L10n.text(.settingsDeviceName), text: $draftName)
                     .frame(minHeight: 40)
                     .onSubmit(saveName)
-                Button("重命名", action: saveName)
+                Button(L10n.text(.settingsRename), action: saveName)
                     .disabled(draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .frame(minHeight: 40)
             }
+            Text(device.id.rawValue.uuidString.prefix(8))
+                .font(.caption.monospaced()).foregroundStyle(.secondary)
         }
         .padding(.vertical, 6)
         .onChange(of: device) { _, updated in draftName = updated.displayName }
     }
 
     private var statusText: String {
-        switch device.availability {
-        case .lan: "附近在线"
-        case .internet: "在线"
-        case .offline: "离线"
-        }
+        L10n.text(LocalizedKey(rawValue: presentation.rawValue)!)
+    }
+
+    private var presentation: PeerConnectionPresentation {
+        .resolve(authenticated: model.runtimePresence.authenticated,
+                 sync: model.runtimePresence.trustSync, availability: device.availability)
     }
 
     private var statusSymbol: String {
-        switch device.availability {
-        case .lan: "wifi"
-        case .internet: "network"
-        case .offline: "wifi.slash"
+        switch presentation {
+        case .onlineNearby: "wifi"
+        case .online: "network"
+        case .syncingDevices: "arrow.triangle.2.circlepath"
+        case .statusPending, .currentlyUnreachable: "questionmark.circle"
         }
     }
 

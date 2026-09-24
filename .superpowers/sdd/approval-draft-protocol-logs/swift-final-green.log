@@ -1,0 +1,110 @@
+[0/1] Planning build
+Building for debugging...
+[0/7] Write swift-version-239F2A40393FBBF.txt
+[1/3] Linking MacChannelApp
+[2/3] Applying MacChannelApp
+Build complete! (1.84s)
+Test Suite 'Selected tests' started at 2026-09-20 15:37:06.421.
+Test Suite 'MacChannelPackageTests.xctest' started at 2026-09-20 15:37:06.422.
+Test Suite 'AccountGroupApprovalDraftTests' started at 2026-09-20 15:37:06.422.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testActorOnlyDraftFinalizesExactPayloadAndRejectsInvalidProof]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testActorOnlyDraftFinalizesExactPayloadAndRejectsInvalidProof]' passed (0.015 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testMalformedCanonicalBytesRemainRejectedEvenWhenActorResigns]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testMalformedCanonicalBytesRemainRejectedEvenWhenActorResigns]' passed (0.005 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStrictRawJSONAndBase64]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStrictRawJSONAndBase64]' passed (0.004 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStructureRepresentationAndHistoryCannotBeBypassed]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testStructureRepresentationAndHistoryCannotBeBypassed]' passed (0.008 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testSyntheticCrossLanguageFixture]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupApprovalDraftTests testSyntheticCrossLanguageFixture]' passed (0.005 seconds).
+Test Suite 'AccountGroupApprovalDraftTests' passed at 2026-09-20 15:37:06.458.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.036 (0.036) seconds
+Test Suite 'AccountGroupHistoryVerifierTests' started at 2026-09-20 15:37:06.458.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testAccountGroupGenerationAndBindingMismatchRejected]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testAccountGroupGenerationAndBindingMismatchRejected]' passed (0.007 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testCancellationDoesNotReleaseAdmissionDuringPendingWrite]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testCancellationDoesNotReleaseAdmissionDuringPendingWrite]' passed (0.007 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testConfirmationCannotOverlapPendingAcceptOrResetCompletedHead]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testConfirmationCannotOverlapPendingAcceptOrResetCompletedHead]' passed (0.006 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testEveryProofIsReplayedBeforeSavingAndTerminalEmptyCannotRollBack]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testEveryProofIsReplayedBeforeSavingAndTerminalEmptyCannotRollBack]' passed (0.012 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testFailedSavePublishesNothingAndRetrySucceeds]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testFailedSavePublishesNothingAndRetrySucceeds]' passed (0.007 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testFirstConfirmationPublishesOnlyAfterDurableWrite]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testFirstConfirmationPublishesOnlyAfterDurableWrite]' passed (0.004 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testForkAtPersistedHeadAndLongerBypassAreRejected]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testForkAtPersistedHeadAndLongerBypassAreRejected]' passed (0.012 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testMaximumCompleteJournalIsAccepted]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testMaximumCompleteJournalIsAccepted]' passed (11.194 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testMissingPinAndEmptyOrOversizedHistoryFailClosed]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testMissingPinAndEmptyOrOversizedHistoryFailClosed]' passed (0.005 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testOverlappingAcceptIsRejectedUntilEarlierWriteCompletes]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testOverlappingAcceptIsRejectedUntilEarlierWriteCompletes]' passed (0.007 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testPendingFailedWriteReturnsNoSnapshotAndReleasesAdmissionForRetry]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testPendingFailedWriteReturnsNoSnapshotAndReleasesAdmissionForRetry]' passed (0.007 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testPendingLoadHoldsAdmissionAndCancelledReadCannotWrite]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testPendingLoadHoldsAdmissionAndCancelledReadCannotWrite]' passed (0.006 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testRepeatConfirmationIsIdempotentButCannotResetAdvancedHeadOrReplacePin]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testRepeatConfirmationIsIdempotentButCannotResetAdvancedHeadOrReplacePin]' passed (0.008 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testRestartRejectsEarlierValidPrefixAfterApprovalAndRemoval]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testRestartRejectsEarlierValidPrefixAfterApprovalAndRemoval]' passed (0.007 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testUnreadableExistingPinCannotBeConfirmedAsNew]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testUnreadableExistingPinCannotBeConfirmedAsNew]' passed (0.006 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testWrongConfirmationPinsAndUnsignedAnchorNeverPersist]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupHistoryVerifierTests testWrongConfirmationPinsAndUnsignedAnchorNeverPersist]' passed (0.004 seconds).
+Test Suite 'AccountGroupHistoryVerifierTests' passed at 2026-09-20 15:37:17.759.
+	 Executed 16 tests, with 0 failures (0 unexpected) in 11.300 (11.300) seconds
+Test Suite 'AccountGroupInteropTests' started at 2026-09-20 15:37:17.759.
+Test Case '-[MacChannelCoreTests.AccountGroupInteropTests testRealBidirectionalGoInterop]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupInteropTests testRealBidirectionalGoInterop]' passed (1.583 seconds).
+Test Suite 'AccountGroupInteropTests' passed at 2026-09-20 15:37:19.342.
+	 Executed 1 test, with 0 failures (0 unexpected) in 1.583 (1.583) seconds
+Test Suite 'AccountGroupProofTests' started at 2026-09-20 15:37:19.342.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testCanonicalGoldenBothKeyFormsAndSignatureIndependentDigest]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testCanonicalGoldenBothKeyFormsAndSignatureIndependentDigest]' passed (0.008 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testEveryBoundPayloadFieldTamperingRejected]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testEveryBoundPayloadFieldTamperingRejected]' passed (0.013 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testIntegerBoundsAndIdentityRejections]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testIntegerBoundsAndIdentityRejections]' passed (0.006 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testMemberCapAndSortedOwnedSnapshots]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testMemberCapAndSortedOwnedSnapshots]' passed (0.095 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testMembershipRemovalReplayFreshRejoinAndTerminalEmpty]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testMembershipRemovalReplayFreshRejoinAndTerminalEmpty]' passed (0.009 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testNoncanonicalPayloadAndStrictBase64Rejected]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testNoncanonicalPayloadAndStrictBase64Rejected]' passed (0.005 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testOuterJSONStrictHelperAndCodableLimits]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testOuterJSONStrictHelperAndCodableLimits]' passed (0.001 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testPinsAndInvalidTransitionsLeaveStateUnchanged]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testPinsAndInvalidTransitionsLeaveStateUnchanged]' passed (0.011 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testRawWireErrorsAreGeneric]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testRawWireErrorsAreGeneric]' passed (0.000 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testSignedBootstrapRoundTrip]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testSignedBootstrapRoundTrip]' passed (0.002 seconds).
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testUnsignedAnchorRejectedEvenWithExactPins]' started.
+Test Case '-[MacChannelCoreTests.AccountGroupProofTests testUnsignedAnchorRejectedEvenWithExactPins]' passed (0.001 seconds).
+Test Suite 'AccountGroupProofTests' passed at 2026-09-20 15:37:19.492.
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.150 (0.150) seconds
+Test Suite 'MacChannelPackageTests.xctest' passed at 2026-09-20 15:37:19.492.
+	 Executed 33 tests, with 0 failures (0 unexpected) in 13.069 (13.070) seconds
+Test Suite 'Selected tests' passed at 2026-09-20 15:37:19.492.
+	 Executed 33 tests, with 0 failures (0 unexpected) in 13.069 (13.071) seconds
+ACCEPTED approval fixture actor64-subject65: 94b74e1925422ca0c89f4a4d1f72b2644ed225123809e88455a9065ccde8ace9
+ACCEPTED approval fixture actor65-subject64: 91cfc6869f58ec101a05e81dddf7be9d5a4fbe1a0ab72fe54c514bfcc1fa264d
+=== RUN   TestNativeGroupInterop
+    native_interop_test.go:129: Go exported two signed P256 chains: 64-byte and 65-byte keys
+--- PASS: TestNativeGroupInterop (0.00s)
+PASS
+ok  	macchannel/rendezvous/internal/accountgroup	0.310s
+
+ACCEPTED Go → Swift: both signed bootstrap/approve/remove chains, key forms 64/65
+=== RUN   TestNativeGroupInterop
+    native_interop_test.go:187: Go verified Swift signatures and applied both complete 64/65 chains
+--- PASS: TestNativeGroupInterop (0.00s)
+PASS
+ok  	macchannel/rendezvous/internal/accountgroup	0.268s
+
+ACCEPTED Swift → Go: both signed bootstrap/approve/remove chains, key forms 64/65
+◇ Test run started.
+↳ Testing Library Version: 124.4
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests passed after 0.001 seconds.

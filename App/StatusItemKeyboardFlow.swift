@@ -24,8 +24,8 @@ final class NativeStatusItemFilePicker: StatusItemFilePicking {
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.canCreateDirectories = false
-        panel.message = "选择要发送的文件或文件夹。"
-        panel.prompt = "选择"
+        panel.message = L10n.text(.sendFilePickerMessage)
+        panel.prompt = L10n.text(.commonChoose)
         return panel.runModal() == .OK ? panel.urls : nil
     }
 }
@@ -38,10 +38,10 @@ final class NativeStatusItemDeviceMenuPresenter: StatusItemDeviceMenuPresenting 
         select: @escaping (DeviceID) -> Bool,
         cancel: @escaping () -> Void
     ) {
-        let menu = NSMenu(title: "选择接收设备")
-        let heading = NSMenuItem(title: "选择接收设备", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: L10n.text(.sendChooseDevice))
+        let heading = NSMenuItem(title: L10n.text(.sendChooseDevice), action: nil, keyEquivalent: "")
         heading.isEnabled = false
-        heading.setAccessibilityLabel("选择接收设备")
+        heading.setAccessibilityLabel(L10n.text(.sendChooseDevice))
         menu.addItem(heading)
         menu.addItem(.separator())
 
@@ -61,7 +61,7 @@ final class NativeStatusItemDeviceMenuPresenter: StatusItemDeviceMenuPresenting 
             )
             item.target = target
             item.setAccessibilityLabel(
-                "发送到\(displayName)，\(availabilityLabel(device.availability))"
+                L10n.text(.sendDeviceAccessibility, String(displayName), String(availabilityLabel(device.availability)))
             )
             menu.addItem(item)
         }
@@ -80,9 +80,9 @@ final class NativeStatusItemDeviceMenuPresenter: StatusItemDeviceMenuPresenting 
 
     private func availabilityLabel(_ availability: DeviceAvailability) -> String {
         switch availability {
-        case .lan: "局域网在线"
-        case .internet: "互联网在线"
-        case .offline: "离线"
+        case .lan: L10n.text(.deviceLan)
+        case .internet: L10n.text(.deviceInternet)
+        case .offline: L10n.text(.deviceOffline)
         }
     }
 }

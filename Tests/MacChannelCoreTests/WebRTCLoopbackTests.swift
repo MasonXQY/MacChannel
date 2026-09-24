@@ -4,6 +4,344 @@ import XCTest
 @testable import MacChannelCore
 
 final class WebRTCLoopbackTests: XCTestCase {
+    func testAuthorizedWithdrawalDeniesExporterAndSend() async throws {
+        let pair = try await makeAuthorizedPair()
+        let key = try await pair.left.exportKey(label: "test", context: Data(), length: 32)
+        XCTAssertEqual(key.count, 32)
+        try pair.owner.replaceManual([:])
+        do {
+            _ = try await pair.left.exportKey(label: "test", context: Data(), length: 32)
+            XCTFail("Withdrawn channel exported a key")
+        } catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        do {
+            try await pair.left.send(Data([1]))
+            XCTFail("Withdrawn channel sent application data")
+        } catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        await pair.left.close()
+        await pair.right.close()
+    }
+
+    func testAuthorizedPreWithdrawalAdmissionCompletesButNextOperationIsDenied() async throws {
+        let pair = try await makeAuthorizedPair()
+        // Already admitted/delivered bytes are not retroactively retracted.
+        var iterator = pair.left.frames().makeAsyncIterator()
+        try await pair.right.send(Data([7]))
+        let admitted = try await iterator.next()
+        XCTAssertEqual(admitted, Data([7]))
+        try pair.owner.replaceManual([:])
+        do {
+            _ = try await pair.left.exportKey(label: "next", context: Data(), length: 32)
+            XCTFail("Next operation after withdrawal must be denied")
+        } catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        await pair.left.close()
+        await pair.right.close()
+    }
+
+    func testAuthorizedBackpressureWithdrawalFinishesWaiter() async throws {
+        let pair = try await makeAuthorizedPair()
+        await pair.left._testOnlyForceBackpressure(true)
+        let finished = expectation(description: "withdrawal resumes backpressure waiter")
+        let send = Task { () -> WebRTCSecureChannelError? in
+            defer { finished.fulfill() }
+            do { try await pair.left.send(Data([9])); return nil }
+            catch { return error as? WebRTCSecureChannelError }
+        }
+        let suspended = await waitForBackpressureWaiters(1, on: pair.left)
+        XCTAssertTrue(suspended)
+        try pair.owner.replaceManual([:])
+        await fulfillment(of: [finished], timeout: 2)
+        let failure = await send.value
+        XCTAssertEqual(failure, .transportClosed)
+        await pair.left.close()
+        do {
+            _ = try await pair.left.exportKey(label: "closed", context: Data(), length: 32)
+            XCTFail("Terminated channel exported")
+        } catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        await pair.right.close()
+    }
+
+    func testAuthorizedBufferedFrameIsDeniedWhenIteratorStartsAfterWithdrawal() async throws {
+        let pair = try await makeAuthorizedPair()
+        let enqueued = expectation(description: "frame admitted to bounded buffer")
+        pair.left._testOnlyQueueReceive(Data([42])) { admitted in
+            XCTAssertTrue(admitted)
+            enqueued.fulfill()
+        }
+        await fulfillment(of: [enqueued], timeout: 2)
+        try pair.owner.replaceManual([:])
+        var iterator = pair.left.frames().makeAsyncIterator()
+        do { _ = try await iterator.next(); XCTFail("Buffered frame escaped withdrawal") }
+        catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        await pair.left.close(); await pair.right.close()
+    }
+
+    func testAuthorizedQueuedCallbackCannotAdmitAfterWithdrawal() async throws {
+        let pair = try await makeAuthorizedPair()
+        let barrier = ChannelAuthorizationBarrier()
+        defer { barrier.release() }
+        pair.left._testOnlyQueueOperation { await barrier.pause() }
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        let received = expectation(description: "queued callback drained")
+        pair.left._testOnlyQueueReceive(Data([42])) { admitted in
+            XCTAssertFalse(admitted)
+            received.fulfill()
+        }
+        try pair.owner.replaceManual([:])
+        barrier.release()
+        await fulfillment(of: [received], timeout: 2)
+        await pair.left.close(); await pair.right.close()
+    }
+
+    func testAuthorizedPendingAuthenticationWithdrawalFinishesWithoutExplicitClose() async throws {
+        let local = try DeviceIdentity.ephemeral(), remote = try DeviceIdentity.ephemeral()
+        let owner = PeerAuthorizationOwner.live(identity: local)
+        try owner.replaceManual([remote.id: remote.publicKey.rawRepresentation])
+        let lease = try owner.acquire(for: remote.id)
+        let signaling = AuthorizationPendingSignaling()
+        let done = expectation(description: "factory waiter failed")
+        let task = Task {
+            defer { done.fulfill() }
+            do {
+                _ = try await WebRTCFactory(connectionTimeout: .seconds(5)).connect(
+                    localIdentity: local, remoteDevice: remote.id,
+                    remotePublicKey: lease.publicKey, connectionID: UUID(), role: .offerer,
+                    route: .lan, ice: ICEConfiguration(stunURLs: [], turnServers: []),
+                    signaling: signaling, authorizationProvider: owner, authorizationLease: lease)
+                XCTFail("Pending authentication returned after withdrawal")
+            } catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .authenticationFailed) }
+        }
+        defer { task.cancel() }
+        await fulfillment(of: [signaling.offerSent], timeout: 2)
+        try owner.replaceManual([:])
+        await fulfillment(of: [done], timeout: 2)
+        await task.value
+    }
+
+    func testAuthorizedMismatchedAndStaleLeaseRejectBeforeSignaling() async throws {
+        let local = try DeviceIdentity.ephemeral(), remote = try DeviceIdentity.ephemeral()
+        let owner = PeerAuthorizationOwner.live(identity: local)
+        try owner.replaceManual([remote.id: remote.publicKey.rawRepresentation])
+        let lease = try owner.acquire(for: remote.id)
+        let signal = AuthorizationPendingSignaling()
+        for (peer, key, stale) in [(local.id, lease.publicKey, false),
+                                   (remote.id, local.publicKey.rawRepresentation, false),
+                                   (remote.id, lease.publicKey, true)] {
+            if stale { try owner.replaceManual([:]) }
+            do {
+                _ = try await WebRTCFactory(connectionTimeout: .milliseconds(100)).connect(
+                    localIdentity: local, remoteDevice: peer, remotePublicKey: key,
+                    connectionID: UUID(), role: .offerer, route: .lan,
+                    ice: ICEConfiguration(stunURLs: [], turnServers: []), signaling: signal,
+                    authorizationProvider: owner, authorizationLease: lease)
+                XCTFail("Invalid authorization returned a channel")
+            } catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .authenticationFailed) }
+        }
+        let calls = await signal.messageCalls
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testAuthorizedLateFactoryResultRechecksBeforeReturning() async throws {
+        try await assertLateFactoryResult(revoke: true)
+    }
+
+    func testAuthorizedLateFactoryCancellationNeverReturnsChannel() async throws {
+        try await assertLateFactoryResult(revoke: false)
+    }
+
+    private func assertLateFactoryResult(revoke: Bool) async throws {
+        let barrier = ChannelAuthorizationBarrier()
+        defer { barrier.release() }
+        let local = try DeviceIdentity.ephemeral(), remote = try DeviceIdentity.ephemeral()
+        let owner = PeerAuthorizationOwner.live(identity: local)
+        try owner.replaceManual([remote.id: remote.publicKey.rawRepresentation])
+        let lease = try owner.acquire(for: remote.id)
+        let bus = InMemoryWebRTCSignalBus(), id = UUID()
+        let factory = WebRTCFactory(connectionTimeout: .seconds(5), beforeAuthorizedReturn: { await barrier.pause() })
+        let left = Task {
+            try await factory.connect(localIdentity: local, remoteDevice: remote.id,
+                remotePublicKey: lease.publicKey, connectionID: id, role: .offerer, route: .lan,
+                ice: ICEConfiguration(stunURLs: [], turnServers: []), signaling: bus.endpoint(for: local.id),
+                authorizationProvider: owner, authorizationLease: lease)
+        }
+        let right = Task {
+            try await factory.connect(localIdentity: remote, remoteDevice: local.id,
+                remotePublicKey: local.publicKey.rawRepresentation, connectionID: id, role: .answerer,
+                route: .lan, ice: ICEConfiguration(stunURLs: [], turnServers: []), signaling: bus.endpoint(for: remote.id))
+        }
+        defer { left.cancel(); right.cancel() }
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        if revoke { try owner.replaceManual([:]) } else { left.cancel() }
+        barrier.release()
+        do { let channel = try await left.value; await channel.close(); XCTFail("Late result escaped") }
+        catch {
+            if revoke { XCTAssertEqual(error as? WebRTCSecureChannelError, .authenticationFailed) }
+            else { XCTAssertTrue(error is CancellationError) }
+        }
+        if let channel = try? await right.value { await channel.close() }
+    }
+
+    func testAuthorizedGateExactSourceOverlapAndFinalRemoval() throws {
+        let fixture = try PeerOwnerFixture()
+        try fixture.owner.replaceManual([fixture.peer: fixture.peerKey])
+        let lease = try fixture.owner.acquire(for: fixture.peer)
+        let gate = try WebRTCPeerAuthorizationGate(provider: fixture.owner, lease: lease,
+            peer: fixture.peer, publicKey: fixture.peerKey)
+        let invalidations = PeerTestBox(0)
+        gate.onInvalidation { invalidations.update { $0 += 1 } }
+        let epoch = try fixture.begin()
+        try fixture.install(epoch)
+        try fixture.owner.replaceManual([:])
+        XCTAssertNoThrow(try gate.requireCurrent())
+        XCTAssertEqual(invalidations.value, 0)
+        fixture.owner.invalidateAccount(epoch)
+        XCTAssertThrowsError(try gate.requireCurrent())
+        XCTAssertEqual(invalidations.value, 1)
+        try fixture.owner.replaceManual([fixture.peer: fixture.peerKey])
+        XCTAssertThrowsError(try gate.requireCurrent(), "A withdrawn continuity never revives")
+    }
+
+    func testAuthorizedGateExpiryAndConflictingEvidenceFailClosed() throws {
+        let fixture = try PeerOwnerFixture()
+        let epoch = try fixture.begin()
+        try fixture.install(epoch)
+        let gate = try WebRTCPeerAuthorizationGate(provider: fixture.owner,
+            lease: fixture.owner.acquire(for: fixture.peer), peer: fixture.peer, publicKey: fixture.peerKey)
+        fixture.clock.update { $0 = fixture.start.addingTimeInterval(21) }
+        XCTAssertThrowsError(try gate.requireCurrent(), "Delayed timer cannot extend authorization")
+        // Different-key evidence for a hash-derived peer is rejected at producer
+        // validation, not silently substituted into this exact-key lease.
+        XCTAssertThrowsError(try fixture.owner.replaceManual([fixture.peer: fixture.localKey]))
+        XCTAssertThrowsError(try gate.requireCurrent())
+    }
+
+    func testAuthorizedGateClaimReleasedWithoutRetainCycle() throws {
+        let fixture = try PeerOwnerFixture()
+        try fixture.owner.replaceManual([fixture.peer: fixture.peerKey])
+        let provider = RecordingAuthorizationProvider(fixture.owner)
+        var gate: WebRTCPeerAuthorizationGate? = try WebRTCPeerAuthorizationGate(provider: provider,
+            lease: fixture.owner.acquire(for: fixture.peer), peer: fixture.peer, publicKey: fixture.peerKey)
+        weak var weakGate = gate
+        XCTAssertTrue(provider.hasRegistration)
+        gate = nil
+        XCTAssertNil(weakGate)
+        XCTAssertFalse(provider.hasRegistration)
+        XCTAssertEqual(provider.claims, 1)
+    }
+
+    func testAuthorizedCloseRacingWithdrawalDisposesRegistrationAndChannel() async throws {
+        var pair: AuthorizedLoopbackPair? = try await makeAuthorizedPair()
+        let provider = pair!.provider
+        weak var weakChannel: WebRTCSecureChannel?
+        var channel: WebRTCSecureChannel? = pair!.left
+        weakChannel = channel
+        XCTAssertTrue(provider.hasRegistration)
+        var closeTask: Task<Void, Never>? = Task { [channel] in await channel?.close() }
+        try pair!.owner.replaceManual([:])
+        await closeTask?.value
+        closeTask = nil
+        channel = nil
+        XCTAssertFalse(provider.hasRegistration)
+        await pair!.right.close()
+        pair = nil
+        XCTAssertNil(weakChannel)
+    }
+
+    func testAuthorizedChannelSurvivesSameKeyAccountOverlapThenDeniesFinalRemoval() async throws {
+        let pair = try await makeAuthorizedPair()
+        let binding = try AccountSessionBinding(deviceID: pair.local.id.rawValue,
+            audience: "test", origin: URL(string: "https://example.com")!)
+        let account = UUID().uuidString.lowercased()
+        let epoch = try pair.owner.beginAccountSession(binding: binding, accountID: account,
+            sessionID: UUID().uuidString.lowercased(), localPublicKey: pair.local.publicKey.rawRepresentation,
+            accessExpiresAt: Date().addingTimeInterval(100))
+        try pair.owner.install(VerifiedPeerAccountEvidence(epoch: epoch, binding: binding,
+            snapshot: AccountGroupSnapshot(accountID: account, groupID: UUID().uuidString.lowercased(),
+                generation: 1, sequence: 1, headHash: Data(repeating: 1, count: 32),
+                members: [pair.local, pair.remote].map { AccountGroupMember(
+                    deviceID: $0.id.rawValue.uuidString.lowercased(), publicKey: $0.publicKey.rawRepresentation) }),
+            freshUntil: Date().addingTimeInterval(30)))
+        try pair.owner.replaceManual([:])
+        var iterator = pair.right.frames().makeAsyncIterator()
+        try await pair.left.send(Data([12]))
+        let frame = try await iterator.next()
+        XCTAssertEqual(frame, Data([12]))
+        pair.owner.invalidateAccount(epoch)
+        do { try await pair.left.send(Data([13])); XCTFail("Final source removed") }
+        catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        await pair.left.close(); await pair.right.close()
+    }
+
+    func testLegacyTerminalReceiveErrorIsPreservedForLateIterator() async throws {
+        let pair = try await makeLoopbackPair()
+        let rejected = expectation(description: "oversized receive rejected")
+        pair.left._testOnlyQueueReceive(Data(repeating: 1, count: WebRTCSecureChannel.maximumMessageBytes + 1)) { admitted in
+            XCTAssertFalse(admitted); rejected.fulfill()
+        }
+        await fulfillment(of: [rejected], timeout: 2)
+        var iterator = pair.left.frames().makeAsyncIterator()
+        do { _ = try await iterator.next(); XCTFail("Expected original receive error") }
+        catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .messageTooLarge) }
+        await pair.left.close(); await pair.right.close()
+    }
+
+    func testLegacyTerminationRejectsExportSendAndBufferedIteration() async throws {
+        let pair = try await makeLoopbackPair()
+        let enqueued = expectation(description: "legacy buffer populated")
+        pair.left._testOnlyQueueReceive(Data([42])) { admitted in
+            XCTAssertTrue(admitted); enqueued.fulfill()
+        }
+        await fulfillment(of: [enqueued], timeout: 2)
+        await pair.left.close()
+        do { _ = try await pair.left.exportKey(label: "closed", context: Data(), length: 32); XCTFail("closed export") }
+        catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        do { try await pair.left.send(Data([1])); XCTFail("closed send") }
+        catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        var iterator = pair.left.frames().makeAsyncIterator()
+        do { _ = try await iterator.next(); XCTFail("closed buffered iteration") }
+        catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        await pair.right.close()
+    }
+
+    func testAuthorizedSuspendedIteratorRechecksBeforeReturningBufferedElement() async throws {
+        let pair = try await makeAuthorizedPair()
+        let barrier = ChannelAuthorizationBarrier()
+        defer { barrier.release() }
+        let consumer = Task {
+            var iterator = pair.left._testOnlyFrames(beforeDelivery: { await barrier.pause() }).makeAsyncIterator()
+            do { _ = try await iterator.next(); XCTFail("Post-suspension delivery escaped withdrawal") }
+            catch { XCTAssertEqual(error as? WebRTCSecureChannelError, .transportClosed) }
+        }
+        defer { consumer.cancel() }
+        try await pair.right.send(Data([17]))
+        await fulfillment(of: [barrier.entered], timeout: 2)
+        try pair.owner.replaceManual([:])
+        barrier.release()
+        await consumer.value
+        await pair.left.close(); await pair.right.close()
+    }
+
+    private func makeAuthorizedPair() async throws -> AuthorizedLoopbackPair {
+        let local = try DeviceIdentity.ephemeral()
+        let remote = try DeviceIdentity.ephemeral()
+        let owner = PeerAuthorizationOwner.live(identity: local)
+        try owner.replaceManual([remote.id: remote.publicKey.rawRepresentation])
+        let lease = try owner.acquire(for: remote.id)
+        let provider = RecordingAuthorizationProvider(owner)
+        let bus = InMemoryWebRTCSignalBus()
+        let id = UUID()
+        let factory = WebRTCFactory(connectionTimeout: .seconds(5))
+        async let left = factory.connect(localIdentity: local, remoteDevice: remote.id,
+            remotePublicKey: remote.publicKey.rawRepresentation, connectionID: id,
+            role: .offerer, route: .lan, ice: ICEConfiguration(stunURLs: [], turnServers: []),
+            signaling: bus.endpoint(for: local.id), authorizationProvider: provider, authorizationLease: lease)
+        async let right = factory.connect(localIdentity: remote, remoteDevice: local.id,
+            remotePublicKey: local.publicKey.rawRepresentation, connectionID: id,
+            role: .answerer, route: .lan, ice: ICEConfiguration(stunURLs: [], turnServers: []),
+            signaling: bus.endpoint(for: remote.id))
+        return try await AuthorizedLoopbackPair(left: left, right: right, owner: owner,
+            provider: provider, local: local, remote: remote)
+    }
+
     func testThroughputFlowControlRemainsExplicitlyBounded() {
         XCTAssertEqual(WebRTCSecureChannel.bufferedAmountLowThreshold, 1024 * 1024)
     }
@@ -517,6 +855,55 @@ final class WebRTCLoopbackTests: XCTestCase {
     }
 }
 
+private struct AuthorizedLoopbackPair {
+    let left: WebRTCSecureChannel
+    let right: WebRTCSecureChannel
+    let owner: PeerAuthorizationOwner
+    let provider: RecordingAuthorizationProvider
+    let local: DeviceIdentity
+    let remote: DeviceIdentity
+}
+
+private final class ChannelAuthorizationBarrier: @unchecked Sendable {
+    let entered = XCTestExpectation(description: "deterministic barrier entered")
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+    init() { (stream, continuation) = AsyncStream.makeStream() }
+    func pause() async { entered.fulfill(); for await _ in stream {} }
+    func release() { continuation.finish() }
+}
+
+private final class RecordingAuthorizationProvider: PeerAuthorizationProviding, @unchecked Sendable {
+    let owner: PeerAuthorizationOwner
+    private let lock = NSLock()
+    private weak var registration: PeerAuthorizationRegistration?
+    private var claimCount = 0
+    init(_ owner: PeerAuthorizationOwner) { self.owner = owner }
+    var hasRegistration: Bool { lock.withLock { registration != nil } }
+    var claims: Int { lock.withLock { claimCount } }
+    func acquire(for peer: DeviceID) throws -> PeerAuthorizationLease { try owner.acquire(for: peer) }
+    func validate(_ lease: PeerAuthorizationLease) throws { try owner.validate(lease) }
+    func claim(_ lease: PeerAuthorizationLease, onInvalidation: @escaping @Sendable () -> Void) throws -> PeerAuthorizationRegistration {
+        let value = try owner.claim(lease, onInvalidation: onInvalidation)
+        lock.withLock { registration = value; claimCount += 1 }
+        return value
+    }
+    func snapshot() -> PeerAuthorizationSnapshot { owner.snapshot() }
+    func updates() -> AsyncStream<PeerAuthorizationSnapshot> { owner.updates() }
+}
+
+private actor AuthorizationPendingSignaling: WebRTCSignalTransport {
+    nonisolated let offerSent = XCTestExpectation(description: "offer sent while authentication pending")
+    private(set) var messageCalls = 0
+    func messages(from remoteDevice: DeviceID, connectionID: UUID) async -> AsyncThrowingStream<WebRTCSignalMessage, Error> {
+        messageCalls += 1
+        return AsyncThrowingStream { _ in }
+    }
+    func send(_ message: WebRTCSignalMessage, to remoteDevice: DeviceID, connectionID: UUID) async throws {
+        if case .offer = message { offerSent.fulfill() }
+    }
+}
+
 private actor ReceivedFrameRecorder {
     private(set) var frames: [Data] = []
     var count: Int { frames.count }
@@ -594,7 +981,7 @@ private struct CandidateFloodSignalTransport: WebRTCSignalTransport {
     }
 }
 
-private actor InMemoryWebRTCSignalBus {
+actor InMemoryWebRTCSignalBus {
     struct Key: Hashable {
         let recipient: DeviceID
         let sender: DeviceID
@@ -690,7 +1077,7 @@ private actor CancellableCandidateSendGate {
     }
 }
 
-private struct InMemoryWebRTCSignalEndpoint: WebRTCSignalTransport {
+struct InMemoryWebRTCSignalEndpoint: WebRTCSignalTransport {
     let localDevice: DeviceID
     let bus: InMemoryWebRTCSignalBus
 

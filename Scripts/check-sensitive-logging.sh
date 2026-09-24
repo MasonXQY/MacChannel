@@ -5,10 +5,14 @@ if [[ $# -eq 0 ]]; then
   repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   source_files=()
   while IFS= read -r source_file; do source_files+=("${source_file}"); done < <(
-    find "$repository_root/App" "$repository_root/Sources" \
-      "$repository_root/Services/rendezvous" "$repository_root/Scripts" -type f \
+    find "$repository_root/App" "$repository_root/Sources" "$repository_root/iPhone" \
+      "$repository_root/Services/rendezvous" "$repository_root/Scripts" \
+      "$repository_root/Tools/PrivacyEvidenceVerifier" \
+      "$repository_root/Tools/AuditOwnerPreflight" -type f \
       \( -name '*.swift' -o -name '*.go' -o -name '*.sh' \) \
-      ! -name 'audit-privacy.sh' ! -name 'check-sensitive-logging.sh' -print
+      ! -path "$repository_root/iPhone/Tests/*" \
+      ! -name 'audit-privacy.sh' ! -name 'audit-app-store-privacy.sh' \
+      ! -name 'check-sensitive-logging.sh' -print
   )
   set -- "${source_files[@]}"
 fi
@@ -25,6 +29,18 @@ remove_fixture_data_write() {
   local line
   while IFS= read -r line; do
     if [[ "$line" == *"printf "* && "$line" == *">"* && "$line" == *"$fixture_path"* ]]; then
+      continue
+    fi
+    printf '%s\n' "$line"
+  done <<< "$matches"
+}
+
+remove_exact_forged_profile_fixture_write() {
+  local matches="$1"
+  local line text
+  while IFS= read -r line; do
+    text="${line#*:}"
+    if [[ "$text" == 'printf '\''%s\n'\'' '\''<?xml version="1.0"?><plist version="1.0"><dict><key>Name</key><string>forged</string></dict></plist>'\'' >"$selfsigned_root/payload.plist"' ]]; then
       continue
     fi
     printf '%s\n' "$line"
@@ -57,6 +73,14 @@ for source_file in "$@"; do
         */Scripts/test-personal-mesh-install.sh)
           matches="$(remove_fixture_data_write "$matches" 'MacChannel.app/Contents/MacChannelApp')"
           matches="$(remove_fixture_data_write "$matches" 'MacChannel.app/Contents/Resources/state.bin')"
+          ;;
+        */Scripts/test-direct-regression-baseline.sh)
+          # Test-only failure diagnostics describe the caller-supplied fixture.
+          matches="$(printf '%s\n' "$matches" | rg -v 'required Direct Sparkle component is missing or not executable' || true)"
+          ;;
+        */Scripts/test-app-store-prerequisites-contract.sh)
+          # Synthetic unsigned plist input is written to a fixture file, not a log.
+          matches="$(remove_exact_forged_profile_fixture_write "$matches")"
           ;;
         */Scripts/test-sensitive-logging-contract.sh|*/Scripts/test-privacy-audit-contract.sh)
           matches="$(remove_fixture_data_write "$matches" '"$mutation_path"')"

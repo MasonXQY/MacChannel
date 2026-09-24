@@ -6,7 +6,16 @@ protocol AccessibilityAnnouncing: AnyObject {
 }
 
 struct SurfaceActionResult: Equatable, Sendable {
-    let warning: String?
+    let warningContent: LocalizedContent?
+    var warning: String? { warningContent?.text }
+
+    init(warning: String?) {
+        warningContent = warning.map(LocalizedContent.verbatim)
+    }
+
+    init(warningKeys: [LocalizedKey]) {
+        warningContent = warningKeys.isEmpty ? nil : .keys(warningKeys)
+    }
 
     static let committed = SurfaceActionResult(warning: nil)
 

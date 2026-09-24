@@ -7,6 +7,42 @@ import XCTest
 @testable import MacChannelCore
 
 final class ReceiveStoreTests: XCTestCase {
+    func testSeparateSandboxIncomingPermissionLossNeverPublishesCompletedOutput() async throws {
+        let fixture = try StorageFixture()
+        let bytes = Data("verified in private sandbox staging".utf8)
+        let manifest = try makeManifest(name: "authorized.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        XCTAssertNotEqual(fixture.incoming, fixture.downloads)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.downloads.appendingPathComponent("authorized.txt").path))
+        try await store.write(bytes, index: 0, entry: 0)
+        XCTAssertEqual(chmod(fixture.downloads.path, S_IRUSR | S_IXUSR), 0)
+        defer { _ = chmod(fixture.downloads.path, S_IRWXU) }
+        await assertReceiveError(.destinationNotWritable) { _ = try await store.finalize() }
+        let history = try await fixture.database.history(limit: 1)
+        XCTAssertNotEqual(history.first?.phase, .completed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.downloads.appendingPathComponent("authorized.txt").path))
+        XCTAssertEqual(chmod(fixture.downloads.path, S_IRWXU), 0)
+        let output = try await store.finalize()
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+    }
+
+    func testACLAuthorizedDestinationWithoutOwnerWriteBitCanPublish() async throws {
+        let fixture = try StorageFixture()
+        XCTAssertEqual(chmod(fixture.downloads.path, S_IRUSR | S_IXUSR), 0)
+        defer { _ = chmod(fixture.downloads.path, S_IRWXU) }
+        try grantCurrentUserDirectoryWriteACL(fixture.downloads)
+        var status = stat()
+        XCTAssertEqual(stat(fixture.downloads.path, &status), 0)
+        XCTAssertEqual(status.st_mode & S_IWUSR, 0)
+
+        let bytes = Data("ACL-authorized destination".utf8)
+        let manifest = try makeManifest(name: "acl.txt", bytes: bytes)
+        let store = try await fixture.prepare(manifest: manifest)
+        try await store.write(bytes, index: 0, entry: 0)
+        let output = try await store.finalize()
+
+        XCTAssertEqual(try Data(contentsOf: output), bytes)
+    }
     func testPendingChunksBecomeDurableInOneExplicitCheckpoint() async throws {
         let fixture = try StorageFixture()
         let first = Data(repeating: 0x31, count: TransferProtocolLimits.maximumChunkBytes)
@@ -2200,6 +2236,21 @@ private func assertReceiveError(
         XCTFail("Expected \(expected)", file: file, line: line)
     } catch {
         XCTAssertEqual(error as? ReceiveStoreError, expected, file: file, line: line)
+    }
+}
+
+private func grantCurrentUserDirectoryWriteACL(_ directory: URL) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+    process.arguments = [
+        "+a",
+        "user:\(NSUserName()) allow read,write,execute,delete_child",
+        directory.path,
+    ]
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw NSError(domain: "ReceiveStoreTests.ACL", code: Int(process.terminationStatus))
     }
 }
 

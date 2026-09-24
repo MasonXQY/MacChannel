@@ -5,7 +5,7 @@ import Network
 
 @MainActor
 public enum MacChannelApplication {
-    public static func run() {
+    package static func run(distribution: any ApplicationDistribution) {
         let application = NSApplication.shared
         let mode = AppLaunchMode.resolve()
         let delegate: MacChannelApplicationDelegate
@@ -13,20 +13,28 @@ public enum MacChannelApplication {
         case .localShell:
             delegate = MacChannelApplicationDelegate(
                 initialContainer: .localShell(),
-                initialStatus: .offline("本地测试模式；网络服务未启动。"),
-                runtimeHost: nil
+                initialStatus: .serviceOffline(.statusLocalTest),
+                runtimeHost: nil,
+                updateController: distribution.updates,
+                distributionChannel: distribution.channel
             )
         case .production:
             let builder: any AppRuntimeBuilding
             do {
-                builder = try ProductionAppRuntimeBuilder()
+                builder = try ProductionAppRuntimeBuilder(namespace: distribution.runtimeNamespace)
             } catch {
                 builder = FailedProductionRuntimeBuilder()
             }
             delegate = MacChannelApplicationDelegate(
                 initialContainer: .loadingShell(),
                 initialStatus: .loading,
-                runtimeHost: AppRuntimeHost(builder: builder)
+                runtimeHost: AppRuntimeHost(
+                    builder: builder,
+                    eligibility: distribution.conflictingBundleIdentifiers.isEmpty ? nil :
+                        ConcurrentDistributionGuard(conflictingBundleIdentifiers: distribution.conflictingBundleIdentifiers)
+                ),
+                updateController: distribution.updates,
+                distributionChannel: distribution.channel
             )
         }
         application.delegate = delegate
@@ -34,17 +42,6 @@ public enum MacChannelApplication {
         application.run()
     }
 }
-
-@MainActor
-protocol SoftwareUpdateLaunchControlling: AnyObject {
-    func observeTransfers(
-        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>,
-        onReady: @escaping @MainActor () -> Void
-    )
-    func start()
-}
-
-extension SparkleUpdateController: SoftwareUpdateLaunchControlling {}
 
 @MainActor
 final class SoftwareUpdateLaunchCoordinator {
@@ -185,13 +182,16 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
     private let runtimeHost: AppRuntimeHost?
     private var statusItemController: StatusItemController?
     private var surfaceController: AppSurfaceController?
+    private var onboardingWindowController: OnboardingWindowController?
     private var bootstrapTask: Task<Void, Never>?
     private var terminationPending = false
     private var runtimeShutdownComplete = false
     private var productionLaunchDiagnostics: ProductionLaunchDiagnostics?
     private var networkMonitor: NWPathMonitor?
     private var networkWasAvailable = false
-    private let updateController = SparkleUpdateController()
+    private let updateController: any SoftwareUpdateControlling
+    private let distributionChannel: DistributionChannel
+    private let localNetworkActivationStore: LocalNetworkActivationStore
     private lazy var updateLaunch = SoftwareUpdateLaunchCoordinator(controller: updateController)
     private let receiveNotificationController: ReceiveNotificationController
     private let receiveDirectoryResolver = ApplicationReceiveDirectoryResolver()
@@ -223,6 +223,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         initialContainer: AppContainer,
         initialStatus: AppRuntimeStatus,
         runtimeHost: AppRuntimeHost?,
+        updateController: (any SoftwareUpdateControlling)? = nil,
+        distributionChannel: DistributionChannel = .direct,
+        localNetworkActivationStore: LocalNetworkActivationStore = LocalNetworkActivationStore(),
         receiveNotificationController: ReceiveNotificationController = ReceiveNotificationController(),
         transferSurfacePresentation: ((TransferSurfaceSection) -> Void)? = nil,
         beforeReceiveResultRecord: (@MainActor (TransferReceiveResult) async -> Void)? = nil,
@@ -236,6 +239,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         container = initialContainer
         self.initialStatus = initialStatus
         self.runtimeHost = runtimeHost
+        self.updateController = updateController ?? InactiveSoftwareUpdateController()
+        self.distributionChannel = distributionChannel
+        self.localNetworkActivationStore = localNetworkActivationStore
         self.receiveNotificationController = receiveNotificationController
         self.transferSurfacePresentation = transferSurfacePresentation
         self.beforeReceiveResultRecord = beforeReceiveResultRecord
@@ -250,13 +256,22 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         install(container, status: initialStatus)
+        presentStoreOnboardingIfNeeded()
         Task { [weak self] in
             await self?.receiveNotificationController.prepare()
         }
         if let runtimeHost {
+            runtimeHost.onWillStop = { [weak self, weak runtimeHost] in
+                guard let self, let runtimeHost else { return }
+                await self.replace(.loadingShell(), status: runtimeHost.status)
+                self.updateLaunch.prepare(transfers: nil)
+            }
             runtimeHost.onChange = { [weak self] status, container in
                 guard let self else { return }
                 if let container {
+                    if self.distributionChannel == .direct || self.localNetworkActivationStore.isActivated {
+                        Task { await runtimeHost.startLocalNetwork() }
+                    }
                     containerReplacementGeneration += 1
                     let generation = containerReplacementGeneration
                     Task { [weak self] in
@@ -278,10 +293,13 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                     self.statusItemController?.setRuntimeStatus(status)
                     self.surfaceController?.updateRuntimeStatus(status)
                     self.updateReceiveDirectoryAvailability(for: status)
-                    if case .startupError = status {
+                    if status.isStartupFailure {
                         self.updateLaunch.prepare(transfers: nil)
                     }
                 }
+            }
+            runtimeHost.onPresenceChange = { [weak self] snapshot in
+                self?.surfaceController?.updateRuntimePresence(snapshot)
             }
             bootstrapTask = Task { await runtimeHost.bootstrap() }
             NSWorkspace.shared.notificationCenter.addObserver(
@@ -309,11 +327,23 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func presentStoreOnboardingIfNeeded() {
+        guard distributionChannel == .appStore else { return }
+        let controller = OnboardingWindowController { [weak self] in
+            self?.statusItemController?.onShowSettings?()
+        }
+        onboardingWindowController = controller
+        controller.present()
+    }
+
     private func install(_ container: AppContainer, status: AppRuntimeStatus) {
         self.container = container
         surfaceController?.invalidate()
         statusItemController?.invalidate()
         let statusController = statusItemControllerFactory(container)
+        statusController.button.baseIconStyle = StatusItemBaseIconStyle(
+            distributionChannel: distributionChannel
+        )
         let surfaces = AppSurfaceController(
             transferService: NativeTransferSurfaceService(
                 coordinator: container.transferCoordinator
@@ -321,13 +351,36 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             pairingService: container.pairingSurfaceService,
             settingsService: container.settingsSurfaceService,
             directorySelector: container.directorySelector,
+            localNetworkModel: LocalNetworkPermissionModel(
+                retry: { [weak runtimeHost] in
+                    Task { await runtimeHost?.startLocalNetwork() }
+                },
+                stateProvider: container.localNetworkState
+            ),
+            accountController: container.accountController,
             updateService: updateController,
             notificationService: receiveNotificationController,
             transferSurfacePresentation: transferSurfacePresentation,
             onRetryRuntime: { [weak runtimeHost] in
                 Task { await runtimeHost?.bootstrap() }
+            },
+            onRetryPresence: { [weak runtimeHost] in
+                Task { await runtimeHost?.reconnectPublicService() }
+            },
+            onRetryTrustSave: { [weak runtimeHost] in
+                Task { await runtimeHost?.retryTrustPersistence() }
+            },
+            onUseLocalNetwork: { [weak self, weak runtimeHost] in
+                if self?.distributionChannel == .appStore {
+                    self?.localNetworkActivationStore.activate()
+                }
+                Task { await runtimeHost?.startLocalNetwork() }
             }
         )
+        surfaces.localNetworkModel.refresh()
+        if let states = container.localNetworkStates?() {
+            surfaces.localNetworkModel.observe(browser: states.0, advertiser: states.1)
+        }
         receiveDirectoryResolver.configure(
             initialSnapshot: container.initialSettingsSnapshot,
             waitForSnapshot: container.receiveDirectoryConfigurationPending
@@ -359,11 +412,14 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         }
         statusController.setRuntimeStatus(status)
         surfaces.updateRuntimeStatus(status)
+        if let runtimeHost { surfaces.updateRuntimePresence(runtimeHost.presence) }
         surfaces.observe(container.deviceDirectory)
         if let transferSnapshots = container.transferSnapshots {
             surfaces.observeTransferSnapshots(transferSnapshots)
         }
-        if let pairingStates = container.pairingStates {
+        if let states = container.durablePairingStates {
+            surfaces.observeDurablePairingStates(states)
+        } else if let pairingStates = container.pairingStates {
             surfaces.observePairingStates(pairingStates)
         }
         if let settingsSnapshots = container.settingsSnapshots {
@@ -394,7 +450,9 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         generation: Int
     ) async -> Bool {
         await drainReceiveEventObservation()
+        await surfaceController?.stopPairingObservation()
         guard generation == containerReplacementGeneration else { return false }
+        receiveNotificationController.stopPendingNotifications()
         install(container, status: status)
         return true
     }
@@ -407,6 +465,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         bootstrapTask?.cancel()
         beginReceiveEventDrain()
         updateController.stop()
+        receiveNotificationController.stopPendingNotifications()
         surfaceController?.invalidate()
         statusItemController?.invalidate()
     }
@@ -431,6 +490,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
             return .terminateNow
         }
         Task {
+            await surfaceController?.stopPairingObservation()
             if let receiveDrain {
                 await receiveDrain.task.value
                 finishReceiveEventDrain(receiveDrain)
@@ -461,7 +521,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
                     releaseReceiveEventDeduplication(result, generation: generation)
                 }
                 guard !Task.isCancelled else { break }
-                await receiveNotificationController.notify(receive: result)
+                receiveNotificationController.enqueue(receive: result)
             }
             await events.cancel()
         }
@@ -502,7 +562,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         guard ids.insert(result.transferID).inserted else { return }
         receiveEventDeduplicationIDs[generation] = ids
         observedReceiveEventCount += 1
-        let sourceName = statusItemController?.sourceDisplayName(for: result.source) ?? "其他设备"
+        let sourceName = statusItemController?.knownSourceDisplayName(for: result.source) ?? ""
         recentReceiveStore.record(result, sourceName: sourceName)
     }
 
@@ -543,7 +603,7 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
            container.receiveDirectoryConfigurationPending
         {
             receiveDirectoryResolver.configure(initialSnapshot: nil, waitForSnapshot: true)
-        } else if case .startupError = status {
+        } else if status.isStartupFailure {
             receiveDirectoryResolver.markConfigurationUnavailable()
         }
     }
@@ -595,8 +655,8 @@ final class MacChannelApplicationDelegate: NSObject, NSApplicationDelegate {
         let statusName: String
         switch status {
         case .ready: statusName = "ready"
-        case .offline: statusName = "offline"
-        case .loading, .startupError, .error: return
+        case .offline, .serviceOffline: statusName = "offline"
+        case .loading, .startupError, .startupFailure, .error, .serviceError: return
         }
         productionLaunchDiagnostics = ProductionLaunchDiagnostics(
             marker: URL(fileURLWithPath: arguments[flag + 1]),
@@ -635,6 +695,38 @@ private struct ProductionLaunchDiagnostics {
     let identityID: String
     let settingsAvailable: Bool
     let statusInstalled: Bool
+}
+
+@MainActor
+private final class InactiveSoftwareUpdateController: SoftwareUpdateControlling {
+    private let snapshot = SoftwareUpdateSnapshot(
+        installedVersion: InstalledAppVersion(),
+        phase: .idle,
+        canCheck: false,
+        lastCheckedAt: nil
+    )
+
+    let isAvailable = false
+    var softwareUpdateSnapshot: SoftwareUpdateSnapshot { snapshot }
+
+    func checkForUpdates() {}
+    func showAvailableUpdate() {}
+    func start() {}
+    func stop() {}
+
+    func observeTransfers(
+        _ snapshots: @escaping @Sendable () async -> AsyncStream<[TransferSnapshot]>,
+        onReady: @escaping @MainActor () -> Void
+    ) {
+        onReady()
+    }
+
+    func softwareUpdateSnapshots() -> AsyncStream<SoftwareUpdateSnapshot> {
+        AsyncStream { continuation in
+            continuation.yield(snapshot)
+            continuation.finish()
+        }
+    }
 }
 
 @MainActor

@@ -77,7 +77,7 @@ public actor IncomingTransferListener {
         let task: Task<Void, Never>
     }
 
-    private let source: any IncomingTransferConnectionSource
+    private let sources: [any IncomingTransferConnectionSource]
     private let policy: ReceivePolicy
     private let directories: DownloadDirectory
     private let database: TransferDatabase
@@ -88,6 +88,7 @@ public actor IncomingTransferListener {
     private let onReceiveFailed: @Sendable (TransferID, IncomingTransferFailure) async -> Void
     private let resources = BoundedChannelResourceRegistry.shared
     private let closeRegistry = IncomingChannelCloseRegistry.shared
+    private let resourceOwner = UUID()
 
     private var readerTask: Task<Void, Never>?
     private var pending: [AdmittedConnection] = []
@@ -95,6 +96,7 @@ public actor IncomingTransferListener {
     private var activeTransferIDs: Set<TransferID> = []
     private var schedulingWorker: Task<Void, Never>?
     private var stopped = false
+    private var stopTask: Task<Void, Never>?
 
     public init(
         source: any IncomingTransferConnectionSource,
@@ -107,7 +109,24 @@ public actor IncomingTransferListener {
         onReceiveFinished: @escaping @Sendable (TransferReceiveResult?) async -> Void = { _ in },
         onReceiveFailed: @escaping @Sendable (TransferID, IncomingTransferFailure) async -> Void = { _, _ in }
     ) {
-        self.source = source
+        self.init(sources: [source], policy: policy, directories: directories, database: database,
+            incomingDirectory: incomingDirectory, capacity: capacity, inactivityTimeout: inactivityTimeout,
+            onReceiveFinished: onReceiveFinished, onReceiveFailed: onReceiveFailed)
+    }
+
+    public init(
+        sources: [any IncomingTransferConnectionSource],
+        policy: ReceivePolicy,
+        directories: DownloadDirectory = DownloadDirectory(),
+        database: TransferDatabase,
+        incomingDirectory: URL? = nil,
+        capacity: any ReceiveCapacityProviding = VolumeReceiveCapacityProvider(),
+        inactivityTimeout: Duration = .seconds(30),
+        onReceiveFinished: @escaping @Sendable (TransferReceiveResult?) async -> Void = { _ in },
+        onReceiveFailed: @escaping @Sendable (TransferID, IncomingTransferFailure) async -> Void = { _, _ in }
+    ) {
+        precondition((1...2).contains(sources.count), "One or two inbound planes are supported")
+        self.sources = sources
         self.policy = policy
         self.directories = directories
         self.database = database
@@ -126,76 +145,91 @@ public actor IncomingTransferListener {
 
     public func start() {
         guard !stopped, readerTask == nil else { return }
-        readerTask = Task { [weak self, source, closeRegistry, timeout = inactivityTimeout] in
-            do {
-                guard let initialPermit = await closeRegistry.acquire() else {
-                    await self?.sourceEnded()
-                    return
-                }
-                guard !Task.isCancelled else {
-                    await closeRegistry.releaseUnused(initialPermit)
-                    return
-                }
-                let connections = await source.connections()
-                var iterator = connections.makeAsyncIterator()
-                var permit: IncomingChannelCloseRegistry.Permit? = initialPermit
-                while let currentPermit = permit {
-                    let connection: IncomingTransferConnection?
-                    do {
-                        connection = try await iterator.next()
-                    } catch {
-                        await closeRegistry.releaseUnused(currentPermit)
-                        throw error
+        readerTask = Task { [weak self, sources, closeRegistry, resourceOwner, timeout = inactivityTimeout] in
+            await withTaskGroup(of: Void.self) { group in
+                for source in sources {
+                    group.addTask { [weak self] in
+                        do {
+                            guard let initialPermit = await closeRegistry.acquire(owner: resourceOwner) else {
+                                return
+                            }
+                            guard !Task.isCancelled else {
+                                await closeRegistry.releaseUnused(initialPermit)
+                                return
+                            }
+                            let connections = await source.connections()
+                            var iterator = connections.makeAsyncIterator()
+                            var permit: IncomingChannelCloseRegistry.Permit? = initialPermit
+                            while let currentPermit = permit {
+                                let connection: IncomingTransferConnection?
+                                do {
+                                    connection = try await iterator.next()
+                                } catch {
+                                    await closeRegistry.releaseUnused(currentPermit)
+                                    throw error
+                                }
+                                guard let connection else {
+                                    await closeRegistry.releaseUnused(currentPermit)
+                                    break
+                                }
+                                guard !Task.isCancelled, let self else {
+                                    await closeRegistry.close(
+                                        connection.channel,
+                                        permit: currentPermit,
+                                        timeout: timeout
+                                    )
+                                    return
+                                }
+                                await self.enqueue(
+                                    AdmittedConnection(connection: connection, permit: currentPermit)
+                                )
+                                guard !Task.isCancelled else { return }
+                                permit = await closeRegistry.acquire(owner: resourceOwner)
+                            }
+                        } catch {
+                            // This plane ending does not stop the other admitted reader.
+                        }
                     }
-                    guard let connection else {
-                        await closeRegistry.releaseUnused(currentPermit)
-                        break
-                    }
-                    guard !Task.isCancelled, let self else {
-                        await closeRegistry.close(
-                            connection.channel,
-                            permit: currentPermit,
-                            timeout: timeout
-                        )
-                        return
-                    }
-                    await self.enqueue(
-                        AdmittedConnection(connection: connection, permit: currentPermit)
-                    )
-                    guard !Task.isCancelled else { return }
-                    permit = await closeRegistry.acquire()
                 }
-            } catch {
-                await self?.sourceEnded()
+                await group.waitForAll()
             }
+            await self?.sourceEnded()
         }
     }
 
     public func stop() async {
-        guard !stopped else { return }
+        if let stopTask { await stopTask.value; return }
         stopped = true
+        let reader = readerTask
         readerTask?.cancel()
         readerTask = nil
+        let scheduler = schedulingWorker
+        schedulingWorker?.cancel()
         let queued = pending
         pending.removeAll()
         let receives = Array(active.values)
         active.removeAll()
         activeTransferIDs.removeAll()
         for receive in receives { receive.task.cancel() }
-        for receive in receives {
-            await resources.beginClose(
-                receive.channel,
-                token: receive.resourceToken,
-                timeout: inactivityTimeout
-            )
+        let task = Task {
+            // Start close before joining runners: close can unblock their I/O.
+            for receive in receives {
+                await resources.beginClose(receive.channel, token: receive.resourceToken,
+                                           timeout: inactivityTimeout)
+            }
+            for connection in queued {
+                await closeRegistry.close(connection.connection.channel, permit: connection.permit,
+                                          timeout: inactivityTimeout)
+            }
+            await reader?.value
+            await scheduler?.value
+            for receive in receives { await receive.task.value }
+            // Permits survive runner return until close and every detached I/O
+            // operation return. Drain only this listener, not the shared pool.
+            await closeRegistry.waitForDrain(owner: resourceOwner)
         }
-        for connection in queued {
-            await closeRegistry.close(
-                connection.connection.channel,
-                permit: connection.permit,
-                timeout: inactivityTimeout
-            )
-        }
+        stopTask = task
+        await task.value
     }
 
     private func enqueue(_ admitted: AdmittedConnection) async {
@@ -216,7 +250,7 @@ public actor IncomingTransferListener {
     }
 
     private func schedule() {
-        guard schedulingWorker == nil else { return }
+        guard !stopped, schedulingWorker == nil else { return }
         schedulingWorker = Task { [weak self] in
             await self?.drainSchedule()
         }
@@ -224,10 +258,13 @@ public actor IncomingTransferListener {
 
     private func drainSchedule() async {
         defer { schedulingWorker = nil }
-        while active.count < IncomingTransferCapacity.maximumActiveTransfers, !pending.isEmpty {
+        while !stopped, active.count < IncomingTransferCapacity.maximumActiveTransfers, !pending.isEmpty {
             let admitted = pending.removeFirst()
             let connection = admitted.connection
             let permit = admitted.permit
+            // Keep the identity reserved while waiting for a process-wide slot;
+            // the other plane must not enqueue it in this suspension window.
+            activeTransferIDs.insert(connection.transferID)
             let resourceToken = await resources.reserveWhenAvailable(
                 .inbound,
                 onReleased: { [weak self, closeRegistry, permit] in
@@ -236,6 +273,7 @@ public actor IncomingTransferListener {
                 }
             )
             guard let resourceToken else {
+                activeTransferIDs.remove(connection.transferID)
                 await closeRegistry.close(
                     connection.channel,
                     permit: permit,
@@ -253,7 +291,6 @@ public actor IncomingTransferListener {
                 continue
             }
             let token = UUID()
-            activeTransferIDs.insert(connection.transferID)
             let timeout = inactivityTimeout
             let task = Task { [weak self, resources] in
                 guard let self else {

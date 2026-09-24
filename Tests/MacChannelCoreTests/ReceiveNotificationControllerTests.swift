@@ -6,6 +6,35 @@ import XCTest
 
 @MainActor
 final class ReceiveNotificationControllerTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
+    func testInvalidatedNotificationIdentifiersStayBoundedAndExpire() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        var identifiers = ExpiringReceiveNotificationIdentifiers(capacity: 2, ttl: 10)
+
+        identifiers.insert("first", now: start)
+        identifiers.insert("second", now: start.addingTimeInterval(1))
+        identifiers.insert("third", now: start.addingTimeInterval(2))
+
+        XCTAssertEqual(identifiers.count, 2)
+        XCTAssertFalse(identifiers.contains("first", now: start.addingTimeInterval(2)))
+        XCTAssertTrue(identifiers.contains("second", now: start.addingTimeInterval(2)))
+        XCTAssertTrue(identifiers.contains("third", now: start.addingTimeInterval(2)))
+        XCTAssertFalse(identifiers.contains("second", now: start.addingTimeInterval(12)))
+        XCTAssertEqual(identifiers.count, 1)
+        XCTAssertFalse(identifiers.contains("third", now: start.addingTimeInterval(13)))
+        XCTAssertEqual(identifiers.count, 0)
+    }
+
     func testForegroundNotificationUsesModernPresentationSurfacesAndCompletesOnce() {
         var completionCount = 0
         var observedOptions: UNNotificationPresentationOptions = []
@@ -98,7 +127,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         XCTAssertEqual(finder.revealedURLs, [[first, second]])
     }
 
-    func testPrepareRequestsUndeterminedAuthorizationOnlyOnce() async {
+    func testPrepareDoesNotRequestUndeterminedAuthorization() async {
         let center = RecordingReceiveNotificationCenter(
             status: .notDetermined,
             requestedStatus: .authorized
@@ -111,7 +140,24 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         await controller.prepare()
         await controller.prepare()
 
+        XCTAssertEqual(center.authorizationRequestCount, 0)
+    }
+
+    func testFirstReceivedItemRequestsUndeterminedAuthorizationOnlyOnce() async {
+        let center = RecordingReceiveNotificationCenter(
+            status: .notDetermined,
+            requestedStatus: .authorized
+        )
+        let controller = ReceiveNotificationController(
+            center: center,
+            revealer: RecordingReceiveTargetRevealer()
+        )
+
+        await controller.notify(receive: receiveResult(named: "first.pdf"))
+        await controller.notify(receive: receiveResult(named: "second.pdf"))
+
         XCTAssertEqual(center.authorizationRequestCount, 1)
+        XCTAssertEqual(center.requests.count, 2)
     }
 
     func testDeniedAuthorizationSendsNothingAndPublishesDeniedState() async {
@@ -223,7 +269,7 @@ final class ReceiveNotificationControllerTests: XCTestCase {
             authorizationPromptTimeout: .seconds(30)
         )
         let cancelledPrepare = Task { @MainActor in
-            await controller.prepare()
+            await controller.notify(receive: self.receiveResult(named: "cancelled.pdf"))
         }
         await waitForAuthorizationQueries(1, in: center)
         center.resolveAuthorizationQuery(at: 0, with: .notDetermined)
@@ -430,14 +476,14 @@ final class ReceiveNotificationControllerTests: XCTestCase {
         )
 
         let first = Task { @MainActor in
-            await controller.prepare()
+            await controller.notify(receive: self.receiveResult(named: "first.pdf"))
         }
         await waitForAuthorizationQueries(1, in: center)
         center.resolveAuthorizationQuery(at: 0, with: .notDetermined)
         await waitForAuthorizationRequests(1, in: center)
         await first.value
 
-        await controller.prepare()
+        await controller.notify(receive: receiveResult(named: "second.pdf"))
         XCTAssertEqual(center.authorizationRequestCount, 1)
         center.resolveAuthorizationRequest(at: 0, with: .authorized)
         for _ in 0..<100 { await Task.yield() }

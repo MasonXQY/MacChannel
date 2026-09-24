@@ -1,0 +1,13 @@
+DropMesh lives in your Mac menu bar and helps you send files between paired computers.
+
+Drag files onto the menu bar icon and choose a receiving device to start a transfer. You can also choose files from the menu or send supported clipboard content. Received content is saved in a receiving folder under Downloads, or another folder you authorize.
+
+• Send files and folders, and pair multiple Macs. Choose one recipient for each send.
+• Connect over a local network or the internet, with encrypted relay fallback when a direct connection is unavailable.
+• View progress and pause, resume or cancel transfers.
+• Find received files through notifications, unread indicators and recent arrivals.
+• Use Simplified Chinese or English. No DropMesh account registration is needed.
+
+Requires macOS 14 or later. Internet transfers depend on network and service availability. Speed depends on both devices' networks and the route used. Notifications and folder access require system permission.
+
+The Mac App Store edition receives updates through the store. It uses a separate local identity and data from the independently downloaded edition, so switching editions requires pairing again. Do not run both editions at the same time.

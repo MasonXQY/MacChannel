@@ -101,6 +101,21 @@ public struct PairingJoinResult: Sendable {
     }
 }
 
+/// Immutable comparison context. Possession does not confer approval authority.
+public struct PairingHostConfirmation: Equatable, Sendable {
+    public let sessionID: PairingSessionID
+    public let peer: DeviceSummary
+    public let fingerprint: String
+    public let expiresAt: Date
+
+    public init(sessionID: PairingSessionID, peer: DeviceSummary, fingerprint: String, expiresAt: Date) {
+        self.sessionID = sessionID
+        self.peer = peer
+        self.fingerprint = fingerprint
+        self.expiresAt = expiresAt
+    }
+}
+
 public protocol PairingClock: Sendable {
     var now: Date { get }
 }

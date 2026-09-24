@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Name</key><string>Sanitized DropMesh Mac App Store</string>
+<key>UUID</key><string>00000000-0000-0000-0000-000000000001</string>
+<key>TeamIdentifier</key><array><string>XKAZ67HN45</string></array>
+<key>Platform</key><array><string>OSX</string></array>
+<key>ExpirationDate</key><date>2099-01-01T00:00:00Z</date>
+<key>Entitlements</key><dict>
+<key>com.apple.application-identifier</key><string>XKAZ67HN45.com.zensystech.dropmesh</string>
+<key>com.apple.developer.team-identifier</key><string>XKAZ67HN45</string>
+<key>keychain-access-groups</key><array><string>XKAZ67HN45.*</string></array>
+</dict></dict></plist>

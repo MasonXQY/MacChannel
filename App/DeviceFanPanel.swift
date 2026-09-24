@@ -286,12 +286,12 @@ private final class DeviceFanDropView: NSView {
                     cancel: request.cancel
                 )
             case .noPhysicalDrag:
-                request.announce("请使用键盘设备菜单选择接收设备；当前没有可发送的拖放项目。")
+                request.announce(L10n.text(.sendKeyboardRequired))
                 return false
             case .invalid:
                 accessibilityLease.clear()
                 session.rejectInvalidDrop(cancel: request.cancel)
-                request.announce("拖放内容已变化，请重新拖放文件后再发送。")
+                request.announce(L10n.text(.sendDragChanged))
                 return false
             }
         }

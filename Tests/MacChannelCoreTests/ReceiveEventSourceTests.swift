@@ -123,11 +123,9 @@ final class ReceiveEventSourceTests: XCTestCase {
         XCTAssertFalse(finishedBeforeCancellation)
 
         await stream.cancel()
-
-        for _ in 0..<100 where !(await publisherFinished.isFinished()) { await Task.yield() }
+        await blockedPublisher.value
         let finishedAfterCancellation = await publisherFinished.isFinished()
         XCTAssertTrue(finishedAfterCancellation)
-        await blockedPublisher.value
     }
 
     func testEverySubscriptionReceivesEventsPublishedAfterItStarts() async throws {
@@ -271,7 +269,8 @@ final class ReceiveEventSourceTests: XCTestCase {
         XCTAssertEqual(drained, [yielded])
         await source.publish(afterCutoff)
         let repeatedDrain = await stream.drainAndCancel()
-        let resultAfterCutoff = await iterator.next()
+        var afterCutoffIterator = stream.makeAsyncIterator()
+        let resultAfterCutoff = await afterCutoffIterator.next()
         XCTAssertEqual(repeatedDrain, [])
         XCTAssertNil(resultAfterCutoff)
         await source.finish()

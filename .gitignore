@@ -8,3 +8,4 @@ DerivedData/
 *.sparkle-private-key
 .superpowers/
 dist/
+dist-app-store/

@@ -5,11 +5,13 @@ COPY Services/rendezvous/go.mod Services/rendezvous/go.sum ./
 RUN go mod download
 COPY Services/rendezvous/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/rendezvous ./cmd/server \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/accountserver ./cmd/accountserver \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/secret-launcher ./cmd/secret-launcher
 
 FROM alpine:3.23.5@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
 COPY --from=build /out/rendezvous /usr/local/bin/rendezvous
+COPY --from=build /out/accountserver /usr/local/bin/accountserver
 COPY --from=build /out/secret-launcher /usr/local/bin/secret-launcher
 
 USER 0:0

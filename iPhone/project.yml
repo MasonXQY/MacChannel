@@ -1,0 +1,129 @@
+name: DropMesh
+options:
+  bundleIdPrefix: com.zensystech.dropmesh
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.4"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    TARGETED_DEVICE_FAMILY: "1"
+packages:
+  DropMeshPackage:
+    path: ..
+targets:
+  DropMesh:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: App/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: Shared
+      - path: Resources
+    dependencies:
+      - target: DropMeshShare
+        embed: true
+      - package: DropMeshPackage
+        product: DropMeshMobileRuntime
+      - package: DropMeshPackage
+        product: MacChannelCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev
+        PRODUCT_NAME: DropMesh
+        INFOPLIST_FILE: App/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Shared/DropMeshMainDevelopment.entitlements
+  DropMeshShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: ShareExtension/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: Shared
+      - path: Resources
+      - path: ../Sources/DropMeshMobileRuntime/MobileImportStager.swift
+      - path: ../Sources/DropMeshMobileRuntime/MobileImportCopy.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev.share
+        PRODUCT_NAME: DropMeshShare
+        INFOPLIST_FILE: ShareExtension/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Shared/DropMeshDevelopment.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SHARE_EXTENSION
+        SKIP_INSTALL: YES
+  DropMeshTestHost:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - DropMeshApp.swift
+          - ProductionMobileAppDependencies.swift
+      - path: Resources
+      - path: Tests/TestHost
+      - path: Shared
+      - path: ShareExtension
+        excludes:
+          - Info.plist
+          - PrivacyInfo.xcprivacy
+    dependencies:
+      - package: DropMeshPackage
+        product: DropMeshMobileRuntime
+      - package: DropMeshPackage
+        product: MacChannelCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev.test-host
+        PRODUCT_NAME: DropMeshTestHost
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: DropMesh
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: Allow DropMesh to reopen photos and videos you previously sent when you choose Preview or Share in History.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+  DropMeshTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/Unit
+    dependencies:
+      - target: DropMeshTestHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev.tests
+        GENERATE_INFOPLIST_FILE: YES
+  DropMeshUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Tests/UI
+    dependencies:
+      - target: DropMeshTestHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zensystech.dropmesh.iphone.dev.uitests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  DropMesh:
+    build:
+      targets:
+        DropMesh: all
+  DropMeshTests:
+    build:
+      targets:
+        DropMeshTestHost: all
+        DropMeshTests: [test]
+        DropMeshUITests: [test]
+    test:
+      macroExpansion: DropMeshTestHost
+      targets:
+        - DropMeshTests
+        - DropMeshUITests

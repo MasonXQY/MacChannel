@@ -1,0 +1,5 @@
+"CFBundleDisplayName" = "DropMesh";
+"CFBundleName" = "DropMesh";
+"NSLocalNetworkUsageDescription" = "Find paired Macs nearby and transfer files securely over your local network.";
+"NSDownloadsFolderUsageDescription" = "Save files received from your paired Macs to Downloads.";
+"NSDocumentsFolderUsageDescription" = "Save received files to a folder you choose.";

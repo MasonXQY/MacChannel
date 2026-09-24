@@ -4,6 +4,17 @@ import XCTest
 @testable import MacChannelCore
 
 final class DeviceFanLayoutTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     func testBlankDiscoveredDeviceNameHasStableVisibleFallback() {
         let id = DeviceID(rawValue: UUID(uuidString: "12345678-1234-1234-1234-123456789ABC")!)
         let target = DeviceFanTarget.device(

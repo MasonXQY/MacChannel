@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -26,7 +27,21 @@ type Credential struct {
 // error therefore cannot disclose the stable device identity.
 func Mint(deviceID string, now time.Time, secret []byte) Credential {
 	expirySeconds := now.Unix() + int64(CredentialLifetime/time.Second)
-	expiresAt := time.Unix(expirySeconds, 0).In(now.Location())
+	return mintAt(deviceID, time.Unix(expirySeconds, 0).In(now.Location()), secret)
+}
+
+// MintUntil floors an authority-provided deadline to coturn's whole seconds.
+// It does not extend a session deadline to obtain a minimum usable lifetime.
+func MintUntil(deviceID string, now, deadline time.Time, secret []byte) (Credential, error) {
+	expiry := time.Unix(deadline.Unix(), 0).In(now.Location())
+	if len(secret) < 32 || strings.TrimSpace(deviceID) == "" || !expiry.After(now) {
+		return Credential{}, errors.New("TURN credential unavailable")
+	}
+	return mintAt(deviceID, expiry, secret), nil
+}
+
+func mintAt(deviceID string, expiresAt time.Time, secret []byte) Credential {
+	expirySeconds := expiresAt.Unix()
 	expiryText := strconv.FormatInt(expirySeconds, 10)
 	normalizedDeviceID := strings.ToLower(strings.TrimSpace(deviceID))
 	handleMAC := hmac.New(sha256.New, secret)

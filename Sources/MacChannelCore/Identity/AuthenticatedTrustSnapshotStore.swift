@@ -12,6 +12,13 @@ public protocol TrustSnapshotPersisting: Sendable {
     func persistLatest(from repository: TrustRepository) async throws
 }
 
+/// The exact payload acknowledged by the existing file and generation-anchor
+/// checkpoint. A repository mutation alone never creates this receipt.
+public struct AuthenticatedTrustState: Sendable {
+    public let snapshot: TrustStoreSnapshot
+    public let authenticationRecords: [SignedTrustRecord]
+}
+
 private final class DurableIssuerSequenceReserver<Secrets: SecretStore & Sendable>:
     IssuerSequenceReserving, @unchecked Sendable
 {
@@ -97,6 +104,8 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
     private let secrets: Secrets
     private let policy: KeychainPolicy
     private let issuerSequenceReserver: DurableIssuerSequenceReserver<Secrets>
+    private var durableState: AuthenticatedTrustState?
+    private var subscribers: [UUID: AsyncStream<AuthenticatedTrustState?>.Continuation] = [:]
 
     public init(
         url: URL,
@@ -113,7 +122,7 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
         )
     }
 
-    public func load(identity: DeviceIdentity) throws -> TrustRepository {
+    public func load(identity: DeviceIdentity, authorizationOwner: PeerAuthorizationOwner? = nil) throws -> TrustRepository {
         let generation = try storedGeneration()
         if FileManager.default.fileExists(atPath: url.path) {
             let data = try Data(contentsOf: url)
@@ -135,13 +144,17 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
             if snapshot.generation > generation {
                 try storeGeneration(snapshot.generation)
             }
-            return try TrustRepository(
+            let repository = try TrustRepository(
                 ownerIdentity: identity,
                 trustStore: store,
                 persistedGeneration: snapshot.generation,
                 authenticationRecords: decoded?.authenticationRecords ?? [],
-                issuerSequenceReserver: issuerSequenceReserver
+                issuerSequenceReserver: issuerSequenceReserver,
+                authorizationOwner: authorizationOwner
             )
+            publish(AuthenticatedTrustState(snapshot: snapshot,
+                authenticationRecords: decoded?.authenticationRecords ?? []))
+            return repository
         }
         guard generation == 0 else {
             throw AuthenticatedTrustSnapshotStoreError.invalidGeneration
@@ -150,7 +163,8 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
             ownerIdentity: identity,
             trustStore: TrustStore(owner: identity.id),
             persistedGeneration: 0,
-            issuerSequenceReserver: issuerSequenceReserver
+            issuerSequenceReserver: issuerSequenceReserver,
+            authorizationOwner: authorizationOwner
         )
     }
 
@@ -161,7 +175,24 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
     }
 
     public func persistLatest(from repository: TrustRepository) async throws {
-        guard let repositoryState = try? await repository.persistenceState() else { return }
+        _ = try await persistLatestState(from: repository)
+    }
+
+    /// Nil means there was no signed mutation to write. Existing Void callers
+    /// retain that no-op behavior. Receipts are published only after anchoring.
+    @discardableResult
+    public func persistLatestState(from repository: TrustRepository) async throws -> AuthenticatedTrustState? {
+        guard let repositoryState = try? await repository.persistenceState() else { return nil }
+        // The repository await is reentrant: an older capture may resume after
+        // a newer one was saved. Never rewrite the file/anchor backwards.
+        if let durableState, durableState.snapshot.owner == repositoryState.snapshot.owner {
+            if durableState.snapshot.generation > repositoryState.snapshot.generation { return durableState }
+            if durableState.snapshot.generation == repositoryState.snapshot.generation {
+                guard durableState.snapshot.signature == repositoryState.snapshot.signature else {
+                    throw AuthenticatedTrustSnapshotStoreError.invalidGeneration
+                }
+            }
+        }
         let persistedState = PersistedState(
             version: 1,
             snapshot: repositoryState.snapshot,
@@ -173,7 +204,33 @@ public actor AuthenticatedTrustSnapshotStore<Secrets: SecretStore & Sendable>:
             throw AuthenticatedTrustSnapshotStoreError.invalidGeneration
         }
         try storeGeneration(repositoryState.snapshot.generation)
+        let receipt = AuthenticatedTrustState(snapshot: repositoryState.snapshot,
+            authenticationRecords: repositoryState.authenticationRecords)
+        publish(receipt)
+        return receipt
     }
+
+    public func persistedState() -> AuthenticatedTrustState? { durableState }
+
+    public func persistedUpdates() -> AsyncStream<AuthenticatedTrustState?> {
+        let id = UUID()
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            subscribers[id] = continuation
+            continuation.yield(durableState)
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.unsubscribe(id) }
+            }
+        }
+    }
+
+    private func publish(_ state: AuthenticatedTrustState) {
+        durableState = state
+        for subscriber in subscribers.values { subscriber.yield(state) }
+    }
+
+    private func unsubscribe(_ id: UUID) { subscribers[id] = nil }
+
+    deinit { for subscriber in subscribers.values { subscriber.finish() } }
 
     private func storedGeneration() throws -> UInt64 {
         guard let data = try secrets.data(for: Self.generationAccount, policy: policy)

@@ -78,6 +78,24 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
         pendingConfirmation?.peer
     }
 
+    public func pendingHostConfirmation() async -> PairingHostConfirmation? { hostConfirmationSnapshot() }
+
+    private func hostConfirmationSnapshot() -> PairingHostConfirmation? {
+        guard let pending = pendingConfirmation, case .host = pending.role,
+              case .approvalRequested = state, !pending.localConfirmed,
+              pending.issuedAuthorization == nil, clock.now < pending.expiresAt,
+              !codeCreationInProgress, !confirmationInProgress, !commitInProgress else { return nil }
+        return PairingHostConfirmation(sessionID: pending.sessionID, peer: pending.peer,
+            fingerprint: pending.fingerprint, expiresAt: pending.expiresAt)
+    }
+
+    @discardableResult
+    public func approvePendingPairing(_ expected: PairingHostConfirmation) async throws -> SignedTrustRecord {
+        guard hostConfirmationSnapshot() == expected else { throw PairingError.staleOperation }
+        // No suspension between comparison and entering the existing signing gate.
+        return try await confirmFingerprint(expected.fingerprint)
+    }
+
     public func createCode() async throws -> String {
         guard !codeCreationInProgress, !joinInProgress, !commitInProgress else {
             throw PairingError.operationInProgress
@@ -473,7 +491,16 @@ public actor PairingCoordinator: RendezvousPairingHostEndpoint {
             !joinInProgress,
             !codeCreationInProgress
         else { throw PairingError.operationInProgress }
-        guard let pending = pendingConfirmation else { return }
+        guard let pending = pendingConfirmation else {
+            if let hosted = hostedSession, !hosted.used {
+                commitInProgress = true
+                defer { commitInProgress = false }
+                hostedSession = nil
+                transition(to: .idle)
+                await transport.remove(code: hosted.code)
+            }
+            return
+        }
         let bilateral = transport as? any BilateralPairingTransport
         guard pending.issuedAuthorization == nil || bilateral != nil else {
             throw PairingError.operationInProgress

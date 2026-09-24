@@ -32,10 +32,9 @@ public actor MeshTransferConnectionSource: IncomingTransferConnectionSource {
             return AsyncThrowingStream { $0.finish() }
         }
         let upstream = await listener.connections(for: .transfer)
-        var continuation: AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation!
-        let stream = AsyncThrowingStream<IncomingTransferConnection, Error>(
+        let (stream, continuation) = AsyncThrowingStream<IncomingTransferConnection, Error>.makeStream(
             bufferingPolicy: .bufferingOldest(0)
-        ) { continuation = $0 }
+        )
         readerTask = Task { [weak self] in
             do {
                 for try await transport in upstream {

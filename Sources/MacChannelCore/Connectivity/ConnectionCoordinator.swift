@@ -562,13 +562,57 @@ public struct ConnectionCoordinator: RouteEscalatingPeerConnector, Sendable {
     }
 }
 
+private enum WebRTCConnectionAuthority: Sendable {
+    case repository(TrustRepository, any WebRTCChannelFactory)
+    case provider(any PeerAuthorizationProviding, any AuthorizedWebRTCChannelFactory)
+}
+
+/// One exact continuity per attempt. Never refresh it across a suspension.
+private struct WebRTCConnectionLease {
+    let provider: any PeerAuthorizationProviding
+    let lease: PeerAuthorizationLease
+
+    init(provider: any PeerAuthorizationProviding, peer: DeviceID) throws {
+        try Task.checkCancellation()
+        self.provider = provider
+        do {
+            lease = try provider.acquire(for: peer)
+            guard lease.peer == peer else { throw PeerAuthorizationError.denied }
+            try provider.validate(lease)
+        } catch { throw ConnectionAttemptError.authenticationFailed }
+    }
+
+    func requireCurrent() throws {
+        try Task.checkCancellation()
+        do { try provider.validate(lease) }
+        catch { throw ConnectionAttemptError.authenticationFailed }
+    }
+}
+
 public actor WebRTCConnectionAttempts: TransferAwareConnectionAttempting {
     private let directory: DeviceDirectory
     private let identity: DeviceIdentity
-    private let trustRepository: TrustRepository
+    private let authority: WebRTCConnectionAuthority
     private let signaling: any WebRTCSignalTransport
     private let iceProvider: any ICEConfigurationProviding
-    private let factory: any WebRTCChannelFactory
+    public init(directory: DeviceDirectory, identity: DeviceIdentity,
+                authorizationProvider: any PeerAuthorizationProviding,
+                signaling: any WebRTCSignalTransport, iceProvider: any ICEConfigurationProviding,
+                factory: any AuthorizedWebRTCChannelFactory = WebRTCFactory()) {
+        self.directory = directory
+        self.identity = identity
+        authority = .provider(authorizationProvider, factory)
+        self.signaling = signaling
+        self.iceProvider = iceProvider
+    }
+
+    public init(directory: DeviceDirectory, identity: DeviceIdentity,
+                authorizationProvider: any PeerAuthorizationProviding,
+                signaling: any WebRTCSignalTransport, ice: ICEConfiguration,
+                factory: any AuthorizedWebRTCChannelFactory = WebRTCFactory()) {
+        self.init(directory: directory, identity: identity, authorizationProvider: authorizationProvider,
+            signaling: signaling, iceProvider: StaticICEConfigurationProvider(ice), factory: factory)
+    }
 
     public init(
         directory: DeviceDirectory,
@@ -598,10 +642,9 @@ public actor WebRTCConnectionAttempts: TransferAwareConnectionAttempting {
     ) {
         self.directory = directory
         self.identity = identity
-        self.trustRepository = trustRepository
+        authority = .repository(trustRepository, factory)
         self.signaling = signaling
         self.iceProvider = iceProvider
-        self.factory = factory
     }
 
     public func connect(
@@ -624,6 +667,48 @@ public actor WebRTCConnectionAttempts: TransferAwareConnectionAttempting {
         route: ConnectionRoute,
         connectionID: UUID
     ) async throws -> any SecureChannel {
+        switch authority {
+        case let .provider(provider, factory):
+            return try await connectAuthorized(to: device, route: route, connectionID: connectionID,
+                provider: provider, factory: factory)
+        case let .repository(repository, factory):
+            return try await connectLegacy(to: device, route: route, connectionID: connectionID,
+                trustRepository: repository, factory: factory)
+        }
+    }
+
+    private func connectAuthorized(to device: DeviceID, route: ConnectionRoute, connectionID: UUID,
+                                   provider: any PeerAuthorizationProviding,
+                                   factory: any AuthorizedWebRTCChannelFactory) async throws -> WebRTCSecureChannel {
+        let authorization = try WebRTCConnectionLease(provider: provider, peer: device)
+        var result: WebRTCSecureChannel?
+        do {
+            if route == .lan {
+                let endpoint = await directory.endpoint(for: device)
+                try authorization.requireCurrent()
+                guard endpoint != nil else { throw ConnectionAttemptError.routeUnavailable }
+            }
+            let ice = try await iceProvider.configuration(for: route)
+            try authorization.requireCurrent()
+            let channel = try await factory.connect(localIdentity: identity, remoteDevice: device,
+                remotePublicKey: authorization.lease.publicKey, connectionID: connectionID,
+                role: .offerer, route: route, ice: ice, signaling: signaling,
+                authorizationProvider: provider, authorizationLease: authorization.lease)
+            result = channel
+            try authorization.requireCurrent()
+            return channel
+        } catch {
+            // The attempt owns every late result until successful return.
+            if let result { await result.close() }
+            if error is CancellationError || Task.isCancelled { throw CancellationError() }
+            try authorization.requireCurrent()
+            throw error
+        }
+    }
+
+    private func connectLegacy(to device: DeviceID, route: ConnectionRoute, connectionID: UUID,
+                               trustRepository: TrustRepository,
+                               factory: any WebRTCChannelFactory) async throws -> any SecureChannel {
         if route == .lan, await directory.endpoint(for: device) == nil {
             throw ConnectionAttemptError.routeUnavailable
         }
@@ -664,24 +749,40 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         let task: Task<Void, Never>
     }
 
-    private static let maximumConcurrentAcceptances =
-        IncomingTransferCapacity.maximumUpstreamAcceptances
-    private static let maximumConcurrentAcceptancesPerDevice = 2
+    private let acceptanceBudget: WebRTCAcceptanceBudget
 
     private let directory: DeviceDirectory
     private let identity: DeviceIdentity
-    private let trustRepository: TrustRepository
+    private let authority: WebRTCConnectionAuthority
     private let signaling: RendezvousWebRTCSignaling
     private let iceProvider: any ICEConfigurationProviding
-    private let factory: any WebRTCChannelFactory
     private let channelStream: AsyncThrowingStream<WebRTCSecureChannel, Error>
     private let channelContinuation: AsyncThrowingStream<WebRTCSecureChannel, Error>.Continuation
     private var transferContinuation:
         AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation?
     private var readerTask: Task<Void, Never>?
     private var acceptanceTasks: [UUID: Acceptance] = [:]
+    private var drainTask: Task<Void, Never>?
     private var stopped = false
     private var consumer = Consumer.none
+
+    public init(directory: DeviceDirectory, identity: DeviceIdentity,
+                authorizationProvider: any PeerAuthorizationProviding,
+                signaling: RendezvousWebRTCSignaling, iceProvider: any ICEConfigurationProviding,
+                factory: any AuthorizedWebRTCChannelFactory = WebRTCFactory(),
+                acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) {
+        self.init(directory: directory, identity: identity, authority: .provider(authorizationProvider, factory),
+            signaling: signaling, iceProvider: iceProvider, acceptanceBudget: acceptanceBudget)
+    }
+
+    public init(directory: DeviceDirectory, identity: DeviceIdentity,
+                authorizationProvider: any PeerAuthorizationProviding,
+                signaling: RendezvousWebRTCSignaling, ice: ICEConfiguration,
+                factory: any AuthorizedWebRTCChannelFactory = WebRTCFactory(),
+                acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()) {
+        self.init(directory: directory, identity: identity, authorizationProvider: authorizationProvider,
+            signaling: signaling, iceProvider: StaticICEConfigurationProvider(ice), factory: factory, acceptanceBudget: acceptanceBudget)
+    }
 
     public init(
         directory: DeviceDirectory,
@@ -689,7 +790,8 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         trustRepository: TrustRepository,
         signaling: RendezvousWebRTCSignaling,
         ice: ICEConfiguration,
-        factory: any WebRTCChannelFactory = WebRTCFactory()
+        factory: any WebRTCChannelFactory = WebRTCFactory(),
+        acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()
     ) {
         self.init(
             directory: directory,
@@ -697,7 +799,7 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
             trustRepository: trustRepository,
             signaling: signaling,
             iceProvider: StaticICEConfigurationProvider(ice),
-            factory: factory
+            factory: factory, acceptanceBudget: acceptanceBudget
         )
     }
 
@@ -707,14 +809,22 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         trustRepository: TrustRepository,
         signaling: RendezvousWebRTCSignaling,
         iceProvider: any ICEConfigurationProviding,
-        factory: any WebRTCChannelFactory = WebRTCFactory()
+        factory: any WebRTCChannelFactory = WebRTCFactory(),
+        acceptanceBudget: WebRTCAcceptanceBudget = WebRTCAcceptanceBudget()
     ) {
+        self.init(directory: directory, identity: identity, authority: .repository(trustRepository, factory),
+            signaling: signaling, iceProvider: iceProvider, acceptanceBudget: acceptanceBudget)
+    }
+
+    private init(directory: DeviceDirectory, identity: DeviceIdentity, authority: WebRTCConnectionAuthority,
+                 signaling: RendezvousWebRTCSignaling, iceProvider: any ICEConfigurationProviding,
+                 acceptanceBudget: WebRTCAcceptanceBudget) {
+        self.acceptanceBudget = acceptanceBudget
         self.directory = directory
         self.identity = identity
-        self.trustRepository = trustRepository
+        self.authority = authority
         self.signaling = signaling
         self.iceProvider = iceProvider
-        self.factory = factory
         var continuation: AsyncThrowingStream<WebRTCSecureChannel, Error>.Continuation!
         channelStream = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(32)) {
             continuation = $0
@@ -727,7 +837,7 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
 
     public func channels() async -> AsyncThrowingStream<WebRTCSecureChannel, Error> {
         if consumer == .none { consumer = .legacyChannels }
-        await beginReadingIfNeeded()
+        beginReadingIfNeeded()
         return channelStream
     }
 
@@ -748,26 +858,45 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
             continuation = $0
         }
         transferContinuation = continuation
-        await beginReadingIfNeeded()
+        beginReadingIfNeeded()
         return stream
     }
 
     public func stop() {
         guard !stopped else { return }
         stopped = true
-        readerTask?.cancel()
+        let reader = readerTask
+        let acceptances = acceptanceTasks.values.map(\.task)
+        reader?.cancel()
         readerTask = nil
-        for acceptance in acceptanceTasks.values { acceptance.task.cancel() }
+        for task in acceptances { task.cancel() }
         acceptanceTasks.removeAll()
+        // Retain every retired owner even when the caller only requests the
+        // existing nonjoining stop. Late factory results own their close work.
+        drainTask = Task {
+            await reader?.value
+            for task in acceptances { await task.value }
+        }
         channelContinuation.finish()
         transferContinuation?.finish()
         transferContinuation = nil
     }
 
-    private func beginReadingIfNeeded() async {
+    /// Initiates cancellation and joins the same retirement as prior/concurrent
+    /// stop calls. A non-cooperative dependency keeps this drain pending.
+    public func stopAndWait() async {
+        stop()
+        await drainTask?.value
+    }
+
+    private func beginReadingIfNeeded() {
         guard !stopped, readerTask == nil else { return }
-        let offers = await signaling.incomingOffers()
-        readerTask = Task { [weak self] in
+        // Install ownership before the first suspension. Stream initialization
+        // itself can be blocked, and must neither escape drain nor spawn a
+        // reader after stop has captured its owners.
+        readerTask = Task { [weak self, signaling] in
+            let offers = await signaling.incomingOffers()
+            guard !Task.isCancelled else { return }
             for await offer in offers {
                 guard !Task.isCancelled else { return }
                 await self?.beginAccepting(offer)
@@ -776,13 +905,12 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
     }
 
     private func beginAccepting(_ offer: IncomingWebRTCOffer) {
-        guard !stopped,
-              acceptanceTasks.count < Self.maximumConcurrentAcceptances,
-              acceptanceTasks.values.lazy.filter({ $0.remoteDevice == offer.remoteDevice }).count
-                < Self.maximumConcurrentAcceptancesPerDevice
-        else { return }
+        guard !stopped, let permit = acceptanceBudget.acquire(for: offer.remoteDevice) else { return }
         let token = UUID()
-        let task = Task { [weak self] in
+        let task = Task { [weak self, acceptanceBudget] in
+            // Cancellation only requests retirement; late factory/channel close
+            // remains charged until the entire acceptance returns.
+            defer { acceptanceBudget.release(permit) }
             await self?.accept(offer)
             await self?.acceptanceFinished(token)
         }
@@ -794,6 +922,42 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
     }
 
     private func accept(_ offer: IncomingWebRTCOffer) async {
+        switch authority {
+        case let .provider(provider, factory):
+            await acceptAuthorized(offer, provider: provider, factory: factory)
+        case let .repository(repository, factory):
+            await acceptLegacy(offer, trustRepository: repository, factory: factory)
+        }
+    }
+
+    private func acceptAuthorized(_ offer: IncomingWebRTCOffer,
+                                  provider: any PeerAuthorizationProviding,
+                                  factory: any AuthorizedWebRTCChannelFactory) async {
+        guard !stopped, !Task.isCancelled else { return }
+        do {
+            let authorization = try WebRTCConnectionLease(provider: provider, peer: offer.remoteDevice)
+            if offer.route == .lan {
+                let endpoint = await directory.endpoint(for: offer.remoteDevice)
+                guard !stopped else { return }
+                try authorization.requireCurrent()
+                guard endpoint != nil else { return }
+            }
+            let ice = try await iceProvider.configuration(for: offer.route)
+            guard !stopped else { return }
+            try authorization.requireCurrent()
+            let channel = try await factory.connect(localIdentity: identity, remoteDevice: offer.remoteDevice,
+                remotePublicKey: authorization.lease.publicKey, connectionID: offer.connectionID,
+                role: .answerer, route: offer.route, ice: ice, signaling: signaling,
+                authorizationProvider: provider, authorizationLease: authorization.lease)
+            await publish(channel, offer: offer, authorization: authorization)
+        } catch {
+            // Provider and arbitrary dependency errors may contain sensitive data.
+            connectionDiagnostics.error("Inbound authorized attempt failed")
+        }
+    }
+
+    private func acceptLegacy(_ offer: IncomingWebRTCOffer, trustRepository: TrustRepository,
+                              factory: any WebRTCChannelFactory) async {
         if offer.route == .lan, await directory.endpoint(for: offer.remoteDevice) == nil { return }
         guard let remotePublicKey = await trustRepository.publicKey(for: offer.remoteDevice) else {
             return
@@ -815,52 +979,57 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
                 await channel.close()
                 return
             }
-            guard !stopped else {
-                await channel.close()
-                return
-            }
-            switch consumer {
-            case .legacyChannels:
-                switch channelContinuation.yield(channel) {
-                case .enqueued:
-                    break
-                case .dropped(let dropped):
-                    await dropped.close()
-                    await channel.close()
-                case .terminated:
-                    await channel.close()
-                @unknown default:
-                    await channel.close()
-                }
-            case .transferConnections:
-                let connection = IncomingTransferConnection(
-                    source: offer.remoteDevice,
-                    transferID: TransferID(rawValue: offer.connectionID),
-                    channel: channel
-                )
-                guard let transferContinuation else {
-                    await channel.close()
-                    return
-                }
-                switch transferContinuation.yield(connection) {
-                case .enqueued:
-                    break
-                case .dropped(let dropped):
-                    await dropped.channel.close()
-                    await channel.close()
-                case .terminated:
-                    await channel.close()
-                @unknown default:
-                    await channel.close()
-                }
-            case .none:
-                await channel.close()
-            }
+            await publish(channel, offer: offer)
         } catch {
             connectionDiagnostics.error(
                 "Inbound route \(String(describing: offer.route), privacy: .public) from \(offer.remoteDevice.rawValue.uuidString, privacy: .public) failed: \(String(describing: error), privacy: .public)"
             )
             // A failed inbound attempt is isolated; later route offers remain usable.
+        }
+    }
+
+    private func publish(_ channel: WebRTCSecureChannel, offer: IncomingWebRTCOffer,
+                         authorization: WebRTCConnectionLease? = nil) async {
+        guard !stopped else { await channel.close(); return }
+        do { try authorization?.requireCurrent() }
+        catch { await channel.close(); return }
+        // Final checks and yield execute on this actor without a suspension.
+        switch consumer {
+        case .legacyChannels:
+            switch channelContinuation.yield(channel) {
+            case .enqueued:
+                break
+            case .dropped(let dropped):
+                await dropped.close()
+                await channel.close()
+            case .terminated:
+                await channel.close()
+            @unknown default:
+                await channel.close()
+            }
+        case .transferConnections:
+            let connection = IncomingTransferConnection(
+                source: offer.remoteDevice,
+                transferID: TransferID(rawValue: offer.connectionID),
+                channel: channel
+            )
+            guard let transferContinuation else {
+                await channel.close()
+                return
+            }
+            switch transferContinuation.yield(connection) {
+            case .enqueued:
+                break
+            case .dropped(let dropped):
+                await dropped.channel.close()
+                await channel.close()
+            case .terminated:
+                await channel.close()
+            @unknown default:
+                await channel.close()
+            }
+        case .none:
+            await channel.close()
         }
     }
 }

@@ -1,6 +1,39 @@
 import Foundation
 import MacChannelCore
 
+struct RuntimePresenceSnapshot: Equatable, Sendable {
+    var authenticated = false
+    var trustSync: PresenceTrustSyncState = .idle
+    var trustSaveFailed = false
+}
+
+/// Joins an admitted manual retry before its runtime can be replaced.
+@MainActor
+final class RuntimeTrustSaveRetry {
+    private var task: Task<Void, Never>?
+    private var stopped = false
+
+    func run(save: @escaping @MainActor () async throws -> Void,
+             completed: @escaping @MainActor (Bool) async -> Void) async {
+        guard !stopped else { return }
+        if let task { await task.value; return }
+        let operation = Task {
+            let saved: Bool
+            do { try await save(); saved = true } catch { saved = false }
+            guard !stopped else { return }
+            await completed(saved)
+        }
+        task = operation
+        await operation.value
+        task = nil
+    }
+
+    func stop() async {
+        stopped = true
+        await task?.value
+    }
+}
+
 enum AppLaunchMode: Equatable {
     case production
     case localShell
@@ -22,14 +55,25 @@ enum AppRuntimeStatus: Equatable {
     case offline(String)
     case startupError(String, canRetry: Bool)
     case error(String)
+    case serviceOffline(LocalizedKey)
+    case serviceError(LocalizedKey)
+    case startupFailure(LocalizedKey, canRetry: Bool)
+
+    var isStartupFailure: Bool {
+        switch self {
+        case .startupError, .startupFailure: true
+        default: false
+        }
+    }
 
     var localizedText: String {
         switch self {
-        case .loading: "正在启动安全服务…"
-        case .ready: "安全服务已连接"
+        case .loading: L10n.text(.statusServiceStarting)
+        case .ready: L10n.text(.statusServiceConnected)
         case let .offline(message): message
         case let .startupError(message, _): message
         case let .error(message): message
+        case let .serviceOffline(key), let .serviceError(key), let .startupFailure(key, _): L10n.text(key)
         }
     }
 }
@@ -38,13 +82,19 @@ enum AppRuntimeStatus: Equatable {
 protocol AppRuntimeLifecycle: AnyObject {
     var container: AppContainer { get }
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>?
+    func presenceUpdates() -> AsyncStream<RuntimePresenceSnapshot>?
     func reconnectPublicService() async
+    func retryTrustPersistence() async
+    func startLocalNetwork() async
     func shutdown() async
 }
 
 extension AppRuntimeLifecycle {
     func statusUpdates() -> AsyncStream<AppRuntimeStatus>? { nil }
+    func presenceUpdates() -> AsyncStream<RuntimePresenceSnapshot>? { nil }
     func reconnectPublicService() async {}
+    func retryTrustPersistence() async {}
+    func startLocalNetwork() async {}
 }
 
 struct AppRuntimeLaunch {
@@ -63,89 +113,152 @@ final class AppRuntimeHost {
     private var buildTask: Task<Void, Never>?
     private var runtime: (any AppRuntimeLifecycle)?
     private var statusTask: Task<Void, Never>?
-    private var stoppedRuntimeIDs: Set<ObjectIdentifier> = []
+    private var presenceTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
+    private let eligibility: (any RuntimeEligibilityMonitoring)?
+    private var eligibilityTask: Task<Void, Never>?
+    private var generation = 0
     private var isShuttingDown = false
 
     private(set) var status: AppRuntimeStatus = .loading
     var onChange: ((AppRuntimeStatus, AppContainer?) -> Void)?
+    var onPresenceChange: ((RuntimePresenceSnapshot) -> Void)?
+    private(set) var presence = RuntimePresenceSnapshot()
+    var onWillStop: (() async -> Void)?
 
-    init(builder: any AppRuntimeBuilding) {
+    init(builder: any AppRuntimeBuilding, eligibility: (any RuntimeEligibilityMonitoring)? = nil) {
         self.builder = builder
+        self.eligibility = eligibility
+        if let eligibility {
+            let updates = eligibility.updates()
+            eligibilityTask = Task { [weak self] in
+                for await _ in updates {
+                    guard !Task.isCancelled else { return }
+                    await self?.checkEligibility()
+                }
+            }
+        }
     }
 
     func bootstrap() async {
+        await stopTask?.value
         guard !isShuttingDown, runtime == nil else { return }
+        guard eligibility?.current != .blocked else {
+            await checkEligibility()
+            return
+        }
         status = .loading
         onChange?(.loading, nil)
         if buildTask == nil {
+            let generation = generation
             buildTask = Task { [weak self] in
-                await self?.performBuild()
+                await self?.performBuild(generation: generation)
             }
         }
         await buildTask?.value
     }
 
-    private func performBuild() async {
+    private func performBuild(generation: Int) async {
         defer { buildTask = nil }
         do {
             let launch = try await builder.build()
-            guard !isShuttingDown else {
-                await stopOnce(launch.runtime)
+            guard !isShuttingDown, generation == self.generation,
+                  eligibility?.current != .blocked else {
+                await launch.runtime.shutdown()
                 return
             }
             runtime = launch.runtime
             status = launch.status
             onChange?(launch.status, launch.runtime.container)
+            if let updates = launch.runtime.presenceUpdates() {
+                presenceTask = Task { [weak self] in
+                    for await snapshot in updates {
+                        guard !Task.isCancelled, self?.generation == generation else { return }
+                        self?.presence = snapshot
+                        self?.onPresenceChange?(snapshot)
+                    }
+                }
+            }
             if let updates = launch.runtime.statusUpdates() {
                 statusTask = Task { [weak self] in
                     for await status in updates {
-                        guard !Task.isCancelled else { return }
+                        guard !Task.isCancelled, self?.generation == generation else { return }
                         self?.status = status
                         self?.onChange?(status, nil)
                     }
                 }
             }
         } catch {
-            guard !isShuttingDown else { return }
+            guard !isShuttingDown, generation == self.generation else { return }
             let presentation = Self.failurePresentation(for: error)
-            status = .startupError(presentation.message, canRetry: presentation.canRetry)
+            status = .startupFailure(presentation.message, canRetry: presentation.canRetry)
             onChange?(status, nil)
         }
     }
 
-    private static func failurePresentation(for error: Error) -> (message: String, canRetry: Bool) {
+    private static func failurePresentation(for error: Error) -> (message: LocalizedKey, canRetry: Bool) {
         if case .operationFailed = error as? KeychainStoreError {
             return (
-                "无法启动 DropMesh。请先允许钥匙串访问，然后点“重试启动”。",
+                .statusStartupKeychain,
                 true
             )
         }
         if error is KeychainStoreError || error is DeviceIdentityError {
-            return ("无法读取这台 Mac 的安全身份。现有身份和配对数据没有被更改。", false)
+            return (.statusStartupIdentity, false)
         }
-        return ("无法启动 DropMesh。请检查本地存储权限，然后点“重试启动”。", true)
+        return (.statusStartupStorage, true)
     }
 
     func shutdown() async {
         isShuttingDown = true
+        eligibilityTask?.cancel()
+        eligibilityTask = nil
+        await stopCurrentRuntime()
+    }
+
+    func stopCurrentRuntime() async {
+        if let stopTask { await stopTask.value; return }
+        generation += 1
+        presence = RuntimePresenceSnapshot()
+        onPresenceChange?(presence)
+        presenceTask?.cancel()
+        let oldPresenceTask = presenceTask
+        presenceTask = nil
         statusTask?.cancel()
+        let oldStatusTask = statusTask
         statusTask = nil
         buildTask?.cancel()
-        await buildTask?.value
-        if let runtime { await stopOnce(runtime) }
+        let pendingBuild = buildTask
+        let oldRuntime = runtime
         runtime = nil
-        buildTask = nil
+        let task = Task {
+            if !isShuttingDown { await onWillStop?() }
+            await pendingBuild?.value
+            await oldStatusTask?.value
+            await oldPresenceTask?.value
+            await oldRuntime?.shutdown()
+        }
+        stopTask = task
+        await task.value
+        stopTask = nil
+    }
+
+    private func checkEligibility() async {
+        guard !isShuttingDown, eligibility?.current == .blocked else { return }
+        status = .startupFailure(.statusDistributionConflict, canRetry: true)
+        onChange?(status, nil)
+        await stopCurrentRuntime()
     }
 
     func reconnectPublicService() async {
         await runtime?.reconnectPublicService()
     }
+    func retryTrustPersistence() async { await runtime?.retryTrustPersistence() }
 
-    private func stopOnce(_ runtime: any AppRuntimeLifecycle) async {
-        let identifier = ObjectIdentifier(runtime)
-        guard stoppedRuntimeIDs.insert(identifier).inserted else { return }
-        await runtime.shutdown()
+    func startLocalNetwork() async {
+        await runtime?.startLocalNetwork()
     }
+
 }
 
 @MainActor

@@ -25,13 +25,78 @@ enum SwiftPasteboardSourceAuditor {
 
     static func satisfiesFailClosedPolicy(
         in sources: [String: String],
-        allowingSingleExplicitAccessAt allowedPath: String
+        allowingSingleExplicitAccessAt allowedPath: String,
+        allowingWriteOnlyApprovalCopyAt copyAdapterPath: String? = nil,
+        calledFrom copyButtonPath: String? = nil,
+        invitationCalledFrom invitationPath: String? = nil
     ) -> Bool {
         let detectedAccesses = accesses(in: sources)
-        return detectedAccesses.count == 1
-            && detectedAccesses[0].path == allowedPath
-            && detectedAccesses[0].kind == .explicitNSPasteboard
+        if copyAdapterPath == nil, copyButtonPath == nil, invitationPath == nil {
+            return detectedAccesses.count == 1
+                && detectedAccesses[0].path == allowedPath
+                && detectedAccesses[0].kind == .explicitNSPasteboard
+        }
+        guard let copyAdapterPath, let copyButtonPath, let invitationPath,
+              copyAdapterPath != allowedPath, copyButtonPath != copyAdapterPath,
+              invitationPath != copyAdapterPath, invitationPath != copyButtonPath,
+              let adapter = sources[copyAdapterPath], sources[copyButtonPath] != nil,
+              sources[invitationPath] != nil,
+              detectedAccesses.count == 2,
+              detectedAccesses.filter({ $0.path == allowedPath && $0.kind == .explicitNSPasteboard }).count == 1,
+              detectedAccesses.filter({ $0.path == copyAdapterPath }).count == 1,
+              SwiftSourceLexer.tokenize(adapter).map(\.kind) == SwiftSourceLexer.tokenize(writeOnlyApprovalCopyContract).map(\.kind)
+        else { return false }
+
+        // This is a deliberately closed lexical contract, not a UIKit/file
+        // exemption or a general Swift data-flow proof. Any adapter change must
+        // be reviewed against this complete shape; aliases and extra behavior fail.
+        let button = SwiftSourceLexer.tokenize(#"Button("approval.copy") { ExplicitApprovalCodeCopy.copy(code) }"#)
+        guard let referenceOffset = button.firstIndex(where: { $0.kind == .identifier("ExplicitApprovalCodeCopy") }) else { return false }
+        let invitation = SwiftSourceLexer.tokenize("ExplicitApprovalCodeCopy.copyInvitationLink(text)")
+        guard let invitationOffset = invitation.firstIndex(where: { $0.kind == .identifier("ExplicitApprovalCodeCopy") }) else { return false }
+        var approvalCalls = 0
+        var invitationCalls = 0
+        for (path, source) in sources where path != copyAdapterPath {
+            let tokens = SwiftSourceLexer.tokenize(source)
+            for index in tokens.indices where token(tokens, at: index, isIdentifier: "ExplicitApprovalCodeCopy") {
+                let buttonStart = index - referenceOffset
+                if path == copyButtonPath, buttonStart >= 0, buttonStart + button.count <= tokens.count,
+                   Array(tokens[buttonStart..<(buttonStart + button.count)]).map(\.kind) == button.map(\.kind) {
+                    approvalCalls += 1
+                    continue
+                }
+                let invitationStart = index - invitationOffset
+                if path == invitationPath, invitationStart >= 0,
+                   invitationStart + invitation.count <= tokens.count,
+                   Array(tokens[invitationStart..<(invitationStart + invitation.count)]).map(\.kind) == invitation.map(\.kind) {
+                    invitationCalls += 1
+                    continue
+                }
+                return false
+            }
+        }
+        return approvalCalls == 1 && invitationCalls == 1
     }
+
+    private static let writeOnlyApprovalCopyContract = """
+    #if canImport(UIKit)
+    import UIKit
+    @MainActor
+    public enum ExplicitApprovalCodeCopy {
+        public static func copy(_ code: String) {
+            write(code)
+        }
+
+        public static func copyInvitationLink(_ link: String) {
+            write(link)
+        }
+
+        private static func write(_ value: String) {
+            UIPasteboard.general.string = value
+        }
+    }
+    #endif
+    """
 
     private static func accesses(
         in tokens: [SwiftSourceToken],

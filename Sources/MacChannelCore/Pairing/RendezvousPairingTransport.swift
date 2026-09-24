@@ -8,6 +8,7 @@ public actor RendezvousPairingTransport: BilateralPairingTransport {
     private let session: URLSession
     private var hostTasks: [String: Task<Void, Never>] = [:]
     private var hostReservations: Set<String> = []
+    private var hostFailures: [String: MacChannelError] = [:]
     private var isStopped = false
 
     public init(
@@ -44,13 +45,17 @@ public actor RendezvousPairingTransport: BilateralPairingTransport {
         hostTasks.values.forEach { $0.cancel() }
     }
 
+    /// Failure of this exact code's background host request, never a trust result.
+    public func hostFailure(for code: String) -> MacChannelError? { hostFailures[code] }
+
     public func publish(_ offer: PairingOffer, endpoint: any PairingHostEndpoint) async throws {
         guard !isStopped else { throw CancellationError() }
         if let previous = hostTasks.removeValue(forKey: offer.code) {
             previous.cancel()
             await previous.value
         }
-        guard hostTasks.count + hostReservations.count < Self.maximumHostTasks,
+        hostFailures.removeValue(forKey: offer.code)
+        guard hostTasks.count + hostReservations.count + hostFailures.count < Self.maximumHostTasks,
             hostReservations.insert(offer.code).inserted
         else { throw PairingError.resourceExhausted }
         defer { hostReservations.remove(offer.code) }
@@ -116,6 +121,7 @@ public actor RendezvousPairingTransport: BilateralPairingTransport {
             task.cancel()
             await task.value
         }
+        hostFailures.removeValue(forKey: code)
         _ = try? await request(
             method: "DELETE",
             path: "/v1/pairing/\(escaped(code))",
@@ -262,6 +268,7 @@ public actor RendezvousPairingTransport: BilateralPairingTransport {
 
     public func stop() async {
         isStopped = true
+        hostFailures.removeAll()
         let tasks = Array(hostTasks.values)
         hostTasks.removeAll()
         tasks.forEach { $0.cancel() }
@@ -312,6 +319,9 @@ public actor RendezvousPairingTransport: BilateralPairingTransport {
             } catch PairingError.authorizationPending {
                 try? await Task.sleep(for: .milliseconds(300))
             } catch {
+                if !Task.isCancelled, !isStopped {
+                    hostFailures[code] = (error as? PairingError)?.stateError ?? .pairingHandshakeFailed
+                }
                 return
             }
         }

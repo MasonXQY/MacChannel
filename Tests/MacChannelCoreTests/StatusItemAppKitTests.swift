@@ -4,6 +4,135 @@ import XCTest
 @testable import MacChannelCore
 
 final class StatusItemAppKitTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
+    @MainActor
+    func testStoreIdleUsesApprovedUpperRightTemplateMarkWhileDirectRemainsSystemPaperplane() throws {
+        XCTAssertEqual(StatusItemButton.appStoreOutlineSVGPoints[0], NSPoint(x: 20, y: 4))
+        XCTAssertEqual(StatusItemButton.appStoreOutlineSVGPoints[1], NSPoint(x: 4, y: 10.5))
+        XCTAssertEqual(StatusItemButton.appStoreOutlineSVGPoints[2], NSPoint(x: 10.5, y: 13.5))
+        XCTAssertEqual(StatusItemButton.appStoreOutlineSVGPoints[3], NSPoint(x: 13.5, y: 20))
+        XCTAssertEqual(StatusItemButton.appStoreFoldSVGPoints, [NSPoint(x: 20, y: 4), NSPoint(x: 10.5, y: 13.5)])
+        let direct = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+        let originalDirect = try XCTUnwrap(direct.image)
+        XCTAssertEqual(originalDirect.name(), NSImage(systemSymbolName: "paperplane", accessibilityDescription: nil)?.name())
+
+        let store = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+        store.baseIconStyle = .appStore
+        let image = try XCTUnwrap(store.image)
+        XCTAssertTrue(image.isTemplate)
+        XCTAssertFalse(image.representations.isEmpty)
+        XCTAssertEqual(image.size, NSSize(width: 18, height: 18))
+
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 36,
+            pixelsHigh: 36,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        image.draw(in: NSRect(x: 0, y: 0, width: 36, height: 36))
+        NSGraphicsContext.restoreGraphicsState()
+        func alphaNear(x: Int, y: Int) -> CGFloat {
+            var total: CGFloat = 0
+            for pixelY in (y - 2)...(y + 2) {
+                for pixelX in (x - 2)...(x + 2) {
+                    total += bitmap.colorAt(x: pixelX, y: pixelY)?.alphaComponent ?? 0
+                }
+            }
+            return total
+        }
+        XCTAssertGreaterThan(alphaNear(x: 30, y: 30), 0, "approved Store mark must have an upper-right tip")
+        XCTAssertEqual(alphaNear(x: 30, y: 6), 0, "approved Store mark must not be vertically flipped")
+    }
+
+    @MainActor
+    func testStoreCustomBaseDoesNotReplaceReadyOrTransferStateSymbols() throws {
+        let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+        button.baseIconStyle = .appStore
+        button.hasUnreadReceive = true
+
+        button.phase = .ready
+        XCTAssertEqual(button.image?.name(), NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)?.name())
+        XCTAssertTrue(button.showsReceiveIndicator)
+
+        button.phase = .transferring(progress: 0.42)
+        XCTAssertEqual(button.image?.name(), NSImage(systemSymbolName: "paperplane", accessibilityDescription: nil)?.name())
+        XCTAssertEqual(button.transferProgressFillRect.width, 5.88, accuracy: 0.001)
+        XCTAssertTrue(button.showsReceiveIndicator)
+    }
+
+    @MainActor
+    func testDistributionChannelRoutesOnlyStoreToCustomBaseIcon() {
+        XCTAssertEqual(StatusItemBaseIconStyle(distributionChannel: .direct), .direct)
+        XCTAssertEqual(StatusItemBaseIconStyle(distributionChannel: .appStore), .appStore)
+    }
+
+    @MainActor
+    func testStoreStatusIconRendersInNativeLightAndDarkAppearancesWhenRequested() throws {
+        guard let outputPath = ProcessInfo.processInfo.environment["DROPMESH_STATUS_ICON_RENDER_DIR"] else {
+            throw XCTSkip("Set DROPMESH_STATUS_ICON_RENDER_DIR to capture native status icons")
+        }
+        let output = URL(fileURLWithPath: outputPath, isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+
+        for (appearanceName, filename) in [(NSAppearance.Name.aqua, "status-light.png"), (.darkAqua, "status-dark.png")] {
+            let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 30, height: 24))
+            button.baseIconStyle = .appStore
+            button.hasUnreadReceive = true
+            button.appearance = try XCTUnwrap(NSAppearance(named: appearanceName))
+            let window = NSWindow(
+                contentRect: NSRect(x: -10_000, y: -10_000, width: 30, height: 24),
+                styleMask: .borderless,
+                backing: .buffered,
+                defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.backgroundColor = appearanceName == .darkAqua ? .black : .white
+            window.contentView = button
+            button.displayIfNeeded()
+            let bitmap = try XCTUnwrap(button.bitmapImageRepForCachingDisplay(in: button.bounds))
+            button.cacheDisplay(in: button.bounds, to: bitmap)
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                .write(to: output.appendingPathComponent(filename), options: .atomic)
+            window.close()
+        }
+    }
+
+    @MainActor
+    func testFileSelectionAndDirectDragActivateLocalNetworkOnFirstRelevantAction() throws {
+        let peer = DeviceID(rawValue: UUID())
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: peer, displayName: "Desk", availability: .internet)],
+            transferCoordinator: RecordingTransferCoordinator(),
+            filePicker: StubStatusItemFilePicker(result: [URL(fileURLWithPath: "/tmp/file.txt")]),
+            deviceMenuPresenter: RecordingStatusItemDeviceMenuPresenter()
+        )
+        var activations = 0
+        controller.onUseLocalNetwork = { activations += 1 }
+
+        controller.performKeyboardSend()
+        _ = controller.beginDrop(try DropIntent(items: [.fileURL(URL(fileURLWithPath: "/tmp/drag.txt"))]))
+
+        XCTAssertEqual(activations, 2)
+    }
     @MainActor
     func testButtonRegistersFileURLsAndExposesTextualAccessibleState() {
         let button = StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24))
@@ -1159,11 +1288,13 @@ final class StatusItemAppKitTests: XCTestCase {
         let prepared = try ownedClipboardTransfer(fileManager: fileManager)
         defer { prepared.discardTemporaryFiles() }
         let transfer = BlockingBeforeReadTransferCoordinator()
+        let scopes = ScopeCalls()
+        let scopedTransfer = SourceAccessTransferCoordinator(coordinator: transfer, access: UserSelectedSourceAccess(start: { scopes.start($0); return true }, stop: { scopes.stop($0) }, readable: { FileManager.default.isReadableFile(atPath: $0.path) }))
         let menu = RecordingStatusItemDeviceMenuPresenter()
         var controller: StatusItemController? = StatusItemController(
             button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
             devices: [DeviceSummary(id: target, displayName: "Desk Mac", availability: .lan)],
-            transferCoordinator: transfer,
+            transferCoordinator: scopedTransfer,
             clipboardPreparer: RecordingClipboardTransferPreparer(prepared: prepared),
             deviceMenuPresenter: menu
         )
@@ -1180,6 +1311,7 @@ final class StatusItemAppKitTests: XCTestCase {
             "admission still needs to read the generated source"
         )
         XCTAssertEqual(fileManager.removeCount, 0)
+        XCTAssertEqual(scopes.counts, [1, 0], "Controller destruction must preserve admission scope")
 
         await transfer.allowRead()
         let received = try await transfer.waitForRead()
@@ -1189,6 +1321,7 @@ final class StatusItemAppKitTests: XCTestCase {
         }
 
         XCTAssertEqual(fileManager.removeCount, 1)
+        XCTAssertEqual(scopes.counts, [1, 1], "Admission and clipboard cleanup balance the scope once")
         XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.urls[0].path))
     }
 
@@ -1251,6 +1384,26 @@ final class StatusItemAppKitTests: XCTestCase {
     }
 
     @MainActor
+    func testInvalidatedAdmissionDoesNotPresentFailure() async throws {
+        let target = DeviceID(rawValue: UUID())
+        let menu = RecordingStatusItemDeviceMenuPresenter()
+        let controller = StatusItemController(
+            button: StatusItemButton(frame: NSRect(x: 0, y: 0, width: 72, height: 24)),
+            devices: [DeviceSummary(id: target, displayName: "Mac", availability: .lan)],
+            transferCoordinator: FailingTransferCoordinator(),
+            filePicker: StubStatusItemFilePicker(result: [URL(fileURLWithPath: "/tmp/a")]),
+            deviceMenuPresenter: menu
+        )
+        var failures: [String] = []
+        controller.onSendFailure = { failures.append($0) }
+        controller.performKeyboardSend()
+        XCTAssertTrue(try XCTUnwrap(menu.select)(target))
+        controller.invalidate()
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertTrue(failures.isEmpty)
+    }
+
+    @MainActor
     func testFailedSendReturnsIdleAndAnnouncesActionableError() async throws {
         let target = DeviceID(rawValue: UUID())
         let menu = RecordingStatusItemDeviceMenuPresenter()
@@ -1264,7 +1417,9 @@ final class StatusItemAppKitTests: XCTestCase {
             deviceMenuPresenter: menu
         )
         var announcements: [String] = []
+        var visibleFailures: [String] = []
         controller.onAnnouncement = { announcements.append($0) }
+        controller.onSendFailure = { visibleFailures.append($0) }
 
         controller.performKeyboardSend()
         XCTAssertTrue(try XCTUnwrap(menu.select)(target))
@@ -1274,6 +1429,7 @@ final class StatusItemAppKitTests: XCTestCase {
 
         XCTAssertEqual(controller.phase, .idle)
         XCTAssertEqual(announcements, ["无法开始传输，请检查连接和设备状态。"])
+        XCTAssertEqual(visibleFailures, announcements, "Admission failure must reach the visible error presenter, not only VoiceOver")
     }
 
     @MainActor
@@ -1519,6 +1675,7 @@ final class StatusItemAppKitTests: XCTestCase {
         )
     }
 }
+
 
 @MainActor
 private final class RecordingForwardingMenuDelegate: NSObject, NSMenuDelegate {

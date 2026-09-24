@@ -1,0 +1,2 @@
+"NSLocalNetworkUsageDescription" = "Allow DropMesh to discover your paired devices on the local network for direct file transfers.";
+"NSPhotoLibraryUsageDescription" = "Allow DropMesh to reopen photos and videos you previously sent when you choose Preview or Share in History.";

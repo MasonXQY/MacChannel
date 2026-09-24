@@ -5,6 +5,17 @@ import XCTest
 @testable import MacChannelCore
 
 final class PersonalMeshRuntimeTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // These existing copy assertions explicitly exercise the Chinese UI.
+        L10n.select(.simplifiedChinese)
+    }
+
+    override func tearDown() {
+        L10n.select(.system)
+        super.tearDown()
+    }
+
     func testFreshSettingsUseBuiltInPublicChannel() async throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -35,7 +46,7 @@ final class PersonalMeshRuntimeTests: XCTestCase {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         )
-        XCTAssertEqual(object["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(object["schemaVersion"] as? Int, 3)
         XCTAssertNil(object["connectivityMode"])
         XCTAssertNil(object["personalMeshEnabled"])
         XCTAssertNil(object["rendezvousURL"])

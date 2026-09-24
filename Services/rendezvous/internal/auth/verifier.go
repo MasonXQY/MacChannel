@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ var (
 	ErrReplayCapacity   = errors.New("replay cache capacity reached")
 	ErrInvalidChallenge = errors.New("invalid challenge")
 	ErrInvalidTrust     = errors.New("invalid trust record")
+	ErrTrustUnavailable = errors.New("trust state unavailable")
 	ErrTrustCapacity    = errors.New("trust registry capacity reached")
 	ErrTrustRateLimit   = errors.New("trust issuer update rate reached")
 )
@@ -680,6 +682,7 @@ type TrustRegistry struct {
 	directional        map[directedTrustEdge]directionalTrustState
 	adjacency          map[string]map[string]bool
 	issuerSequence     map[string]uint64
+	durableIssuers     map[string]bool
 	records            map[[32]byte]directedTrustEdge
 	maxRecords         int
 	recordStore        TrustRecordStore
@@ -690,6 +693,7 @@ type TrustRegistry struct {
 	issuerUpdateEvents map[string][]time.Time
 	nextTrustOrder     uint64
 	storeVersion       uint64
+	mutationGeneration uint64
 }
 
 type TrustRegistryConfig struct {
@@ -725,6 +729,7 @@ func NewTrustRegistryWithConfig(config TrustRegistryConfig) *TrustRegistry {
 		directional:        make(map[directedTrustEdge]directionalTrustState),
 		adjacency:          make(map[string]map[string]bool),
 		issuerSequence:     make(map[string]uint64),
+		durableIssuers:     make(map[string]bool),
 		records:            make(map[[32]byte]directedTrustEdge),
 		maxRecords:         config.GlobalPairs,
 		clock:              config.Clock,
@@ -741,53 +746,42 @@ func NewPersistentTrustRegistry(ctx context.Context, store TrustRecordStore) (*T
 
 func NewPersistentTrustRegistryWithConfig(ctx context.Context, store TrustRecordStore, config TrustRegistryConfig) (*TrustRegistry, error) {
 	registry := NewTrustRegistryWithConfig(config)
-	persisted, version, err := loadConsistentTrustSnapshot(ctx, store)
+	persisted, highWater, version, err := loadConsistentTrustSnapshot(ctx, store)
 	if err != nil {
 		return nil, err
 	}
-	for _, item := range persisted {
-		if err := item.Record.Validate(); err != nil {
-			return nil, err
-		}
-	}
-	registry.mu.Lock()
-	pending, err := registry.prepareRestoreLocked(persisted)
-	if err == nil {
-		registry.applyPendingLocked(pending)
-		registry.recordStore = store
-	}
-	registry.mu.Unlock()
-	if err != nil {
+	if err := registry.restoreTrustSnapshot(persisted, highWater); err != nil {
 		return nil, err
 	}
+	registry.recordStore = store
 	registry.storeVersion = version
 	return registry, nil
 }
 
-func loadConsistentTrustSnapshot(ctx context.Context, store TrustRecordStore) ([]PersistedTrustRecord, uint64, error) {
+func loadConsistentTrustSnapshot(ctx context.Context, store TrustRecordStore) ([]PersistedTrustRecord, map[string]uint64, uint64, error) {
 	versioned, ok := store.(versionedTrustRecordStore)
 	if !ok {
-		records, err := store.Load(ctx)
-		return records, 0, err
+		records, highWater, err := loadTrustSnapshot(ctx, store)
+		return records, highWater, 0, err
 	}
 	for range 5 {
 		before, err := versioned.Version(ctx)
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
-		records, err := store.Load(ctx)
+		records, highWater, err := loadTrustSnapshot(ctx, store)
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
 		after, err := versioned.Version(ctx)
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
 		if before == after {
-			return records, after, nil
+			return records, highWater, after, nil
 		}
 	}
-	return nil, 0, errors.New("trust state changed continuously while loading")
+	return nil, nil, 0, errors.New("trust state changed continuously while loading")
 }
 
 func (r *TrustRegistry) AuthenticateDevice(deviceID string, publicKey []byte, records []SignedTrustRecord) error {
@@ -820,20 +814,24 @@ func (r *TrustRegistry) AuthenticateDeviceWithResult(deviceID string, publicKey 
 func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, records []SignedTrustRecord) ([]BatchRecordResult, error) {
 	deviceID = strings.ToLower(deviceID)
 	if DeviceID(publicKey) != deviceID || len(records) > 256 {
+		log.Print("trust_auth_rejected category=invalid_identity_or_count")
 		return nil, ErrInvalidTrust
 	}
 	for _, record := range records {
 		if err := record.Validate(); err != nil {
+			log.Print("trust_auth_rejected category=invalid_signed_record")
 			return nil, err
 		}
 	}
 	if r.recordStore != nil && r.refreshPersistent() != nil {
-		return nil, ErrInvalidTrust
+		log.Print("trust_auth_rejected category=persistent_refresh")
+		return nil, ErrTrustUnavailable
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if pinned, ok := r.publicKeys[deviceID]; ok && !equalBytes(pinned, publicKey) {
+		log.Print("trust_auth_rejected category=pin_mismatch")
 		return nil, ErrInvalidTrust
 	}
 	pending, err := r.preparePendingLocked(deviceID, records)
@@ -850,11 +848,18 @@ func (r *TrustRegistry) PrepareConfirmBatch(deviceID string, publicKey []byte, r
 		err := r.recordStore.ConfirmBatch(ctx, deviceID, toSave)
 		cancel()
 		if err != nil {
+			log.Print("trust_auth_rejected category=persistent_confirm")
 			return nil, err
 		}
 	}
 
 	r.applyPendingLocked(pending)
+	if _, ok := r.recordStore.(issuerHighWaterStore); ok {
+		for _, item := range pending {
+			r.durableIssuers[strings.ToLower(item.record.Issuer)] = true
+		}
+	}
+	r.mutationGeneration++
 	results := make([]BatchRecordResult, len(records))
 	seen := make(map[[32]byte]bool, len(records))
 	for index, record := range records {
@@ -900,6 +905,7 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 		issuer := strings.ToLower(record.Issuer)
 		subject := strings.ToLower(record.Subject)
 		if presentedBy != issuer && (record.Action != TrustAuthorize || presentedBy != subject) {
+			log.Print("trust_auth_rejected category=unrelated_presenter")
 			return nil, ErrInvalidTrust
 		}
 		edge := directedTrustEdge{issuer: issuer, subject: subject}
@@ -907,10 +913,12 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 		reverse := r.directional[directedTrustEdge{issuer: subject, subject: issuer}]
 		sameRecord := exists && current.hash == recordHash
 		if sameRecord && current.pendingExpired {
+			log.Print("trust_auth_rejected category=pending_expired")
 			return nil, ErrInvalidTrust
 		}
 		established := current.established || reverse.established
 		if record.Action == TrustRevoke && !established {
+			log.Print("trust_auth_rejected category=unestablished_revoke")
 			return nil, ErrInvalidTrust
 		}
 		issuerConfirmed := presentedBy == issuer
@@ -951,6 +959,7 @@ func (r *TrustRegistry) preparePendingLocked(presentedBy string, records []Signe
 			current = r.issuerSequence[issuer]
 		}
 		if record.IssuerSequence <= current {
+			log.Print("trust_auth_rejected category=nonincreasing_sequence")
 			return nil, ErrInvalidTrust
 		}
 		highWater[issuer] = record.IssuerSequence
@@ -999,7 +1008,11 @@ func (r *TrustRegistry) purgeUnconfirmedLocked(now time.Time) {
 	}
 	for issuer := range r.issuerSequence {
 		if r.issuerSubjectCountLocked(issuer) == 0 {
-			delete(r.issuerSequence, issuer)
+			// Only a subsequent consistent durable snapshot may retire a persisted
+			// barrier. Expiring local pair rows does not prove durable retirement.
+			if !r.durableIssuers[issuer] {
+				delete(r.issuerSequence, issuer)
+			}
 			delete(r.issuerUpdateEvents, issuer)
 		}
 	}
@@ -1367,6 +1380,7 @@ func (r *TrustRegistry) refreshPersistent() error {
 	r.mu.RLock()
 	store := r.recordStore
 	currentVersion := r.storeVersion
+	generation := r.mutationGeneration
 	r.mu.RUnlock()
 	versioned, ok := store.(versionedTrustRecordStore)
 	if !ok {
@@ -1381,7 +1395,7 @@ func (r *TrustRegistry) refreshPersistent() error {
 	if version <= currentVersion {
 		return nil
 	}
-	persisted, err := versioned.Load(ctx)
+	persisted, highWater, version, err := loadConsistentTrustSnapshot(ctx, store)
 	if err != nil {
 		return err
 	}
@@ -1389,18 +1403,7 @@ func (r *TrustRegistry) refreshPersistent() error {
 		Clock: r.clock, PerIssuerSubjects: r.perIssuerSubjects, PerIssuerUpdates: r.perIssuerUpdates,
 		GlobalPairs: r.maxRecords, UnconfirmedTTL: r.unconfirmedTTL,
 	})
-	for _, item := range persisted {
-		if err := item.Record.Validate(); err != nil {
-			return err
-		}
-	}
-	fresh.mu.Lock()
-	pending, err := fresh.prepareRestoreLocked(persisted)
-	if err == nil {
-		fresh.applyPendingLocked(pending)
-	}
-	fresh.mu.Unlock()
-	if err != nil {
+	if err := fresh.restoreTrustSnapshot(persisted, highWater); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -1408,10 +1411,20 @@ func (r *TrustRegistry) refreshPersistent() error {
 	if version <= r.storeVersion {
 		return nil
 	}
+	if generation != r.mutationGeneration {
+		return errors.New("trust registry changed while refreshing; retry snapshot")
+	}
+	// A refresh must never lower an already observed issuer replay barrier.
+	for issuer, sequence := range r.issuerSequence {
+		if sequence > fresh.issuerSequence[issuer] {
+			fresh.issuerSequence[issuer] = sequence
+		}
+	}
 	r.publicKeys = fresh.publicKeys
 	r.directional = fresh.directional
 	r.adjacency = fresh.adjacency
 	r.issuerSequence = fresh.issuerSequence
+	r.durableIssuers = fresh.durableIssuers
 	r.records = fresh.records
 	r.nextTrustOrder = fresh.nextTrustOrder
 	r.storeVersion = version
