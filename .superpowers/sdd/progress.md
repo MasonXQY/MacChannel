@@ -1,5 +1,77 @@
 # iPhone continuation ledger
 
+CURRENT 2026-09-21 signed phone install complete: current development build
+installed and launch-requested on physical iPhone Mason
+(`00008140-001A6CE63082201C`) as `com.zensystech.dropmesh.iphone.dev` version
+1.0 build 8. Build log `/tmp/dropmesh-phone-install-20260921-build-team.log`,
+install log `/tmp/dropmesh-phone-install-20260921-install.log`, device app
+inventory `/tmp/dropmesh-phone-install-20260921-apps-all.log`, launch log
+`/tmp/dropmesh-phone-install-20260921-launch.log`. Used existing team
+`XKAZ67HN45`/Apple Development signing only; no project/profile/certificate
+mutation. This is signed install + launch evidence, not live flow or Store
+release evidence.
+
+CURRENT 2026-09-21 invitation/share UI continuation: account invitation
+presentation is wired into iPhone account settings and production dependencies.
+Root fixed first-copy empty-link handling and post-login invitation refresh,
+opened explicit non-Keychain invitation storage injection for tests, and added
+iPhone model regression coverage for first-copy invite creation plus invalid
+typed-link handling. The iPhone app now registers `dropmesh://connect` and
+opens Account with the invite link prefilled without auto-sending. Verification:
+focused iPhone tests 2/0 (`/tmp/dropmesh-invitations-ui-tests-final.log`),
+`swift test --filter AccountInvitation` 45/0
+(`/tmp/dropmesh-invitations-core-final.log`); unsigned iPhone generic Release
+build succeeded, log `/tmp/dropmesh-invitations-ui-ios-build-final.log`; plist
+shows `dropmesh` URL scheme. No signed install, phone acceptance, server
+deployment or Store update. Next: signed device verification of
+share/open/request/accept/reject/cancel flows.
+
+CURRENT 2026-09-21: HEAD b958b0e candidate command opt-in composition reviewed
+Approved; f196e47 account TURN reviewed by root, actual3SQL tests incl12negative
+and lock-wait expiry PASS; command full SQL race PASS2.305s. e6e5d7c native
+supervisor independently Approved, affected329/3skip/0fail. Earlier review-pending
+notes below superseded. Foreground lifecycle agent finishing iOS tests; shared
+inbound budget/2-source listener staged waiting cache; native TURN client underway.
+Root scoped Keychain constructor/tests compile-ready but not yet tested/committed.
+SQL55463 stopped, accounts40unchanged. No deployment/install/Store claim.
+Current physical iPad mini connected, iPhone unavailable. SSH timed out; current
+IP92.96.17.75 differs firewall92.96.19.217. Action-time temporary/32 approval asked,
+no firewall modification. Candidate deployment still waits integrated exact build.
+
+2026-09-21 instruction audit applied and independently scenario-reviewed; report
+docs/acceptance/agent-instruction-audit-20260921.md. User-local skill changes
+preserve true safety/approval and exact-state evidence, remove repeated gates.
+Native controller slice committed0fd2dba; root matched three hashes and actual
+270/3skip/0fail log. account_activation_native_design reviewing controller;
+account_route_controller preparing next supervisor tests, source waits for gate.
+No installation/live account activation claim; no unrelated dirty files staged.
+
+2026-09-21 dual-plane topology APPROVED by user. Prior pending-choice entries
+are superseded. Native controller route ownership is next; baseline 1c38a51.
+Legacy/manual data and connectivity remain intact. No account activation claim.
+
+2026-09-21 optional periodic account presence refresh complete (base7098be2,
+final independent reviewPASS after SQL attribution P2 fixed). Nine refresh tests
+and affected racepackagesPASS; actual2SQLtests/no skips finalPASS2.411s, disabled
+timer RED proves dependency. Fixture55463 stopped/accounts40unchanged. Reports
+account-presence-refresh-{report,review}.md. No implementers active; pending
+user topology choice before native integration, see HANDOFF and native-next-design.
+
+2026-09-21 HTTP account presence composition complete (base dd7d5b4, review
+PASS/no findings). Five source hashes matched; actual guarded SQL1test/no-skip
+PASS .43s/racepackage1.769s, all affected no-SQL racePASS. Fixture55463 stopped,
+accounts40 pre/post unchanged. See account-presence-http-{report,review}.md.
+No native or live activation. account_activation_native_design is read-only;
+root preparing bounded server periodic refresh before candidate integration.
+
+2026-09-21 account activation: native socket binding cae2f5c, SQL presence
+projection620efbe, source-union hubde4042d, coherent router adapterdd7d5b4 complete
+with independent reviews. Adapter P2 historical pair capacity fixed with actual
+RED4096/GREEN4186. Report/review files account-presence-adapter-*.md. Current
+account_presence_http agent owns bounded HTTP composition per
+account-presence-http-brief.md, base dd7d5b4. Root owns SQL55463 execution and
+HANDOFF; fixture currently stopped. No live/native activation or install yet.
+
 ## Active continuation — shared mobile authorization
 
 Runtime consumer completebb8930a..03b93b2, independent mobile_runtime_review

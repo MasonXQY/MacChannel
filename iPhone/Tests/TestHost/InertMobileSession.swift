@@ -17,10 +17,40 @@ actor InertMobileSession: MobileAppSession {
     private var beforeRetry: @Sendable () async -> Void = {}
     private var retryState: MobileRuntimeState = .online
     private var beforeSend: @Sendable () async -> Void = {}
+    private var account: AccountSessionController?
     private(set) var sendCount = 0
     private var cancelResult: TransferCancellationResult = .tooLate
     private var historyRows: [MobileHistoryEntry] = []
+    private var historyDeleteFails = false
+    func setHistoryDeleteFailure(_ fails: Bool) { historyDeleteFails = fails }
+    func deleteHistory(ids: Set<TransferID>?) async throws {
+        if historyDeleteFails { throw CocoaError(.fileWriteUnknown) }
+        historyRows.removeAll { row in
+            (ids == nil || ids!.contains(row.id)) && [.completed, .cancelled, .failed].contains(row.phase)
+        }
+    }
     private var receivedURL: URL?
+    private var historyFileURLs: [MobileHistoryFileID: URL] = [:]
+    private(set) var thumbnailRequests: [MobileHistoryFileID] = []
+    func historyThumbnail(for id: TransferID, itemID: MobileHistoryFileID) async -> MobileHistoryThumbnail? {
+        thumbnailRequests.append(itemID)
+        guard let url = historyFileURLs[itemID] else { return nil }
+        return await MobileHistoryThumbnailLoader.load(url)
+    }
+    private(set) var recordedSentSources: [TransferID: [MobileSentHistorySource]] = [:]
+    func recordSentHistorySources(_ files: [MobileSentHistorySource], for id: TransferID) async {
+        recordedSentSources[id] = files
+    }
+    private(set) var releasedHistoryURLs: [URL] = []
+    private var beforeHistoryFile: @Sendable () async -> Void = {}
+    func setBeforeHistoryFile(_ operation: @escaping @Sendable () async -> Void) { beforeHistoryFile = operation }
+    func releaseHistoryActionURL(_ url: URL) async { releasedHistoryURLs.append(url) }
+    func setHistoryFileURLs(_ urls: [MobileHistoryFileID: URL]) { historyFileURLs = urls }
+    func availableHistoryFileURL(for id: TransferID, itemID: MobileHistoryFileID) async -> URL? {
+        let url = historyFileURLs[itemID]
+        await beforeHistoryFile()
+        return url
+    }
     private var historyFailed = false
     private var discoverySaveFailed = false
     private var beforeHistory: @Sendable () async -> Void = {}
@@ -97,6 +127,10 @@ actor InertMobileSession: MobileAppSession {
     func setBeforeRetry(_ operation: @escaping @Sendable () async -> Void) { beforeRetry = operation }
     func setRetryState(_ state: MobileRuntimeState) { retryState = state }
     func setNames(_ names: [DeviceID: String]) { value.names = names; publish() }
+    func renamePeer(id: DeviceID, name: String) async throws {
+        guard value.trustedIDs.contains(id) else { throw CocoaError(.validationMissingMandatoryProperty) }
+        value.names[id] = name; publish()
+    }
     func setBeforeSend(_ operation: @escaping @Sendable () async -> Void) { beforeSend = operation }
     func send(items: [URL], to device: DeviceID) async throws -> TransferID {
         sendCount += 1
@@ -134,6 +168,12 @@ actor InertMobileSession: MobileAppSession {
     func setTransfers(_ transfers: [TransferSnapshot]) { value.transfers = transfers; publish() }
     func setReceivedCompletionIDs(_ ids: [TransferID]) { value.receivedCompletionIDs = ids; publish() }
     func setTrustedIDs(_ ids: Set<DeviceID>) { value.trustedIDs = ids; publish() }
+    func setEffectivePeerIDs(_ ids: Set<DeviceID>?) { value.effectivePeerIDs = ids; publish() }
+    func setAccountConfigurationUnavailable(_ unavailable: Bool) {
+        value.accountConfigurationUnavailable = unavailable; publish()
+    }
+    func setAccountController(_ controller: AccountSessionController?) { account = controller }
+    func accountController() -> AccountSessionController? { account }
     func setPresence(_ state: MobileRuntimeState, peers: [DeviceSummary]) {
         value.state = state; value.reachable = peers; publish()
     }

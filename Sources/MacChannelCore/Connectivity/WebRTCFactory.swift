@@ -216,26 +216,34 @@ public final class WebRTCFactory: AuthorizedWebRTCChannelFactory, @unchecked Sen
             authorization: authorization
         )
         await driver.retainForLifetime()
+        let gate = WebRTCFactoryAttemptGate()
+        let attempt = Task {
+            do {
+                let channel = try await driver.establish()
+                if !(await gate.resolve(.success(channel))) { await channel.close() }
+            } catch {
+                _ = await gate.resolve(.failure(error))
+            }
+        }
+        let timeout = Task { [connectionTimeout] in
+            do { try await Task.sleep(for: connectionTimeout) }
+            catch { return }
+            await driver.timeout()
+            _ = await gate.resolve(.failure(WebRTCFactoryError.timeout))
+        }
         do {
             let channel = try await withTaskCancellationHandler {
-                try await withThrowingTaskGroup(of: WebRTCSecureChannel.self) { group in
-                    group.addTask { try await driver.establish() }
-                    group.addTask { [connectionTimeout] in
-                        do {
-                            try await Task.sleep(for: connectionTimeout)
-                        } catch {
-                            throw CancellationError()
-                        }
-                        await driver.timeout()
-                        throw WebRTCFactoryError.timeout
-                    }
-                    defer { group.cancelAll() }
-                    guard let result = try await group.next() else { throw WebRTCFactoryError.timeout }
-                    return result
-                }
+                try await gate.wait()
             } onCancel: {
-                Task { await driver.abort() }
+                attempt.cancel()
+                timeout.cancel()
+                Task {
+                    _ = await gate.resolve(.failure(CancellationError()))
+                    await driver.abort()
+                }
             }
+            timeout.cancel()
+            attempt.cancel()
             if authorization != nil {
                 await beforeAuthorizedReturn()
                 try Task.checkCancellation()
@@ -247,11 +255,48 @@ public final class WebRTCFactory: AuthorizedWebRTCChannelFactory, @unchecked Sen
             }
             return channel
         } catch {
+            timeout.cancel()
+            attempt.cancel()
             authorization?.terminate()
-            await driver.abort()
+            // A websocket/SDP primitive may ignore cooperative cancellation.
+            // Cleanup therefore drains independently while the bounded caller
+            // is released; any late channel is closed by the attempt owner.
+            Task { await driver.abort() }
             if Task.isCancelled { throw CancellationError() }
             throw error
         }
+    }
+}
+
+/// A bounded result handoff for libwebrtc setup. Structured task groups wait for
+/// cancelled children at scope exit, so a non-cooperative signaling primitive
+/// could otherwise defeat the public connection deadline.
+private actor WebRTCFactoryAttemptGate {
+    private enum State {
+        case pending([CheckedContinuation<WebRTCSecureChannel, Error>])
+        case resolved(Result<WebRTCSecureChannel, Error>)
+    }
+
+    private var state: State = .pending([])
+
+    func wait() async throws -> WebRTCSecureChannel {
+        try await withCheckedThrowingContinuation { continuation in
+            switch state {
+            case .pending(var continuations):
+                continuations.append(continuation)
+                state = .pending(continuations)
+            case .resolved(let result):
+                continuation.resume(with: result)
+            }
+        }
+    }
+
+    @discardableResult
+    func resolve(_ result: Result<WebRTCSecureChannel, Error>) -> Bool {
+        guard case .pending(let continuations) = state else { return false }
+        state = .resolved(result)
+        for continuation in continuations { continuation.resume(with: result) }
+        return true
     }
 }
 
@@ -420,6 +465,9 @@ private actor WebRTCPeerState {
     func establish() async throws -> WebRTCSecureChannel {
         try requireAuthorization()
         let messages = await signaling.messages(from: remoteDevice, connectionID: connectionID)
+        #if DEBUG
+        print("DropMeshWebRTC route=\(String(describing: route)) stage=subscribed")
+        #endif
         try requireAuthorization()
         signalTask = Task { [weak self] in
             do {
@@ -447,10 +495,19 @@ private actor WebRTCPeerState {
             }
             openedDataChannel(FactoryDataChannelBox(dataChannel))
             let offer = try await createOffer()
+            #if DEBUG
+            print("DropMeshWebRTC route=\(String(describing: route)) stage=offer-created")
+            #endif
             try requireAuthorization()
             try await setLocalDescription(offer)
+            #if DEBUG
+            print("DropMeshWebRTC route=\(String(describing: route)) stage=local-description")
+            #endif
             try requireAuthorization()
             try await signaling.send(.offer(sdp: offer.sdp, route: route), to: remoteDevice, connectionID: connectionID)
+            #if DEBUG
+            print("DropMeshWebRTC route=\(String(describing: route)) stage=offer-sent")
+            #endif
         }
 
         let channel = try await waitForChannel()

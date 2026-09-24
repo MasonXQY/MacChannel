@@ -140,6 +140,28 @@ final class WebRTCLoopbackTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
+    func testConnectionTimeoutDoesNotWaitForBlockedOfferSend() async throws {
+        let local = try DeviceIdentity.ephemeral(), remote = try DeviceIdentity.ephemeral()
+        let signaling = BlockingOfferSendSignaling()
+        let finished = expectation(description: "factory returns at its connection deadline")
+        let task = Task<Error?, Never> {
+            defer { finished.fulfill() }
+            do {
+                _ = try await WebRTCFactory(connectionTimeout: .milliseconds(75)).connect(
+                    localIdentity: local, remoteDevice: remote.id,
+                    remotePublicKey: remote.publicKey.rawRepresentation,
+                    connectionID: UUID(), role: .offerer, route: .relay,
+                    ice: ICEConfiguration(stunURLs: [], turnServers: []), signaling: signaling)
+                return nil
+            } catch { return error }
+        }
+        await fulfillment(of: [signaling.offerSendStarted], timeout: 2)
+        await fulfillment(of: [finished], timeout: 1)
+        await signaling.release()
+        let error = await task.value
+        XCTAssertEqual(error as? WebRTCFactoryError, .timeout)
+    }
+
     func testAuthorizedLateFactoryResultRechecksBeforeReturning() async throws {
         try await assertLateFactoryResult(revoke: true)
     }
@@ -901,6 +923,30 @@ private actor AuthorizationPendingSignaling: WebRTCSignalTransport {
     }
     func send(_ message: WebRTCSignalMessage, to remoteDevice: DeviceID, connectionID: UUID) async throws {
         if case .offer = message { offerSent.fulfill() }
+    }
+}
+
+private actor BlockingOfferSendSignaling: WebRTCSignalTransport {
+    nonisolated let offerSendStarted = XCTestExpectation(description: "offer send started")
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func messages(from remoteDevice: DeviceID, connectionID: UUID) async -> AsyncThrowingStream<WebRTCSignalMessage, Error> {
+        _ = remoteDevice
+        _ = connectionID
+        return AsyncThrowingStream { _ in }
+    }
+
+    func send(_ message: WebRTCSignalMessage, to remoteDevice: DeviceID, connectionID: UUID) async throws {
+        _ = remoteDevice
+        _ = connectionID
+        guard case .offer = message else { return }
+        offerSendStarted.fulfill()
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

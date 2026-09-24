@@ -1,0 +1,266 @@
+--- a/iPhone/App/PairingModel.swift
++++ b/iPhone/App/PairingModel.swift
+@@ -2,6 +2,50 @@
+ import Foundation
+ import MacChannelCore
+ import Observation
++
++// Shared with the inert test target; construction alone starts no service.
++actor ProductionPairingAttempt: PairingAttempt {
++    private let session: MobilePairingSession
++    private let transport: RendezvousPairingTransport
++    private var hostedCode: String?
++    init(session: MobilePairingSession, transport: RendezvousPairingTransport) {
++        self.session = session; self.transport = transport
++    }
++    func createCode() async throws -> String {
++        let code = try await session.createCode()
++        hostedCode = code
++        return code
++    }
++    func pendingHostConfirmation() async -> PairingHostConfirmation? {
++        guard await hostFailure() == nil else { return nil }
++        return await session.pendingHostConfirmation()
++    }
++    func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary {
++        guard await hostFailure() == nil else { throw PairingError.invalidHandshake }
++        return try await session.approve(expected)
++    }
++    func reject() async throws { try await session.reject() }
++    func join(code: String) async throws -> PairingJoinResult { try await session.join(code: code) }
++    func awaitApproval() async throws -> DeviceSummary { try await session.awaitApproval() }
++    func currentState() async -> MobilePairingState {
++        let failure = await hostFailure()
++        let state = await session.currentState()
++        if let failure {
++            switch state {
++            case .active(.displayingCode), .active(.approvalRequested): return .active(.failed(failure))
++            default: break
++            }
++        }
++        return state
++    }
++    private func hostFailure() async -> MacChannelError? {
++        guard let hostedCode else { return nil }
++        return await transport.hostFailure(for: hostedCode)
++    }
++    func retrySaving() async throws -> DeviceSummary { try await session.retrySaving() }
++    func cancel() async throws { try await session.cancel() }
++    func stop() async { await transport.stop() }
++}
+ 
+ struct PairingCode: Equatable, Sendable {
+     let value: String
+--- a/iPhone/App/ProductionMobileAppDependencies.swift
++++ b/iPhone/App/ProductionMobileAppDependencies.swift
+@@ -207,46 +207,3 @@
+         }
+     }
+ }
+-
+-private actor ProductionPairingAttempt: PairingAttempt {
+-    private let session: MobilePairingSession
+-    private let transport: RendezvousPairingTransport
+-    private var hostedCode: String?
+-    init(session: MobilePairingSession, transport: RendezvousPairingTransport) {
+-        self.session = session; self.transport = transport
+-    }
+-    func createCode() async throws -> String {
+-        let code = try await session.createCode()
+-        hostedCode = code
+-        return code
+-    }
+-    func pendingHostConfirmation() async -> PairingHostConfirmation? {
+-        guard await hostFailure() == nil else { return nil }
+-        return await session.pendingHostConfirmation()
+-    }
+-    func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary {
+-        guard await hostFailure() == nil else { throw PairingError.invalidHandshake }
+-        return try await session.approve(expected)
+-    }
+-    func reject() async throws { try await session.reject() }
+-    func join(code: String) async throws -> PairingJoinResult { try await session.join(code: code) }
+-    func awaitApproval() async throws -> DeviceSummary { try await session.awaitApproval() }
+-    func currentState() async -> MobilePairingState {
+-        let failure = await hostFailure()
+-        let state = await session.currentState()
+-        if let failure {
+-            switch state {
+-            case .active(.displayingCode), .active(.approvalRequested): return .active(.failed(failure))
+-            default: break
+-            }
+-        }
+-        return state
+-    }
+-    private func hostFailure() async -> MacChannelError? {
+-        guard let hostedCode else { return nil }
+-        return await transport.hostFailure(for: hostedCode)
+-    }
+-    func retrySaving() async throws -> DeviceSummary { try await session.retrySaving() }
+-    func cancel() async throws { try await session.cancel() }
+-    func stop() async { await transport.stop() }
+-}
+--- a/iPhone/Tests/Unit/PairingModelTests.swift
++++ b/iPhone/Tests/Unit/PairingModelTests.swift
+@@ -1,4 +1,5 @@
+ @testable import MacChannelCore
++import CryptoKit
+ import DropMeshMobileRuntime
+ import XCTest
+ @testable import DropMeshTestHost
+@@ -569,7 +570,155 @@
+ }
+ 
+ private enum TestFailure: Error { case expected }
++
++@MainActor
++final class ProductionPairingAttemptTests: XCTestCase {
++    func testKnownHostPollingFailureSuppressesSnapshotAndRejectsApprovalBeforeCoordinator() async throws {
++        let fixture = try AdapterFixture()
++        addTeardownBlock { await fixture.close() }
++        _ = try await fixture.attempt.createCode()
++        await fixture.core.setState(.approvalRequested(fixture.core.peer))
++        let before = await fixture.attempt.pendingHostConfirmation()
++        XCTAssertEqual(before, fixture.core.confirmation)
++        try await fixture.failHostPolling()
++
++        let after = await fixture.attempt.pendingHostConfirmation()
++        XCTAssertNil(after)
++        do {
++            _ = try await fixture.attempt.approve(fixture.core.confirmation)
++            XCTFail("Known failed host must not approve the displayed snapshot")
++        } catch { XCTAssertEqual(error as? PairingError, .invalidHandshake) }
++        let calls = await fixture.core.approvals
++        XCTAssertEqual(calls, 0, "Failure must stop before the shared signing flow")
++        let state = await fixture.attempt.currentState()
++        XCTAssertEqual(state, .active(.failed(.pairingHandshakeFailed)))
++    }
++
++    func testKnownHostFailureOverlaysWaitingOnlyAndPreservesEveryDurablePhase() async throws {
++        let fixture = try AdapterFixture()
++        addTeardownBlock { await fixture.close() }
++        _ = try await fixture.attempt.createCode()
++        try await fixture.failHostPolling()
++        let waiting = await fixture.attempt.currentState()
++        XCTAssertEqual(waiting, .active(.failed(.pairingHandshakeFailed)))
++
++        let peer = fixture.core.peer
++        await fixture.core.setState(.committing(peer))
++        let committing = await fixture.attempt.currentState()
++        XCTAssertEqual(committing, .active(.committing(peer)))
++        await fixture.core.setState(.confirmed(peer))
++        let unsaved = await fixture.attempt.currentState()
++        XCTAssertEqual(unsaved, .saveFailed(peer))
+ 
++        let save = Task { try await fixture.session.retrySaving() }
++        await boundedWait { await fixture.disk.calls == 1 }
++        let saving = await fixture.attempt.currentState()
++        XCTAssertEqual(saving, .saving(peer))
++        await fixture.disk.release(false)
++        do { _ = try await save.value; XCTFail("Expected controlled disk failure") }
++        catch { XCTAssertTrue(error is TestFailure) }
++        let failed = await fixture.attempt.currentState()
++        XCTAssertEqual(failed, .saveFailed(peer))
++        await fixture.disk.release(true)
++        _ = try await fixture.attempt.retrySaving()
++        let paired = await fixture.attempt.currentState()
++        XCTAssertEqual(paired, .paired(peer))
++        let failureStillPresent = await fixture.transport.hostFailure(for: "012345")
++        XCTAssertEqual(failureStillPresent, .pairingHandshakeFailed,
++            "Durable phases must survive an actual retained transport failure")
++    }
++}
++
++private struct AdapterFixture: Sendable {
++    let identity: DeviceIdentity
++    let transport: RendezvousPairingTransport
++    let core = AdapterCoordinator()
++    let disk = AdapterDisk()
++    let session: MobilePairingSession
++    let attempt: ProductionPairingAttempt
++    init() throws {
++        identity = try DeviceIdentity.ephemeral()
++        let config = URLSessionConfiguration.ephemeral
++        config.protocolClasses = [AdapterFailureURLProtocol.self]
++        transport = try RendezvousPairingTransport(identity: identity,
++            origin: URL(string: "https://adapter.test")!, session: URLSession(configuration: config))
++        let disk = self.disk
++        session = MobilePairingSession(coordinator: core, persistTrust: { _ in try await disk.save() })
++        attempt = ProductionPairingAttempt(session: session, transport: transport)
++    }
++    @MainActor func failHostPolling() async throws {
++        let key = P256.KeyAgreement.PrivateKey()
++        try await transport.publish(.init(code: "012345", expiresAt: Date().addingTimeInterval(300),
++            hostID: identity.id, hostIdentityPublicKey: identity.publicKey.rawRepresentation,
++            hostEphemeralPublicKey: key.publicKey.rawRepresentation, hostDisplayName: "Fixture"), endpoint: core)
++        await boundedWait { await transport.hostFailure(for: "012345") != nil }
++    }
++    func close() async {
++        await disk.release(true)
++        await session.stopObservation()
++        await transport.stop()
++    }
++}
++
++private actor AdapterCoordinator: DurablePairingCoordinating, PairingHostEndpoint {
++    nonisolated let peer = fixturePeer
++    nonisolated let confirmation = PairingHostConfirmation(sessionID: PairingSessionID(),
++        peer: fixturePeer, fingerprint: "fixture comparison", expiresAt: Date().addingTimeInterval(300))
++    nonisolated let states = AsyncStream<PairingState> { $0.finish() }
++    private var state: PairingState = .idle
++    private(set) var approvals = 0
++    func setState(_ value: PairingState) { state = value }
++    func currentState() async -> PairingState { state }
++    func isTrusted(_ device: DeviceID) async -> Bool { device == peer.id }
++    func createCode() async throws -> String { state = .displayingCode(expiresAt: confirmation.expiresAt); return "012345" }
++    func join(code: String) async throws -> PairingJoinResult { throw TestFailure.expected }
++    func pendingHostConfirmation() async -> PairingHostConfirmation? { confirmation }
++    func approvePendingPairing(_ expected: PairingHostConfirmation) async throws -> SignedTrustRecord {
++        approvals += 1
++        throw TestFailure.expected
++    }
++    func approvePendingPairing() async throws -> SignedTrustRecord { throw TestFailure.expected }
++    func awaitHostApproval() async throws -> SignedTrustRecord { throw TestFailure.expected }
++    func rejectPendingPairing() async throws {}
++    func cancelPendingPairing() async throws {}
++    func pendingPeerSummary() async -> DeviceSummary? { peer }
++    func accept(_ request: PairingJoinRequest) async throws -> PairingJoinResponse { throw TestFailure.expected }
++}
++
++private actor AdapterDisk {
++    private var releaseBeforeEntry: Bool?
++    private var continuation: CheckedContinuation<Bool, Never>?
++    private(set) var calls = 0
++    func save() async throws {
++        calls += 1
++        let success: Bool
++        if let released = releaseBeforeEntry { releaseBeforeEntry = nil; success = released }
++        else { success = await withCheckedContinuation { continuation = $0 } }
++        if !success { throw TestFailure.expected }
++    }
++    func release(_ success: Bool) {
++        if let continuation { self.continuation = nil; continuation.resume(returning: success) }
++        else { releaseBeforeEntry = success }
++    }
++}
++
++private final class AdapterFailureURLProtocol: URLProtocol, @unchecked Sendable {
++    override class func canInit(with request: URLRequest) -> Bool { true }
++    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
++    override func startLoading() {
++        guard let url = request.url else { return }
++        if url.path.hasSuffix("/host") {
++            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
++        } else {
++            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: 201,
++                httpVersion: "HTTP/1.1", headerFields: [:])!, cacheStoragePolicy: .notAllowed)
++            client?.urlProtocol(self, didLoad: Data("{}".utf8))
++            client?.urlProtocolDidFinishLoading(self)
++        }
++    }
++    override func stopLoading() {}
++}
++
+ private final class PairingTestSecrets: SecretStore, @unchecked Sendable {
+     private let lock = NSLock()
+     private var values: [String: Data] = [:]

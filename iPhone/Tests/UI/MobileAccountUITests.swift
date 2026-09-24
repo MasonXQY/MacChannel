@@ -271,6 +271,34 @@ final class MobileAccountUITests: XCTestCase {
         }
     }
 
+    func testDeletionConfirmationPreservesExplicitConsent() throws {
+        let app = launch(state: "deletion-ready")
+        defer { app.terminate() }
+        openAccount(app)
+        let delete = app.buttons["account-delete"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 5))
+        reveal(delete, in: app)
+        delete.tap()
+        let confirm = app.sheets.buttons["account-delete-confirm"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        try capture(app, name: "en-Delete-Confirmation")
+        // Synthetic Apple authorization cancels; no real account is touched.
+        confirm.tap()
+        XCTAssertTrue(delete.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["account-sign-out"].exists)
+    }
+
+    func testManualRevocationIsNotPresentedAsAutomaticCompletion() throws {
+        let app = launch(state: "deletion-manual")
+        defer { app.terminate() }
+        openAccount(app)
+        let status = app.staticTexts["account-delete-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertTrue(status.label.contains("could not confirm"), status.label)
+        reveal(status, in: app)
+        try capture(app, name: "en-Delete-Manual-Revocation")
+    }
+
     private func launch(state: String, language: String = "en", large: Bool = false, dark: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += ["-account-evidence", "-account-evidence-state", state,

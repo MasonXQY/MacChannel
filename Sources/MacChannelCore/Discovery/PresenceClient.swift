@@ -37,6 +37,30 @@ public protocol PresenceWebSocket: Sendable {
     func close() async
 }
 
+/// URLSession may race a ping completion with task cancellation. Some OS
+/// versions can deliver both callbacks, so the checked continuation needs an
+/// explicit one-shot gate instead of trusting callback cardinality.
+final class PresencePingCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, any Error>?
+
+    init(_ continuation: CheckedContinuation<Void, any Error>) {
+        self.continuation = continuation
+    }
+
+    @discardableResult
+    func resume(error: (any Error)?) -> Bool {
+        let pending = lock.withLock { () -> CheckedContinuation<Void, any Error>? in
+            defer { continuation = nil }
+            return continuation
+        }
+        guard let pending else { return false }
+        if let error { pending.resume(throwing: error) }
+        else { pending.resume() }
+        return true
+    }
+}
+
 /// Production `/v1/ws` transport. The session layer supplies the required
 /// subprotocol and performs the signed challenge exchange before any event is
 /// accepted by `PresenceClient`.
@@ -67,12 +91,9 @@ public final class URLSessionPresenceWebSocket: PresenceWebSocket, @unchecked Se
     public func ping() async throws {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, any Error>) in
+            let completion = PresencePingCompletion(continuation)
             task.sendPing { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
+                completion.resume(error: error)
             }
         }
     }

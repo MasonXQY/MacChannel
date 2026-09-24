@@ -1,6 +1,380 @@
 # DropMesh iPhone companion handoff
 
+LATEST 2026-09-21 Apple sign-out/sign-in recovery on iPhone: user reported
+"apple登出再登录进不去" after signing out and trying to sign in again. Root
+cause in code path: `AccountSessionController.logout()` intentionally keeps the
+local session when server logout is unavailable or unacknowledged, then
+`MobileAccountModel.signOut()` surfaced that as `.unavailable`; the account UI
+no longer exposed the Apple sign-in button, and retrying restore could keep
+returning unavailable for the retained old session. Added a narrow explicit
+recovery method `discardLocalSessionAfterLogoutFailure()` that only applies
+after user-initiated logout failure, removes this device's local account session,
+withdraws account route state, and publishes `.signedOut`; it does not run for
+background restore/refresh failures and does not delete identity, pairings, or
+received files. `MobileAccountModel.signOut()` now uses that recovery path and
+shows `account.sign-out.local` ("Signed out on this device. You can sign in
+again." / "已在此设备退出，可以重新登录。"). Verification:
+`swift test --filter
+AccountSessionControllerTests/testExplicitLocalDiscardAfterLogoutFailureUnblocksLogin`
+passed in `/tmp/dropmesh-account-logout-local-discard-swift-20260921.log`;
+`xcodebuild test -project iPhone/DropMesh.xcodeproj -scheme DropMeshTests
+-destination 'platform=iOS Simulator,name=iPhone 16,OS=18.6'
+-only-testing:DropMeshTests/MobileAccountModelTests/testSignOutServerFailureReturnsToAppleLogin`
+passed in `/tmp/dropmesh-mobile-account-signout-relogin-20260921.log`.
+Built signed Debug for physical iPhone Mason using Xcode 27 and
+`DEVELOPMENT_TEAM=XKAZ67HN45 CODE_SIGN_STYLE=Automatic`, installed and launched
+`com.zensystech.dropmesh.iphone.dev` successfully; logs:
+`/tmp/dropmesh-phone-apple-relogin-fix-build-20260921.log`,
+`/tmp/dropmesh-phone-apple-relogin-fix-install-20260921.log`,
+`/tmp/dropmesh-phone-apple-relogin-fix-launch-20260921.log`. Device inventory
+still shows `DropMesh com.zensystech.dropmesh.iphone.dev 1.0 8`.
+
+LATEST 2026-09-21 account invitation service enabled on account-dev: user
+pointed out `channel.zensys-tech.com` was probably wrong. Confirmed account
+identity traffic should use `https://account-dev.zensys-tech.com`; DNS currently
+lands on the same host as channel, but channel remains the wrong logical account
+origin. Root cause of "Copy My Invite Link" was server-side: account-dev was
+healthy, but the deployed account service only had migrations 001-009 and
+runtime env lacked `DROPMESH_ACCOUNT_GROUPS_ENABLED`,
+`DROPMESH_ACCOUNT_INVITATIONS_ENABLED`, and `DROPMESH_ACCOUNT_ORIGIN`, so
+invitation routes were not mounted and `/v1/account/invitation/link/get`
+returned 404. Temporarily opened SSH from the current workstation IP in Hetzner,
+backed up the service binary, runtime env, and database to
+`/root/dropmesh-account-dev-backup-20260921T190540Z`, copied migrations
+010/011/013, applied them to `dropmesh_account_dev`, installed the current
+linux/amd64 `accountserver`, set groups/invitations/origin in account-dev env,
+and restarted `dropmesh-account-dev`. Verification: service is active; public
+`https://account-dev.zensys-tech.com/healthz` returns 200; unauthenticated empty
+POSTs to `link/get`, `link/rotate`, and `request` now return `400
+invalid_request` instead of 404; live Swift probe
+`DROPMESH_LIVE_ACCOUNT_PROBE_ORIGIN=https://account-dev.zensys-tech.com
+DROPMESH_LIVE_ACCOUNT_PROBE_AUDIENCES=com.zensystech.dropmesh.iphone.dev swift
+test --filter LiveChallengeProbeTests` passed 2/0 in
+`/tmp/dropmesh-live-account-probe-20260921.log`, including challenge 200 and all
+invitation routes non-404. Removed the temporary SSH firewall rule afterward;
+Hetzner showed "Firewall applied" and SSH from the current host timed out again,
+while HTTPS stayed healthy.
+
+LATEST 2026-09-21 invite link copy root cause: user reported "Copy My Invite
+Link" does not work. This is not an iPhone pasteboard bug. Fresh live checks
+show `https://account-dev.zensys-tech.com/healthz` returns 200, while
+`POST /v1/account/invitation/link/get` and `POST /v1/account/invitation/link/rotate`
+return `404 page not found` (`/tmp/dropmesh-live-account-dev-invite-link-get-20260921.http`).
+Code inspection confirms invitation routes are mounted only when
+`DROPMESH_ACCOUNT_INVITATIONS_ENABLED=1` and groups are enabled. SSH to
+`channel.zensys-tech.com:22` timed out, so no live server mutation was possible
+from this host. Client UX now maps `AccountServiceError.unavailable` during
+invitation operations to a specific localized message:
+`account.invitation.unavailable` ("Connection invites are not available yet." /
+"连接邀请服务暂不可用，请稍后再试。"). Added a default-skipped live invitation
+route probe beside the account challenge probe and documented the invitation
+server toggle in `cmd/accountserver/README.md`. Also updated
+`Infrastructure/rendezvous/Dockerfile` to build and copy `/usr/local/bin/accountserver`
+into the published service image while preserving the legacy rendezvous entrypoint.
+Verification: `go test ./cmd/accountserver -run 'Test.*(Invitation|ServiceMux|Config)'`
+passed in `/tmp/dropmesh-accountserver-invitation-config-20260921.log`;
+`go build -trimpath -ldflags='-s -w' ./cmd/accountserver` produced
+`/tmp/dropmesh-accountserver-build-check-20260921`; `xcodebuild test -scheme
+MacChannel-Package -destination platform=macOS -only-testing:DropMeshMobileRuntimeTests`
+passed 160/0 in `/tmp/dropmesh-mobile-runtime-tests-20260921.log`; live
+invitation route remains 404 until account-dev is redeployed with migration013,
+groups enabled, invitations enabled, and exact origin configured. Physical iPhone
+Mason is connected, but signed install could not proceed because local Xcode has
+`No Account for Team "LY7NCDXP4L"` and no development profiles for
+`com.zensystech.dropmesh.iphone.dev(.share)`, even with `-allowProvisioningUpdates`;
+see `/tmp/dropmesh-phone-invite-unavailable-20260921-build.log`.
+
+LATEST 2026-09-21 Apple login failure fixed on installed dev phone: user
+reported Apple login failed after the direct invitation-entry install. Root
+cause was not the Apple entitlement/profile: the installed app had
+`com.apple.developer.applesignin` and profile
+`iOS Team Provisioning Profile: com.zensystech.dropmesh.iphone.dev`. The account
+origin was wrong. `https://channel.zensys-tech.com/v1/account/login/challenge`
+returned `404 page not found` for all tested audiences, proving the legacy
+rendezvous domain did not mount account routes. Live probe against
+`https://account-dev.zensys-tech.com` returned 200 for
+`com.zensystech.dropmesh.iphone.dev` and 401 for non-dev audiences, proving this
+is the correct account origin for the installed dev bundle. Updated
+`iPhone/App/Info.plist` `DropMeshAccountServiceOrigin` and
+`DropMeshAccountTransportOrigin` to `https://account-dev.zensys-tech.com`.
+Added a default-skipped `LiveChallengeProbeTests` test for future origin/audience
+diagnostics. Verification: account config/model tests 24/0 in
+`/tmp/dropmesh-account-origin-fix-tests-20260921.log`, result bundle
+`/tmp/dropmesh-account-origin-fix-tests-20260921/Logs/Test/Test-DropMeshTests-2026.09.21_22-41-57-+0400.xcresult`;
+signed iPhone Debug build succeeded at
+`/tmp/dropmesh-phone-account-origin-fix-20260921-build.log`;
+`Scripts/verify-mobile-account-configuration.sh` passed for origin
+`https://account-dev.zensys-tech.com` and bundle
+`com.zensystech.dropmesh.iphone.dev`; installed to physical iPhone Mason
+`00008140-001A6CE63082201C` with log
+`/tmp/dropmesh-phone-account-origin-fix-20260921-install.log`; launched
+successfully with log `/tmp/dropmesh-phone-account-origin-fix-20260921-launch.log`;
+device app inventory confirms `DropMesh com.zensystech.dropmesh.iphone.dev 1.0
+8` in `/tmp/dropmesh-phone-account-origin-fix-20260921-apps.log`; final live
+probe passed in `/tmp/dropmesh-live-account-dev-final-probe.log`:
+`OK audience=com.zensystech.dropmesh.iphone.dev status=200 contentType=application/json`.
+This proves the installed dev app now points to a live account challenge service;
+user still needs to tap Apple sign-in on the physical device to verify the full
+Apple authorization-code exchange and session completion.
+
+LATEST 2026-09-21 direct invitation entry installed: user could not find invite
+features on phone. Kept the account config fix below and made invitation access
+obvious in the iPhone Devices tab: when account configuration is available,
+Devices now shows a first-class `Account & Invitations` / `账号与邀请` row with
+subtitle, leading directly to `MobileAccountView`; `MobileAccountView` now loads
+from `.disabled` as well as `.loading` so direct entry is not stuck before the
+settings task has primed the model. Localized EN/ZH strings added. Verification:
+`DropMeshTests/MobileAccountConfigurationTests` + `DropMeshTests/
+MobileAccountModelTests` passed 24/0 in
+`/tmp/dropmesh-account-entry-tests-20260921.log` with result bundle
+`/tmp/dropmesh-account-entry-tests-20260921/Logs/Test/Test-DropMeshTests-2026.09.21_22-33-44-+0400.xcresult`;
+signed iPhone Debug build succeeded at
+`/tmp/dropmesh-phone-invite-entry-20260921-build.log`;
+`Scripts/verify-mobile-account-configuration.sh` passed against
+`/private/tmp/dropmesh-phone-invite-entry-20260921/Build/Products/Debug-iphoneos/DropMesh.app`
+for `https://channel.zensys-tech.com` and bundle
+`com.zensystech.dropmesh.iphone.dev`; installed to physical iPhone Mason
+`00008140-001A6CE63082201C` with log
+`/tmp/dropmesh-phone-invite-entry-20260921-install.log`; devicectl launch
+returned success in `/tmp/dropmesh-phone-invite-entry-20260921-launch.log`;
+device app inventory confirms `DropMesh com.zensystech.dropmesh.iphone.dev 1.0
+8` in `/tmp/dropmesh-phone-invite-entry-20260921-apps.log`. This proves the
+configured dev app with the visible entry is installed and launch-requested on
+the phone; user still needs to sign in on-device before invitation copy/request/
+accept controls become active.
+
+LATEST 2026-09-21 account invitation visibility fix: user reported no invite
+features on phone after the previous install. Root cause was artifact
+configuration, not missing UI code: the installed Debug app had no
+`DropMeshAccountServiceOrigin`, `DropMeshAccountTransportOrigin`,
+`DropMeshAccountGroupsEnabled`, or `DropMeshAccountDeletionEnabled`, so
+`MobileAccountConfiguration.load()` returned nil and the account/invitation UI
+was hidden. Added the development account configuration to
+`iPhone/App/Info.plist` for `https://channel.zensys-tech.com` with groups,
+transport, and deletion enabled. Verification: `DropMeshTests/
+MobileAccountConfigurationTests` 9/0 passed in
+`/tmp/dropmesh-account-config-tests-20260921.log`; signed iPhone Debug build
+succeeded at `/tmp/dropmesh-phone-account-enabled-20260921-build.log`;
+`Scripts/verify-mobile-account-configuration.sh` passed against
+`/private/tmp/dropmesh-phone-account-enabled-20260921/Build/Products/Debug-iphoneos/DropMesh.app`
+for bundle `com.zensystech.dropmesh.iphone.dev`; installed to physical iPhone
+Mason `00008140-001A6CE63082201C` with log
+`/tmp/dropmesh-phone-account-enabled-20260921-install.log`; launched successfully
+with log `/tmp/dropmesh-phone-account-enabled-20260921-launch.log`; device app
+inventory confirms `DropMesh com.zensystech.dropmesh.iphone.dev 1.0 8` in
+`/tmp/dropmesh-phone-account-enabled-20260921-apps.log`. This proves config is
+in the installed dev app and it launches; user still needs to open Settings >
+Account and sign in for invitation copy/request/accept UI to appear, because the
+invitation section is signed-in account UI.
+
+LATEST 2026-09-21 signed phone install: current dirty-worktree development
+build was signed and installed onto physical iPhone "Mason"
+(`00008140-001A6CE63082201C`). First build without command-line team stopped at
+missing Development Team for main + Share targets; retry used existing team
+`XKAZ67HN45` and existing Apple Development identity/profile only, with no
+project/profile/certificate mutation. Signed Debug build succeeded at
+`/tmp/dropmesh-phone-install-20260921-build-team.log`; artifact:
+`/private/tmp/dropmesh-phone-install-20260921/Build/Products/Debug-iphoneos/DropMesh.app`.
+Installed bundle `com.zensystech.dropmesh.iphone.dev`, version `1.0`, build `8`;
+codesign TeamIdentifier `XKAZ67HN45`; devicectl install log
+`/tmp/dropmesh-phone-install-20260921-install.log`. Device app inventory confirms
+`DropMesh com.zensystech.dropmesh.iphone.dev 1.0 8` in
+`/tmp/dropmesh-phone-install-20260921-apps-all.log`. devicectl launch returned
+success for `com.zensystech.dropmesh.iphone.dev`
+(`/tmp/dropmesh-phone-install-20260921-launch.log`). This proves signed install
+and launch request on the physical iPhone; it does not prove invitation/share
+end-to-end, live server behavior, TestFlight/App Store review, or production
+release readiness. Continue with on-device functional testing of account
+auto-pairing, approval, invitation, share-link open, and transfer flows.
+
+LATEST 2026-09-21 invitation/share continuation: native invitation/share UI is
+wired into iPhone account settings and production dependencies; first-copy now
+creates a share link when none exists instead of surfacing a generic error, and
+post-login presentation now refreshes invitation support/inbox immediately.
+Root added non-Keychain invitation storage injection for stable tests and a
+focused iPhone model regression covering first-copy creation + invalid typed
+link handling. `dropmesh://connect?v=1&token=...` is registered in Info.plist
+and opens DropMesh to the Account view with the invitation link prefilled; it
+does not auto-send the request. Verified: iPhone focused tests 2/0 at
+`/tmp/dropmesh-invitations-ui-tests-final.log`, `swift test --filter
+AccountInvitation` 45/0 at `/tmp/dropmesh-invitations-core-final.log`, unsigned
+iPhone generic Release `DropMesh` build succeeded with log
+`/tmp/dropmesh-invitations-ui-ios-build-final.log`; plist contains the `dropmesh`
+URL scheme. This is source + unsigned build evidence only: no signed install,
+phone acceptance, server deployment, App Store submission or release claim.
+Continue at signed device install/real invitation acceptance.
+
+LATEST verified checkpoint: HEADd914c00 + preserved working tree, native receipt
+presentation6c05211 and iPhone deletionUI d914c00 independently approved. Final
+core49/0, model/config23/0 + UI2/0; persistent .build/account-deletion-accepted-final.xcresult.
+Unsigned shipping DropMesh generic/platform=iOS Release BUILD SUCCEEDED in
+/tmp/account-deletion-production-device-release.log (Xcode16.4, CODE_SIGNING_ALLOWED=NO).
+Root visually inspected confirmation and manual-revocation screenshots. Source
+and unsigned build are NOT signed install, real Apple/account transport or Store.
+Remaining gate: serverSSH stilltimeouts, temporary92.96.17.75/32 TCP22 action-time
+approval unanswered. No firewall/remote mutation. iPadconnected, iPhoneunavailable.
+Candidate deployment/config + signed2device acceptance still needed; invitations
+only scoped brief, not implemented. Do not call whole account system publishable.
+Root Production/localization/evidence code remains uncommitted mixed with old
+worktree changes; preserve all, use scoped integration. DisposableSQL55463 stopped.
+
+CURRENT checkpoint: commits659ccc9 (Go recovery), d0a6205 (native recovery/drain),
+1f49604 (exact-account cleanup),76ed4e0 (candidate/config gates). Native16/0 and
+cleanup87/0 independently approved; root inspected actual logs. UI51unit+2UI passed,
+root viewed both deletion screenshots under iPhone/Tests/Evidence/AccountSettings/393.
+Post-review stale-terminal/new-login presentation fix still in progress; finaltests
+and generic iOSdeviceRelease rebuild pending. Root Production closure/localizations/
+fixtures remain uncommitted amid preserved older changes; do not broadstage.
+SSH retry stilltimedout (no remotecommand executed), firewall approval unanswered.
+No candidate deployment, phone update, Store upload or release readiness claim.
+
+LATEST integration verification: graph 9f9352e locally built, 102 core / 68 iOS
+tests passing; persistent account peer UI test 1/0 in
+.build/account-peer-ui-20260921.xcresult, screenshot visually checked (account
+management instead of manual removal). No physical/live/Store acceptance yet.
+Root command deletion capability/config/schema/worker integration implemented,
+default off. Command focused3 incl real local SQL startup PASS (1.446s).
+Backend deletion finalizer race reproduced in tool session75682 (exit1 line671)
+and fixed; /tmp/account-deletion-sql-root-v3.log all9 SQL PASS (2.500s).
+Independent finalizer+command rereview approved, no actionable issues.
+Native deletion controller agent finishing scoped commit (14 focused passing;
+broad295/3existingLiveGoSkips/0 reported, root still must inspect).
+Next: native deletion UI/config wiring, invitations, signed physical dual-device
+acceptance, reachable candidate deployment. Temporary SSH allow92.96.17.75/32
+TCP22 action-time approval remains unanswered; no firewall/remote mutation.
+Disposable Unix SQL55463 stopped after tests, root sole owner.
+
+Native65ea1db independent review found session-loss recovery deadend, terminal
+save bypass and missing writerjoin; native agent fixing, not approved yet.
+Recovery server now adds signed /v1/account/deletion/recover with originalaccountID,
+same receipt and fresh Apple proof, no session/upsert. Root all12 SQL PASS3.083s
+(/tmp/account-deletion-recovery-root-sql.log); cmd3 incl realstartup PASS1.679s.
+SQL55463 stopped again. Root wired defaultoff MobileAccountDeletionEnabled and
+Production shared checkpoint/intent stores; their cleanup methods are still being
+implemented by presence agent, DO NOT enable or install until final verification.
+EN/ZH delete keys added, lint passes; native UI not yet finished. Artifact gate
+now requires deletion capability; behavior RED then GREEN recorded. Latest device
+check: physical iPad mini connected, physical iPhone unavailable.
+
+LATEST 2026-09-21: continue through publishability, approved dual-plane scope.
+HEAD c3b8cf5 fixes independently reviewed foreground start/stop race (43/0).
+Prior reviewed components: candidate command b958b0e, Go TURN f196e47 with actual
+SQL tests, supervisor e6e5d7c, shared inbound limits def5c42, native TURN dc7d91f,
+binding-scoped Keychain 896aee0. See .superpowers/sdd component reports/reviews.
+Active: dual-plane graph, controller TURN binding, durable account deletion.
+Root adds read-only built account configuration gate to catch absent activation.
+Don't redo completed component gates. Not yet integrated/installed/live/Store-ready.
+Physical iPad mini connected; iPhone currently unavailable. No remote mutation.
+
+LATEST 2026-09-21 instruction audit requested and applied: user-local workflow
+skills plus project/template AGENTS now reuse approval/evidence, distinguish
+baseline failures and true blockers, preserve safety and support local fallback.
+See docs/acceptance/agent-instruction-audit-20260921.md; originals backed up under
+/Users/mason/.codex/instruction-audit-backup-9UPSnm. Seven scenario review passed.
+Development continued: controller route lifecycle 0fd2dba, 12 focused PASS;
+affected270/3environment-skips/0fail. Independent review in progress before
+supervisor integration. No device install or live account activation yet.
+
+LATEST APPROVAL 2026-09-21: user approved the recommended dual-plane topology
+("按你推荐的来，快点搞吧，太磨叽了"). Preserve legacy manual connectivity and
+add isolated account connectivity. This supersedes pending topology notes below.
+Continue native lifecycle and plane-aware composition without another topology
+confirmation; preserve existing data and require real signed-device verification.
+
 ## Current mainline decision — 2026-09-20
+
+LATEST 2026-09-21: optional periodic refresh final independent PASS after SQL
+test attribution P2 fixed. Nine focused tests + affected racePASS; real SQL
+Composition/PeriodicRevocation bothPASS/no skips/package2.411s. Timer-disabled
+RED required-gate assertion proves timer dependency. Reports
+account-presence-refresh-{report,review}.md; source/test hashes matched. All
+root/agent tests drained; fixture55463 stopped/accounts40unchanged. No native,
+production, firewall, install or Store updates this turn. Account auto-pairing
+is still NOT enabled on phone. Server TURN/candidate and native lifecycle/
+transport/presentation integration remain, followed by signed physical tests.
+Implementation now pauses only at the pending material native topology choice
+below; no need repeat completed server/native foundation tasks.
+
+PENDING USER CHOICE 2026-09-21: source-confirmed topology conflict. Existing
+mobile runtime has one legacy presence/signal plane; isolated account candidate
+has separate DB/state. Switching sole socket would break cross-network use with
+unchanged manually paired peers. Async question asks dual-plane preservingmanual
+(recommended) vs explicit candidate-only test. Do not silently choose migration
+or rewrite production. Native design agent read-only; bounded optional server
+periodic refresh agent account_presence_refresh active, base7098be2, owns brief
+account-presence-refresh-brief.md paths only. This server work is independent
+of pending topology choice. Root sole SQL owner, disposable fixture stopped.
+Native design finished read-only: account-activation-native-next-design.md;
+root read it. Proposed controller-private route context, supervisor joined
+binding worker, foreground verified refresh, plane-aware presentation. Proposed
+freshness/cadence values are not activated production policy. Do not start
+topology-dependent native work until choice arrives. Preserve origin-bound
+Keychain state when preparing separate candidate login; no silent old-state reset.
+
+LATEST 2026-09-21: HTTP account presence composition independently PASS/no
+findings, all five hashes matched. Real guarded SQL/WebSocket integration
+1test/no skip PASS .43s/package1.769s; affected no-SQL race packages PASS. Baseline
+accounts40 unchanged; fixture55463 stopped. Reports account-presence-http-
+{report,review}.md. Actual bind→bilateral presence→signal delivery→explicit
+refresh after revocation→offline/denial verified locally, NOT file transfer,
+idle periodic revocation or physical-device activation. Next: bounded refresh
+and native integration/candidate composition. Read-only native design agent
+account_activation_native_design active; no native writes authorized to it.
+
+LATEST 2026-09-21: account presence router adapter independently PASS after P2
+historical hub-pair capacity retirement fix. Root matched six source hashes and
+actual race logs. 13 adapter tests, affected race packages PASS; full no-SQL
+module 15 packages PASS before final scoped hub fix; final presence/routeauth
+race PASS afterward. Reports account-presence-adapter-{report,review}.md.
+No idle refresh cadence yet; no HTTP wiring or native auto-pair activation.
+Next bounded brief account-presence-http-brief.md: real WebSocket composition,
+same-hub configuration checks and guarded SQL integration. No installed/live
+changes this turn. SQL55463 remains stopped; root owns its execution.
+
+LATEST: account presence hub independently Approved, no findings after adding
+exact-epoch capacity-independent withdrawal. Root matched3hashes,19tests declarations,
+actualracePASS2.440s. Root no-SQL presence/routeauth/httpapi packagesPASS at
+/tmp/account-presence-hub-root-regression.log; SQL-dependent cases not exercised
+by that run. Reports account-presence-hub-{report,review}.md. Next agent
+account_presence_adapter owns routeauth-only opt-in coherent adapter design first;
+no httpapi/TURN/deployment in its task. All root caches free, SQL55463 stopped.
+Public channel/account-dev health both freshlyok; no live activation claimed.
+
+LATEST 2026-09-21: account presence projection independently Approved/no findings,
+root verified actual SQL RED and GREEN5top+extra2top/no skips; hashes match report.
+Fresh Unix-only fixture55463 /private/tmp/dropmesh-presence-sql.rjUENJ is now
+STOPPED with data retained. No production or old fixture changes. Reports
+account-presence-projection-{report,review}.md. Next account_presence_hub owns
+only presence hub source-union/opaque bounded batches/tests, design-first then
+TDD, no SQL/deploy. Root iOS build/cache released; current phone and iPad connected.
+
+2026-09-21 activation follow-up: user explicitly requests account automatic
+pairing enabled. Native account socket binding independently Approved, with
+102 focused tests / 0 failures / 0 skips, source hashes matched. Xcode27 unsigned
+Release shipping main/Share BUILD SUCCEEDED, embedded privacy manifests PASS;
+log /tmp/native-account-binding-ios-20260921.log. See native-account-binding-
+{report,review}.md for TDD, two fixed review findings and one fixture readiness
+race. Next bounded server projection task account_presence_projection active;
+root owns fresh disposable Unix-only PostgreSQL55463 at
+/private/tmp/dropmesh-presence-sql.rjUENJ, migrations001..011 applied. Do not
+touch old55461/55462 or production databases. No native runtime bind caller yet;
+account auto-pairing is NOT active. Fresh inspection of the installed build's
+source artifact Info.plist shows BOTH DropMeshAccountServiceOrigin and
+DropMeshAccountGroupsEnabled absent. The September20 generic signed rebuild
+did not carry the separate September19 live-account artifact configuration.
+Next account-capable install must verify these bundle values, exact candidate
+endpoint routing, signature and profiles BEFORE installation; never infer
+account readiness from build success. Do not enable groups against an
+uncomposed transfer service. Prior locked-launch blocker resolved: subsequent
+devicectl launch succeeded and process2400 was observed; visual/account/transfer
+acceptance remains unverified. Preserve existing app data and manual pairs.
+
+PHONE UPDATED on explicit user request: current bd08148 working tree signed
+Debug build installed successfully to Mason iPhone16ProMax, same bundle1.0(8),
+no uninstall/reset. Strict signature and privacy packaging PASS. Launch blocked
+only by device Locked; startup/data/transfer acceptance not yet verified. Details
+docs/acceptance/iphone-development-update-20260920.md and build log
+/tmp/dropmesh-phone-update-20260920-build.log. No iPad/Store/server changes.
 
 LATEST VERIFIED: mobile runtime authorization03b93b2 independently Approved/no
 findings; report/review mobile-runtime-authorization-{report,review}.md. Root

@@ -11,7 +11,9 @@ legal compliance, deletion completeness or Store metadata changes.
 | Credentials | Encrypted Apple refresh credential bound to device/audience; access/refresh hashes, session families and replay/issuance registry | Explain security/session purpose without claiming immediate erasure or publishing secrets |
 | Group membership | Migration010 stores group anchor and signed event journal | Describe account-linked device membership and security history; not file-content cloud storage |
 | Approval requests | Migration011 stores device/public key, bound sessions/audiences, five-minute expiry and signed draft/event states | Expiry is not proof of database deletion; do not invent a retention deadline |
-| Account deletion | No integrated deletion operation found in native controller or account HTTP source in this inspection | Must finish and verify deletion/revocation UX before account-enabled release; adapter alone is insufficient |
+| Account deletion | September21: opt-in server worker and native receipt/controller implemented; server SQL tests pass, native review found recovery/persistence fixes still required | Finish fresh-Apple recovery, scoped local cleanup, UI and physical verification before enabling release; no live deletion proof yet |
+| Deletion receipt | Migration012 retains a device/audience-bound receipt hash and terminal status after account erasure, with a 30-day expiry; worker purges expired receipts | Verify the worker is operating before claiming a live retention guarantee; completed receipt removes account ID |
+| Interrupted Apple exchanges | Protected credentials and subject-bound exchange admission support retries; uncertain provider outcomes may require manual Apple revocation after data erasure | Explain manual-revocation-required state distinctly; never label uncertain revocation successful |
 
 Existing AppStore/metadata/privacy.md is dated 16 September and describes the
 manual-pair release. Its statement that an account is not required can remain

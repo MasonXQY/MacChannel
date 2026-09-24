@@ -162,7 +162,8 @@ struct DeviceListView: View {
                     Label("receiving.foreground", systemImage: "iphone.radiowaves.left.and.right")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                MobileSendView(model: sender, devices: model.pairedDevices).preparation
+                MobileSendView(model: sender, devices: model.pairedDevices)
+                    .preparation(includesConfirmation: false)
                 if let failure = sender.failureKey { Text(LocalizedStringKey(failure)).foregroundStyle(.secondary) }
                 MobilePendingShareView(model: model.pendingShares, sender: sender) { selectedPage = .send }
                 let active = sender.transfers.filter { ![TransferPhase.completed, .cancelled].contains($0.phase) }
@@ -245,6 +246,18 @@ struct DeviceListView: View {
                 }
                 .accessibilityIdentifier("pair-device-button")
             }
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if page == .send, let sender = model.send, sender.phase == .ready {
+                Button("send.confirm") { sender.send() }
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(sender.selectedRecipient == nil)
+                    .accessibilityIdentifier("send-confirm-button")
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(.bar)
             }
         }
         .refreshable {

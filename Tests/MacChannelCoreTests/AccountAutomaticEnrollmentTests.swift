@@ -19,7 +19,7 @@ final class AccountAutomaticEnrollmentTests: XCTestCase, @unchecked Sendable {
     func testTwoSignedInDevicesAdvanceSignedEnrollmentAcrossBoundedCycles() async throws {
         let member = try DeviceIdentity.ephemeral(), anchor = try approvalAnchor(member)
         let actor = try ApprovalControllerFixture(identity: member, history: [anchor])
-        let subject = try ApprovalControllerFixture(history: [anchor])
+        let subject = try ApprovalControllerFixture(history: [anchor], accountRouteEnabled: true)
         await actor.controller.restore(); await subject.controller.restore()
         _ = try await actor.verifier.confirm(anchor: anchor, expectedAccountID: groupAccount, expectedGroupID: groupID,
             expectedGeneration: 1, expectedAnchorHash: anchor.digest(), binding: actor.binding)
@@ -57,6 +57,23 @@ final class AccountAutomaticEnrollmentTests: XCTestCase, @unchecked Sendable {
         catch { XCTFail("subject verification failed: \(error)"); throw error }
         guard case .verified(let subjectSnapshot) = joined else { return XCTFail("Expected subject membership") }
         XCTAssertEqual(subjectSnapshot.members.count, 2)
+        let routeReady = await subject.controller.isAccountRouteReady()
+        XCTAssertTrue(routeReady,
+            "A verified automatic enrollment must publish the account route used for automatic pairing")
+    }
+
+    func testJoiningDeviceCreatesRequestWithoutCallingMemberOnlyList() async throws {
+        let member = try DeviceIdentity.ephemeral(), anchor = try approvalAnchor(member)
+        let subject = try ApprovalControllerFixture(history: [anchor])
+        await subject.service.requireMembershipForList(true)
+        await subject.controller.restore()
+
+        let state = try await AccountAutomaticEnrollment(controller: subject.controller).runOnce()
+
+        guard case .waitingForMember = state else { return XCTFail("Expected join request") }
+        let calls = await subject.service.calls
+        XCTAssertEqual(calls.filter { $0 == "create" }.count, 1)
+        XCTAssertFalse(calls.contains("list"), "Non-members cannot call the member-only pending list route")
     }
 
     func testSignedOutDeviceNeverTouchesEnrollmentService() async throws {

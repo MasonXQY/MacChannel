@@ -126,6 +126,66 @@ final class TransferCoordinatorTests: XCTestCase {
         await controller.stop()
         XCTAssertEqual(calls.counts, [1, 1])
     }
+
+    func testIncomingRuntimeRefreshesReceivePolicyWhenAccountAuthorizationChanges() async throws {
+        let root = try makeCoordinatorTemporaryDirectory()
+        defer { removeCoordinatorTemporaryDirectory(root) }
+        let local = try DeviceIdentity.ephemeral()
+        let peer = try DeviceIdentity.ephemeral()
+        let authorization = PeerAuthorizationOwner.live(identity: local)
+        let trust = try TrustRepository(
+            ownerIdentity: local,
+            trustStore: TrustStore(owner: local.id),
+            persistedGeneration: 0
+        )
+        let destination = root.appendingPathComponent("downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let database = try TransferDatabase(url: root.appendingPathComponent("history.sqlite"))
+        let source = ReconfigurableIncomingSource()
+        let controller = IncomingRuntimeController(
+            sources: [source],
+            trustRepository: trust,
+            authorizationProvider: authorization,
+            settings: DynamicReceiveSettings(destination: destination),
+            database: database,
+            incomingDirectory: root.appendingPathComponent("incoming", isDirectory: true),
+            ownerID: local.id,
+            onReceiveFinished: { _ in }
+        )
+        await controller.start()
+        try await source.waitForConnectionRequests(1)
+        try await Task.sleep(for: .milliseconds(50))
+        let initialConnectionRequests = await source.connectionRequestCount()
+        XCTAssertEqual(
+            initialConnectionRequests,
+            1,
+            "The authorization stream's initial snapshot must not restart an equivalent listener"
+        )
+
+        try authorization.replaceManual([peer.id: peer.publicKey.rawRepresentation])
+        try await source.waitForConnectionRequests(2)
+
+        let payload = root.appendingPathComponent("account-authorized.txt")
+        let expected = Data("account authorization refresh".utf8)
+        try expected.write(to: payload)
+        let manifest = try TransferManifest.build(from: payload)
+        let pair = CoordinatorMemoryChannelPair.make(route: .relay)
+        await source.offer(
+            IncomingTransferConnection(
+                source: peer.id,
+                transferID: manifest.id,
+                channel: pair.receiver
+            )
+        )
+        _ = try await SendSession(manifest).run(on: pair.sender)
+        try await waitForDatabasePhase(.completed, id: manifest.id, database: database)
+        await controller.stop()
+
+        XCTAssertEqual(
+            try Data(contentsOf: destination.appendingPathComponent(payload.lastPathComponent)),
+            expected
+        )
+    }
     func testIncomingOwnerDrainDoesNotWaitForAnotherOwnersSuspendedClose() async throws {
         let registry = IncomingChannelCloseRegistry.shared
         let owner = UUID()
@@ -3695,6 +3755,48 @@ private struct ListenerAuthorizedSettings: RuntimeReceiveSettingsProviding {
         calls.start(url)
         return AuthorizedReceiveDirectories(directories: DownloadDirectory(), leases: [SecurityScopeLease(urls: [url], stop: { calls.stop($0) })])
     }
+}
+
+private struct DynamicReceiveSettings: RuntimeReceiveSettingsProviding {
+    let destination: URL
+
+    func current() async -> SettingsSurfaceSnapshot {
+        SettingsSurfaceSnapshot(defaultDirectory: destination, devices: [])
+    }
+
+    func downloadDirectory() async -> DownloadDirectory {
+        DownloadDirectory(globalDirectory: destination)
+    }
+}
+
+private actor ReconfigurableIncomingSource: IncomingTransferConnectionSource {
+    private var continuation:
+        AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation?
+    private var requests = 0
+
+    func connections() -> AsyncThrowingStream<IncomingTransferConnection, Error> {
+        requests += 1
+        var next: AsyncThrowingStream<IncomingTransferConnection, Error>.Continuation!
+        let stream = AsyncThrowingStream<IncomingTransferConnection, Error>(
+            bufferingPolicy: .bufferingOldest(16)
+        ) { next = $0 }
+        continuation = next
+        return stream
+    }
+
+    func offer(_ connection: IncomingTransferConnection) {
+        continuation?.yield(connection)
+    }
+
+    func waitForConnectionRequests(_ expected: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while requests < expected {
+            guard ContinuousClock.now < deadline else { throw CoordinatorTestError.timedOut }
+            await Task.yield()
+        }
+    }
+
+    func connectionRequestCount() -> Int { requests }
 }
 
 private final class StopBoundaryChannel: SecureChannel, @unchecked Sendable {

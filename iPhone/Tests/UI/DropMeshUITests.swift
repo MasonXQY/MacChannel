@@ -2,8 +2,391 @@ import XCTest
 
 @MainActor
 final class DropMeshUITests: XCTestCase {
+    func testAccountPeerDetailUsesAccountManagementNotManualRemoval() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence", "-account-peer-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.tabBars.buttons["Devices"].waitForExistence(timeout: 5))
+        app.tabBars.buttons["Devices"].tap()
+        let peer = app.buttons["device-details-11111111-1111-1111-1111-111111111111"]
+        XCTAssertTrue(peer.waitForExistence(timeout: 5))
+        peer.tap()
+        XCTAssertTrue(app.buttons["device-account-management"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["remove-device-11111111-1111-1111-1111-111111111111"].exists)
+        XCTAssertTrue(app.buttons["rename-device-11111111-1111-1111-1111-111111111111"].exists)
+        attach(app.screenshot(), named: "Account-Peer-Detail-Source-Aware")
+    }
+
+    func testIdentityRecoveryCancelThenAcceptRunsOnce() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-identity-recovery-evidence"]
+        app.launch()
+        defer { app.terminate() }
+
+        let recreate = app.buttons["Recreate Identity"]
+        XCTAssertTrue(recreate.waitForExistence(timeout: 5))
+        recreate.tap()
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 3))
+        app.alerts.buttons["Cancel"].tap()
+        XCTAssertEqual(app.staticTexts["identity-recovery-call-count"].label, "Recovery calls: 0")
+
+        recreate.tap()
+        let accept = app.alerts.buttons["Recreate Identity"]
+        XCTAssertTrue(accept.waitForExistence(timeout: 3))
+        accept.tap()
+        XCTAssertTrue(app.staticTexts["identity-recovery-call-count"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.staticTexts["identity-recovery-call-count"].label, "Recovery calls: 1")
+        XCTAssertTrue(app.staticTexts["service-status"].waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "Identity-Recovery-English-Success")
+    }
+
+    func testIdentityRecoveryErrorIsVisible() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-identity-recovery-evidence", "-identity-recovery-error"]
+        app.launch()
+        defer { app.terminate() }
+
+        XCTAssertTrue(app.buttons["Recreate Identity"].waitForExistence(timeout: 5))
+        app.buttons["Recreate Identity"].tap()
+        app.alerts.buttons["Recreate Identity"].tap()
+
+        XCTAssertTrue(app.staticTexts["The identity could not be recreated. Nothing else was removed. Try again."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Try Again"].exists)
+        XCTAssertEqual(app.staticTexts["identity-recovery-call-count"].label, "Recovery calls: 1")
+        attach(app.screenshot(), named: "Identity-Recovery-English-Error")
+    }
+
+    func testIdentityRecoveryChineseConfirmation() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-identity-recovery-evidence"]
+        app.launch()
+        defer { app.terminate() }
+
+        XCTAssertTrue(app.buttons["重新创建身份"].waitForExistence(timeout: 5))
+        app.buttons["重新创建身份"].tap()
+        XCTAssertTrue(app.alerts.staticTexts["重新创建这台 iPhone 的身份？"].waitForExistence(timeout: 3))
+        attach(app.screenshot(), named: "Identity-Recovery-Chinese-Confirmation")
+        app.alerts.buttons["取消"].tap()
+        XCTAssertEqual(app.staticTexts["identity-recovery-call-count"].label, "Recovery calls: 0")
+    }
+
+    func testCaptureCurrentAppStoreScreenshots() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-app-store-screenshots"]
+        app.launch()
+        defer { app.terminate() }
+        let selected = app.staticTexts["Launch photo.jpg"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 8))
+        reveal(selected, in: app)
+        try saveStoreScreenshot(app, name: "01-Send")
+        app.tabBars.buttons["History"].tap()
+        XCTAssertTrue(app.buttons["history-entry-33333333-3333-3333-3333-333333333333"].waitForExistence(timeout: 5))
+        try saveStoreScreenshot(app, name: "02-History")
+        app.tabBars.buttons["Devices"].tap()
+        XCTAssertTrue(app.buttons["pair-device-button"].waitForExistence(timeout: 5))
+        try saveStoreScreenshot(app, name: "03-Devices")
+    }
+
+    func testCaptureCurrentAppStoreHistoryScreenshot() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-app-store-screenshots"]
+        app.launch()
+        defer { app.terminate() }
+        app.tabBars.buttons["History"].tap()
+        XCTAssertTrue(app.buttons["history-entry-33333333-3333-3333-3333-333333333333"].waitForExistence(timeout: 8))
+        try saveStoreScreenshot(app, name: "02-History")
+    }
+
+    func testCaptureCurrentAppStoreIPadScreenshot() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-app-store-screenshots"]
+        app.launch()
+        defer { app.terminate() }
+        let selected = app.staticTexts["Launch photo.jpg"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 8))
+        reveal(selected, in: app)
+        try saveStoreScreenshot(app, name: "01-Send",
+            fallbackDirectory: "app-store-screenshots-ipad-13-20260916")
+    }
+
+    func testSentHistoryShowsBatchThumbnail() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence", "-sent-ux-evidence", "-thumbnail-history-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        app.tabBars.buttons["History"].tap()
+        XCTAssertTrue(app.images["history-thumbnail-33333333-3333-3333-3333-333333333333"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["history-file-count-33333333-3333-3333-3333-333333333333"].exists)
+        attach(app.screenshot(), named: "History-Sent-Batch-Thumbnail")
+    }
+    func testHistoryDeletionRequiresConfirmationAndRemovesRecord() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        app.tabBars.buttons["History"].tap()
+        let row = app.buttons["history-entry-33333333-3333-3333-3333-333333333333"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        app.buttons["history-edit"].tap()
+        app.buttons["history-select-33333333-3333-3333-3333-333333333333"].tap()
+        app.buttons["history-delete-selected"].tap()
+        XCTAssertTrue(app.buttons["history-delete-cancel"].waitForExistence(timeout: 3))
+        app.alerts.buttons["history-delete-cancel"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["history-select-33333333-3333-3333-3333-333333333333"].exists)
+        app.buttons["history-delete-selected"].tap()
+        app.alerts.buttons["history-delete-confirm"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["No transfers yet."].waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "History-Deleted")
+    }
+    func testClearHistoryOffersExplicitConfirmation() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        app.tabBars.buttons["History"].tap()
+        app.buttons["history-edit"].tap()
+        app.buttons["history-actions"].tap()
+        app.buttons["history-clear-all"].tap()
+        XCTAssertTrue(app.buttons["history-delete-confirm"].waitForExistence(timeout: 3))
+        attach(app.screenshot(), named: "History-Clear-Confirmation")
+        app.alerts.buttons["history-delete-confirm"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["No transfers yet."].waitForExistence(timeout: 5))
+    }
+    func testSentBatchHistoryOpensIndividualFiles() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence", "-batch-history-evidence", "-sent-ux-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        app.tabBars.buttons["History"].tap()
+        app.segmentedControls.buttons["Sent"].tap()
+        let row = app.buttons["history-entry-33333333-3333-3333-3333-333333333333"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5)); row.tap()
+        let second = app.buttons.containing(.staticText, identifier: "Second file.txt").firstMatch
+        XCTAssertTrue(second.waitForExistence(timeout: 5)); second.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "Sent-Batch-Second-Preview")
+        app.buttons["Done"].tap()
+        XCTAssertTrue(second.waitForExistence(timeout: 5))
+    }
+    func testBatchHistoryOpensIndividualFiles() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence", "-batch-history-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        app.tabBars.buttons["History"].tap()
+        let row = app.buttons["history-entry-33333333-3333-3333-3333-333333333333"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5)); row.tap()
+        let second = app.buttons.containing(.staticText, identifier: "Second file.txt").firstMatch
+        XCTAssertTrue(second.waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "Tabs-Batch-Files")
+        second.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "Tabs-Batch-Second-Preview")
+    }
+    func testTabsPreservePreparedFilesAndRecipient() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence", "-prepared-tabs-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        let confirm = app.buttons["send-confirm-button"]
+        reveal(confirm, in: app)
+        XCTAssertTrue(confirm.waitForExistence(timeout: 8))
+        XCTAssertTrue(confirm.isEnabled)
+        app.tabBars.buttons["History"].tap()
+        app.tabBars.buttons["Devices"].tap()
+        app.tabBars.buttons["Send"].tap()
+        reveal(confirm, in: app)
+        XCTAssertTrue(confirm.isEnabled)
+        XCTAssertTrue(app.staticTexts["Tab selection.txt"].exists)
+        attach(app.screenshot(), named: "Tabs-Prepared-Preserved")
+    }
+    func testThreeTabsKeepPrimaryTasksSeparate() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.tabBars.buttons["History"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["home-send-photos"].exists)
+        app.tabBars.buttons["History"].tap()
+        XCTAssertTrue(app.buttons["history-entry-33333333-3333-3333-3333-333333333333"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["home-send-photos"].exists)
+        attach(app.screenshot(), named: "Tabs-History")
+        app.segmentedControls.buttons["Sent"].tap()
+        XCTAssertFalse(app.buttons["history-entry-33333333-3333-3333-3333-333333333333"].exists)
+        app.segmentedControls.buttons["Received"].tap()
+        XCTAssertTrue(app.buttons["history-entry-33333333-3333-3333-3333-333333333333"].exists)
+        app.tabBars.buttons["Devices"].tap()
+        XCTAssertTrue(app.buttons["pair-device-button"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["pair-device-button"].label, "Pair a Device")
+        attach(app.screenshot(), named: "Tabs-Devices")
+        app.tabBars.buttons["Send"].tap()
+        XCTAssertTrue(app.buttons["home-send-files"].waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "Tabs-Send")
+    }
+    func testSentHistoryRowOpensDetails() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence", "-sent-ux-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        let history = app.tabBars.buttons["History"]
+        reveal(history, in: app)
+        history.tap()
+        let row = app.buttons["history-entry-33333333-3333-3333-3333-333333333333"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Original file unavailable"].exists)
+        app.segmentedControls.buttons["Sent"].tap()
+        XCTAssertFalse(app.buttons["Received files folder"].exists)
+        row.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["This older record does not include a file list. Original files cannot be recovered from this record."].exists)
+        attach(app.screenshot(), named: "UserUX-Sent-Row-Details")
+    }
+    func testUserFocusedEnglishHome() { runUserFocusedHome(language: "en", large: false) }
+    func testUserFocusedChineseHome() { runUserFocusedHome(language: "zh-Hans", large: false) }
+    func testUserFocusedLargeTextHome() { runUserFocusedHome(language: "en", large: true) }
+    func testUserFocusedChineseLargeTextHome() { runUserFocusedHome(language: "zh-Hans", large: true) }
+
+    func testHomeFilesOpensDocumentPickerDirectly() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        let files = app.buttons["home-send-files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 5))
+        files.tap()
+        XCTAssertTrue(app.buttons["Cancel"].waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "UserUX-Files-Direct")
+        app.buttons["Cancel"].tap()
+    }
+
+    func testReceivedRowOpensPreviewAndKeepsDiagnosticsInDetails() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-user-ux-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        app.tabBars.buttons["History"].tap()
+        let row = app.buttons["history-entry-33333333-3333-3333-3333-333333333333"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        reveal(row, in: app)
+        XCTAssertFalse(app.staticTexts["11111111"].exists)
+        row.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "UserUX-Received-Preview")
+        app.buttons["Done"].tap()
+        let info = app.buttons["history-info-33333333-3333-3333-3333-333333333333"]
+        reveal(info, in: app)
+        info.tap()
+        let share = app.buttons["history-share-33333333-3333-3333-3333-333333333333"]
+        reveal(share, in: app)
+        XCTAssertTrue(share.waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "UserUX-History-Details")
+        share.tap()
+        let copyAction = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Copy")).firstMatch
+        XCTAssertTrue(copyAction.waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "UserUX-History-System-Share")
+    }
+
+    func testMissingFileFailureIsVisibleInsideDetails() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-history-evidence"]
+        app.launch()
+        defer { app.terminate() }
+        app.tabBars.buttons["History"].tap()
+        let info = app.buttons["history-info-33333333-3333-3333-3333-333333333333"]
+        reveal(info, in: app)
+        XCTAssertTrue(info.waitForExistence(timeout: 5))
+        info.tap()
+        let preview = app.buttons["Open preview"]
+        reveal(preview, in: app)
+        XCTAssertTrue(preview.waitForExistence(timeout: 5))
+        preview.tap()
+        let message = app.staticTexts["history-detail-action-message"]
+        reveal(message, in: app)
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "UserUX-Detail-Missing-File")
+    }
+
+    private func runUserFocusedHome(language: String, large: Bool) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", language == "en" ? "en_US" : "zh_CN", "-user-ux-evidence"]
+        if large { app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] }
+        app.launch()
+        defer { app.terminate() }
+        let photos = app.buttons["home-send-photos"]
+        XCTAssertTrue(photos.waitForExistence(timeout: 5))
+        XCTAssertTrue(photos.isHittable)
+        XCTAssertTrue(app.buttons["home-send-files"].isHittable)
+        XCTAssertFalse(app.staticTexts["11111111"].exists)
+        attach(app.screenshot(), named: "UserUX-\(language)-\(large ? "Large" : "Standard")-Home")
+        photos.tap()
+        XCTAssertTrue(app.buttons["photos-use-button"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["photos-use-button"].isEnabled)
+        attach(app.screenshot(), named: "UserUX-\(language)-Photos")
+        app.buttons["photos-cancel-button"].tap()
+        let done = app.buttons[language == "en" ? "Done" : "完成"]
+        if done.waitForExistence(timeout: 3) { done.tap() }
+        app.tabBars.buttons[language == "en" ? "History" : "历史记录"].tap()
+        let received = app.buttons["history-entry-33333333-3333-3333-3333-333333333333"]
+        reveal(received, in: app)
+        XCTAssertTrue(received.isHittable)
+        attach(app.screenshot(), named: "UserUX-\(language)-\(large ? "Large" : "Standard")-Received")
+    }
+
     func testEnglishPairingSaving() { runPairingSaving(language: "en", locale: "en_US") }
     func testChinesePairingSaving() { runPairingSaving(language: "zh-Hans", locale: "zh_CN") }
+
+    func testEnglishPairingHost() { runPairingHost(language: "en", large: false) }
+    func testChinesePairingHost() { runPairingHost(language: "zh-Hans", large: false) }
+    func testEnglishPairingHostLarge() { runPairingHost(language: "en", large: true) }
+    func testChinesePairingHostLarge() { runPairingHost(language: "zh-Hans", large: true) }
+
+    private func runPairingHost(language: String, large: Bool) {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", language == "en" ? "en_US" : "zh_CN", "-pairing-host-evidence"]
+        if large { app.launchArguments += ["-pairing-host-large"] }
+        app.launch()
+        defer { app.terminate() }
+        let prefix = "PairingHost-\(language)-\(large ? "XXXL" : "Standard")"
+        func revealHost(_ element: XCUIElement) {
+            for _ in 0..<12 {
+                if element.exists, element.isHittable,
+                   element.frame.minY > app.navigationBars.firstMatch.frame.maxY,
+                   element.frame.maxY < app.buttons["fixture-host-request"].frame.minY { return }
+                if element.exists, element.frame.minY < app.navigationBars.firstMatch.frame.maxY {
+                    app.swipeDown()
+                } else {
+                    app.swipeUp()
+                }
+            }
+        }
+        let generate = app.buttons["pairing-generate"]
+        revealHost(generate)
+        XCTAssertTrue(generate.waitForExistence(timeout: 5))
+        XCTAssertTrue(generate.isHittable)
+        generate.tap()
+        let code = app.staticTexts["pairing-host-code"]
+        revealHost(code)
+        XCTAssertTrue(code.waitForExistence(timeout: 5))
+        XCTAssertEqual(code.label.count, 6)
+        attach(app.screenshot(), named: "\(prefix)-Waiting")
+        app.buttons["fixture-host-request"].tap()
+        let allow = app.buttons["pairing-host-allow"]
+        let fingerprint = app.staticTexts["pairing-fingerprint"]
+        revealHost(fingerprint)
+        XCTAssertTrue(fingerprint.exists)
+        attach(app.screenshot(), named: "\(prefix)-Request")
+        revealHost(allow)
+        XCTAssertTrue(allow.waitForExistence(timeout: 5))
+        XCTAssertTrue(allow.isHittable)
+        XCTAssertGreaterThanOrEqual(allow.frame.height, 44)
+        attach(app.screenshot(), named: "\(prefix)-Approval")
+        allow.tap()
+        let success = app.staticTexts[language == "en" ? "Paired and saved on this iPhone" : "已配对并保存在这台 iPhone 上"]
+        XCTAssertTrue(success.waitForExistence(timeout: 5))
+        revealHost(success)
+        attach(app.screenshot(), named: "\(prefix)-Saved")
+    }
 
     private func runPairingSaving(language: String, locale: String) {
         let app = XCUIApplication()
@@ -84,7 +467,8 @@ final class DropMeshUITests: XCTestCase {
                     let recovered = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: retry)
                     XCTAssertEqual(XCTWaiter.wait(for: [recovered], timeout: 5), .completed)
                 }
-                let unnamed = app.staticTexts[language == "en" ? "Unnamed device" : "未命名设备"]
+                app.tabBars.buttons[language == "en" ? "Devices" : "设备"].tap()
+            let unnamed = app.staticTexts[language == "en" ? "Unnamed device" : "未命名设备"]
                 reveal(unnamed, in: app)
                 positionPresenceText(unnamed, in: app)
                 XCTAssertGreaterThanOrEqual(unnamed.frame.minY, app.navigationBars.firstMatch.frame.maxY)
@@ -112,6 +496,7 @@ final class DropMeshUITests: XCTestCase {
             app.launch()
             XCTAssertTrue(app.staticTexts["service-status"].waitForExistence(timeout: 5))
             attach(app.screenshot(), named: "Presence-\(language)-\(mode)-Service")
+            app.tabBars.buttons[language == "en" ? "Devices" : "设备"].tap()
             let unnamed = app.staticTexts[language == "en" ? "Unnamed device" : "未命名设备"]
             reveal(unnamed, in: app)
             XCTAssertTrue(unnamed.exists)
@@ -133,12 +518,8 @@ final class DropMeshUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale]
         app.launch()
-        let entry = app.buttons["send-open-button"]
-        reveal(entry, in: app)
-        XCTAssertTrue(entry.waitForExistence(timeout: 5))
-        entry.tap()
         for _ in 0..<2 {
-            let files = app.buttons["send-files-button"]
+            let files = app.buttons["home-send-files"]
             reveal(files, in: app)
             let available = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: files)
             guard XCTWaiter.wait(for: [available], timeout: 5) == .completed else {
@@ -159,7 +540,7 @@ final class DropMeshUITests: XCTestCase {
             attach(app.screenshot(), named: "Files-picker-before-cancel")
             cancelButton.tap()
         }
-        let files = app.buttons["send-files-button"]
+        let files = app.buttons["home-send-files"]
         let available = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: files)
         XCTAssertEqual(XCTWaiter.wait(for: [available], timeout: 5), .completed)
     }
@@ -171,10 +552,6 @@ final class DropMeshUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-failed-send-evidence"]
         app.launch()
-        let entry = app.buttons["send-open-button"]
-        reveal(entry, in: app)
-        XCTAssertTrue(entry.waitForExistence(timeout: 3))
-        entry.tap()
         let guidance = app.staticTexts["transfer-failure-guidance"]
         reveal(guidance, in: app)
         XCTAssertTrue(guidance.waitForExistence(timeout: 3))
@@ -259,54 +636,23 @@ final class DropMeshUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale, "-history-evidence"]
         app.launch()
-        let filename = app.staticTexts["history-entry-name"].firstMatch
-        reveal(filename, in: app)
-        XCTAssertTrue(filename.waitForExistence(timeout: 5))
-        positionExplanation(filename, in: app)
-        attach(app.screenshot(), named: "\(prefix)-Home-Filename")
-        let open = app.buttons["received-preview-button"].firstMatch
-        reveal(open, in: app)
+        let historyTitle = language == "en" ? "History" : "历史记录"
+        app.tabBars.buttons[historyTitle].tap()
+        let open = app.buttons["history-entry-33333333-3333-3333-3333-333333333333"]
         XCTAssertTrue(open.waitForExistence(timeout: 5))
-        attach(app.screenshot(), named: "\(prefix)-Home-Latest")
+        attach(app.screenshot(), named: "\(prefix)-History")
         open.tap()
         let unavailable = app.staticTexts["history-action-message"]
-        revealAbove(unavailable, in: app)
         XCTAssertTrue(unavailable.waitForExistence(timeout: 3))
-        positionExplanation(unavailable, in: app)
-        attach(app.screenshot(), named: "\(prefix)-Home-Unavailable")
-        let share = app.buttons["received-share-button"].firstMatch
-        reveal(share, in: app)
-        XCTAssertTrue(share.isHittable)
-        attach(app.screenshot(), named: "\(prefix)-Home-Actions")
-        let history = app.buttons["history-open-button"]
-        reveal(history, in: app)
-        positionExplanation(history, in: app)
-        history.tap()
-        guard app.navigationBars[language == "en" ? "History" : "历史记录"].waitForExistence(timeout: 3) else {
-            XCTFail("History navigation must finish before inspecting rows or going back")
-            return
-        }
-        reveal(app.staticTexts["history-entry-name"].firstMatch, in: app)
-        XCTAssertTrue(app.staticTexts["history-entry-name"].firstMatch.waitForExistence(timeout: 3))
-        attach(app.screenshot(), named: "\(prefix)-History")
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        let settings = app.buttons["settings-open-button"]
-        revealAbove(settings, in: app)
-        settings.tap()
+        attach(app.screenshot(), named: "\(prefix)-History-Unavailable")
+        app.buttons["settings-open-button"].tap()
         let toggle = app.switches["discovery-toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-Settings")
-        let location = app.staticTexts["received-location-instructions"]
-        reveal(location, in: app)
-        positionExplanation(location, in: app)
-        attach(app.screenshot(), named: "\(prefix)-Settings-Location")
         app.terminate()
         app.launchArguments += ["-history-error"]
         app.launch()
-        let failedHistory = app.buttons["history-open-button"]
-        reveal(failedHistory, in: app)
-        positionExplanation(failedHistory, in: app)
-        failedHistory.tap()
+        app.tabBars.buttons[historyTitle].tap()
         XCTAssertTrue(app.staticTexts["history-load-error"].waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-History-Error")
     }
@@ -354,19 +700,15 @@ final class DropMeshUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", locale]
         app.launch()
-        let entry = app.buttons["send-open-button"]
-        reveal(entry, in: app)
-        XCTAssertTrue(entry.waitForExistence(timeout: 3))
-        entry.tap()
-        XCTAssertTrue(app.buttons["send-files-button"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["home-send-files"].waitForExistence(timeout: 3))
         attach(app.screenshot(), named: "\(prefix)-Send")
-        reveal(app.buttons["send-photos-button"], in: app)
-        app.buttons["send-photos-button"].tap()
+        reveal(app.buttons["home-send-photos"], in: app)
+        app.buttons["home-send-photos"].tap()
         XCTAssertTrue(app.buttons["photos-use-button"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.buttons["photos-use-button"].isEnabled)
         attach(app.screenshot(), named: "\(prefix)-Photos-Browse")
         app.buttons["photos-cancel-button"].tap()
-        XCTAssertTrue(app.buttons["send-files-button"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["home-send-files"].waitForExistence(timeout: 3))
         let progress = app.staticTexts["transfer-progress-label"]
         reveal(progress, in: app)
         XCTAssertTrue(progress.exists)
@@ -395,8 +737,15 @@ final class DropMeshUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
+        app.tabBars.buttons["Devices"].tap()
         let remove = app.buttons["remove-device-11111111-1111-1111-1111-111111111111"]
+        XCTAssertFalse(remove.exists)
+        let details = app.buttons["device-details-11111111-1111-1111-1111-111111111111"]
+        reveal(details, in: app)
+        XCTAssertTrue(details.waitForExistence(timeout: 5))
+        details.tap()
         XCTAssertTrue(remove.waitForExistence(timeout: 5))
+        attach(app.screenshot(), named: "UserUX-Device-Details")
         remove.tap()
         XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 2))
         attach(app.screenshot(), named: "English-Removal-Confirmation")
@@ -420,6 +769,7 @@ final class DropMeshUITests: XCTestCase {
         attach(app.screenshot(), named: "\(attachmentPrefix)-Home")
         app.swipeUp()
         attach(app.screenshot(), named: "\(attachmentPrefix)-Home-Devices")
+        app.tabBars.buttons[language == "en" ? "Devices" : "设备"].tap()
         let pairButton = app.buttons["pair-device-button"]
         for _ in 0..<5 {
             if pairButton.exists && pairButton.isHittable { break }
@@ -479,5 +829,20 @@ final class DropMeshUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func saveStoreScreenshot(_ app: XCUIApplication, name: String,
+                                     fallbackDirectory: String = "app-store-screenshots-20260916") throws {
+        let environment = ProcessInfo.processInfo.environment
+        let configured = environment["DROP_MESH_SCREENSHOT_DIR"].map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        }
+        let source = URL(fileURLWithPath: #filePath)
+        let root = source.deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let directory = configured ?? root.appendingPathComponent(
+            "docs/acceptance/\(fallbackDirectory)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try app.screenshot().pngRepresentation.write(to: directory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 }

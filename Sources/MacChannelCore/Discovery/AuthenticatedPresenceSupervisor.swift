@@ -177,7 +177,12 @@ public actor AuthenticatedPresenceSupervisor {
                 var ready = false
                 for await _ in changes {
                     guard !stopped, !Task.isCancelled else { break }
-                    if await accountController.isAccountRouteReady() { ready = true; break }
+                    if await accountController.isAccountRouteReady() {
+                        #if DEBUG
+                        print("DropMeshAccount route=ready")
+                        #endif
+                        ready = true; break
+                    }
                 }
                 guard ready, !stopped, !Task.isCancelled else { break }
             }
@@ -204,6 +209,9 @@ public actor AuthenticatedPresenceSupervisor {
                         throw CancellationError()
                     }
                     accountAttachment = attachment
+                    #if DEBUG
+                    print("DropMeshAccount route=attached")
+                    #endif
                 }
                 await publish(failures == 0 ? .connecting : .reconnecting)
                 try Task.checkCancellation()
@@ -218,6 +226,9 @@ public actor AuthenticatedPresenceSupervisor {
                 await authenticationDeadline?.value
                 authenticationDeadline = nil
                 authenticated = true
+                #if DEBUG
+                if accountController != nil { print("DropMeshAccount route=transport-authenticated") }
+                #endif
                 failures = 0
                 guard !stopped, !Task.isCancelled else { throw CancellationError() }
                 guard isActive(token) else { throw AttemptInterrupted.retry }
@@ -329,11 +340,17 @@ public actor AuthenticatedPresenceSupervisor {
             do {
                 try Task.checkCancellation()
                 try await accountController.bindAccountRoute(attachment, on: session)
+                #if DEBUG
+                print("DropMeshAccount route=bound")
+                #endif
                 for await _ in changes {
                     try Task.checkCancellation()
                     try await accountController.bindAccountRoute(attachment, on: session)
                 }
             } catch {
+                #if DEBUG
+                print("DropMeshAccount route=bind-failed category=\(Self.diagnosticCategory(error))")
+                #endif
                 // Controller withdrawal may cancel only its bind task. That
                 // still needs to retire this attempt's bridge immediately.
                 if !Task.isCancelled { await self?.interrupt(token) }

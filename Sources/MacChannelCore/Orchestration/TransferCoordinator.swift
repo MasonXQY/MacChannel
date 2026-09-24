@@ -354,6 +354,9 @@ public actor TransferCoordinator: TransferCoordinating {
                 for completion in completions { try await completion.wait() }
                 break transferLoop
             } catch {
+#if DEBUG
+                print("DropMeshTransfer outbound stage=failed category=\(String(describing: error))")
+#endif
                 transferDiagnostics.error(
                     "Outbound transfer \(id.rawValue.uuidString, privacy: .public) on \(String(describing: openedResource?.channel.route), privacy: .public) failed: \(String(describing: error), privacy: .public)"
                 )

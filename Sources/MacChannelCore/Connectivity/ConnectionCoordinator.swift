@@ -6,6 +6,48 @@ private let connectionDiagnostics = Logger(
     category: "Connection"
 )
 
+/// Closed diagnostic vocabulary. Never place raw transport errors, URLs,
+/// credentials, peer identifiers or signaling payloads in logs.
+func connectionDiagnosticCategory(_ error: any Error) -> String {
+    if error is CancellationError { return "cancelled" }
+    if let value = error as? ConnectionAttemptError {
+        switch value {
+        case .timeout: return "attempt_timeout"
+        case .iceFailed: return "attempt_ice_failed"
+        case .routeUnavailable: return "route_unavailable"
+        case .signalingFailed: return "signaling_failed"
+        case .authenticationFailed: return "authentication_failed"
+        }
+    }
+    if let value = error as? WebRTCFactoryError {
+        switch value {
+        case .peerConnectionCreationFailed: return "peer_connection_creation_failed"
+        case .dataChannelCreationFailed: return "data_channel_creation_failed"
+        case .sessionDescriptionFailed: return "session_description_failed"
+        case .iceFailed: return "ice_failed"
+        case .signalingEnded: return "signaling_ended"
+        case .signalingOverflow: return "signaling_overflow"
+        case .remoteCandidateOverflow: return "remote_candidate_overflow"
+        case .peerUnavailable: return "peer_unavailable"
+        case .trustForbidden: return "trust_forbidden"
+        case .timeout: return "webrtc_timeout"
+        }
+    }
+    if let value = error as? RendezvousTURNClientError {
+        switch value {
+        case .insecureOrigin: return "turn_insecure_origin"
+        case .authenticationRejected: return "turn_authentication_rejected"
+        case .unavailable: return "turn_unavailable"
+        case .invalidResponse: return "turn_invalid_response"
+        case .transport: return "turn_transport"
+        }
+    }
+    if error is PeerAuthorizationError { return "peer_authorization" }
+    if error is WebRTCSecureChannelError { return "secure_channel" }
+    if error is AccountRouteBindingError { return "account_route" }
+    return "other"
+}
+
 public protocol RendezvousSignalSession: Sendable {
     func signalFrames() async -> AsyncStream<RendezvousSignalFrame>
     func protocolErrors() async -> AsyncStream<RendezvousProtocolError>
@@ -530,6 +572,9 @@ public struct ConnectionCoordinator: RouteEscalatingPeerConnector, Sendable {
             routes = plan[...]
         }
         for route in routes {
+            #if DEBUG
+            print("DropMeshConnection outbound route=\(String(describing: route)) stage=starting")
+            #endif
             do {
                 if let transferID,
                     let transferAttempts = attempts as? any TransferAwareConnectionAttempting
@@ -542,19 +587,38 @@ public struct ConnectionCoordinator: RouteEscalatingPeerConnector, Sendable {
                 }
                 return try await attempts.connect(to: device, route: route)
             } catch is CancellationError {
+                #if DEBUG
+                print("DropMeshConnection outbound route=\(String(describing: route)) category=cancelled")
+                #endif
                 throw CancellationError()
             } catch ConnectionAttemptError.authenticationFailed {
                 throw ConnectionAttemptError.authenticationFailed
             } catch WebRTCSecureChannelError.authenticationFailed {
                 throw WebRTCSecureChannelError.authenticationFailed
             } catch WebRTCFactoryError.peerUnavailable {
+                connectionDiagnostics.error(
+                    "Outbound route \(String(describing: route), privacy: .public) failed category=peer_unavailable"
+                )
+                #if DEBUG
+                print("DropMeshConnection outbound route=\(String(describing: route)) category=peer_unavailable")
+                #endif
                 throw ConnectionCoordinatorError.peerUnavailable
             } catch WebRTCFactoryError.trustForbidden {
+                connectionDiagnostics.error(
+                    "Outbound route \(String(describing: route), privacy: .public) failed category=trust_forbidden"
+                )
+                #if DEBUG
+                print("DropMeshConnection outbound route=\(String(describing: route)) category=trust_forbidden")
+                #endif
                 throw ConnectionCoordinatorError.trustForbidden
             } catch {
+                let category = connectionDiagnosticCategory(error)
                 connectionDiagnostics.error(
-                    "Outbound route \(String(describing: route), privacy: .public) failed: \(String(describing: error), privacy: .public)"
+                    "Outbound route \(String(describing: route), privacy: .public) failed category=\(category, privacy: .public)"
                 )
+                #if DEBUG
+                print("DropMeshConnection outbound route=\(String(describing: route)) category=\(category)")
+                #endif
                 continue
             }
         }
@@ -689,6 +753,9 @@ public actor WebRTCConnectionAttempts: TransferAwareConnectionAttempting {
                 guard endpoint != nil else { throw ConnectionAttemptError.routeUnavailable }
             }
             let ice = try await iceProvider.configuration(for: route)
+            #if DEBUG
+            print("DropMeshConnection outbound route=\(String(describing: route)) stage=ice-ready")
+            #endif
             try authorization.requireCurrent()
             let channel = try await factory.connect(localIdentity: identity, remoteDevice: device,
                 remotePublicKey: authorization.lease.publicKey, connectionID: connectionID,
@@ -905,6 +972,9 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
     }
 
     private func beginAccepting(_ offer: IncomingWebRTCOffer) {
+#if DEBUG
+        print("DropMeshConnection inbound route=\(String(describing: offer.route)) stage=offer-observed")
+#endif
         guard !stopped, let permit = acceptanceBudget.acquire(for: offer.remoteDevice) else { return }
         let token = UUID()
         let task = Task { [weak self, acceptanceBudget] in
@@ -936,6 +1006,9 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
         guard !stopped, !Task.isCancelled else { return }
         do {
             let authorization = try WebRTCConnectionLease(provider: provider, peer: offer.remoteDevice)
+            #if DEBUG
+            print("DropMeshConnection inbound route=\(String(describing: offer.route)) stage=starting")
+            #endif
             if offer.route == .lan {
                 let endpoint = await directory.endpoint(for: offer.remoteDevice)
                 guard !stopped else { return }
@@ -943,6 +1016,9 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
                 guard endpoint != nil else { return }
             }
             let ice = try await iceProvider.configuration(for: offer.route)
+            #if DEBUG
+            print("DropMeshConnection inbound route=\(String(describing: offer.route)) stage=ice-ready")
+            #endif
             guard !stopped else { return }
             try authorization.requireCurrent()
             let channel = try await factory.connect(localIdentity: identity, remoteDevice: offer.remoteDevice,
@@ -952,7 +1028,9 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
             await publish(channel, offer: offer, authorization: authorization)
         } catch {
             // Provider and arbitrary dependency errors may contain sensitive data.
-            connectionDiagnostics.error("Inbound authorized attempt failed")
+            connectionDiagnostics.error(
+                "Inbound authorized route \(String(describing: offer.route), privacy: .public) failed category=\(connectionDiagnosticCategory(error), privacy: .public)"
+            )
         }
     }
 
@@ -1008,6 +1086,9 @@ public actor WebRTCConnectionListener: IncomingTransferConnectionSource {
                 await channel.close()
             }
         case .transferConnections:
+#if DEBUG
+            print("DropMeshConnection inbound route=\(String(describing: offer.route)) stage=published-to-transfer")
+#endif
             let connection = IncomingTransferConnection(
                 source: offer.remoteDevice,
                 transferID: TransferID(rawValue: offer.connectionID),

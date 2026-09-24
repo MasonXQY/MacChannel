@@ -119,6 +119,91 @@ final class MobileAccountModelTests: XCTestCase {
         XCTAssertEqual(apple.cancelCount, 0)
     }
 
+    func testInvitationCopyCreatesFirstShareLinkAndInvalidTypedLinkIsUserVisible() async throws {
+        let service = GatedAccountService(gated: false)
+        let controller = makeAccountController(service: service,
+            invitationIdentity: try DeviceIdentity.loadOrCreate(keychain: InvitationTestSecrets()),
+            invitationSecrets: InvitationTestSecrets())
+        let model = MobileAccountModel(loadController: { controller }, apple: RecordingAppleAuthorizer())
+
+        await model.load()
+        await model.signIn(anchor: attachedTestWindow())
+        XCTAssertTrue(model.phase == .signedIn)
+        XCTAssertTrue(model.invitationSupported)
+        XCTAssertNil(model.invitationShareURL)
+
+        await model.copyInvitationLink()
+
+        let rotations = await service.rotations
+        XCTAssertEqual(rotations, 1)
+        XCTAssertEqual(model.invitationMessageKey, "account.invitation.copied")
+        XCTAssertNotNil(model.invitationShareURL)
+        XCTAssertEqual(UIPasteboard.general.string, model.invitationShareURL)
+
+        model.invitationLinkText = "not an invitation link"
+        await model.requestConnectionFromTypedLink()
+
+        XCTAssertEqual(model.invitationMessageKey, "account.invitation.invalid-link")
+        let createdRequests = await service.createdRequests
+        XCTAssertEqual(createdRequests, 0)
+    }
+
+    func testUnavailableInvitationServiceShowsSpecificMessage() async throws {
+        let service = GatedAccountService(gated: false)
+        await service.setInvitationsUnavailable(true)
+        let controller = makeAccountController(service: service,
+            invitationIdentity: try DeviceIdentity.loadOrCreate(keychain: InvitationTestSecrets()),
+            invitationSecrets: InvitationTestSecrets())
+        let model = MobileAccountModel(loadController: { controller }, apple: RecordingAppleAuthorizer())
+
+        await model.load()
+        await model.signIn(anchor: attachedTestWindow())
+        XCTAssertTrue(model.invitationSupported)
+
+        await model.copyInvitationLink()
+
+        XCTAssertEqual(model.invitationMessageKey, "account.invitation.unavailable")
+        XCTAssertNil(model.invitationShareURL)
+        let rotations = await service.rotations
+        XCTAssertEqual(rotations, 0)
+    }
+
+    func testCopyInvitationLinkDoesNotRequireFirstDeviceGroupJoin() async throws {
+        let fixture = try AccountGroupEvidenceFixture()
+        await fixture.service.fail("discover")
+        let controller = fixture.controller(invitationsEnabled: true)
+        let model = MobileAccountModel(loadController: { controller }, apple: RecordingAppleAuthorizer())
+
+        await model.load()
+        XCTAssertEqual(model.phase, .signedIn)
+        XCTAssertTrue(model.invitationSupported)
+
+        await model.copyInvitationLink()
+
+        XCTAssertEqual(model.invitationMessageKey, "account.invitation.copied")
+        XCTAssertNotNil(model.invitationShareURL)
+        XCTAssertEqual(UIPasteboard.general.string, model.invitationShareURL)
+        let rotations = await fixture.service.invitationRotations
+        let recordCount = await fixture.service.records.count
+        XCTAssertEqual(rotations, 1)
+        XCTAssertEqual(recordCount, 0)
+    }
+
+    func testLoadDoesNotAutoRefreshInvitationsThroughFirstDeviceGroupJoin() async throws {
+        let fixture = try AccountGroupEvidenceFixture()
+        await fixture.service.fail("discover")
+        let controller = fixture.controller(invitationsEnabled: true)
+        let model = MobileAccountModel(loadController: { controller }, apple: RecordingAppleAuthorizer())
+
+        await model.load()
+
+        XCTAssertEqual(model.phase, .signedIn)
+        XCTAssertTrue(model.invitationSupported)
+        XCTAssertNil(model.invitationMessageKey)
+        let discoveries = await fixture.service.discoveries
+        XCTAssertEqual(discoveries, 0)
+    }
+
     func testAppleAuthorizationWaitsForRealChallenge() async throws {
         let service = GatedAccountService()
         let apple = RecordingAppleAuthorizer()
@@ -232,6 +317,27 @@ final class MobileAccountModelTests: XCTestCase {
         XCTAssertEqual(logoutCount, 1)
     }
 
+    func testSignOutServerFailureReturnsToAppleLogin() async {
+        let service = GatedAccountService(gated: false)
+        let apple = RecordingAppleAuthorizer()
+        let controller = makeAccountController(service: service)
+        let model = MobileAccountModel(loadController: { controller }, apple: apple)
+        await model.load()
+        await model.signIn(anchor: attachedTestWindow())
+        XCTAssertEqual(model.phase, .signedIn)
+
+        await service.setLogoutFailure(true)
+        await model.signOut()
+
+        XCTAssertEqual(model.phase, .signedOut)
+        XCTAssertEqual(model.messageKey, "account.sign-out.local")
+        await service.setLogoutFailure(false)
+        await model.signIn(anchor: attachedTestWindow())
+        XCTAssertEqual(model.phase, .signedIn)
+        let completeCount = await service.completeCount
+        XCTAssertEqual(completeCount, 2)
+    }
+
     private func attachedTestWindow() -> UIWindow {
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first!
         let window = UIWindow(windowScene: scene)
@@ -268,7 +374,7 @@ private actor MemoryAccountStorage: AccountSessionStorage {
     func remove() { record = nil }
 }
 
-private actor GatedAccountService: AccountSessionService, AccountDeletionService {
+private actor GatedAccountService: AccountSessionService, AccountDeletionService, AccountInvitationService {
     private(set) var deletionBegins = 0
     private var deletionResult: AccountDeletionStatus = .pending
     private var deletionFailure = false
@@ -293,7 +399,18 @@ private actor GatedAccountService: AccountSessionService, AccountDeletionService
     private(set) var challengeCount = 0
     private(set) var completeCount = 0
     private(set) var logoutCount = 0
+    private var logoutFailure = false
+    private(set) var rotations = 0
+    private(set) var createdRequests = 0
+    private var invitationsUnavailable = false
+    private var invitationLinkState: AccountInvitationLinkState?
     init(gated: Bool = true) { self.gated = gated }
+    func setLogoutFailure(_ value: Bool) {
+        logoutFailure = value
+    }
+    func setInvitationsUnavailable(_ value: Bool) {
+        invitationsUnavailable = value
+    }
     func waitUntilChallengeRequested() async throws {
         if requested { return }
         await withCheckedContinuation { requestedWaiters.append($0) }
@@ -321,7 +438,46 @@ private actor GatedAccountService: AccountSessionService, AccountDeletionService
     }
     func status(accessToken: String) async throws -> AccountSessionIdentity { throw AccountServiceError.unavailable }
     func refresh(refreshToken: String) async throws -> AccountSessionTokens { throw AccountServiceError.unavailable }
-    func logout(accessToken: String) async throws { logoutCount += 1 }
+    func logout(accessToken: String) async throws {
+        logoutCount += 1
+        if logoutFailure { throw AccountServiceError.unavailable }
+    }
+    func invitationLink(accessToken: String) async throws -> AccountInvitationLinkState {
+        if invitationsUnavailable { throw AccountServiceError.unavailable }
+        guard let invitationLinkState else { throw AccountInvitationError.conflict }
+        return invitationLinkState
+    }
+    func rotateInvitationLink(accessToken: String, link: AccountInvitationLink) async throws -> AccountInvitationLinkState {
+        if invitationsUnavailable { throw AccountServiceError.unavailable }
+        rotations += 1
+        let state = AccountInvitationLinkState(version: UInt64(rotations), hash: link.tokenHash)
+        invitationLinkState = state
+        return state
+    }
+    func createInvitation(accessToken: String, request: AccountInvitationRequestProof) async throws -> AccountInvitationRecord {
+        createdRequests += 1
+        throw AccountServiceError.unavailable
+    }
+    func invitation(accessToken: String, accountID: String, requestID: String) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func invitations(accessToken: String, accountID: String, inbox: Bool, afterRequestID: String?, limit: Int) async throws -> [AccountInvitationRecord] {
+        if invitationsUnavailable { throw AccountServiceError.unavailable }
+        return []
+    }
+    func selectInvitation(accessToken: String, accountID: String, requestID: String, target: AccountInvitationEndpoint) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func countersignInvitation(accessToken: String, accountID: String, pair: AccountInvitationPair, signature: Data) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func commitInvitation(accessToken: String, accountID: String, pair: AccountInvitationPair) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func transitionInvitation(accessToken: String, accountID: String, checkpoint: AccountInvitationCheckpoint, action: AccountInvitationTransition) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func blockInvitations(accessToken: String, targetAccountID: String, disconnectExisting: Bool) async throws {}
 }
 
 private actor AccountHandoffGate {
@@ -350,11 +506,43 @@ private actor MemoryAccountDeletionStorage: AccountDeletionStorage {
     func save(_ record: AccountDeletionRecord) { self.record = record }
 }
 
-private func makeAccountController(service: GatedAccountService, deletion: Bool = false) -> AccountSessionController {
+private final class InvitationTestSecrets: ScopedSecretStoreRecords, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    func data(for account: String, policy: KeychainPolicy) throws -> Data? {
+        lock.withLock { values[account] }
+    }
+    func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
+        lock.withLock { values[account] = data }
+    }
+    func accounts(policy: KeychainPolicy, maximumCount: Int) throws -> [String] {
+        lock.withLock { Array(values.keys.prefix(maximumCount)) }
+    }
+    func dataForRemoval(for account: String, policy: KeychainPolicy) throws -> Data? {
+        lock.withLock { values[account] }
+    }
+    func removeData(for account: String, policy: KeychainPolicy) throws {
+        lock.withLock { _ = values.removeValue(forKey: account) }
+    }
+}
+
+private func makeAccountController(service: GatedAccountService, deletion: Bool = false,
+                                   invitationIdentity: DeviceIdentity? = nil,
+                                   invitationSecrets: InvitationTestSecrets? = nil) -> AccountSessionController {
     let binding = try! AccountSessionBinding(deviceID: service.deviceID,
         audience: "com.example.app", origin: URL(string: "https://accounts.example.com")!)
+    let invitationConfiguration: AccountInvitationConfiguration?
+    if let invitationIdentity {
+        let secrets = invitationSecrets ?? InvitationTestSecrets()
+        invitationConfiguration = AccountInvitationConfiguration(identity: invitationIdentity,
+            links: KeychainAccountInvitationLinkStorage(store: secrets),
+            invitations: KeychainAccountInvitationStorage(store: secrets))
+    } else {
+        invitationConfiguration = nil
+    }
     return AccountSessionController(service: service, storage: MemoryAccountStorage(), binding: binding,
-        deletion: deletion ? AccountDeletionConfiguration(storage: MemoryAccountDeletionStorage(), clearAccountCheckpoints: { _, _ in }) : nil)
+        deletion: deletion ? AccountDeletionConfiguration(storage: MemoryAccountDeletionStorage(), clearAccountCheckpoints: { _, _ in }) : nil,
+        invitations: invitationConfiguration)
 }
 
 private func accountToken(_ byte: UInt8) -> String {

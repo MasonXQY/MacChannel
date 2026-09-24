@@ -31,6 +31,9 @@ services:
 
   rendezvous:
     image: ${MACCHANNEL_RENDEZVOUS_IMAGE:?set a digest-pinned rendezvous image}
+    # Docker health checks execute inside the container's PID namespace. Keep
+    # a real init at PID 1 so completed probe processes are always reaped.
+    init: true
     depends_on:
       migrate-v1-1:
         condition: service_completed_successfully

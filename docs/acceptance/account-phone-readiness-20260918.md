@@ -2,7 +2,54 @@
 
 This is a development checkpoint, not installed-phone or live-Apple acceptance.
 
+## September 19 device refresh
+
+The physical Mason iPhone 16 Pro Max is now connected, verified by `devicectl`.
+The scoped installed-app query reports development bundle
+`com.zensystech.dropmesh.iphone.dev`, version0.1.0 build6. This supersedes the
+September18 unavailable-device observation below. No installation, uninstall or
+reset was performed. Dedicated Apple login capability/profile/key authorization
+was requested explicitly; service activation and real login remain unverified.
+
 ## Verified locally
+
+September19 isolated service assembly e4006d7 + fix13a3060: independent final
+review Approved. Root fresh SQL-enabled `go test -race ./cmd/accountserver
+-count=1` passed2.407s, including exact401 replay rejection and fresh signed200
+after service reconstruction. Original weak non200 replay assertion was fixed;
+actual503 response mutation fails the unchanged expectation. Synthetic PostgreSQL
+was stopped after verification. New standalone executable defaults disabled,
+reads protected files and binds only exact loopback; no live deployment or Apple
+exchange. Final signed app has no DropMeshAccountServiceOrigin and was not installed.
+
+September19 signing continuation: main-only development Apple entitlement split
+passes regression check and scoped independent review. Final signed candidate is
+/Users/mason/Developer/DropMesh-Releases/account-phone-signing-20260919/DropMesh.app;
+root strict codesign verification passes there. The synced Documents build copy
+reacquired FinderInfo and failed verification; it is not an install candidate.
+Share retains only its existing group entitlement. No install yet. One nonblocking
+review note: regression script checks index0 rather than exact array length;
+current plist values were independently checked exact. Existing AppIntents metadata
+extraction warning remains in successful build log.
+
+Deployment gate: existing server SSH22 timed out; current source92.96.17.75.
+Existing HTTPS /healthz still returns status ok. Isolated test service/database,
+DNS/TLS/key deployment and temporary source-only SSH rule were explicitly requested
+but not yet authorized. No remote writes. Native origin requires HTTPS443; check
+actual host routing before selecting a deployment design, never replace/rebind
+existing transfer listener under a promise of isolation.
+
+September19 authorization update: user approved development Apple capability,
+profile and dedicated key setup. Capability persisted; profile AAL5WXBMSJ was
+downloaded and installed, decoded Apple sign-in Default entitlement, unchanged
+App Group and exactly phone00008140-001A6CE63082201C. Dedicated key S4AA4XQXBC
+created for the development primary App ID and saved outside source in an
+owner-only directory (700/file600); private-key format check passed without
+printing contents. This supersedes historical unanswered-approval wording below.
+Associated old "DropMesh iPhone App Store 2026" profile became Invalid in portal;
+user was informed, submitted IPA untouched. Service origin/configuration,
+main-only native entitlement, signed installation and actual Apple login remain
+unverified. No account-service deployment or phone installation occurred.
 
 - Session controller/storage `4805164`: independent review approved; 33 focused tests and unsigned iOS build passed.
 - Native account settings/Apple adapter `08f6c85` + `729337c`: independent review approved after three corrections; 17 final focused account tests and unsigned iOS build passed.

@@ -27,10 +27,19 @@ struct AccountGroupEvidenceFixture: Sendable {
         try .loadOrCreate(keychain: GroupEvidenceEphemeralSecrets())
     }
 
-    func controller(enabled: Bool = true) -> AccountSessionController {
-        .init(service: service, storage: session, binding: binding,
-              groupVerifier: enabled ? .init(storage: checkpoints) : nil,
-              firstDeviceEnrollment: enabled ? .init(identity: identity, intentStorage: intents) : nil)
+    func controller(enabled: Bool = true, invitationsEnabled: Bool = false) -> AccountSessionController {
+        let invitations: AccountInvitationConfiguration?
+        if invitationsEnabled {
+            invitations = .init(identity: identity,
+                links: KeychainAccountInvitationLinkStorage(store: GroupEvidenceEphemeralRecords()),
+                invitations: KeychainAccountInvitationStorage(store: GroupEvidenceEphemeralRecords()))
+        } else {
+            invitations = nil
+        }
+        return AccountSessionController(service: service, storage: session, binding: binding,
+            groupVerifier: enabled ? AccountGroupHistoryVerifier(storage: checkpoints) : nil,
+            firstDeviceEnrollment: enabled ? AccountFirstDeviceEnrollment(identity: identity, intentStorage: intents) : nil,
+            invitations: invitations)
     }
 
     func event(identity actor: DeviceIdentity? = nil, previous: AccountGroupEvent? = nil) throws -> AccountGroupEvent {
@@ -64,11 +73,13 @@ struct AccountGroupEvidenceFixture: Sendable {
     }
 }
 
-actor GroupEvidenceService: AccountSessionService, AccountGroupService, AccountGroupEnrollmentService {
+actor GroupEvidenceService: AccountSessionService, AccountGroupService, AccountGroupEnrollmentService, AccountInvitationService {
     let tokens: AccountSessionTokens
     var history: [AccountGroupEvent] = []
     var records: [AccountGroupEvent] = []
     var discoveries = 0
+    var invitationLinkState: AccountInvitationLinkState?
+    var invitationRotations = 0
     var failure: String?
     var gates: [String: GroupEvidenceGate] = [:]
     init(tokens: AccountSessionTokens) { self.tokens = tokens }
@@ -94,6 +105,38 @@ actor GroupEvidenceService: AccountSessionService, AccountGroupService, AccountG
     func groupHistory(accessToken: String, groupID: String) async throws -> [AccountGroupEvent] {
         try await enter("history"); return history
     }
+    func invitationLink(accessToken: String) async throws -> AccountInvitationLinkState {
+        guard let invitationLinkState else { throw AccountInvitationError.conflict }
+        return invitationLinkState
+    }
+    func rotateInvitationLink(accessToken: String, link: AccountInvitationLink) async throws -> AccountInvitationLinkState {
+        invitationRotations += 1
+        let state = AccountInvitationLinkState(version: UInt64(invitationRotations), hash: link.tokenHash)
+        invitationLinkState = state
+        return state
+    }
+    func createInvitation(accessToken: String, request: AccountInvitationRequestProof) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func invitation(accessToken: String, accountID: String, requestID: String) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func invitations(accessToken: String, accountID: String, inbox: Bool, afterRequestID: String?, limit: Int) async throws -> [AccountInvitationRecord] {
+        []
+    }
+    func selectInvitation(accessToken: String, accountID: String, requestID: String, target: AccountInvitationEndpoint) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func countersignInvitation(accessToken: String, accountID: String, pair: AccountInvitationPair, signature: Data) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func commitInvitation(accessToken: String, accountID: String, pair: AccountInvitationPair) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func transitionInvitation(accessToken: String, accountID: String, checkpoint: AccountInvitationCheckpoint, action: AccountInvitationTransition) async throws -> AccountInvitationRecord {
+        throw AccountServiceError.unavailable
+    }
+    func blockInvitations(accessToken: String, targetAccountID: String, disconnectExisting: Bool) async throws {}
     func challenge() throws -> AccountLoginChallenge { throw AccountServiceError.unavailable }
     func complete(challengeID: String, code: String, identityToken: String) -> AccountSessionTokens { tokens }
     func status(accessToken: String) -> AccountSessionIdentity { tokens.identity }
@@ -144,4 +187,24 @@ actor GroupEvidenceGate {
 private struct GroupEvidenceEphemeralSecrets: SecretStore {
     func data(for account: String, policy: KeychainPolicy) throws -> Data? { nil }
     func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {}
+}
+
+private final class GroupEvidenceEphemeralRecords: ScopedSecretStoreRecords, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    func data(for account: String, policy: KeychainPolicy) throws -> Data? {
+        lock.withLock { values[account] }
+    }
+    func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {
+        lock.withLock { values[account] = data }
+    }
+    func accounts(policy: KeychainPolicy, maximumCount: Int) throws -> [String] {
+        lock.withLock { Array(values.keys.prefix(maximumCount)) }
+    }
+    func dataForRemoval(for account: String, policy: KeychainPolicy) throws -> Data? {
+        lock.withLock { values[account] }
+    }
+    func removeData(for account: String, policy: KeychainPolicy) throws {
+        lock.withLock { _ = values.removeValue(forKey: account) }
+    }
 }

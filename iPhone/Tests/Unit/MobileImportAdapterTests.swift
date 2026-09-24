@@ -114,6 +114,58 @@ final class MobileImportAdapterTests: XCTestCase {
         try await service.discard(attempt)
     }
 
+    func testPhotoBatchRetainsAllCopiesUntilDiscard() async throws {
+        let fixture = try ImportFixture(); defer { fixture.remove() }
+        let service = MobileImportService(makeStager: { fixture.stager() })
+        let attempt = try await service.begin()
+        let first = ControlledPhotoProvider(), second = ControlledPhotoProvider()
+        let load = Task { try await service.importPhotos(in: attempt, starts: [first.start, second.start]) }
+        try await first.waitUntilStarted()
+        let one = try await service.importPhotoFile(fixture.source)
+        first.complete(.success(one))
+        try await second.waitUntilStarted()
+        let two = try await service.importPhotoFile(fixture.source)
+        second.complete(.success(two))
+        let files = try await load.value
+        XCTAssertEqual(files.map(\.url), [one.url, two.url])
+        for file in files { XCTAssertEqual(try Data(contentsOf: file.url), fixture.bytes) }
+        try await service.discard(attempt)
+        for file in files { XCTAssertFalse(FileManager.default.fileExists(atPath: file.url.path)) }
+    }
+
+    func testPhotoBatchFailureDiscardsEarlierCopy() async throws {
+        let fixture = try ImportFixture(); defer { fixture.remove() }
+        let service = MobileImportService(makeStager: { fixture.stager() })
+        let attempt = try await service.begin()
+        let first = ControlledPhotoProvider(), second = ControlledPhotoProvider()
+        let load = Task { try await service.importPhotos(in: attempt, starts: [first.start, second.start]) }
+        try await first.waitUntilStarted()
+        let one = try await service.importPhotoFile(fixture.source)
+        first.complete(.success(one))
+        try await second.waitUntilStarted()
+        second.complete(.failure(MobileImportError.unavailable))
+        do { _ = try await load.value; XCTFail("Partial batch accepted") } catch {}
+        try await service.discard(attempt)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: one.url.path))
+    }
+
+    func testPhotoBatchCancellationDoesNotStartNextProvider() async throws {
+        let fixture = try ImportFixture(); defer { fixture.remove() }
+        let service = MobileImportService(makeStager: { fixture.stager() })
+        let attempt = try await service.begin()
+        let first = ControlledPhotoProvider(), second = ControlledPhotoProvider()
+        let load = Task { try await service.importPhotos(in: attempt, starts: [first.start, second.start]) }
+        try await first.waitUntilStarted()
+        let one = try await service.importPhotoFile(fixture.source)
+        await service.cancel(attempt)
+        first.complete(.success(one))
+        do { _ = try await load.value; XCTFail("Cancelled batch accepted") }
+        catch { XCTAssertEqual(error as? MobileImportError, .cancelled) }
+        XCTAssertFalse(second.hasStarted())
+        try await service.discard(attempt)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: one.url.path))
+    }
+
     func testPhotoCallbackReturnsOnlyOwnedBytesAndRejectsOldOperationDuringCancellation() async throws {
         let fixture = try ImportFixture()
         defer { fixture.remove() }

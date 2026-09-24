@@ -2,10 +2,107 @@ import Foundation
 import MacChannelCore
 import DropMeshMobileRuntime
 import XCTest
+import PhotosUI
+import SwiftUI
 @testable import DropMeshTestHost
 
 @MainActor
 final class MobileSendModelTests: XCTestCase {
+    func testAccountWithdrawalBetweenSelectionAndSendDeniesDispatch() async throws {
+        let fixture = try SendFixture(); defer { fixture.remove() }
+        let service = fixture.service(), session = InertMobileSession()
+        await session.setTrustedIDs([])
+        await session.setEffectivePeerIDs([session.peer.id])
+        await session.setPresence(.online, peers: [session.peer])
+        let model = MobileSendModel(session: session, service: service)
+        model.setForeground(true); model.openPhotos()
+        let id = try XCTUnwrap(model.presentation?.id)
+        model.selectPhoto(generation: id) { try await service.importFiles([fixture.source], in: $0)[0] }
+        model.commitPhotos(id); await model.waitForWork()
+        model.selectRecipient(session.peer.id)
+        await session.setEffectivePeerIDs([])
+        // No UI refresh: send must re-read current authority itself.
+        model.send(); await model.waitForWork()
+        let sent = await session.sendCount
+        XCTAssertEqual(sent, 0)
+        XCTAssertEqual(model.failureKey, "send.error.recipient")
+        await model.cancelAndWait()
+    }
+
+    func testAccountOnlyRecipientCanSendWithoutManualPairing() async throws {
+        let fixture = try SendFixture(); defer { fixture.remove() }
+        let service = fixture.service(), session = InertMobileSession()
+        await session.setTrustedIDs([])
+        await session.setEffectivePeerIDs([session.peer.id])
+        await session.setPresence(.online, peers: [session.peer])
+        let model = MobileSendModel(session: session, service: service)
+        model.setForeground(true); model.openPhotos()
+        let id = try XCTUnwrap(model.presentation?.id)
+        model.selectPhoto(generation: id) { try await service.importFiles([fixture.source], in: $0)[0] }
+        model.commitPhotos(id); await model.waitForWork()
+        model.selectRecipient(session.peer.id)
+        model.update(await session.snapshot())
+        XCTAssertEqual(model.phase, .ready)
+        model.send(); await model.waitForWork()
+        let sent = await session.sendCount
+        XCTAssertEqual(sent, 1)
+        await model.cancelAndWait()
+    }
+
+    func testRecipientToggleRetainsPreparedFiles() async throws {
+        let fixture = try SendFixture(); defer { fixture.remove() }
+        let service = fixture.service()
+        let session = InertMobileSession()
+        let model = MobileSendModel(session: session, service: service)
+        model.setForeground(true); model.openPhotos()
+        let id = try XCTUnwrap(model.presentation?.id)
+        model.selectPhoto(generation: id) { try await service.importFiles([fixture.source], in: $0)[0] }
+        model.commitPhotos(id); await model.waitForWork()
+        model.selectRecipient(session.peer.id)
+        model.selectRecipient(session.peer.id)
+        XCTAssertTrue(model.selectedRecipients.isEmpty)
+        XCTAssertEqual(model.phase, .ready)
+        XCTAssertEqual(model.files.count, 1)
+        await model.cancelAndWait()
+    }
+    func testSelectedRecipientsEachReceiveTheSameOwnedFiles() async throws {
+        let fixture = try SendFixture(); defer { fixture.remove() }
+        let service = fixture.service()
+        let session = InertMobileSession()
+        let second = DeviceSummary(id: DeviceID(rawValue: UUID()), displayName: "Second", availability: .internet)
+        await session.setPresentation(state: .online, sync: .synchronized,
+            names: [session.peer.id: "First", second.id: "Second"], reachable: [session.peer, second])
+        let model = MobileSendModel(session: session, service: service)
+        model.setForeground(true); model.openPhotos()
+        let id = try XCTUnwrap(model.presentation?.id)
+        model.selectPhoto(generation: id) { try await service.importFiles([fixture.source], in: $0)[0] }
+        model.commitPhotos(id); await model.waitForWork()
+        model.selectRecipient(session.peer.id); model.selectRecipient(second.id)
+        XCTAssertEqual(model.selectedRecipients.count, 2)
+        model.send(); await model.waitForWork()
+        let count = await session.sendCount
+        XCTAssertEqual(count, 2)
+        let references = await session.recordedSentSources
+        let completedIDs = await session.snapshot().transfers.map(\.id)
+        XCTAssertEqual(Set(references.keys), Set(completedIDs))
+        XCTAssertEqual(references.count, 2)
+        XCTAssertTrue(references.values.allSatisfy { $0.count == 1 && $0[0].bookmark != nil })
+        XCTAssertNil(model.failureKey)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.staging.path), [])
+    }
+    func testPhotoSelectionRetainsEverySelectedItemAndClearingDisablesCommit() async throws {
+        let model = MobileSendModel(session: InertMobileSession())
+        model.setForeground(true); model.openPhotos()
+        let id = try XCTUnwrap(model.presentation?.id)
+        let items = ["first", "second", "third"].map { PhotosPickerItem(itemIdentifier: $0) }
+        model.updatePhotos(items, generation: id)
+        XCTAssertEqual(model.photoSelection.count, 3)
+        XCTAssertTrue(model.canCommitPhoto)
+        model.updatePhotos([], generation: id)
+        XCTAssertFalse(model.canCommitPhoto)
+        await model.cancelAndWait()
+    }
+
     func testFilesResultReachesModelWithoutPresentationObservation() async throws {
         let fixture = try SendFixture(); defer { fixture.remove() }
         let model = MobileSendModel(session: InertMobileSession(), service: fixture.service())

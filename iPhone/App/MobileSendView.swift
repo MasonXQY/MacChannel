@@ -74,7 +74,12 @@ struct MobileSendView: View {
         })
     }
 
-    @ViewBuilder var preparation: some View {
+    var preparation: some View {
+        preparation(includesConfirmation: true)
+    }
+
+    @ViewBuilder
+    func preparation(includesConfirmation: Bool) -> some View {
         switch model.phase {
         case .idle, .selecting: EmptyView()
         case .preparing, .sending, .cleaning:
@@ -99,7 +104,9 @@ struct MobileSendView: View {
             }
             Section("send.recipient") {
                 if devices.isEmpty { Text("devices.empty") }
-                ForEach(devices, id: \.id) { device in
+                let recipientDevices = devices.filter { $0.availability != .offline }
+                    + devices.filter { $0.availability == .offline }
+                ForEach(recipientDevices, id: \.id) { device in
                     Button { model.selectRecipient(device.id) } label: {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(device.displayName.isEmpty ? String(localized: "devices.paired.mac") : device.displayName)
@@ -112,9 +119,11 @@ struct MobileSendView: View {
                     .disabled(device.availability == .offline && !model.selectedRecipients.contains(device.id))
                     .accessibilityIdentifier("send-recipient-\(device.id.rawValue.uuidString)")
                 }
-                Button("send.confirm") { model.send() }
-                    .disabled(model.selectedRecipient == nil)
-                    .accessibilityIdentifier("send-confirm-button")
+                if includesConfirmation {
+                    Button("send.confirm") { model.send() }
+                        .disabled(model.selectedRecipient == nil)
+                        .accessibilityIdentifier("send-confirm-button")
+                }
             }
         }
     }

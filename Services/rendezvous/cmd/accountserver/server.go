@@ -31,6 +31,10 @@ var requiredTables = []string{
 	"account_sessions", "account_session_refresh_history",
 }
 
+var groupTables = []string{"account_groups", "account_group_events", "account_group_pending"}
+var invitationTables = []string{"account_invitation_link_issuance", "account_invitation_links", "account_invitation_blocks", "account_invitations"}
+var deletionTables = []string{"account_deletions", "account_apple_exchanges"}
+
 func buildService(ctx context.Context, cfg config) (http.Handler, func(), error) {
 	database, err := sql.Open("pgx", cfg.databaseDSN)
 	if err != nil {
@@ -63,8 +67,14 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 	if err := checkSchema(startup, database); err != nil {
 		return fail()
 	}
+	if err := checkTablePrivileges(startup, database, requiredTables); err != nil {
+		return fail()
+	}
 	if cfg.groupsEnabled {
-		if err := checkTables(startup, database, []string{"account_groups", "account_group_events", "account_group_pending"}); err != nil {
+		if err := checkTables(startup, database, groupTables); err != nil {
+			return fail()
+		}
+		if err := checkTablePrivileges(startup, database, groupTables); err != nil {
 			return fail()
 		}
 	}
@@ -73,12 +83,12 @@ func buildService(ctx context.Context, cfg config) (http.Handler, func(), error)
 		audiences = []string{cfg.audience}
 	}
 	if cfg.invitationsEnabled {
-		if !cfg.groupsEnabled || !validInvitationOrigin(cfg.origin) || checkTables(startup, database, []string{"account_invitation_link_issuance", "account_invitation_links", "account_invitation_blocks", "account_invitations"}) != nil {
+		if !cfg.groupsEnabled || !validInvitationOrigin(cfg.origin) || checkTables(startup, database, invitationTables) != nil || checkTablePrivileges(startup, database, invitationTables) != nil {
 			return fail()
 		}
 	}
 	if cfg.deletionEnabled {
-		if !cfg.groupsEnabled || checkTables(startup, database, []string{"account_deletions", "account_apple_exchanges"}) != nil {
+		if !cfg.groupsEnabled || checkTables(startup, database, deletionTables) != nil || checkTablePrivileges(startup, database, deletionTables) != nil {
 			return fail()
 		}
 	}
@@ -189,6 +199,18 @@ func checkTables(ctx context.Context, database *sql.DB, tables []string) error {
 	for _, table := range tables {
 		var present bool
 		if err := database.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+table).Scan(&present); err != nil || !present {
+			return errStartup
+		}
+	}
+	return nil
+}
+
+func checkTablePrivileges(ctx context.Context, database *sql.DB, tables []string) error {
+	for _, table := range tables {
+		var allowed bool
+		if err := database.QueryRowContext(ctx,
+			`SELECT has_table_privilege(current_user, $1, 'SELECT, INSERT, UPDATE, DELETE')`,
+			"public."+table).Scan(&allowed); err != nil || !allowed {
 			return errStartup
 		}
 	}

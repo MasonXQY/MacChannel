@@ -1175,6 +1175,8 @@ actor IncomingRuntimeController {
     private let onReceiveFinished: @Sendable (TransferReceiveResult?) async -> Void
     private var listener: IncomingTransferListener?
     private var directoryAuthorization: AuthorizedReceiveDirectories?
+    private var authorizationObserver: Task<Void, Never>?
+    private var configuredTrustedSources: Set<DeviceID>?
     private(set) var directoryAuthorizationError: String?
     private var transitionTask: Task<Void, Never>?
     private var transitionGeneration = 0
@@ -1218,6 +1220,25 @@ actor IncomingRuntimeController {
 
     func start() async {
         await configureListener(restart: false)
+        startAuthorizationObservationIfNeeded()
+    }
+
+    private func startAuthorizationObservationIfNeeded() {
+        guard authorizationObserver == nil, let authorizationProvider else { return }
+        let updates = authorizationProvider.updates()
+        authorizationObserver = Task { [weak self] in
+            for await snapshot in updates {
+                guard !Task.isCancelled else { return }
+                await self?.authorizationChanged(snapshot)
+            }
+        }
+    }
+
+    private func authorizationChanged(_ snapshot: PeerAuthorizationSnapshot) async {
+        guard !stopped else { return }
+        let trusted = Set(snapshot.peers.keys).subtracting([ownerID])
+        guard configuredTrustedSources != trusted else { return }
+        await configureListener(restart: true)
     }
 
     func restart() async {
@@ -1235,6 +1256,7 @@ actor IncomingRuntimeController {
             if restart {
                 let previousListener = listener
                 listener = nil
+                configuredTrustedSources = nil
                 await previousListener?.stop()
                 directoryAuthorization?.release()
                 directoryAuthorization = nil
@@ -1254,11 +1276,15 @@ actor IncomingRuntimeController {
     func stop() async {
         if let stopTask { await stopTask.value; return }
         stopped = true
+        let observer = authorizationObserver
+        authorizationObserver = nil
+        observer?.cancel()
         let pending = transitionTask
         let task = Task {
             await pending?.value
             let previousListener = listener
             listener = nil
+            configuredTrustedSources = nil
             await previousListener?.stop()
             directoryAuthorization?.release()
             directoryAuthorization = nil
@@ -1284,8 +1310,10 @@ actor IncomingRuntimeController {
         } catch {
             directoryAuthorizationError = DirectoryAuthorizationError.reselect.localizedDescription
             await settings.reportDirectoryAuthorizationError(directoryAuthorizationError)
+            configuredTrustedSources = nil
             return nil
         }
+        configuredTrustedSources = effective.subtracting([ownerID])
         return (IncomingTransferListener(
             sources: sources,
             policy: policy,

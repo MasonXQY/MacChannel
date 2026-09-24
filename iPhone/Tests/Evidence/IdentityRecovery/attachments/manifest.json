@@ -1,0 +1,47 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F0862282-2DD1-41A1-8C04-826C6C6199A1",
+        "deviceName" : "DropMesh-Pairing-Verify-20260914",
+        "exportedFileName" : "F07E9EA1-2511-4138-B897-57C70216A9A1.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Identity-Recovery-English-Success_0_C49D0FFA-EE41-43B8-8D2A-AAFE90813A21.png",
+        "timestamp" : 1789913244.813
+      }
+    ],
+    "testIdentifier" : "DropMeshUITests/testIdentityRecoveryCancelThenAcceptRunsOnce()",
+    "testIdentifierURL" : "test://com.apple.xcode/DropMesh/DropMeshUITests/DropMeshUITests/testIdentityRecoveryCancelThenAcceptRunsOnce"
+  },
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F0862282-2DD1-41A1-8C04-826C6C6199A1",
+        "deviceName" : "DropMesh-Pairing-Verify-20260914",
+        "exportedFileName" : "7E67096C-400B-492B-99E5-352F54E01138.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Identity-Recovery-Chinese-Confirmation_0_811B3057-9CE6-4448-8C76-4745A9CC7C22.png",
+        "timestamp" : 1789913250.981
+      }
+    ],
+    "testIdentifier" : "DropMeshUITests/testIdentityRecoveryChineseConfirmation()",
+    "testIdentifierURL" : "test://com.apple.xcode/DropMesh/DropMeshUITests/DropMeshUITests/testIdentityRecoveryChineseConfirmation"
+  },
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F0862282-2DD1-41A1-8C04-826C6C6199A1",
+        "deviceName" : "DropMesh-Pairing-Verify-20260914",
+        "exportedFileName" : "41FBCE1F-33AA-4F67-BE06-AE2465040FC6.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Identity-Recovery-English-Error_0_3EB2FE27-512A-43C3-917D-79848DB0CC1B.png",
+        "timestamp" : 1789913258.139
+      }
+    ],
+    "testIdentifier" : "DropMeshUITests/testIdentityRecoveryErrorIsVisible()",
+    "testIdentifierURL" : "test://com.apple.xcode/DropMesh/DropMeshUITests/DropMeshUITests/testIdentityRecoveryErrorIsVisible"
+  }
+]

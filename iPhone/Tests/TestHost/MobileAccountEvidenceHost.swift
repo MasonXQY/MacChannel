@@ -51,9 +51,15 @@ struct MobileAccountEvidenceHost: View {
                 refreshToken: String(repeating: "B", count: 42) + "A",
                 accessExpiresAt: Date().addingTimeInterval(600),
                 refreshExpiresAt: Date().addingTimeInterval(1200))
-            let record = state == "signed-in" ? try AccountStoredSession(binding: binding, tokens: tokens) : nil
+            let record = state == "signed-in" || state == "deletion-ready" ? try AccountStoredSession(binding: binding, tokens: tokens) : nil
+            let receipt = state == "deletion-manual"
+                ? try AccountDeletionRecord(binding: binding, receipt: String(repeating: "D", count: 42) + "A",
+                    accountID: nil, status: .completedManualRevocationRequired) : nil
+            let deletion = state.hasPrefix("deletion-")
+                ? AccountDeletionConfiguration(storage: AccountEvidenceDeletionStorage(record: receipt),
+                    clearAccountCheckpoints: { _, _ in }) : nil
             return AccountSessionController(service: service,
-                storage: AccountEvidenceStorage(record: record), binding: binding)
+                storage: AccountEvidenceStorage(record: record), binding: binding, deletion: deletion)
         }
         _settings = State(initialValue: MobileSettingsModel(session: InertMobileSession(),
             accountAuthorizer: AccountEvidenceAuthorizer(), loadAccountController: loader))
@@ -81,7 +87,14 @@ private actor AccountEvidenceStorage: AccountSessionStorage {
     func remove() { record = nil }
 }
 
-private struct AccountEvidenceService: AccountSessionService {
+private actor AccountEvidenceDeletionStorage: AccountDeletionStorage {
+    var record: AccountDeletionRecord?
+    init(record: AccountDeletionRecord?) { self.record = record }
+    func load() -> AccountDeletionRecord? { record }
+    func save(_ record: AccountDeletionRecord) { self.record = record }
+}
+
+private struct AccountEvidenceService: AccountSessionService, AccountDeletionService {
     let identity: AccountSessionIdentity
     func challenge() -> AccountLoginChallenge {
         .init(challengeID: String(repeating: "A", count: 43), nonce: String(repeating: "B", count: 42) + "A",
@@ -93,6 +106,11 @@ private struct AccountEvidenceService: AccountSessionService {
     func status(accessToken: String) -> AccountSessionIdentity { identity }
     func refresh(refreshToken: String) throws -> AccountSessionTokens { throw AccountServiceError.unavailable }
     func logout(accessToken: String) {}
+    func beginDeletion(receipt: String, accessToken: String, challengeID: String, code: String,
+                       identityToken: String, confirmation: Bool) -> AccountDeletionStatus { .pending }
+    func recoverDeletion(receipt: String, accountID: UUID, challengeID: String, code: String,
+                         identityToken: String, confirmation: Bool) -> AccountDeletionStatus { .pending }
+    func deletionStatus(receipt: String) -> AccountDeletionStatus { .completedManualRevocationRequired }
 }
 
 @MainActor

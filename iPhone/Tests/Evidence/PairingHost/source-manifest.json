@@ -1,0 +1,82 @@
+[
+  {
+    "path": "Sources/MacChannelCore/Pairing/DurablePairingSession.swift",
+    "before": "0ac9a78e802caa24692aff6a59ced7cfb24fd5227df3378aa867708fe7673b26",
+    "after": "29cfed7d560a67b70c783e228b541d2556b33999a693d7d06e5105f5e312c0ce"
+  },
+  {
+    "path": "Sources/MacChannelCore/Pairing/PairingCoordinator.swift",
+    "before": "29ab323816db5bbd6dc8137f70ea65fe792c2ce869300fdcecc38008e062e603",
+    "after": "ccd3ac958d0c295fa02f0981317261e5f6f2de867c233e52ca02213063804946"
+  },
+  {
+    "path": "Sources/MacChannelCore/Pairing/PairingModels.swift",
+    "before": "e62ccbc44a74f460d70bfefc209575ac5e508f08b2176b000a265f3caec9bebd",
+    "after": "faddb541b6363fbc5db77675f2d3a5a2ec212f9385c52f89e8719a44c55c1433"
+  },
+  {
+    "path": "Sources/MacChannelCore/Pairing/RendezvousPairingTransport.swift",
+    "before": "61d7d6a40ecedaf190ecb1acf3b9dff923b86bda88c310d56df5d9d2027bc91c",
+    "after": "e87088fa6fffe6993e13c9b61700c20265af7b1c3594f003c4ea6bc7676d7e72"
+  },
+  {
+    "path": "Tests/MacChannelCoreTests/DurablePairingSessionTests.swift",
+    "before": "f2bd51a683d7bfa17baf73cfc1d615bec44d04dbb80811ae6e50f2147b45e3a6",
+    "after": "6a8c542a73ba1baf26cdc7fd803d92e56d2abe6a2918830bd3eb2685c5245d14"
+  },
+  {
+    "path": "Tests/MacChannelCoreTests/PairingHostConfirmationTests.swift",
+    "before": null,
+    "after": "147ef905ff3986078dead0b2d59894375310bbbf83688e4d83e99c1a87c9c283"
+  },
+  {
+    "path": "Tests/MacChannelCoreTests/RendezvousPairingShutdownTests.swift",
+    "before": "b5042a37417c01e2e0bae0be158e169cfd9b0ce931209a51754fee7ce1f54d30",
+    "after": "dd581693e142c39b3c3e6e76be15d893bfc54109ea1836746793eb01b271b0ec"
+  },
+  {
+    "path": "iPhone/App/PairingModel.swift",
+    "before": "768089c76663475b15740208922d3b7c125bdbfd99519817cb7e3b776b460ef7",
+    "after": "c5a55ecdad01f53338ce50c9b9e2b9affa692943547c4ff30920de3c9fd1cf03"
+  },
+  {
+    "path": "iPhone/App/PairingView.swift",
+    "before": "6e261c7ea9449c83efd48e4bbd29ab68727b50a6d29f0bd7dec82958ea19a47d",
+    "after": "9a90452584522b2e2208ec000baece054d01bd07c5d305202832c453d1a68eae"
+  },
+  {
+    "path": "iPhone/App/ProductionMobileAppDependencies.swift",
+    "before": "71a94d622e6e64466d7919495c648faadd4dcf497db3cc10f4a8a7be686ed73c",
+    "after": "85a728aa4cb04318010816d00535e2d276eaf8f465549f1524ec4ec7b89df237"
+  },
+  {
+    "path": "iPhone/Resources/en.lproj/Localizable.strings",
+    "before": "7e3f2d8ae6a29f8fee9e28eaf2582cf6a9c7bdfc5529102a004a160158fc9519",
+    "after": "8366e8b43e9e012949231fc20f76b190491027fd1d23f2f2e558d7fd514c06af"
+  },
+  {
+    "path": "iPhone/Resources/zh-Hans.lproj/Localizable.strings",
+    "before": "6201cd2a6a26066d08cc6fa60e42bc1c2cadef64279b651a7605f197af49c57e",
+    "after": "1e920aebda40f7bc607d44a1fa9e521103f0c3aa44352d11a6f19fe68a0e299c"
+  },
+  {
+    "path": "iPhone/Tests/TestHost/DropMeshTestHostApp.swift",
+    "before": "a14e95c82e4ead0130ed5215545b3c282d580967ee4686d214e6019d1192383b",
+    "after": "90eeac041d77af3d6ae54a8157c6832cf10601350bcbe494497495ce03b5173b"
+  },
+  {
+    "path": "iPhone/Tests/UI/DropMeshUITests.swift",
+    "before": "9261eead8b2ac0b642a17dcb8aa8aa15b23fbd2dcae2654236c446c7ee0b0277",
+    "after": "cf55a0ad31e03d4b6d91c9cc0cbc99f175f838c3501b877f170d2a2f4dcbee7e"
+  },
+  {
+    "path": "iPhone/Tests/Unit/MobileAppModelTests.swift",
+    "before": "c4787a66400756af573a8598e1ea5dac41795682a9610082f30f832dcfa4eb80",
+    "after": "c4787a66400756af573a8598e1ea5dac41795682a9610082f30f832dcfa4eb80"
+  },
+  {
+    "path": "iPhone/Tests/Unit/PairingModelTests.swift",
+    "before": "ee3f267bda1719e5c4062f2307f57a955059fc25ee95edb8a109fb226d696598",
+    "after": "2b9b2799a0dd2a30f2bc15498b7a414aa1011358a07bb7b2ff0f65cb575fa3ab"
+  }
+]

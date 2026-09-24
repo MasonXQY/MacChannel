@@ -1,0 +1,1262 @@
+--- a/Sources/MacChannelCore/Pairing/DurablePairingSession.swift
++++ b/Sources/MacChannelCore/Pairing/DurablePairingSession.swift
+@@ -20,6 +20,8 @@
+     func createCode() async throws -> String
+     func join(code: String) async throws -> PairingJoinResult
+     func approvePendingPairing() async throws -> SignedTrustRecord
++    func pendingHostConfirmation() async -> PairingHostConfirmation?
++    func approvePendingPairing(_ expected: PairingHostConfirmation) async throws -> SignedTrustRecord
+     func awaitHostApproval() async throws -> SignedTrustRecord
+     func rejectPendingPairing() async throws
+     func cancelPendingPairing() async throws
+@@ -28,6 +30,13 @@
+ 
+ extension PairingCoordinator: DurablePairingCoordinating {}
+ 
++extension DurablePairingCoordinating {
++    public func pendingHostConfirmation() async -> PairingHostConfirmation? { nil }
++    public func approvePendingPairing(_ expected: PairingHostConfirmation) async throws -> SignedTrustRecord {
++        throw PairingError.noPendingConfirmation
++    }
++}
++
+ /// Local durable completion requires bilateral confirmation and successful saving.
+ /// Failed/interrupted saving retains the same signed authorization for retry.
+ public actor DurablePairingSession {
+@@ -104,6 +113,10 @@
+     }
+ 
+     public func pendingPeerSummary() async -> DeviceSummary? { await coordinator.pendingPeerSummary() }
++    public func pendingHostConfirmation() async -> PairingHostConfirmation? {
++        guard !retired, !busy else { return nil }
++        return await coordinator.pendingHostConfirmation()
++    }
+ 
+     public func createCode() async throws -> String {
+         try await begin(newPair: true)
+@@ -124,16 +137,23 @@
+     }
+ 
+     public func approve() async throws -> DeviceSummary { try await complete(host: true) }
++    public func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary {
++        try await complete(host: true, expected: expected)
++    }
+     public func awaitApproval() async throws -> DeviceSummary { try await complete(host: false) }
+ 
+-    private func complete(host: Bool) async throws -> DeviceSummary {
++    private func complete(host: Bool, expected: PairingHostConfirmation? = nil) async throws -> DeviceSummary {
+         try await begin(newPair: true)
+         defer { endOperation() }
+         guard let peer = await coordinator.pendingPeerSummary() else { throw PairingError.noPendingConfirmation }
+         guard !retired else { throw PairingError.staleOperation }
++        if let expected {
++            guard await coordinator.pendingHostConfirmation() == expected else { throw PairingError.staleOperation }
++        }
+         unsettled = true
+         do {
+-            if host { _ = try await coordinator.approvePendingPairing() }
++            if let expected { _ = try await coordinator.approvePendingPairing(expected) }
++            else if host { _ = try await coordinator.approvePendingPairing() }
+             else { _ = try await coordinator.awaitHostApproval() }
+             let deadline = ContinuousClock.now.advanced(by: confirmationTimeout)
+             while true {
+--- a/Sources/MacChannelCore/Pairing/PairingCoordinator.swift
++++ b/Sources/MacChannelCore/Pairing/PairingCoordinator.swift
+@@ -78,6 +78,24 @@
+         pendingConfirmation?.peer
+     }
+ 
++    public func pendingHostConfirmation() async -> PairingHostConfirmation? { hostConfirmationSnapshot() }
++
++    private func hostConfirmationSnapshot() -> PairingHostConfirmation? {
++        guard let pending = pendingConfirmation, case .host = pending.role,
++              case .approvalRequested = state, !pending.localConfirmed,
++              pending.issuedAuthorization == nil, clock.now < pending.expiresAt,
++              !codeCreationInProgress, !confirmationInProgress, !commitInProgress else { return nil }
++        return PairingHostConfirmation(sessionID: pending.sessionID, peer: pending.peer,
++            fingerprint: pending.fingerprint, expiresAt: pending.expiresAt)
++    }
++
++    @discardableResult
++    public func approvePendingPairing(_ expected: PairingHostConfirmation) async throws -> SignedTrustRecord {
++        guard hostConfirmationSnapshot() == expected else { throw PairingError.staleOperation }
++        // No suspension between comparison and entering the existing signing gate.
++        return try await confirmFingerprint(expected.fingerprint)
++    }
++
+     public func createCode() async throws -> String {
+         guard !codeCreationInProgress, !joinInProgress, !commitInProgress else {
+             throw PairingError.operationInProgress
+@@ -473,7 +491,16 @@
+             !joinInProgress,
+             !codeCreationInProgress
+         else { throw PairingError.operationInProgress }
+-        guard let pending = pendingConfirmation else { return }
++        guard let pending = pendingConfirmation else {
++            if let hosted = hostedSession, !hosted.used {
++                commitInProgress = true
++                defer { commitInProgress = false }
++                hostedSession = nil
++                transition(to: .idle)
++                await transport.remove(code: hosted.code)
++            }
++            return
++        }
+         let bilateral = transport as? any BilateralPairingTransport
+         guard pending.issuedAuthorization == nil || bilateral != nil else {
+             throw PairingError.operationInProgress
+--- a/Sources/MacChannelCore/Pairing/PairingModels.swift
++++ b/Sources/MacChannelCore/Pairing/PairingModels.swift
+@@ -101,6 +101,21 @@
+     }
+ }
+ 
++/// Immutable comparison context. Possession does not confer approval authority.
++public struct PairingHostConfirmation: Equatable, Sendable {
++    public let sessionID: PairingSessionID
++    public let peer: DeviceSummary
++    public let fingerprint: String
++    public let expiresAt: Date
++
++    public init(sessionID: PairingSessionID, peer: DeviceSummary, fingerprint: String, expiresAt: Date) {
++        self.sessionID = sessionID
++        self.peer = peer
++        self.fingerprint = fingerprint
++        self.expiresAt = expiresAt
++    }
++}
++
+ public protocol PairingClock: Sendable {
+     var now: Date { get }
+ }
+--- a/Sources/MacChannelCore/Pairing/RendezvousPairingTransport.swift
++++ b/Sources/MacChannelCore/Pairing/RendezvousPairingTransport.swift
+@@ -8,6 +8,7 @@
+     private let session: URLSession
+     private var hostTasks: [String: Task<Void, Never>] = [:]
+     private var hostReservations: Set<String> = []
++    private var hostFailures: [String: MacChannelError] = [:]
+     private var isStopped = false
+ 
+     public init(
+@@ -44,13 +45,17 @@
+         hostTasks.values.forEach { $0.cancel() }
+     }
+ 
++    /// Failure of this exact code's background host request, never a trust result.
++    public func hostFailure(for code: String) -> MacChannelError? { hostFailures[code] }
++
+     public func publish(_ offer: PairingOffer, endpoint: any PairingHostEndpoint) async throws {
+         guard !isStopped else { throw CancellationError() }
+         if let previous = hostTasks.removeValue(forKey: offer.code) {
+             previous.cancel()
+             await previous.value
+         }
+-        guard hostTasks.count + hostReservations.count < Self.maximumHostTasks,
++        hostFailures.removeValue(forKey: offer.code)
++        guard hostTasks.count + hostReservations.count + hostFailures.count < Self.maximumHostTasks,
+             hostReservations.insert(offer.code).inserted
+         else { throw PairingError.resourceExhausted }
+         defer { hostReservations.remove(offer.code) }
+@@ -116,6 +121,7 @@
+             task.cancel()
+             await task.value
+         }
++        hostFailures.removeValue(forKey: code)
+         _ = try? await request(
+             method: "DELETE",
+             path: "/v1/pairing/\(escaped(code))",
+@@ -262,6 +268,7 @@
+ 
+     public func stop() async {
+         isStopped = true
++        hostFailures.removeAll()
+         let tasks = Array(hostTasks.values)
+         hostTasks.removeAll()
+         tasks.forEach { $0.cancel() }
+@@ -312,6 +319,9 @@
+             } catch PairingError.authorizationPending {
+                 try? await Task.sleep(for: .milliseconds(300))
+             } catch {
++                if !Task.isCancelled, !isStopped {
++                    hostFailures[code] = (error as? PairingError)?.stateError ?? .pairingHandshakeFailed
++                }
+                 return
+             }
+         }
+--- a/Tests/MacChannelCoreTests/DurablePairingSessionTests.swift
++++ b/Tests/MacChannelCoreTests/DurablePairingSessionTests.swift
+@@ -2,6 +2,16 @@
+ @testable import MacChannelCore
+ 
+ final class DurablePairingSessionTests: XCTestCase {
++    func testBoundApprovalFailsClosedForLegacyCoordinatorWithoutSnapshotSupport() async throws {
++        let core = try DurableCoordinatorProbe()
++        let gate = DurablePairingSession(coordinator: core) { _ in }
++        let expected = PairingHostConfirmation(sessionID: PairingSessionID(), peer: core.peer,
++            fingerprint: "unavailable", expiresAt: Date().addingTimeInterval(300))
++        do { _ = try await gate.approve(expected); XCTFail("Unsupported snapshot signed") }
++        catch PairingError.staleOperation { }
++        assertValue(await core.approvals, 0)
++    }
++
+     func testDeliveredApprovalWaitsForBilateralConfirmationAndDisk() async throws {
+         let core = try DurableCoordinatorProbe()
+         let disk = DurableDiskProbe()
+@@ -237,6 +247,7 @@
+ }
+ 
+ private actor DurableCoordinatorProbe: DurablePairingCoordinating {
++    func pendingHostConfirmation() -> PairingHostConfirmation? { nil }
+     nonisolated let peer: DeviceSummary
+     nonisolated let states: AsyncStream<PairingState>
+     private let continuation: AsyncStream<PairingState>.Continuation
+--- /dev/null
++++ b/Tests/MacChannelCoreTests/PairingHostConfirmationTests.swift
+@@ -0,0 +1,93 @@
++import Foundation
++import XCTest
++@testable import MacChannelCore
++
++final class PairingHostConfirmationTests: XCTestCase {
++    func testSnapshotIsReadOnlyAndBindsEveryFieldBeforeExistingApprovalFlow() async throws {
++        let fixture = try HostFixture()
++        let joined = try await fixture.join.join(code: fixture.host.createCode())
++        let value = await fixture.host.pendingHostConfirmation()
++        let snapshot = try XCTUnwrap(value)
++        XCTAssertEqual(snapshot.sessionID, joined.sessionID)
++        XCTAssertEqual(snapshot.fingerprint, joined.fingerprint)
++        let hostBefore = await fixture.hostStore.authenticationRecords()
++        let joinBefore = await fixture.joinStore.authenticationRecords()
++        XCTAssertTrue(hostBefore.isEmpty); XCTAssertTrue(joinBefore.isEmpty)
++        let invalid = [
++            PairingHostConfirmation(sessionID: PairingSessionID(), peer: snapshot.peer, fingerprint: snapshot.fingerprint, expiresAt: snapshot.expiresAt),
++            PairingHostConfirmation(sessionID: snapshot.sessionID, peer: .init(id: DeviceID(rawValue: UUID()), displayName: "Foreign", availability: .offline), fingerprint: snapshot.fingerprint, expiresAt: snapshot.expiresAt),
++            PairingHostConfirmation(sessionID: snapshot.sessionID, peer: snapshot.peer, fingerprint: "wrong", expiresAt: snapshot.expiresAt),
++            PairingHostConfirmation(sessionID: snapshot.sessionID, peer: snapshot.peer, fingerprint: snapshot.fingerprint, expiresAt: snapshot.expiresAt.addingTimeInterval(1))
++        ]
++        for other in invalid {
++            do { _ = try await fixture.host.approvePendingPairing(other); XCTFail("Foreign snapshot accepted") }
++            catch PairingError.staleOperation { }
++        }
++        do { _ = try await fixture.join.approvePendingPairing(snapshot); XCTFail("Joiner approved as host") } catch { }
++        let after = await fixture.hostStore.authenticationRecords()
++        XCTAssertEqual(after, hostBefore)
++        _ = try await fixture.host.approvePendingPairing(snapshot)
++        _ = try await fixture.join.awaitHostApproval()
++        let trusted = await fixture.joinStore.isTrusted(joined.peer.id)
++        XCTAssertTrue(trusted)
++        let records = await fixture.joinStore.authenticationRecords()
++        XCTAssertEqual(records.count, 1)
++        let confirmed = await fixture.host.currentState()
++        try await fixture.host.cancelPendingPairing()
++        let afterCancellation = await fixture.host.currentState()
++        XCTAssertEqual(afterCancellation, confirmed, "Cancellation must preserve existing completed Mac semantics")
++    }
++
++    func testReplacedAndExpiredRequestsCannotBeApproved() async throws {
++        let fixture = try HostFixture()
++        _ = try await fixture.join.join(code: fixture.host.createCode())
++        let pending = await fixture.host.pendingHostConfirmation()
++        let snapshot = try XCTUnwrap(pending)
++        _ = try await fixture.host.createCode()
++        do { _ = try await fixture.host.approvePendingPairing(snapshot); XCTFail("Replaced request approved") } catch { }
++        try await fixture.join.cancelPendingPairing()
++        _ = try await fixture.join.join(code: fixture.host.createCode())
++        let next = await fixture.host.pendingHostConfirmation()
++        let expiring = try XCTUnwrap(next)
++        fixture.clock.advance(301)
++        let expired = await fixture.host.pendingHostConfirmation()
++        XCTAssertNil(expired)
++        do { _ = try await fixture.host.approvePendingPairing(expiring); XCTFail("Expired request approved") } catch { }
++        let records = await fixture.hostStore.authenticationRecords()
++        XCTAssertTrue(records.isEmpty)
++    }
++
++    func testCancellingUnjoinedHostRevokesCode() async throws {
++        let fixture = try HostFixture()
++        let code = try await fixture.host.createCode()
++        try await fixture.host.cancelPendingPairing()
++        do { _ = try await fixture.join.join(code: code); XCTFail("Dismissed code remains usable") } catch { }
++        let state = await fixture.host.currentState()
++        XCTAssertEqual(state, .idle)
++    }
++}
++
++private struct HostFixture {
++    let clock = HostClock()
++    let hostStore: TrustRepository
++    let joinStore: TrustRepository
++    let host: PairingCoordinator
++    let join: PairingCoordinator
++    init() throws {
++        let server = MemoryPairingServer(clock: clock)
++        let h = try DeviceIdentity.ephemeral(), j = try DeviceIdentity.ephemeral()
++        hostStore = try TrustRepository(ownerIdentity: h, trustStore: TrustStore(owner: h.id), persistedGeneration: 0)
++        joinStore = try TrustRepository(ownerIdentity: j, trustStore: TrustStore(owner: j.id), persistedGeneration: 0)
++        host = try PairingCoordinator(identity: h, trustRepository: hostStore,
++            transport: MemoryPairingTransport(server: server, observedSource: "snapshot-host"), clock: clock)
++        join = try PairingCoordinator(identity: j, trustRepository: joinStore,
++            transport: MemoryPairingTransport(server: server, observedSource: "snapshot-join"), clock: clock)
++    }
++}
++
++private final class HostClock: PairingClock, @unchecked Sendable {
++    private let lock = NSLock()
++    private var value = Date()
++    var now: Date { lock.withLock { value } }
++    func advance(_ seconds: TimeInterval) { lock.withLock { value.addTimeInterval(seconds) } }
++}
+--- a/Tests/MacChannelCoreTests/RendezvousPairingShutdownTests.swift
++++ b/Tests/MacChannelCoreTests/RendezvousPairingShutdownTests.swift
+@@ -4,6 +4,32 @@
+ @testable import MacChannelCore
+ 
+ final class RendezvousPairingShutdownTests: XCTestCase {
++    func testHostPollNetworkFailureIsScopedAndClearedByRemoval() async throws {
++        let configuration = URLSessionConfiguration.ephemeral
++        configuration.protocolClasses = [FailingHostURLProtocol.self]
++        let identity = try DeviceIdentity.ephemeral()
++        let transport = try RendezvousPairingTransport(identity: identity,
++            origin: URL(string: "https://pairing.test")!, session: URLSession(configuration: configuration))
++        addTeardownBlock { await transport.stop() }
++        let key = P256.KeyAgreement.PrivateKey()
++        let offer = PairingOffer(code: "012345", expiresAt: Date().addingTimeInterval(60),
++            hostID: identity.id, hostIdentityPublicKey: identity.publicKey.rawRepresentation,
++            hostEphemeralPublicKey: key.publicKey.rawRepresentation, hostDisplayName: "Host")
++        try await transport.publish(offer, endpoint: BlockingPairingEndpoint())
++        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
++        while await transport.hostFailure(for: offer.code) == nil, ContinuousClock.now < deadline { await Task.yield() }
++        let failure = await transport.hostFailure(for: offer.code)
++        XCTAssertEqual(failure, .pairingHandshakeFailed)
++        let unrelated = await transport.hostFailure(for: "999999")
++        XCTAssertNil(unrelated)
++        await transport.remove(code: offer.code)
++        let removed = await transport.hostFailure(for: offer.code)
++        XCTAssertNil(removed)
++        await transport.stop()
++        let stopped = await transport.hostFailure(for: offer.code)
++        XCTAssertNil(stopped)
++    }
++
+     func testPublicRendezvousTransportRequiresBilateralAuthorization() async throws {
+         let transport = try RendezvousPairingTransport(
+             identity: try DeviceIdentity.ephemeral(),
+@@ -112,6 +138,24 @@
+     }
+ }
+ 
++private final class FailingHostURLProtocol: URLProtocol, @unchecked Sendable {
++    override class func canInit(with request: URLRequest) -> Bool { true }
++    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
++    override func startLoading() {
++        guard let url = request.url else { return }
++        if url.path.hasSuffix("/host") {
++            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
++            return
++        }
++        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: url,
++            statusCode: url.path == "/v1/pairing" ? 201 : 204,
++            httpVersion: "HTTP/1.1", headerFields: [:])!, cacheStoragePolicy: .notAllowed)
++        client?.urlProtocol(self, didLoad: Data("{}".utf8))
++        client?.urlProtocolDidFinishLoading(self)
++    }
++    override func stopLoading() {}
++}
++
+ private actor BlockingPairingEndpoint: PairingHostEndpoint {
+     private var enterCount = 0
+     private var released = false
+--- a/iPhone/App/PairingModel.swift
++++ b/iPhone/App/PairingModel.swift
+@@ -15,6 +15,10 @@
+ }
+ 
+ protocol PairingAttempt: Sendable {
++    func createCode() async throws -> String
++    func pendingHostConfirmation() async -> PairingHostConfirmation?
++    func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary
++    func reject() async throws
+     func join(code: String) async throws -> PairingJoinResult
+     func awaitApproval() async throws -> DeviceSummary
+     func currentState() async -> MobilePairingState
+@@ -23,9 +27,21 @@
+     func stop() async
+ }
+ 
++extension PairingAttempt {
++    func createCode() async throws -> String { throw PairingError.invalidHandshake }
++    func pendingHostConfirmation() async -> PairingHostConfirmation? { nil }
++    func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary { throw PairingError.noPendingConfirmation }
++    func reject() async throws { throw PairingError.noPendingConfirmation }
++}
++
+ enum PairingPhase: Equatable {
+     case entry
+     case joining
++    case generating
++    case hosting(code: String, expiresAt: Date)
++    case hostApproval(PairingHostConfirmation)
++    case committing(DeviceSummary)
++    case expired
+     case waitingForMac(peer: DeviceSummary, fingerprint: String)
+     case saving(DeviceSummary)
+     case saveFailed(DeviceSummary)
+@@ -51,6 +67,14 @@
+     var canSubmit: Bool {
+         isCodeValid && !isBusy && !isClosing && activeAttempt == nil && !requiresSaveRecovery
+     }
++    var canGenerate: Bool { !isBusy && !isClosing && activeAttempt == nil && !requiresSaveRecovery }
++    var canChangeRole: Bool {
++        guard !isBusy, !isClosing, !requiresSaveRecovery else { return false }
++        switch phase {
++        case .hosting, .hostApproval, .expired, .failed: return true
++        default: return false
++        }
++    }
+     var requiresSaveRecovery: Bool {
+         if case .saveFailed = phase { return true }
+         return false
+@@ -66,6 +90,8 @@
+     private var activeAttempt: (any PairingAttempt)?
+     private var operationTask: Task<Void, Never>?
+     private var stateObservationTask: Task<Void, Never>?
++    private var isHost = false
++    private var didRefresh = false
+ 
+     init(
+         makeAttempt: @escaping AttemptFactory,
+@@ -81,11 +107,114 @@
+         isBusy = true
+         errorMessage = nil
+         phase = .joining
++        isHost = false
++        didRefresh = false
+         operationTask = Task { [weak self] in
+             await self?.runPairing(code: accepted.value)
++        }
++    }
++
++    func generateCode() {
++        guard canGenerate else { return }
++        mayDismiss = false
++        isBusy = true
++        isHost = true
++        didRefresh = false
++        errorMessage = nil
++        phase = .generating
++        operationTask = Task { [weak self] in
++            guard let self else { return }
++            do {
++                let attempt = try await makeAttempt()
++                activeAttempt = attempt
++                guard !Task.isCancelled else { return }
++                let generated = try await attempt.createCode()
++                guard !Task.isCancelled else { return }
++                guard PairingCode(generated) != nil,
++                      case let .active(.displayingCode(expiry)) = await attempt.currentState() else {
++                    throw PairingError.invalidHandshake
++                }
++                phase = .hosting(code: generated, expiresAt: expiry)
++                stateObservationTask = Task { [weak self] in await self?.observeState(of: attempt) }
++            } catch is CancellationError {
++                // Close owns reconciliation.
++            } catch {
++                phase = .failed
++                errorMessage = actionableMessage(for: error)
++            }
++            isBusy = false
++            operationTask = nil
++        }
++    }
++
++    func approveHost() {
++        guard !isBusy, !isClosing, case let .hostApproval(displayed) = phase,
++              let attempt = activeAttempt else { return }
++        // Capture the exact displayed value before scheduling asynchronous work.
++        isBusy = true
++        errorMessage = nil
++        phase = .committing(displayed.peer)
++        operationTask = Task { [weak self] in
++            guard let self else { return }
++            do {
++                let peer = try await attempt.approve(displayed)
++                guard !Task.isCancelled else { return }
++                let state = await attempt.currentState()
++                if case .paired = state {
++                    phase = .paired(peer)
++                    await attempt.stop()
++                    activeAttempt = nil
++                    await refreshOnce()
++                } else { applyReconciled(state, fallbackError: MobilePairingError.saveRequired) }
++            } catch is CancellationError {
++                // Close owns reconciliation.
++            } catch {
++                applyReconciled(await attempt.currentState(), fallbackError: error)
++            }
++            stateObservationTask?.cancel()
++            await stateObservationTask?.value
++            stateObservationTask = nil
++            isBusy = false
++            operationTask = nil
+         }
+     }
+ 
++    func rejectHost() {
++        guard !isBusy, !isClosing, case .hostApproval = phase, let attempt = activeAttempt else { return }
++        isBusy = true
++        operationTask = Task { [weak self] in
++            guard let self else { return }
++            stateObservationTask?.cancel()
++            await stateObservationTask?.value
++            stateObservationTask = nil
++            do {
++                try await attempt.reject()
++                await attempt.stop()
++                activeAttempt = nil
++                phase = .entry
++                errorMessage = nil
++            } catch { applyReconciled(await attempt.currentState(), fallbackError: error) }
++            isBusy = false
++            operationTask = nil
++        }
++    }
++
++    func returnToEntry() async {
++        guard canChangeRole else { return }
++        await cancelAndClose()
++        if mayDismiss {
++            mayDismiss = false
++            phase = .entry
++            code = ""
++        }
++    }
++
++    private func refreshOnce() async {
++        guard !didRefresh else { return }
++        didRefresh = true
++        await refreshDevices()
++    }
++
+     func retrySaving() {
+         guard case let .saveFailed(peer) = phase, !isBusy, !isClosing, let attempt = activeAttempt else { return }
+         isBusy = true
+@@ -98,7 +227,7 @@
+                 guard !Task.isCancelled else { return }
+                 self?.phase = .paired(peer)
+                 self?.activeAttempt = nil
+-                await self?.refreshDevices()
++                await self?.refreshOnce()
+             } catch is CancellationError {
+                 return
+             } catch {
+@@ -137,7 +266,7 @@
+             phase = .paired(peer)
+             await attempt.stop()
+             activeAttempt = nil
+-            await refreshDevices()
++            await refreshOnce()
+             mayDismiss = true
+         case let .saveFailed(peer), let .saving(peer):
+             phase = .saveFailed(peer)
+@@ -184,7 +313,7 @@
+                 phase = .paired(peer)
+                 await attempt.stop()
+                 activeAttempt = nil
+-                await refreshDevices()
++                await refreshOnce()
+             } else {
+                 applyReconciled(state, fallbackError: MobilePairingError.saveRequired)
+             }
+@@ -208,6 +337,7 @@
+     private func observeState(of attempt: any PairingAttempt) async {
+         while !Task.isCancelled {
+             let state = await attempt.currentState()
++            guard !Task.isCancelled, !isClosing else { return }
+             switch state {
+             case let .saveFailed(peer):
+                 phase = .saveFailed(peer)
+@@ -217,8 +347,22 @@
+             case let .saving(peer):
+                 phase = .saving(peer)
+                 errorMessage = nil
+-            case .active:
+-                break
++            case let .active(core):
++                guard isHost else { break }
++                switch core {
++                case .approvalRequested:
++                    let confirmation = await attempt.pendingHostConfirmation()
++                    guard !Task.isCancelled, !isClosing, !isBusy else { break }
++                    if let confirmation { phase = .hostApproval(confirmation) }
++                    else { phase = .expired }
++                case .displayingCode:
++                    if case let .hosting(_, expiry) = phase, Date() >= expiry { phase = .expired }
++                case let .committing(peer): phase = .committing(peer)
++                case .failed:
++                    phase = .failed
++                    errorMessage = String(localized: "pairing.error.generic")
++                default: break
++                }
+             }
+             do {
+                 try await Task.sleep(for: .milliseconds(200))
+--- a/iPhone/App/PairingView.swift
++++ b/iPhone/App/PairingView.swift
+@@ -9,9 +9,11 @@
+     var body: some View {
+         NavigationStack {
+             Form {
+-                Section {
+-                    Text("pairing.instructions")
+-                        .foregroundStyle(.secondary)
++                if model.phase == .entry || model.phase == .joining || model.phase == .failed {
++                    Section {
++                        Text("pairing.instructions")
++                            .foregroundStyle(.secondary)
++                    }
+                 }
+                 pairingContent
+                 if let error = model.errorMessage {
+@@ -45,17 +47,53 @@
+         switch model.phase {
+         case .entry, .joining, .failed:
+             codeEntry
++            Section {
++                Button("pairing.host.generate") { codeFocused = false; model.generateCode() }
++                    .frame(minHeight: 44)
++                    .disabled(!model.canGenerate)
++                    .accessibilityIdentifier("pairing-generate")
++            }
++            changeRole
++        case .generating:
++            Section { ProgressView("pairing.host.generating") }
++        case let .hosting(code, expiresAt):
++            Section("pairing.host.code") {
++                Text(code)
++                    .font(.largeTitle.monospacedDigit().weight(.semibold))
++                    .frame(maxWidth: .infinity, minHeight: 44)
++                    .textSelection(.enabled)
++                    .accessibilityIdentifier("pairing-host-code")
++                Text("pairing.host.expires \(expiresAt.formatted(date: .omitted, time: .shortened))")
++                Text("pairing.host.foreground").foregroundStyle(.secondary)
++                ProgressView("pairing.host.waiting")
++            }
++            changeRole
++        case let .hostApproval(confirmation):
++            Section("pairing.host.request") {
++                comparison(peerName: confirmation.peer.displayName, fingerprint: confirmation.fingerprint)
++                Text("pairing.host.compare").foregroundStyle(.secondary)
++                Button("pairing.host.allow") { model.approveHost() }
++                    .frame(maxWidth: .infinity, minHeight: 44)
++                    .buttonStyle(.borderedProminent)
++                    .disabled(model.isBusy || model.isClosing)
++                    .accessibilityIdentifier("pairing-host-allow")
++                Button("pairing.host.reject", role: .destructive) { model.rejectHost() }
++                    .frame(minHeight: 44)
++                    .disabled(model.isBusy || model.isClosing)
++                    .accessibilityIdentifier("pairing-host-reject")
++            }
++            changeRole
++        case let .committing(peer):
++            Section {
++                ProgressView("pairing.host.committing")
++                Text(peer.displayName)
++            }
++        case .expired:
++            Section { Text("pairing.host.expired") }
++            changeRole
+         case let .waitingForMac(peer, fingerprint):
+             Section("pairing.waiting.title") {
+-                LabeledContent("pairing.device", value: peer.displayName)
+-                VStack(alignment: .leading, spacing: 6) {
+-                    Text("pairing.fingerprint")
+-                        .font(.caption)
+-                        .foregroundStyle(.secondary)
+-                    Text(fingerprint)
+-                        .font(.body.monospaced())
+-                        .textSelection(.enabled)
+-                }
++                comparison(peerName: peer.displayName, fingerprint: fingerprint)
+                 if model.showsWaitingProgress {
+                     ProgressView("pairing.waiting.body")
+                 }
+@@ -91,6 +129,29 @@
+         }
+     }
+ 
++    @ViewBuilder private var changeRole: some View {
++        if model.canChangeRole {
++            Section {
++                Button("pairing.host.startOver") { Task { await model.returnToEntry() } }
++                    .frame(minHeight: 44)
++                    .accessibilityIdentifier("pairing-start-over")
++            }
++        }
++    }
++
++    private func comparison(peerName: String, fingerprint: String) -> some View {
++        VStack(alignment: .leading, spacing: 12) {
++            Text("pairing.device").font(.caption).foregroundStyle(.secondary)
++            Text(peerName).fixedSize(horizontal: false, vertical: true)
++            Text("pairing.fingerprint").font(.caption).foregroundStyle(.secondary)
++            Text(fingerprint)
++                .font(.body.monospaced())
++                .fixedSize(horizontal: false, vertical: true)
++                .textSelection(.enabled)
++                .accessibilityIdentifier("pairing-fingerprint")
++        }
++    }
++
+     private var codeEntry: some View {
+         Section("pairing.code.title") {
+             TextField("pairing.code.placeholder", text: $model.code)
+--- a/iPhone/App/ProductionMobileAppDependencies.swift
++++ b/iPhone/App/ProductionMobileAppDependencies.swift
+@@ -211,12 +211,41 @@
+ private actor ProductionPairingAttempt: PairingAttempt {
+     private let session: MobilePairingSession
+     private let transport: RendezvousPairingTransport
++    private var hostedCode: String?
+     init(session: MobilePairingSession, transport: RendezvousPairingTransport) {
+         self.session = session; self.transport = transport
+     }
++    func createCode() async throws -> String {
++        let code = try await session.createCode()
++        hostedCode = code
++        return code
++    }
++    func pendingHostConfirmation() async -> PairingHostConfirmation? {
++        guard await hostFailure() == nil else { return nil }
++        return await session.pendingHostConfirmation()
++    }
++    func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary {
++        guard await hostFailure() == nil else { throw PairingError.invalidHandshake }
++        return try await session.approve(expected)
++    }
++    func reject() async throws { try await session.reject() }
+     func join(code: String) async throws -> PairingJoinResult { try await session.join(code: code) }
+     func awaitApproval() async throws -> DeviceSummary { try await session.awaitApproval() }
+-    func currentState() async -> MobilePairingState { await session.currentState() }
++    func currentState() async -> MobilePairingState {
++        let failure = await hostFailure()
++        let state = await session.currentState()
++        if let failure {
++            switch state {
++            case .active(.displayingCode), .active(.approvalRequested): return .active(.failed(failure))
++            default: break
++            }
++        }
++        return state
++    }
++    private func hostFailure() async -> MacChannelError? {
++        guard let hostedCode else { return nil }
++        return await transport.hostFailure(for: hostedCode)
++    }
+     func retrySaving() async throws -> DeviceSummary { try await session.retrySaving() }
+     func cancel() async throws { try await session.cancel() }
+     func stop() async { await transport.stop() }
+--- a/iPhone/Resources/en.lproj/Localizable.strings
++++ b/iPhone/Resources/en.lproj/Localizable.strings
+@@ -44,8 +44,21 @@
+ "devices.rename.failed" = "The device name couldn’t be saved. The previous name is unchanged.";
+ "pairing.add" = "Pair a Device";
+ "pairing.title" = "Pair a Device";
+-"pairing.instructions" = "On the other device, open DropMesh and generate a six-digit pairing code. That device must explicitly approve this iPhone.";
+-"pairing.code.title" = "Device pairing code";
++"pairing.instructions" = "Enter a code from the other device, or generate one here.";
++"pairing.code.title" = "Enter a code";
++"pairing.host.generate" = "Generate code on this device";
++"pairing.host.generating" = "Generating code…";
++"pairing.host.code" = "Enter this code on the other device";
++"pairing.host.expires %@" = "Expires at %@";
++"pairing.host.foreground" = "Keep DropMesh open on both devices. Closing this screen cancels this code.";
++"pairing.host.waiting" = "Waiting for another device…";
++"pairing.host.request" = "Allow this device to pair?";
++"pairing.host.compare" = "Compare the full fingerprint with the other device. Allow only if both match.";
++"pairing.host.allow" = "Allow Pairing";
++"pairing.host.reject" = "Reject";
++"pairing.host.committing" = "Confirming with the other device…";
++"pairing.host.expired" = "This code or request has expired. Start again to generate a new code.";
++"pairing.host.startOver" = "Cancel and start again";
+ "pairing.code.placeholder" = "000000";
+ "pairing.code.accessibility" = "Six-digit device pairing code";
+ "pairing.submit" = "Join";
+--- a/iPhone/Resources/zh-Hans.lproj/Localizable.strings
++++ b/iPhone/Resources/zh-Hans.lproj/Localizable.strings
+@@ -44,8 +44,21 @@
+ "devices.rename.failed" = "无法保存设备名称，原名称保持不变。";
+ "pairing.add" = "配对设备";
+ "pairing.title" = "配对设备";
+-"pairing.instructions" = "在另一台设备上打开 DropMesh 并生成六位配对码。该设备必须明确批准这台 iPhone。";
+-"pairing.code.title" = "设备配对码";
++"pairing.instructions" = "输入另一台设备上的配对码，或在此生成配对码。";
++"pairing.code.title" = "输入配对码";
++"pairing.host.generate" = "在此设备上生成配对码";
++"pairing.host.generating" = "正在生成配对码…";
++"pairing.host.code" = "在另一台设备上输入此配对码";
++"pairing.host.expires %@" = "有效期至 %@";
++"pairing.host.foreground" = "请保持两台设备上的 DropMesh 打开。关闭此页面将取消配对码。";
++"pairing.host.waiting" = "正在等待另一台设备…";
++"pairing.host.request" = "允许此设备配对？";
++"pairing.host.compare" = "请与另一台设备核对完整指纹。仅在两边一致时允许配对。";
++"pairing.host.allow" = "允许配对";
++"pairing.host.reject" = "拒绝";
++"pairing.host.committing" = "正在与另一台设备确认…";
++"pairing.host.expired" = "此配对码或请求已过期。请重新开始并生成新的配对码。";
++"pairing.host.startOver" = "取消并重新开始";
+ "pairing.code.placeholder" = "000000";
+ "pairing.code.accessibility" = "六位设备配对码";
+ "pairing.submit" = "加入";
+--- a/iPhone/Tests/TestHost/DropMeshTestHostApp.swift
++++ b/iPhone/Tests/TestHost/DropMeshTestHostApp.swift
+@@ -30,6 +30,8 @@
+                 MobileAccountEvidenceHost()
+             } else if ProcessInfo.processInfo.arguments.contains("-pairing-saving-evidence") {
+                 PairingSavingEvidenceHost()
++            } else if ProcessInfo.processInfo.arguments.contains("-pairing-host-evidence") {
++                PairingHostEvidenceView()
+             } else if ProcessInfo.processInfo.arguments.contains("-share-evidence") {
+                 MobileShareEvidenceHost(extensionOnly: false)
+             } else if ProcessInfo.processInfo.arguments.contains("-share-extension-evidence") {
+@@ -106,6 +108,78 @@
+ }
+ 
+ /// Inert controls release synthetic persistence; the content is the shipping pairing view.
++@MainActor
++private struct PairingHostEvidenceView: View {
++    @State private var evidence = PairingHostEvidence()
++    private var large: Bool { ProcessInfo.processInfo.arguments.contains("-pairing-host-large") }
++    var body: some View {
++        PairingView(model: evidence.host, onDismiss: {})
++            .dynamicTypeSize(large ? .accessibility3 : .large)
++            .safeAreaInset(edge: .bottom) {
++                Button("Fixture: request from second device") { evidence.request() }
++                    .accessibilityIdentifier("fixture-host-request")
++                    .font(.caption).dynamicTypeSize(.medium)
++                    .frame(minHeight: 44).frame(maxWidth: .infinity).background(.bar)
++            }
++            .onDisappear { Task { await evidence.close() } }
++    }
++}
++
++@MainActor
++private final class PairingHostEvidence {
++    let host: PairingModel
++    let joiner: PairingModel
++    private let hostSession: MobilePairingSession
++    private let joinSession: MobilePairingSession
++    init() {
++        let server = MemoryPairingServer()
++        let h = try! DeviceIdentity.loadOrCreate(keychain: PairingEvidenceSecrets())
++        let j = try! DeviceIdentity.loadOrCreate(keychain: PairingEvidenceSecrets())
++        let hostStore = try! TrustRepository(ownerIdentity: h, trustStore: TrustStore(owner: h.id), persistedGeneration: 0)
++        let joinStore = try! TrustRepository(ownerIdentity: j, trustStore: TrustStore(owner: j.id), persistedGeneration: 0)
++        let large = ProcessInfo.processInfo.arguments.contains("-pairing-host-large")
++        let peerName = large ? "Fixture 家庭设备 — A very long iPad device name for accessible fingerprint comparison" : "Fixture iPad"
++        let hCore = try! PairingCoordinator(identity: h, displayName: "Fixture iPhone", trustRepository: hostStore,
++            transport: MemoryPairingTransport(server: server, observedSource: "ui-host"))
++        let jCore = try! PairingCoordinator(identity: j, displayName: peerName, trustRepository: joinStore,
++            transport: MemoryPairingTransport(server: server, observedSource: "ui-joiner"))
++        let hs = MobilePairingSession(coordinator: hCore, persistTrust: {})
++        let js = MobilePairingSession(coordinator: jCore, persistTrust: {})
++        hostSession = hs; joinSession = js
++        host = PairingModel(makeAttempt: { EvidenceHostAttempt(session: hs) })
++        joiner = PairingModel(makeAttempt: { EvidenceHostAttempt(session: js) })
++    }
++    func request() {
++        guard case let .hosting(code, _) = host.phase else { return }
++        joiner.code = code
++        joiner.submit()
++    }
++    func close() async {
++        await host.cancelAndClose(); await joiner.cancelAndClose()
++        await hostSession.stopObservation(); await joinSession.stopObservation()
++    }
++}
++
++private struct EvidenceHostAttempt: PairingAttempt {
++    let session: MobilePairingSession
++    func createCode() async throws -> String { try await session.createCode() }
++    func pendingHostConfirmation() async -> PairingHostConfirmation? { await session.pendingHostConfirmation() }
++    func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary { try await session.approve(expected) }
++    func reject() async throws { try await session.reject() }
++    func join(code: String) async throws -> PairingJoinResult { try await session.join(code: code) }
++    func awaitApproval() async throws -> DeviceSummary { try await session.awaitApproval() }
++    func currentState() async -> MobilePairingState { await session.currentState() }
++    func retrySaving() async throws -> DeviceSummary { try await session.retrySaving() }
++    func cancel() async throws { try await session.cancel() }
++    func stop() async {}
++}
++
++private struct PairingEvidenceSecrets: SecretStore {
++    func data(for account: String, policy: KeychainPolicy) throws -> Data? { nil }
++    func store(_ data: Data, for account: String, policy: KeychainPolicy) throws {}
++    func delete(account: String, policy: KeychainPolicy) throws {}
++}
++
+ private struct PairingSavingEvidenceHost: View {
+     @State private var attempt: SavingEvidenceAttempt
+     @State private var model: PairingModel
+--- a/iPhone/Tests/UI/DropMeshUITests.swift
++++ b/iPhone/Tests/UI/DropMeshUITests.swift
+@@ -319,6 +319,58 @@
+ 
+     func testEnglishPairingSaving() { runPairingSaving(language: "en", locale: "en_US") }
+     func testChinesePairingSaving() { runPairingSaving(language: "zh-Hans", locale: "zh_CN") }
++
++    func testEnglishPairingHost() { runPairingHost(language: "en", large: false) }
++    func testChinesePairingHost() { runPairingHost(language: "zh-Hans", large: false) }
++    func testEnglishPairingHostLarge() { runPairingHost(language: "en", large: true) }
++    func testChinesePairingHostLarge() { runPairingHost(language: "zh-Hans", large: true) }
++
++    private func runPairingHost(language: String, large: Bool) {
++        let app = XCUIApplication()
++        app.launchArguments += ["-AppleLanguages", "(\(language))", "-AppleLocale", language == "en" ? "en_US" : "zh_CN", "-pairing-host-evidence"]
++        if large { app.launchArguments += ["-pairing-host-large"] }
++        app.launch()
++        defer { app.terminate() }
++        let prefix = "PairingHost-\(language)-\(large ? "XXXL" : "Standard")"
++        func revealHost(_ element: XCUIElement) {
++            for _ in 0..<12 {
++                if element.exists, element.isHittable,
++                   element.frame.minY > app.navigationBars.firstMatch.frame.maxY,
++                   element.frame.maxY < app.buttons["fixture-host-request"].frame.minY { return }
++                if element.exists, element.frame.minY < app.navigationBars.firstMatch.frame.maxY {
++                    app.swipeDown()
++                } else {
++                    app.swipeUp()
++                }
++            }
++        }
++        let generate = app.buttons["pairing-generate"]
++        revealHost(generate)
++        XCTAssertTrue(generate.waitForExistence(timeout: 5))
++        XCTAssertTrue(generate.isHittable)
++        generate.tap()
++        let code = app.staticTexts["pairing-host-code"]
++        revealHost(code)
++        XCTAssertTrue(code.waitForExistence(timeout: 5))
++        XCTAssertEqual(code.label.count, 6)
++        attach(app.screenshot(), named: "\(prefix)-Waiting")
++        app.buttons["fixture-host-request"].tap()
++        let allow = app.buttons["pairing-host-allow"]
++        let fingerprint = app.staticTexts["pairing-fingerprint"]
++        revealHost(fingerprint)
++        XCTAssertTrue(fingerprint.exists)
++        attach(app.screenshot(), named: "\(prefix)-Request")
++        revealHost(allow)
++        XCTAssertTrue(allow.waitForExistence(timeout: 5))
++        XCTAssertTrue(allow.isHittable)
++        XCTAssertGreaterThanOrEqual(allow.frame.height, 44)
++        attach(app.screenshot(), named: "\(prefix)-Approval")
++        allow.tap()
++        let success = app.staticTexts[language == "en" ? "Paired and saved on this iPhone" : "已配对并保存在这台 iPhone 上"]
++        XCTAssertTrue(success.waitForExistence(timeout: 5))
++        revealHost(success)
++        attach(app.screenshot(), named: "\(prefix)-Saved")
++    }
+ 
+     private func runPairingSaving(language: String, locale: String) {
+         let app = XCUIApplication()
+--- a/iPhone/Tests/Unit/PairingModelTests.swift
++++ b/iPhone/Tests/Unit/PairingModelTests.swift
+@@ -5,6 +5,225 @@
+ 
+ @MainActor
+ final class PairingModelTests: XCTestCase {
++    func testHostLeadingZeroRejectAndRoleSwitchAwaitCleanup() async throws {
++        let attempt = HostModelAttempt()
++        let model = PairingModel(makeAttempt: { attempt })
++        addTeardownBlock { await model.cancelAndClose() }
++        model.generateCode(); model.generateCode()
++        await boundedWait { if case .hosting = model.phase { return true }; return false }
++        guard case let .hosting(code, _) = model.phase else { return XCTFail("Expected code") }
++        XCTAssertEqual(code, "012345")
++        await attempt.request()
++        await boundedWait { if case .hostApproval = model.phase { return true }; return false }
++        model.rejectHost(); model.rejectHost()
++        await boundedWait { !model.isBusy }
++        XCTAssertEqual(model.phase, .entry)
++        let rejects = await attempt.rejectCount, stops = await attempt.stopCount
++        XCTAssertEqual(rejects, 1); XCTAssertEqual(stops, 1)
++    }
++
++    func testHostCodeRoleSwitchMakesOldRealCodeUnusable() async throws {
++        let identity = try DeviceIdentity.ephemeral()
++        let server = MemoryPairingServer()
++        let repository = try TrustRepository(ownerIdentity: identity,
++            trustStore: TrustStore(owner: identity.id), persistedGeneration: 0)
++        let core = try PairingCoordinator(identity: identity, trustRepository: repository,
++            transport: MemoryPairingTransport(server: server, observedSource: "switch-host"))
++        let session = MobilePairingSession(coordinator: core, persistTrust: {})
++        let model = PairingModel(makeAttempt: { MemoryModelAttempt(session: session) })
++        addTeardownBlock { await model.cancelAndClose(); await session.stopObservation() }
++        model.generateCode()
++        await boundedWait { if case .hosting = model.phase { return true }; return false }
++        guard case let .hosting(code, _) = model.phase else { return XCTFail("Expected code") }
++        await model.returnToEntry()
++        XCTAssertEqual(model.phase, .entry)
++        XCTAssertFalse(model.mayDismiss)
++        do {
++            _ = try await MemoryPairingTransport(server: server, observedSource: "lookup-old").lookup(code: code)
++            XCTFail("Role switch left old code available")
++        } catch { }
++    }
++
++    func testHostExpiryAndNetworkFailureRemainActionable() async {
++        let expired = HostModelAttempt(expired: true)
++        let model = PairingModel(makeAttempt: { expired })
++        addTeardownBlock { await model.cancelAndClose() }
++        model.generateCode()
++        await boundedWait { model.phase == .expired }
++        XCTAssertTrue(model.canChangeRole)
++        await model.returnToEntry()
++        let failed = PairingModel(makeAttempt: { HostModelAttempt(failCreate: true) })
++        addTeardownBlock { await failed.cancelAndClose() }
++        failed.generateCode()
++        await boundedWait { failed.phase == .failed }
++        XCTAssertNotNil(failed.errorMessage)
++        XCTAssertTrue(failed.canChangeRole)
++    }
++
++    func testBackgroundDuringHostFactoryAwaitsReturnedAttemptAndStopsIt() async {
++        let attempt = ControlledPairingAttempt()
++        let factory = SuspendedAttemptFactory(attempt: attempt)
++        let model = PairingModel(makeAttempt: factory.make)
++        model.generateCode()
++        await factory.waitUntilStarted()
++        let background = Task { await model.handleBackground() }
++        await boundedWait { model.isClosing }
++        XCTAssertFalse(model.mayDismiss)
++        factory.release()
++        await background.value
++        XCTAssertTrue(model.mayDismiss)
++        let stops = await attempt.stopCount
++        XCTAssertEqual(stops, 1)
++    }
++
++    func testCloseDuringHostApprovalJoinsOperationAndRefreshesOnce() async {
++        await exerciseHostSuspension(saving: false, failSave: false)
++    }
++
++    func testBackgroundDuringHostSavePreservesExactRetryAndBlocksRoleChange() async {
++        await exerciseHostSuspension(saving: true, failSave: true)
++    }
++
++    private func exerciseHostSuspension(saving: Bool, failSave: Bool) async {
++        let attempt = HostModelAttempt(holdApproval: true, holdAsSaving: saving, failSave: failSave)
++        var refreshes = 0
++        let model = PairingModel(makeAttempt: { attempt }, refreshDevices: { refreshes += 1 })
++        addTeardownBlock { await attempt.releaseApproval(); await model.cancelAndClose() }
++        model.generateCode()
++        await boundedWait { if case .hosting = model.phase { return true }; return false }
++        await attempt.request()
++        await boundedWait { if case .hostApproval = model.phase { return true }; return false }
++        model.approveHost(); model.approveHost()
++        await boundedWait { await attempt.approveCount == 1 }
++        let close = Task {
++            if saving { await model.handleBackground() } else { await model.cancelAndClose() }
++        }
++        await boundedWait { model.isClosing }
++        XCTAssertFalse(model.mayDismiss)
++        XCTAssertFalse(model.canChangeRole)
++        model.generateCode(); model.approveHost()
++        await attempt.releaseApproval()
++        await close.value
++        if failSave {
++            XCTAssertTrue(model.requiresSaveRecovery)
++            XCTAssertFalse(model.mayDismiss)
++            await model.returnToEntry()
++            XCTAssertTrue(model.requiresSaveRecovery)
++            model.retrySaving()
++            await boundedWait { !model.isBusy }
++        }
++        guard case .paired = model.phase else { return XCTFail("Expected durable state after save") }
++        XCTAssertEqual(refreshes, 1)
++        let approvals = await attempt.approveCount
++        XCTAssertEqual(approvals, 1)
++    }
++
++    func testStaleDisplayedApprovalCannotApproveReplacementRequest() async {
++        let attempt = HostModelAttempt()
++        let model = PairingModel(makeAttempt: { attempt })
++        addTeardownBlock { await model.cancelAndClose() }
++        model.generateCode()
++        await boundedWait { if case .hosting = model.phase { return true }; return false }
++        await attempt.request()
++        await boundedWait { if case .hostApproval = model.phase { return true }; return false }
++        await attempt.replaceRequest()
++        model.approveHost()
++        await boundedWait { !model.isBusy }
++        XCTAssertEqual(model.phase, .failed)
++        let approvals = await attempt.approveCount
++        XCTAssertEqual(approvals, 0)
++    }
++
++    func testTwoMobileModelsHostAndJoinRequireExplicitBoundApprovalAndBothSaves() async throws {
++        try await exerciseTwoModels()
++    }
++
++    func testRealHostSaveFailureRetriesIdenticalAuthorizationWithoutAnotherApproval() async throws {
++        try await exerciseTwoModels(failHostSave: true)
++    }
++
++    func testRealHostRejectionLeavesBothRepositoriesUntrusted() async throws {
++        try await exerciseTwoModels(reject: true)
++    }
++
++    private func exerciseTwoModels(failHostSave: Bool = false, reject: Bool = false) async throws {
++        let server = MemoryPairingServer()
++        let hostIdentity = try DeviceIdentity.ephemeral()
++        let joinIdentity = try DeviceIdentity.ephemeral()
++        let hostRepository = try TrustRepository(ownerIdentity: hostIdentity,
++            trustStore: TrustStore(owner: hostIdentity.id), persistedGeneration: 0)
++        let joinRepository = try TrustRepository(ownerIdentity: joinIdentity,
++            trustStore: TrustStore(owner: joinIdentity.id), persistedGeneration: 0)
++        let hostCore = try PairingCoordinator(identity: hostIdentity, displayName: "Fixture iPad",
++            trustRepository: hostRepository, transport: MemoryPairingTransport(server: server, observedSource: "mobile-host"))
++        let joinCore = try PairingCoordinator(identity: joinIdentity, displayName: "Fixture iPhone",
++            trustRepository: joinRepository, transport: MemoryPairingTransport(server: server, observedSource: "mobile-join"))
++        let hostSaves = SaveCounter(), joinSaves = SaveCounter()
++        let hostSession = MobilePairingSession(coordinator: hostCore, persistTrust: {
++            await hostSaves.record()
++            if failHostSave, await hostSaves.count == 1 { throw TestFailure.expected }
++        })
++        let joinSession = MobilePairingSession(coordinator: joinCore, persistTrust: { await joinSaves.record() })
++        var hostRefreshes = 0, joinRefreshes = 0, hostFactories = 0
++        let host = PairingModel(makeAttempt: {
++            hostFactories += 1
++            return MemoryModelAttempt(session: hostSession)
++        }, refreshDevices: { hostRefreshes += 1 })
++        let join = PairingModel(makeAttempt: { MemoryModelAttempt(session: joinSession) },
++            refreshDevices: { joinRefreshes += 1 })
++        addTeardownBlock {
++            await host.cancelAndClose(); await join.cancelAndClose()
++            await hostSession.stopObservation(); await joinSession.stopObservation()
++        }
++        host.generateCode()
++        host.generateCode()
++        await boundedWait { if case .hosting = host.phase { return true }; return false }
++        guard case let .hosting(code, _) = host.phase else { return XCTFail("Host code missing") }
++        XCTAssertNotNil(PairingCode(code))
++        XCTAssertEqual(hostFactories, 1)
++        join.code = code
++        join.submit()
++        await boundedWait { if case .hostApproval = host.phase { return true }; return false }
++        guard case let .hostApproval(confirmation) = host.phase,
++              case let .waitingForMac(_, fingerprint) = join.phase else { return XCTFail("Both verification views required") }
++        XCTAssertEqual(confirmation.fingerprint, fingerprint)
++        let beforeHost = await hostRepository.authenticationRecords()
++        let beforeJoin = await joinRepository.authenticationRecords()
++        XCTAssertTrue(beforeHost.isEmpty); XCTAssertTrue(beforeJoin.isEmpty)
++        if reject {
++            host.rejectHost()
++            await boundedWait { !host.isBusy && !join.isBusy }
++            XCTAssertEqual(host.phase, .entry)
++            XCTAssertEqual(join.phase, .failed)
++            let hostAfter = await hostRepository.authenticationRecords()
++            let joinAfter = await joinRepository.authenticationRecords()
++            XCTAssertTrue(hostAfter.isEmpty); XCTAssertTrue(joinAfter.isEmpty)
++            XCTAssertEqual(hostRefreshes, 0); XCTAssertEqual(joinRefreshes, 0)
++            return
++        }
++        host.approveHost()
++        host.approveHost()
++        if failHostSave {
++            await boundedWait { host.requiresSaveRecovery && !host.isBusy }
++            XCTAssertFalse(host.canGenerate)
++            XCTAssertFalse(host.canChangeRole)
++            let signed = await hostRepository.authenticationRecords()
++            XCTAssertEqual(signed.count, 1)
++            host.retrySaving()
++            await boundedWait { !host.isBusy }
++            let retried = await hostRepository.authenticationRecords()
++            XCTAssertEqual(retried, signed)
++        }
++        await boundedWait { if case .paired = host.phase, case .paired = join.phase { return true }; return false }
++        await boundedWait { !host.isBusy && !join.isBusy }
++        let hostCount = await hostSaves.count, joinCount = await joinSaves.count
++        XCTAssertEqual(hostCount, failHostSave ? 2 : 1); XCTAssertEqual(joinCount, 1)
++        XCTAssertEqual(hostRefreshes, 1); XCTAssertEqual(joinRefreshes, 1)
++        let hostTrusted = await hostRepository.isTrusted(joinIdentity.id)
++        let joinTrusted = await joinRepository.isTrusted(hostIdentity.id)
++        XCTAssertTrue(hostTrusted); XCTAssertTrue(joinTrusted)
++    }
++
+     func testHeldFirstSaveShowsLocalProgressUntilDurableSuccess() async throws {
+         try await exerciseHeldSaving(failFirstSave: false)
+     }
+@@ -331,6 +550,61 @@
+ }
+ 
+ private enum TestFailure: Error { case expected }
++
++private actor HostModelAttempt: PairingAttempt {
++    private var approvalGate: CheckedContinuation<Void, Never>?
++    private let expiry: Date
++    private let failCreate: Bool
++    private let holdApproval: Bool
++    private let holdAsSaving: Bool
++    private var failSave: Bool
++    private var confirmation: PairingHostConfirmation
++    private var state: MobilePairingState = .active(.idle)
++    private(set) var approveCount = 0
++    private(set) var rejectCount = 0
++    private(set) var stopCount = 0
++    init(expired: Bool = false, failCreate: Bool = false, holdApproval: Bool = false,
++         holdAsSaving: Bool = false, failSave: Bool = false) {
++        expiry = Date().addingTimeInterval(expired ? -1 : 300)
++        self.failCreate = failCreate; self.holdApproval = holdApproval
++        self.holdAsSaving = holdAsSaving; self.failSave = failSave
++        confirmation = .init(sessionID: PairingSessionID(), peer: fixturePeer,
++            fingerprint: "fixture host fingerprint", expiresAt: expiry)
++    }
++    func createCode() async throws -> String {
++        if failCreate { throw URLError(.notConnectedToInternet) }
++        state = .active(.displayingCode(expiresAt: expiry))
++        return "012345"
++    }
++    func request() { state = .active(.approvalRequested(fixturePeer)) }
++    func replaceRequest() {
++        confirmation = .init(sessionID: PairingSessionID(), peer: fixturePeer,
++            fingerprint: "new fingerprint", expiresAt: expiry)
++    }
++    func pendingHostConfirmation() -> PairingHostConfirmation? { confirmation }
++    func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary {
++        guard expected == confirmation else { throw PairingError.staleOperation }
++        approveCount += 1
++        state = holdAsSaving ? .saving(fixturePeer) : .active(.committing(fixturePeer))
++        if holdApproval {
++            await withCheckedContinuation { approvalGate = $0 }
++        }
++        if failSave {
++            state = .saveFailed(fixturePeer)
++            throw MobilePairingError.saveRequired
++        }
++        state = .paired(fixturePeer)
++        return fixturePeer
++    }
++    func reject() async throws { rejectCount += 1; state = .active(.idle) }
++    func releaseApproval() { approvalGate?.resume(); approvalGate = nil }
++    func join(code: String) async throws -> PairingJoinResult { throw TestFailure.expected }
++    func awaitApproval() async throws -> DeviceSummary { throw TestFailure.expected }
++    func currentState() async -> MobilePairingState { state }
++    func retrySaving() async throws -> DeviceSummary { failSave = false; state = .paired(fixturePeer); return fixturePeer }
++    func cancel() async throws { state = .active(.idle) }
++    func stop() async { stopCount += 1 }
++}
+ 
+ @MainActor
+ private func boundedWait(_ condition: () async -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+@@ -413,6 +687,10 @@
+ private actor MemoryModelAttempt: PairingAttempt {
+     let session: MobilePairingSession
+     init(session: MobilePairingSession) { self.session = session }
++    func createCode() async throws -> String { try await session.createCode() }
++    func pendingHostConfirmation() async -> PairingHostConfirmation? { await session.pendingHostConfirmation() }
++    func approve(_ expected: PairingHostConfirmation) async throws -> DeviceSummary { try await session.approve(expected) }
++    func reject() async throws { try await session.reject() }
+     func join(code: String) async throws -> PairingJoinResult { try await session.join(code: code) }
+     func awaitApproval() async throws -> DeviceSummary { try await session.awaitApproval() }
+     func currentState() async -> MobilePairingState { await session.currentState() }

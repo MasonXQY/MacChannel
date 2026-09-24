@@ -234,6 +234,9 @@ public actor IncomingTransferListener {
 
     private func enqueue(_ admitted: AdmittedConnection) async {
         let connection = admitted.connection
+#if DEBUG
+        print("DropMeshTransfer inbound stage=enqueued")
+#endif
         guard !stopped,
             !activeTransferIDs.contains(connection.transferID),
             !pending.contains(where: { $0.connection.transferID == connection.transferID })
@@ -326,6 +329,9 @@ public actor IncomingTransferListener {
     ) async {
         defer { receiveFinished(token) }
         do {
+#if DEBUG
+            print("DropMeshTransfer inbound stage=receiving")
+#endif
             let result = try await ReceiveSession(
                 transferID: connection.transferID,
                 source: connection.source,
@@ -342,8 +348,14 @@ public actor IncomingTransferListener {
                     token: resourceToken
                 )
             ).run(on: connection.channel)
+#if DEBUG
+            print("DropMeshTransfer inbound stage=completed")
+#endif
             await onReceiveFinished(result)
         } catch {
+#if DEBUG
+            print("DropMeshTransfer inbound stage=failed category=\(String(describing: IncomingTransferFailure(error)))")
+#endif
             await onReceiveFinished(nil)
             await onReceiveFailed(connection.transferID, IncomingTransferFailure(error))
         }

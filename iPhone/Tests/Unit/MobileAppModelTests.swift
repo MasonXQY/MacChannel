@@ -6,6 +6,265 @@ import XCTest
 
 @MainActor
 final class MobileAppModelTests: XCTestCase {
+    func testManualRemovalDoesNotRemoveIndependentAccountPeerAfterSave() async {
+        let session = InertMobileSession()
+        await session.setEffectivePeerIDs([session.peer.id])
+        await session.setPresence(.online, peers: [session.peer])
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+        await model.refreshDevices()
+        model.removeDevice(session.peer.id)
+        await model.waitForRemoval()
+        XCTAssertEqual(model.removalState, .saved)
+        XCTAssertTrue(model.manualPeerIDs.isEmpty)
+        XCTAssertEqual(model.pairedDevices.map(\.id), [session.peer.id])
+        XCTAssertTrue(model.isEligible(session.peer.id))
+        await model.close()
+    }
+
+    func testAccountOnlyPeerDisplaysWithoutBecomingManualPairing() async throws {
+        let session = InertMobileSession()
+        await session.setTrustedIDs([])
+        await session.setEffectivePeerIDs([session.peer.id])
+        await session.setPresence(.online, peers: [session.peer])
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+        await model.refreshDevices()
+        XCTAssertEqual(model.pairedDevices.map(\.id), [session.peer.id])
+        XCTAssertTrue(model.manualPeerIDs.isEmpty)
+        XCTAssertTrue(model.isEligible(session.peer.id))
+        model.removeDevice(session.peer.id)
+        await model.waitForRemoval()
+        let revokes = await session.revokeCount
+        XCTAssertEqual(revokes, 0, "account-only peer must not use manual trust revocation")
+        await session.setEffectivePeerIDs([])
+        await model.refreshDevices()
+        XCTAssertTrue(model.pairedDevices.isEmpty)
+        XCTAssertEqual(model.currentDevice(session.peer).availability, .offline)
+        XCTAssertNotEqual(model.presentation(for: model.currentDevice(session.peer)), .online)
+        await model.close()
+    }
+
+    func testInvitationOpenURLPrefillsAccountRequestLinkOnlyForValidDropMeshInvite() async throws {
+        let session = InertMobileSession()
+        let binding = try AccountSessionBinding(deviceID: UUID(),
+            audience: "com.example.app", origin: URL(string: "https://accounts.example.com")!)
+        await session.setAccountController(AccountSessionController(service: LinkOpenAccountService(),
+            storage: LinkOpenAccountStorage(), binding: binding))
+        let model = MobileAppModel(loadSession: { session })
+        let link = try AccountInvitationLink.generate().shareURL
+
+        let rejected = await model.prepareInvitationFromOpenURL(URL(string: "https://example.com/connect")!)
+        let accepted = await model.prepareInvitationFromOpenURL(link)
+        XCTAssertFalse(rejected)
+        XCTAssertTrue(accepted)
+
+        XCTAssertEqual(model.settings?.account.invitationLinkText, link.absoluteString)
+        await model.close()
+    }
+
+    func testWithdrawnAuthorityKeepsManualPeerButNotOnline() async {
+        let session = InertMobileSession()
+        await session.setEffectivePeerIDs([])
+        await session.setPresence(.online, peers: [session.peer])
+        await session.setAccountConfigurationUnavailable(true)
+        let model = MobileAppModel(loadSession: { session })
+        await model.bootstrap(initialPhase: .active)
+        await model.waitForLifecycle()
+        await model.refreshDevices()
+        XCTAssertEqual(model.pairedDevices.map(\.id), [session.peer.id])
+        XCTAssertEqual(model.pairedDevices.first?.availability, .offline)
+        XCTAssertFalse(model.isEligible(session.peer.id))
+        XCTAssertTrue(model.accountConfigurationUnavailable)
+        await model.close()
+    }
+
+    func testFrameworkDismissalBeforeAffirmativeCallbackStillRunsAcceptedRecovery() async {
+        let recovery = LockedRecoveryCalls()
+        let model = MobileAppModel(
+            loadSession: { throw MobileIdentityRecoveryError.orphanedInstallation },
+            recoverOrphanedIdentity: { recovery.record() }
+        )
+
+        await model.bootstrap(initialPhase: .active)
+        model.requestIdentityRecovery()
+
+        let confirmationID = try! XCTUnwrap(model.identityRecoveryConfirmationID)
+        // SwiftUI writes `false` to the alert binding before invoking its button callback.
+        model.identityRecoveryPresentationDismissed(confirmationID)
+        let operationID = try! XCTUnwrap(model.acceptIdentityRecovery(confirmationID))
+        await model.performAcceptedIdentityRecovery(operationID)
+
+        XCTAssertEqual(recovery.count, 1)
+    }
+
+    func testExplicitCancelNeverAcceptsRecovery() async throws {
+        let recovery = LockedRecoveryCalls()
+        let model = MobileAppModel(
+            loadSession: { throw MobileIdentityRecoveryError.orphanedInstallation },
+            recoverOrphanedIdentity: { recovery.record() }
+        )
+        await model.bootstrap(initialPhase: .active)
+        model.requestIdentityRecovery()
+        let confirmationID = try XCTUnwrap(model.identityRecoveryConfirmationID)
+
+        model.cancelIdentityRecovery(confirmationID)
+        XCTAssertNil(model.acceptIdentityRecovery(confirmationID))
+        XCTAssertEqual(recovery.count, 0)
+    }
+
+    func testStaleDismissalAndAcceptanceCannotAffectNewPresentation() async throws {
+        let recovery = LockedRecoveryCalls()
+        let model = MobileAppModel(
+            loadSession: { throw MobileIdentityRecoveryError.orphanedInstallation },
+            recoverOrphanedIdentity: { recovery.record() }
+        )
+        await model.bootstrap(initialPhase: .active)
+        model.requestIdentityRecovery()
+        let oldID = try XCTUnwrap(model.identityRecoveryConfirmationID)
+        model.cancelIdentityRecovery(oldID)
+        model.requestIdentityRecovery()
+        let newID = try XCTUnwrap(model.identityRecoveryConfirmationID)
+
+        model.identityRecoveryPresentationDismissed(oldID)
+        XCTAssertNil(model.acceptIdentityRecovery(oldID))
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(model.identityRecoveryConfirmationID, newID)
+        let operationID = try XCTUnwrap(model.acceptIdentityRecovery(newID))
+        await model.performAcceptedIdentityRecovery(operationID)
+        XCTAssertEqual(recovery.count, 1)
+    }
+
+    func testDuplicateAcceptanceRunsRecoveryOnce() async throws {
+        let recovery = LockedRecoveryCalls()
+        let model = MobileAppModel(
+            loadSession: { throw MobileIdentityRecoveryError.orphanedInstallation },
+            recoverOrphanedIdentity: { recovery.record() }
+        )
+        await model.bootstrap(initialPhase: .active)
+        model.requestIdentityRecovery()
+        let confirmationID = try XCTUnwrap(model.identityRecoveryConfirmationID)
+
+        let operationID = try XCTUnwrap(model.acceptIdentityRecovery(confirmationID))
+        XCTAssertNil(model.acceptIdentityRecovery(confirmationID))
+        await model.performAcceptedIdentityRecovery(operationID)
+        await model.performAcceptedIdentityRecovery(operationID)
+
+        XCTAssertEqual(recovery.count, 1)
+    }
+
+    func testRecoveryRemainsInProgressWhileAcceptedOperationIsSuspended() async throws {
+        let session = InertMobileSession()
+        let loads = LockedRecoveryCalls()
+        let recovery = LockedRecoveryCalls()
+        let gate = LockedRecoveryGate()
+        let entered = expectation(description: "recovery closure entered")
+        let model = MobileAppModel(
+            loadSession: {
+                if loads.recordAndReturnCount() == 1 {
+                    throw MobileIdentityRecoveryError.orphanedInstallation
+                }
+                return session
+            },
+            recoverOrphanedIdentity: {
+                recovery.record()
+                entered.fulfill()
+                await gate.waitForRelease()
+            }
+        )
+        defer { gate.release() }
+
+        await model.bootstrap(initialPhase: .active)
+        model.requestIdentityRecovery()
+        let confirmationID = try XCTUnwrap(model.identityRecoveryConfirmationID)
+        let operationID = try XCTUnwrap(model.acceptIdentityRecovery(confirmationID))
+        let operation = Task { await model.performAcceptedIdentityRecovery(operationID) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        XCTAssertTrue(model.identityRecoveryInProgress)
+        XCTAssertNil(model.acceptIdentityRecovery(confirmationID))
+        await model.performAcceptedIdentityRecovery(operationID)
+        XCTAssertEqual(recovery.count, 1)
+
+        gate.release()
+        await operation.value
+        XCTAssertEqual(model.bootstrapState, .ready)
+        XCTAssertFalse(model.identityRecoveryInProgress)
+        XCTAssertEqual(recovery.count, 1)
+    }
+
+    func testRecoveryFailureIsVisibleAndOffersSafeBootstrapRetry() async throws {
+        struct FixtureFailure: Error {}
+        let loads = LockedRecoveryCalls()
+        let model = MobileAppModel(
+            loadSession: {
+                loads.record()
+                throw MobileIdentityRecoveryError.orphanedInstallation
+            },
+            recoverOrphanedIdentity: { throw FixtureFailure() }
+        )
+        await model.bootstrap(initialPhase: .active)
+        model.requestIdentityRecovery()
+        let confirmationID = try XCTUnwrap(model.identityRecoveryConfirmationID)
+        let operationID = try XCTUnwrap(model.acceptIdentityRecovery(confirmationID))
+
+        XCTAssertTrue(model.identityRecoveryInProgress)
+        await model.performAcceptedIdentityRecovery(operationID)
+
+        XCTAssertFalse(model.identityRecoveryInProgress)
+        XCTAssertFalse(model.identityRecoveryAvailable)
+        XCTAssertEqual(model.bootstrapState, .failed)
+        XCTAssertEqual(model.bootstrapError, String(localized: "identity.recovery.failed"))
+        await model.retryBootstrap()
+        XCTAssertEqual(loads.count, 2)
+    }
+
+    func testOrphanedIdentityRequiresExplicitConfirmationBeforeRecovery() async {
+        let recovery = LockedRecoveryCalls()
+        let model = MobileAppModel(
+            loadSession: { throw MobileIdentityRecoveryError.orphanedInstallation },
+            recoverOrphanedIdentity: { recovery.record() }
+        )
+
+        await model.bootstrap(initialPhase: .active)
+        XCTAssertTrue(model.identityRecoveryAvailable)
+        XCTAssertFalse(model.identityRecoveryConfirmationPresented)
+        XCTAssertEqual(recovery.count, 0)
+
+        model.requestIdentityRecovery()
+        XCTAssertTrue(model.identityRecoveryConfirmationPresented)
+        model.cancelIdentityRecovery()
+        XCTAssertFalse(model.identityRecoveryConfirmationPresented)
+        XCTAssertEqual(recovery.count, 0)
+    }
+
+    func testConfirmedIdentityRecoveryRunsOnceThenRetriesBootstrap() async {
+        let session = InertMobileSession()
+        let loads = LockedRecoveryCalls()
+        let recovery = LockedRecoveryCalls()
+        let model = MobileAppModel(
+            loadSession: {
+                if loads.recordAndReturnCount() == 1 {
+                    throw MobileIdentityRecoveryError.orphanedInstallation
+                }
+                return session
+            },
+            recoverOrphanedIdentity: { recovery.record() }
+        )
+
+        await model.bootstrap(initialPhase: .inactive)
+        model.requestIdentityRecovery()
+        await model.confirmIdentityRecovery()
+
+        XCTAssertEqual(recovery.count, 1)
+        XCTAssertEqual(loads.count, 2)
+        XCTAssertEqual(model.bootstrapState, .ready)
+        XCTAssertFalse(model.identityRecoveryAvailable)
+    }
     func testPresentationUsesSyncWithoutChangingEligibilityAndPreservesDistinctNames() async {
         let session = InertMobileSession()
         let model = MobileAppModel(loadSession: { session })
@@ -427,6 +686,48 @@ final class MobileAppModelTests: XCTestCase {
     private func expectEqual(_ actual: Int, _ expected: Int, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(actual, expected, file: file, line: line)
     }
+}
+
+private final class LockedRecoveryCalls: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var count: Int { lock.withLock { value } }
+    func record() { lock.withLock { value += 1 } }
+    func recordAndReturnCount() -> Int { lock.withLock { value += 1; return value } }
+}
+
+private final class LockedRecoveryGate: @unchecked Sendable {
+    private let releases: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        releases = stream.stream
+        continuation = stream.continuation
+    }
+
+    func waitForRelease() async {
+        var iterator = releases.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+
+    func release() { continuation.yield(()) }
+}
+
+private actor LinkOpenAccountStorage: AccountSessionStorage {
+    func load() -> AccountStoredSession? { nil }
+    func save(_ record: AccountStoredSession) {}
+    func remove() {}
+}
+
+private struct LinkOpenAccountService: AccountSessionService {
+    func challenge() async throws -> AccountLoginChallenge { throw AccountServiceError.unavailable }
+    func complete(challengeID: String, code: String, identityToken: String) async throws -> AccountSessionTokens {
+        throw AccountServiceError.unavailable
+    }
+    func status(accessToken: String) async throws -> AccountSessionIdentity { throw AccountServiceError.unavailable }
+    func refresh(refreshToken: String) async throws -> AccountSessionTokens { throw AccountServiceError.unavailable }
+    func logout(accessToken: String) async throws {}
 }
 
 private actor AlreadyPairedAttempt: PairingAttempt {

@@ -137,6 +137,22 @@ func TestComposeSeparatesDatabaseApplicationAndRelayNetworks(t *testing.T) {
 	}
 }
 
+func TestRendezvousUsesInitToReapHealthcheckProcesses(t *testing.T) {
+	compose := readContractFile(t, filepath.Join(repositoryRoot(t), "Infrastructure", "production", "docker-compose.yml"))
+	marker := "  rendezvous:\n"
+	start := strings.Index(compose, marker)
+	if start < 0 {
+		t.Fatal("production compose is missing rendezvous service")
+	}
+	block := compose[start+len(marker):]
+	if next := strings.Index(block, "\n  coturn:\n"); next >= 0 {
+		block = block[:next]
+	}
+	if !strings.Contains(block, "    init: true\n") {
+		t.Fatal("rendezvous must run behind an init process so healthcheck children are reaped")
+	}
+}
+
 func TestAllServicesConsumeOnePersistentSecretGeneration(t *testing.T) {
 	root := repositoryRoot(t)
 	compose := readContractFile(t, filepath.Join(root, "Infrastructure", "docker-compose.yml"))

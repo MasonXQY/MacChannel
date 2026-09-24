@@ -648,6 +648,9 @@ public actor AccountSessionController {
     private func invalidateRouteContext() {
         for task in turnRequests.values { task.cancel() }
         let changed = routeContext != nil || routeSocket != nil
+        #if DEBUG
+        if changed { print("DropMeshAccount route=context-invalidated") }
+        #endif
         routeContext?.lifetime.invalidate()
         routeContext = nil
         routeExpiryID = UUID()
@@ -686,6 +689,9 @@ public actor AccountSessionController {
         if !same { invalidateRouteContext() }
         routeContext = RouteContext(id: id, lifetime: lifetime, revision: operationRevision, epoch: epoch,
             identity: record.tokens.identity, snapshot: snapshot, freshUntil: freshUntil)
+        #if DEBUG
+        print("DropMeshAccount route=\(same ? "context-refreshed" : "context-installed")")
+        #endif
         routeExpiry?.cancel()
         let expiryID = UUID()
         routeExpiryID = expiryID

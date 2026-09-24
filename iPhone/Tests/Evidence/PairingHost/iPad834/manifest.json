@@ -1,0 +1,86 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "47DC47EB-E32F-4068-82D0-260EE228A669",
+        "deviceName" : "iPad Pro 11-inch (M4)",
+        "exportedFileName" : "2A60F1BD-9BAF-4568-A8AC-728F17388527.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "PairingHost-zh-Hans-Standard-Saved_0_DC65545A-D9DF-4413-86CB-E35EB2C7E526.png",
+        "timestamp" : 1789915453.155
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "47DC47EB-E32F-4068-82D0-260EE228A669",
+        "deviceName" : "iPad Pro 11-inch (M4)",
+        "exportedFileName" : "1DA10A43-8B96-49E8-99B7-D359601975F3.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "PairingHost-zh-Hans-Standard-Approval_0_A552B8A8-242B-464B-A8D7-3139B3E219DB.png",
+        "timestamp" : 1789915451.52
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "47DC47EB-E32F-4068-82D0-260EE228A669",
+        "deviceName" : "iPad Pro 11-inch (M4)",
+        "exportedFileName" : "D1218790-9C92-40BB-A015-7CA1F46B47EE.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "PairingHost-zh-Hans-Standard-Request_0_7C1B9000-31C9-486D-BF5D-3866F42D2C23.png",
+        "timestamp" : 1789915450.156
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "47DC47EB-E32F-4068-82D0-260EE228A669",
+        "deviceName" : "iPad Pro 11-inch (M4)",
+        "exportedFileName" : "FF171662-831E-406D-B260-519EC7B5F5DF.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "PairingHost-zh-Hans-Standard-Waiting_0_2DF65C28-DE31-42FA-945D-CCC63F841D49.png",
+        "timestamp" : 1789915449.574
+      }
+    ],
+    "testIdentifier" : "DropMeshUITests/testChinesePairingHost()",
+    "testIdentifierURL" : "test://com.apple.xcode/DropMesh/DropMeshUITests/DropMeshUITests/testChinesePairingHost"
+  },
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "47DC47EB-E32F-4068-82D0-260EE228A669",
+        "deviceName" : "iPad Pro 11-inch (M4)",
+        "exportedFileName" : "2191883F-2284-4F20-9975-6CDF3C0AE9AA.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "PairingHost-en-Standard-Saved_0_69BDE2C3-CBA7-4329-AF9C-778F14817676.png",
+        "timestamp" : 1789915463.142
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "47DC47EB-E32F-4068-82D0-260EE228A669",
+        "deviceName" : "iPad Pro 11-inch (M4)",
+        "exportedFileName" : "55342FBA-8B3A-42CE-A1D7-9CC0240E371B.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "PairingHost-en-Standard-Approval_0_AE9F87F6-3D08-4B81-9235-771BF0CFF694.png",
+        "timestamp" : 1789915461.513
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "47DC47EB-E32F-4068-82D0-260EE228A669",
+        "deviceName" : "iPad Pro 11-inch (M4)",
+        "exportedFileName" : "07A8E8F0-163E-4CC1-8E3F-22B8A0926F22.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "PairingHost-en-Standard-Request_0_93594CA9-B904-41B5-AF5D-838B211E2CBB.png",
+        "timestamp" : 1789915460.151
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "47DC47EB-E32F-4068-82D0-260EE228A669",
+        "deviceName" : "iPad Pro 11-inch (M4)",
+        "exportedFileName" : "41C2CFF7-7A98-4FF5-97A9-DA99A1C88CA3.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "PairingHost-en-Standard-Waiting_0_4706CC29-B370-4051-AA94-9AC60FC4EA71.png",
+        "timestamp" : 1789915459.571
+      }
+    ],
+    "testIdentifier" : "DropMeshUITests/testEnglishPairingHost()",
+    "testIdentifierURL" : "test://com.apple.xcode/DropMesh/DropMeshUITests/DropMeshUITests/testEnglishPairingHost"
+  }
+]

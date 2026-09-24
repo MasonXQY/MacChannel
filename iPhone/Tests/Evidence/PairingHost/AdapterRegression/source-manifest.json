@@ -1,0 +1,17 @@
+[
+  {
+    "path": "iPhone/App/PairingModel.swift",
+    "before": "c5a55ecdad01f53338ce50c9b9e2b9affa692943547c4ff30920de3c9fd1cf03",
+    "after": "4d3961a074bf00d0fb23b618cb66ae84d5463c0ddd741371b1f8d8e5e37d6751"
+  },
+  {
+    "path": "iPhone/App/ProductionMobileAppDependencies.swift",
+    "before": "85a728aa4cb04318010816d00535e2d276eaf8f465549f1524ec4ec7b89df237",
+    "after": "e432311704778d13e4b170c58cfdacfde1dcc83f2103698e51a3940734719157"
+  },
+  {
+    "path": "iPhone/Tests/Unit/PairingModelTests.swift",
+    "before": "2b9b2799a0dd2a30f2bc15498b7a414aa1011358a07bb7b2ff0f65cb575fa3ab",
+    "after": "3bf7ac0b5399a6357530fec2d6707a7a885213758820d5fb2a671b2630c434bf"
+  }
+]

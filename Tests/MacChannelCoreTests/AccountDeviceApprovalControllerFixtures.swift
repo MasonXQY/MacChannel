@@ -22,7 +22,8 @@ struct ApprovalControllerFixture: Sendable {
     let checkpoint: ApprovalCheckpointStorage
     let verifier: AccountGroupHistoryVerifier
     let controller: AccountSessionController
-    init(identity: DeviceIdentity? = nil, history: [AccountGroupEvent]? = nil, configured: Bool = true) throws {
+    init(identity: DeviceIdentity? = nil, history: [AccountGroupEvent]? = nil, configured: Bool = true,
+         accountRouteEnabled: Bool = false) throws {
         let local = try identity ?? DeviceIdentity.ephemeral()
         self.identity = local
         binding = try checkpointBinding(device: local.id.rawValue)
@@ -37,9 +38,20 @@ struct ApprovalControllerFixture: Sendable {
         verifier = .init(storage: checkpoint)
         service = try ApprovalService(tokens: tokens, identity: local, history: history)
         let clock = clock
-        controller = AccountSessionController(service: service, storage: session, binding: binding, groupVerifier: verifier,
-            firstDeviceEnrollment: .init(identity: local, intentStorage: KeychainAccountGroupBootstrapIntentStorage(store: CheckpointSecretStore())),
-            deviceApproval: configured ? .init(identity: local, intentStorage: intents) : nil, now: { clock.now() })
+        let firstDevice = AccountFirstDeviceEnrollment(identity: local,
+            intentStorage: KeychainAccountGroupBootstrapIntentStorage(store: CheckpointSecretStore()))
+        let approval = configured ? AccountDeviceApproval(identity: local, intentStorage: intents) : nil
+        if accountRouteEnabled {
+            let peerAuthorization = try AccountPeerAuthorization(owner: .live(identity: local), identity: local,
+                binding: binding, freshness: 300)
+            controller = try AccountSessionController(service: service, storage: session, binding: binding,
+                groupVerifier: verifier, peerAuthorization: peerAuthorization, firstDeviceEnrollment: firstDevice,
+                deviceApproval: approval, now: { clock.now() })
+        } else {
+            controller = AccountSessionController(service: service, storage: session, binding: binding,
+                groupVerifier: verifier, firstDeviceEnrollment: firstDevice, deviceApproval: approval,
+                now: { clock.now() })
+        }
     }
     func reconstructed() -> AccountSessionController {
         AccountSessionController(service: service, storage: session, binding: binding, groupVerifier: verifier,
@@ -97,6 +109,7 @@ actor ApprovalService: AccountSessionService, AccountGroupService, AccountGroupE
     var gates: [String: ApprovalGate] = [:]
     var lost: String?
     var absent = false
+    var memberOnlyList = false
     init(tokens: AccountSessionTokens, identity: DeviceIdentity, history: [AccountGroupEvent]?) throws {
         self.tokens = tokens; self.identity = identity
         self.history = try history ?? [approvalAnchor(DeviceIdentity.ephemeral())]
@@ -109,6 +122,7 @@ actor ApprovalService: AccountSessionService, AccountGroupService, AccountGroupE
     }
     func setHistory(_ events: [AccountGroupEvent]) { history = events }
     func setAbsent(_ value: Bool) { absent = value }
+    func requireMembershipForList(_ value: Bool) { memberOnlyList = value }
     func gate(_ operation: String, _ gate: ApprovalGate) { gates[operation] = gate }
     func lose(_ operation: String?) { lost = operation }
     func pause(_ operation: String) async throws {
@@ -134,7 +148,17 @@ actor ApprovalService: AccountSessionService, AccountGroupService, AccountGroupE
     }
     func groupHistory(accessToken: String, groupID: String) async throws -> [AccountGroupEvent] { try await pause("history"); return history }
     func groupJoins(accessToken: String, accountID: String) async throws -> [AccountGroupPendingSummary] {
-        try await pause("list"); return records.values.map(\.summary).filter { $0.status.active }
+        try await pause("list")
+        if memberOnlyList {
+            let local = identity.id.rawValue.uuidString.lowercased()
+            var member = false
+            for event in history {
+                if (event.action == "bootstrap" || event.action == "approve") && event.subjectDeviceID == local { member = true }
+                if event.action == "remove" && event.subjectDeviceID == local { member = false }
+            }
+            if !member { throw AccountGroupEnrollmentError.conflict }
+        }
+        return records.values.map(\.summary).filter { $0.status.active }
     }
     func groupJoin(accessToken: String, accountID: String, requestID: String) async throws -> AccountGroupPendingRequest {
         try await pause("get"); guard let record = records[requestID] else { throw AccountServiceError.transport }; return record
