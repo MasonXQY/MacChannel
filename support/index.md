@@ -7,7 +7,7 @@ title: DropMesh Support
 
 Contact / 联系我们: [xuqy87@gmail.com](mailto:xuqy87@gmail.com)
 
-Updated / 更新日期: 16 September 2026 / 2026 年 9 月 16 日。
+Updated / 更新日期: 25 September 2026 / 2026 年 9 月 25 日。
 
 DropMesh supports macOS 14 and later and iPhone with iOS 17 and later. Operator / 运营方: ZENSYS TECHNOLOGIES - FZCO.
 
@@ -17,7 +17,15 @@ DropMesh supports macOS 14 and later and iPhone with iOS 17 and later. Operator 
 
 Open DropMesh from Applications and look for its icon in the menu bar at the top of your screen. It is a menu-bar app; you do not need a Finder window to keep it running. Open DropMesh on both Macs. Generate a pairing code on one Mac, enter it on the other, and approve the request on the first Mac. Pair only with a device you recognize.
 
-On iPhone, open DropMesh and choose Devices, then Pair a Device. Open the app on both compatible devices, generate a code on one, enter it on the other, and approve the request on the first device. This release does not require a DropMesh account.
+On iPhone, open DropMesh and choose Devices, then Pair a Device. Open the app on both compatible devices, generate a code on one, enter it on the other, and approve the request on the first device. Manual pairing does not require an account.
+
+### Optional account and invitations
+
+Choose Devices, then Account & Invitations to use Sign in with Apple. DropMesh does not request your Apple name or email address. Devices that use the same Apple Account can join your device group after the required approval and then connect without a new six-digit code. Manual pairings keep working when you are signed out.
+
+To connect with another person, show or share your invite link from Account & Invitations. The other person sends a request with that link. You choose which device receives the connection, then both selected devices complete the approval. Treat an invite link as a secret; create a new link if it reaches the wrong person. You can reject or cancel a pending request.
+
+Signing out removes the account session from the current device; it does not delete your account. To delete the account, choose Delete Account on the signed-in Account page, verify with Apple and confirm. Keep DropMesh open while it submits the request, and use Check Deletion Status if completion is pending. Manual pairings and received files stay on the device. If the app says Apple access could not be revoked, follow its Apple Account Settings link and remove DropMesh from Sign in with Apple.
 
 ### Send, receive and manage history on iPhone
 
@@ -53,7 +61,15 @@ Email the device models, iOS/macOS versions, DropMesh version/build, the step th
 
 从“应用程序”打开 DropMesh，在屏幕顶部菜单栏找到图标。它是菜单栏应用，无需保持 Finder 窗口打开。两台 Mac 都启动 DropMesh，在其中一台生成配对码，在另一台输入，然后回到第一台批准请求。只与自己认识的设备配对。
 
-在 iPhone 上打开 DropMesh，进入“设备”，选择“配对设备”。两台兼容设备均打开应用，在一台生成配对码，在另一台输入，然后回到第一台批准请求。本版本无需注册 DropMesh 账号。
+在 iPhone 上打开 DropMesh，进入“设备”，选择“配对设备”。两台兼容设备均打开应用，在一台生成配对码，在另一台输入，然后回到第一台批准请求。手动配对无需账号。
+
+### 可选账号与邀请
+
+进入“设备”中的“账号与邀请”，可使用“通过 Apple 登录”。DropMesh 不会请求你的 Apple 姓名或邮箱地址。使用同一 Apple 账户的设备在完成必要批准后加入设备组，之后无需新的六位配对码即可连接。退出登录后，手动配对仍可继续使用。
+
+如需连接另一位用户，请在“账号与邀请”中显示或分享邀请链接。对方使用该链接发送请求；你再选择用哪台设备接收连接，两台被选中的设备完成批准。邀请链接相当于秘密凭据；如果发给了错误的人，请创建新链接。你可以拒绝或取消待处理请求。
+
+退出登录只会移除当前设备上的账号会话，不会删除账号。如需删除账号，请在已登录的“账号”页面选择“删除账号”，通过 Apple 验证并确认。提交请求时请保持 DropMesh 打开；如果尚未完成，可使用“查询删除状态”。手动配对和已接收文件会保留在设备上。如果应用提示 Apple 授权未能撤销，请打开它提供的 Apple 账号设置链接，在“通过 Apple 登录”中移除 DropMesh。
 
 ### 在 iPhone 上发送、接收与管理历史
 

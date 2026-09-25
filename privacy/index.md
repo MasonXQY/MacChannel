@@ -5,7 +5,7 @@ title: DropMesh Privacy
 
 # DropMesh privacy notice / 隐私说明
 
-Last updated / 更新日期: 16 September 2026 / 2026 年 9 月 16 日。
+Last updated / 更新日期: 25 September 2026 / 2026 年 9 月 25 日。
 
 Operator: ZENSYS TECHNOLOGIES - FZCO. Privacy and support contact: [xuqy87@gmail.com](mailto:xuqy87@gmail.com).
 
@@ -13,9 +13,11 @@ Operator: ZENSYS TECHNOLOGIES - FZCO. Privacy and support contact: [xuqy87@gmail
 
 ### Transfers and local data
 
-DropMesh lets you send files to compatible devices you pair with. The Mac app also supports clipboard sending; the iPhone app lets you choose files, photos and videos. The receiving device saves content in its receiving folder. Local settings, transfer history and device trust records support this workflow. Removing a paired device does not delete files already received by that device. This release does not require a DropMesh account.
+DropMesh lets you send files to compatible devices you pair with. The Mac app also supports clipboard sending; the iPhone app lets you choose files, photos and videos. The receiving device saves content in its receiving folder. Local settings, transfer history and device trust records support this workflow. Removing a paired device does not delete files already received by that device.
 
-DropMesh supports direct connections and encrypted relay transfer when a direct connection is unavailable. The relay handles transfer traffic; it is not a cloud drive where you can retrieve files later. Share only with a device and person you trust.
+You can use manual pairing without a DropMesh account. You may choose Sign in with Apple to connect your approved devices that use the same Apple Account and to manage connection invitations from other DropMesh accounts.
+
+DropMesh supports direct connections and encrypted relay transfer when a direct connection is unavailable. The relay forwards encrypted transfer traffic in real time. DropMesh does not store file contents in the account database or offer cloud storage where you can retrieve transferred files later. Connection infrastructure still processes transient network traffic and the connection information described below. Share only with a device and person you trust.
 
 ### iPhone permissions, history and your choices
 
@@ -29,9 +31,23 @@ DropMesh uses local-network access to discover paired devices and establish loca
 
 ### Connection and security information
 
-Our connection service stores pseudonymous device identifiers, pairing and authorization state, revocation records, timestamps, expiry information, encrypted pairing messages, and hashed challenge and network-source identifiers. We use these records to connect paired devices, enforce trust decisions and prevent abuse. A device identifier can link activity from the same device even though you do not register a DropMesh account.
+Our connection service stores pseudonymous device identifiers, pairing and authorization state, revocation records, timestamps, expiry information, encrypted pairing messages, and hashed challenge and network-source identifiers. We use these records to connect paired devices, enforce trust decisions and prevent abuse. A device identifier can link activity from the same device whether or not you sign in to a DropMesh account.
 
 Network services and infrastructure providers process connection information such as IP addresses to deliver and protect the service. Operational logs and diagnostics may contain connection and error information. We do not describe this service as collecting no data.
+
+### Optional accounts and invitations
+
+If you use Sign in with Apple, DropMesh requests no name or email scopes. Apple provides a stable Sign in with Apple subject identifier. We create a DropMesh account identifier and store the Apple subject, account status and creation time. We also store device and app identifiers, an encrypted Apple refresh credential, hashed session credentials, session and replay-security records, and expiry and revocation information. We use this data to authenticate you, protect sessions and connect your approved devices.
+
+Account device groups store a group identifier, security anchor, signed device-membership history and pending device-approval records. Connection invitations store hashed invite-link capabilities and the request, selected-device, public-key, signature, status and timing information needed to complete or reject a connection. Invite links act as secrets. Share them only with the intended person, and replace a link if it reaches someone else.
+
+Account and invitation records do not contain transferred file contents. Sign out removes the account session from that device; it does not delete the account. Removing a device, deleting local history, rebuilding a device identity and deleting an account are separate actions with different results.
+
+### Account deletion
+
+If you created an optional account, you can start deletion from the signed-in Account page in the app. DropMesh asks you to verify with Apple before deletion starts. The service removes the DropMesh account and its sessions, account-device group, approvals and invitation records, and attempts to revoke the related Sign in with Apple credential. If Apple revocation cannot be confirmed, the app tells you to remove DropMesh from Sign in with Apple in your Apple Account settings.
+
+A status-only deletion receipt may remain temporarily so the app can report completion; a completed receipt does not contain the account identifier or Apple subject. Manual pairings and received files on your devices remain. Delete received files separately in Files or Finder. Apple, infrastructure providers and backups may retain information under their own terms or for security or legal reasons. We do not promise that every copy disappears on the same schedule.
 
 ### Retention and backups
 
@@ -41,7 +57,7 @@ Retention varies by record type. Temporary pairing records have expiry fields; a
 
 If you email support, we receive your email address and the content and attachments you choose to send. We use them to respond and investigate your request. Apple handles App Store purchases and TestFlight distribution under its own privacy terms. Infrastructure and email providers process information needed to provide their services.
 
-You can stop using DropMesh, remove paired devices and delete locally received files. Contact us to request access to or deletion of service data associated with your device. We may need information to verify the request; some security or legally required records may need to remain. Do not send private keys or pairing codes with your request.
+You can stop using DropMesh, remove paired devices and delete locally received files. If you created an account, use the in-app deletion control. You may also contact us to request access to service data associated with your account or device, or for help with deletion. We may need information to verify the request; some security or legally required records may need to remain. Do not send private keys, session credentials, invite links or pairing codes with your request.
 
 ### This website
 
@@ -51,9 +67,11 @@ GitHub Pages hosts our support and privacy pages. Visiting them sends request in
 
 ### 传输和本地数据
 
-DropMesh 允许你向已配对的兼容设备发送文件。Mac 版还支持发送剪贴板内容；iPhone 版允许你选择文件、照片和视频。接收设备将内容保存到接收文件夹。本地设置、传输历史和设备信任记录用于支持这一流程。移除配对设备不会删除对方已经收到的文件。本版本无需注册 DropMesh 账号。
+DropMesh 允许你向已配对的兼容设备发送文件。Mac 版还支持发送剪贴板内容；iPhone 版允许你选择文件、照片和视频。接收设备将内容保存到接收文件夹。本地设置、传输历史和设备信任记录用于支持这一流程。移除配对设备不会删除对方已经收到的文件。
 
-DropMesh 支持直接连接；无法直连时，可通过加密中继传输。中继处理传输流量，不提供供你日后取回文件的网盘。请只向自己信任的设备和人员分享内容。
+你可以在不登录 DropMesh 账号的情况下手动配对设备。你也可以选择“通过 Apple 登录”，连接使用同一 Apple 账户且已获批准的设备，并管理其他 DropMesh 账号发来的连接邀请。
+
+DropMesh 支持直接连接；无法直连时，可通过加密中继传输。中继实时转发加密传输流量。DropMesh 不会在账号数据库中保存文件内容，也不提供供你日后取回传输文件的网盘。连接基础设施仍会处理短暂的网络流量和下文说明的连接信息。请只向自己信任的设备和人员分享内容。
 
 ### iPhone 权限、历史与你的选择
 
@@ -67,9 +85,23 @@ DropMesh 使用本地网络权限发现已配对设备并建立局域网连接�
 
 ### 连接和安全信息
 
-连接服务保存设备标识符、配对和授权状态、撤销记录、时间戳、过期信息、加密配对消息，以及经过哈希处理的验证和网络来源标识。我们使用这些记录连接已配对设备、执行信任决定并防止滥用。虽然无需注册 DropMesh 账号，同一设备的标识符仍可关联该设备的活动。
+连接服务保存设备标识符、配对和授权状态、撤销记录、时间戳、过期信息、加密配对消息，以及经过哈希处理的验证和网络来源标识。我们使用这些记录连接已配对设备、执行信任决定并防止滥用。无论你是否登录 DropMesh 账号，同一设备的标识符都可关联该设备的活动。
 
 网络服务和基础设施提供商处理 IP 地址等连接信息，以提供服务和维护安全。运行日志和诊断信息可能包含连接及错误信息。本服务并非“不收集数据”。
+
+### 可选账号与邀请
+
+如果你使用“通过 Apple 登录”，DropMesh 不会请求姓名或邮箱权限。Apple 会提供一个稳定的“通过 Apple 登录”主体标识。我们会创建 DropMesh 账号标识，并保存 Apple 主体标识、账号状态和创建时间。我们还会保存设备和应用标识、加密的 Apple 刷新凭据、经过哈希处理的会话凭据、会话与重放攻击防护记录，以及过期和撤销信息。这些数据用于验证身份、保护会话并连接你批准的设备。
+
+账号设备组会保存组标识、安全锚点、经签名的设备成员变更历史和待处理的设备批准记录。连接邀请会保存邀请链接能力的哈希值，以及完成或拒绝连接所需的请求、选定设备、公钥、签名、状态和时间信息。邀请链接相当于秘密凭据，请只分享给指定的人；如果链接被其他人获得，请生成新链接。
+
+账号与邀请记录不包含传输的文件内容。退出登录只会移除该设备上的账号会话，不会删除账号。移除设备、删除本地历史、重建设备身份和删除账号是不同的操作，产生的结果也不同。
+
+### 删除账号
+
+如果你创建了可选账号，可从应用中已登录的“账号”页面发起删除。开始删除前，DropMesh 会要求你通过 Apple 验证身份。服务会删除 DropMesh 账号及其会话、账号设备组、批准和邀请记录，并尝试撤销相关的“通过 Apple 登录”凭据。如果无法确认 Apple 撤销成功，应用会提示你在 Apple 账号设置的“通过 Apple 登录”中移除 DropMesh。
+
+服务可能临时保留一份仅包含删除状态的回执，用于向应用报告完成情况；已完成的回执不包含账号标识或 Apple 主体标识。手动配对和设备上已接收的文件会保留；请另行在“文件”或 Finder 中删除已接收文件。Apple、基础设施提供商和备份可能按各自条款或安全、法律要求保留信息。我们不承诺所有副本都会在同一时间范围内消失。
 
 ### 保留与备份
 
@@ -79,7 +111,7 @@ DropMesh 使用本地网络权限发现已配对设备并建立局域网连接�
 
 你通过邮件联系支持时，我们会收到你的邮箱地址，以及你选择发送的内容和附件，用于回复和调查问题。Apple 根据其隐私条款处理 App Store 购买和 TestFlight 分发；基础设施和邮件服务商处理提供相应服务所需的信息。
 
-你可以停止使用 DropMesh、移除配对设备并删除本地接收的文件。如需访问或删除与设备相关的服务数据，请联系我们。我们可能需要信息来核验请求；部分安全或法律要求的记录可能需要保留。请勿在请求中发送私钥或配对码。
+你可以停止使用 DropMesh、移除配对设备并删除本地接收的文件。如果你创建了账号，请使用应用内的删除功能。如需访问与账号或设备相关的服务数据，或需要删除帮助，也可以联系我们。我们可能需要信息来核验请求；部分安全或法律要求的记录可能需要保留。请勿在请求中发送私钥、会话凭据、邀请链接或配对码。
 
 ### 本网站
 
