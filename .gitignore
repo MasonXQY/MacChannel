@@ -9,3 +9,4 @@ DerivedData/
 .superpowers/
 dist/
 dist-app-store/
+Windows/target/

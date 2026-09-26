@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/dropmesh-account",
+    "crates/dropmesh-identity",
+    "crates/dropmesh-platform-windows",
+    "crates/dropmesh-protocol",
+    "crates/dropmesh-storage",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "Proprietary"
+publish = false
+
+[workspace.dependencies]
+aes-gcm = "=0.11.1"
+base64 = "=0.23.1"
+hex = "=0.4.3"
+hkdf = "=0.13.0"
+p256 = "=0.14.0"
+rand_core = "=0.10.1"
+renamore = "=0.3.2"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+same-file = "=1.0.6"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+tempfile = "=3.27.0"
+thiserror = "=2.0.21"
+unicode-normalization = "=0.1.25"
+uuid = { version = "=1.26.1", features = ["serde", "v4"] }
+windows = "=0.62.2"
+zeroize = { version = "=1.9.0", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"

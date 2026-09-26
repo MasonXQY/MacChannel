@@ -412,6 +412,13 @@ public actor RendezvousPairingTransport: BilateralPairingTransport {
         return encoder
     }()
     private static let decoder = JSONDecoder()
+
+    /// Freezes the exact sorted JSON consumed by non-Swift protocol peers.
+    /// This is internal so production callers continue to use the transport API.
+    static func _testOnlyEncodeOfferWire(_ offer: PairingOffer) throws -> Data {
+        try encoder.encode(OfferWire(offer))
+    }
+
     private static func date(milliseconds: Int64) -> Date {
         Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
     }

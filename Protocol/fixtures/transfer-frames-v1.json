@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vectors": [
+    { "name": "pause", "kind": "pause", "wireBase64": "AQU=" },
+    { "name": "resume", "kind": "resume", "wireBase64": "AQY=" },
+    { "name": "cancel", "kind": "cancel", "wireBase64": "AQc=" },
+    { "name": "complete", "kind": "complete", "wireBase64": "AQg=" },
+    { "name": "source-unavailable", "kind": "error", "wireBase64": "AQkABg==" },
+    { "name": "empty-resume-map", "kind": "accept", "wireBase64": "AQIAAAAA" },
+    { "name": "one-resume-range", "kind": "ackRanges", "wireBase64": "AQQAAAABAAAAAgAAAAMAAAAF" },
+    { "name": "small-chunk", "kind": "chunk", "wireBase64": "AQMAAAABAAAAAgAAAAAAAAADAAAAA2FiYw==" },
+    { "name": "single-file-offer", "kind": "offer", "wireBase64": "AQEAESIzRFVmd4iZqrvM3e7/AAAAAQAJcGhvdG8uanBnAQAAAAAAAAADQdlU/EAgAAAAAAABungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=" }
+  ]
+}

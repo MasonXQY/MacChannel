@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "vectors": [
+    { "name": "unsupported-version", "wireBase64": "AgU=", "expectedError": "unsupportedVersion" },
+    { "name": "trailing-byte", "wireBase64": "AQUA", "expectedError": "invalidFrame" },
+    { "name": "unknown-frame-kind", "wireBase64": "Af8=", "expectedError": "invalidFrame" },
+    { "name": "noncanonical-resume-ranges", "wireBase64": "AQIAAAACAAAAAAAAAAAAAAABAAAAAAAAAAEAAAAC", "expectedError": "invalidResumeMap" },
+    { "name": "oversized-chunk", "wireBase64": "AQMAAAAAAAAAAAAAAAAAAAAAAAD/rQ==", "expectedError": "invalidChunk" }
+  ]
+}

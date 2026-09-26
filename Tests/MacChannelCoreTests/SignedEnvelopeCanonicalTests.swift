@@ -36,7 +36,7 @@ final class SignedEnvelopeCanonicalTests: XCTestCase {
             .deletingLastPathComponent()
         return try JSONDecoder().decode(
             FixtureFile.self,
-            from: Data(contentsOf: root.appendingPathComponent("Fixtures/signed-envelope-v1.json"))
+            from: Data(contentsOf: root.appendingPathComponent("Protocol/fixtures/signed-envelope-v1.json"))
         )
     }
 }

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "keyBase64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "transferID": "00112233-4455-6677-8899-aabbccddeeff",
+  "sequence": 7,
+  "direction": 1,
+  "nonceEpochBase64": "oKGio6SlpqeoqaqrrK2urw==",
+  "plaintextBase64": "RHJvcE1lc2ggZml4dHVyZQ==",
+  "wireBase64": "TUNYRgEBABEiM0RVZneImaq7zN3u/wAAAAAAAAAHoKGio6SlpqeoqaqrrK2ur61dJ1GQg5Lt6Ci1x4xtS2SJWP32rFKDy4WUOMepio9G"
+}
