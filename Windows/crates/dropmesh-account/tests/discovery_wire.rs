@@ -1,7 +1,10 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use dropmesh_account::{AccountDiscovery, AccountError, encode_discovery_request};
+use dropmesh_account::{
+    AccountDiscovery, AccountError, AccountGroupPage, encode_discovery_request,
+    encode_history_request,
+};
 use p256::{
     SecretKey,
     ecdsa::{SigningKey, signature::Signer as _},
@@ -74,6 +77,13 @@ fn present_response(anchor: &str, digest: [u8; 32]) -> String {
     )
 }
 
+fn history_response(anchor: &str, digest: [u8; 32]) -> String {
+    let hash = STANDARD.encode(digest);
+    format!(
+        "{{\"groupID\":\"{GROUP}\",\"generation\":1,\"headSequence\":1,\"headHash\":\"{hash}\",\"afterSequence\":0,\"nextSequence\":1,\"hasMore\":false,\"events\":[{anchor}]}}"
+    )
+}
+
 #[test]
 fn decodes_absent_and_strictly_verified_present_discovery() {
     assert_eq!(
@@ -122,6 +132,66 @@ fn rejects_ambiguous_or_inconsistently_bound_discovery() {
             AccountDiscovery::decode_json_strict(invalid.as_bytes(), ACCOUNT),
             Err(AccountError::InvalidWire),
             "{name}",
+        );
+    }
+}
+
+#[test]
+fn history_request_and_initial_page_are_exact_and_chain_verified() {
+    assert_eq!(
+        encode_history_request("com.zensystech.dropmesh", TOKEN, GROUP, 0, None).unwrap(),
+        format!(
+            "{{\"accessToken\":\"{TOKEN}\",\"afterSequence\":\"0\",\"audience\":\"com.zensystech.dropmesh\",\"expectedHeadHash\":\"\",\"groupID\":\"{GROUP}\",\"purpose\":\"dropmesh.account.group.events.v1\"}}"
+        )
+        .into_bytes()
+    );
+    assert_eq!(
+        encode_history_request("com.zensystech.dropmesh", TOKEN, GROUP, 1, None),
+        Err(AccountError::InvalidWire)
+    );
+
+    let (anchor, digest) = bootstrap_wire();
+    let page = AccountGroupPage::decode_json_strict(
+        history_response(&anchor, digest).as_bytes(),
+        ACCOUNT,
+        GROUP,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(page.generation(), 1);
+    assert_eq!(page.head_sequence(), 1);
+    assert_eq!(page.head_hash(), digest);
+    assert_eq!(page.after_sequence(), 0);
+    assert_eq!(page.next_sequence(), 1);
+    assert!(!page.has_more());
+    assert_eq!(page.events().len(), 1);
+    assert_eq!(page.events()[0].digest(), digest);
+}
+
+#[test]
+fn history_page_rejects_empty_ambiguous_or_inconsistent_chains() {
+    let (anchor, digest) = bootstrap_wire();
+    let valid = history_response(&anchor, digest);
+    let hash = STANDARD.encode(digest);
+    for (name, invalid) in [
+        ("empty events", valid.replace(&format!("[{anchor}]"), "[]")),
+        (
+            "wrong next",
+            valid.replace("\"nextSequence\":1", "\"nextSequence\":0"),
+        ),
+        (
+            "wrong head",
+            valid.replace(&hash, &STANDARD.encode([4; 32])),
+        ),
+        ("duplicate", valid.replacen('{', "{\"groupID\":\"x\",", 1)),
+        ("unknown", valid.replacen('{', "{\"extra\":true,", 1)),
+    ] {
+        assert_eq!(
+            AccountGroupPage::decode_json_strict(invalid.as_bytes(), ACCOUNT, GROUP, 0, None, None,),
+            Err(AccountError::InvalidWire),
+            "{name}"
         );
     }
 }

@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use dropmesh_account::{AccountDiscovery, encode_discovery_request};
+use dropmesh_account::{
+    AccountDiscovery, AccountGroupPage, encode_discovery_request, encode_history_request,
+};
 use dropmesh_identity::DeviceIdentity;
 use dropmesh_rendezvous::{
     Challenge, MAX_FRAME_BYTES, MAX_HTTP_BODY_BYTES, RendezvousError, SUBPROTOCOL, ServerFrame,
@@ -35,6 +37,8 @@ pub enum NetworkError {
     ResponseTooLarge,
     #[error("rendezvous authentication was rejected")]
     AuthenticationRejected,
+    #[error("the account group changed while it was being read")]
+    GroupChanged,
     #[error("network operation timed out")]
     TimedOut,
     #[error("network transport failed")]
@@ -185,6 +189,53 @@ impl AccountEnrollmentClient {
             200 => AccountDiscovery::decode_json_strict(&response.body, expected_account_id)
                 .map_err(|_| NetworkError::InvalidResponse),
             401 => Err(NetworkError::AuthenticationRejected),
+            _ => Err(NetworkError::InvalidResponse),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn history_page(
+        &self,
+        identity: &dyn DeviceIdentity,
+        nonce: &[u8; 32],
+        epoch_milliseconds: i64,
+        access_token: &str,
+        expected_account_id: &str,
+        group_id: &str,
+        after_sequence: u64,
+        expected_head_hash: Option<[u8; 32]>,
+        expected_previous_hash: Option<[u8; 32]>,
+    ) -> Result<AccountGroupPage, NetworkError> {
+        let payload = encode_history_request(
+            &self.audience,
+            access_token,
+            group_id,
+            after_sequence,
+            expected_head_hash,
+        )
+        .map_err(|_| NetworkError::InvalidConfiguration)?;
+        let response = self
+            .http
+            .post_signed(
+                "/v1/account/group/events",
+                identity,
+                nonce,
+                &payload,
+                epoch_milliseconds,
+            )
+            .await?;
+        match response.status {
+            200 => AccountGroupPage::decode_json_strict(
+                &response.body,
+                expected_account_id,
+                group_id,
+                after_sequence,
+                expected_head_hash,
+                expected_previous_hash,
+            )
+            .map_err(|_| NetworkError::InvalidResponse),
+            401 => Err(NetworkError::AuthenticationRejected),
+            409 => Err(NetworkError::GroupChanged),
             _ => Err(NetworkError::InvalidResponse),
         }
     }
@@ -446,6 +497,24 @@ mod tests {
         }
     }
 
+    fn bootstrap_wire(identity: &TestIdentity) -> (String, [u8; 32]) {
+        let account = "11111111-1111-1111-1111-111111111111";
+        let group = "22222222-2222-2222-2222-222222222222";
+        let device = identity.device_id();
+        let public = STANDARD.encode(identity.signing_public_key().as_raw_xy());
+        let payload = format!(
+            "{{\"accountID\":\"{account}\",\"action\":\"bootstrap\",\"actorDeviceID\":\"{device}\",\"actorPublicKey\":\"{public}\",\"epochMilliseconds\":1800000000000,\"generation\":1,\"groupID\":\"{group}\",\"previousHash\":\"\",\"purpose\":\"dropmesh.account.group.event.v1\",\"sequence\":1,\"subjectDeviceID\":\"{device}\",\"subjectPublicKey\":\"{public}\"}}"
+        );
+        let signature = identity.sign(payload.as_bytes()).unwrap();
+        let wire = format!(
+            "{{\"payload\":\"{}\",\"signature\":\"{}\",\"subjectSignature\":\"\"}}",
+            STANDARD.encode(payload.as_bytes()),
+            STANDARD.encode(signature.as_bytes())
+        );
+        let event = dropmesh_account::VerifiedEvent::decode_json_strict(wire.as_bytes()).unwrap();
+        (wire, event.digest())
+    }
+
     #[tokio::test]
     async fn websocket_authenticates_then_delivers_presence() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -586,6 +655,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(discovery, dropmesh_account::AccountDiscovery::Absent);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_history_page_posts_the_pinned_cursor_and_verifies_the_chain() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let identity = TestIdentity::seeded(31);
+        let (anchor, digest) = bootstrap_wire(&identity);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut block = [0_u8; 1_024];
+                let count = stream.read(&mut block).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&block[..count]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            assert!(headers.starts_with("POST /v1/account/group/events HTTP/1.1\r\n"));
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .map(str::parse::<usize>)
+                })
+                .unwrap()
+                .unwrap();
+            while request.len() - header_end < length {
+                let mut block = [0_u8; 1_024];
+                let count = stream.read(&mut block).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&block[..count]);
+            }
+            let envelope =
+                SignedEnvelope::decode_canonical_json(&request[header_end..header_end + length])
+                    .unwrap();
+            envelope.verify().unwrap();
+            assert_eq!(
+                envelope.payload,
+                br#"{"accessToken":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","afterSequence":"0","audience":"com.zensystech.dropmesh","expectedHeadHash":"","groupID":"22222222-2222-2222-2222-222222222222","purpose":"dropmesh.account.group.events.v1"}"#
+            );
+            let hash = STANDARD.encode(digest);
+            let body = format!(
+                "{{\"groupID\":\"22222222-2222-2222-2222-222222222222\",\"generation\":1,\"headSequence\":1,\"headHash\":\"{hash}\",\"afterSequence\":0,\"nextSequence\":1,\"hasMore\":false,\"events\":[{anchor}]}}"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = AccountEnrollmentClient::new_with_policy(
+            &format!("http://{address}"),
+            "com.zensystech.dropmesh",
+            true,
+        )
+        .unwrap();
+        let page = client
+            .history_page(
+                &identity,
+                &[8; 32],
+                1_800_000_000_001,
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "11111111-1111-1111-1111-111111111111",
+                "22222222-2222-2222-2222-222222222222",
+                0,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.events().len(), 1);
+        assert_eq!(page.head_hash(), digest);
         server.await.unwrap();
     }
 

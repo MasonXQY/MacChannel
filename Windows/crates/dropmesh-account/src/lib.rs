@@ -13,6 +13,7 @@ use thiserror::Error;
 
 const PURPOSE: &str = "dropmesh.account.group.event.v1";
 const DISCOVERY_PURPOSE: &str = "dropmesh.account.group.discover.v1";
+const HISTORY_PURPOSE: &str = "dropmesh.account.group.events.v1";
 
 /// Creates the canonical inner payload for signed account-group discovery.
 ///
@@ -24,24 +25,48 @@ pub fn encode_discovery_request(
     audience: &str,
     access_token: &str,
 ) -> Result<Vec<u8>, AccountError> {
-    if audience.is_empty()
-        || audience.len() > 255
-        || audience.chars().any(char::is_whitespace)
-        || audience.chars().any(char::is_control)
-        || access_token.len() != 43
-    {
-        return Err(AccountError::InvalidWire);
-    }
-    let token = URL_SAFE_NO_PAD
-        .decode(access_token)
-        .map_err(|_| AccountError::InvalidWire)?;
-    if token.len() != 32 || URL_SAFE_NO_PAD.encode(token) != access_token {
+    if !valid_credential(audience, 255) || !valid_token(access_token) {
         return Err(AccountError::InvalidWire);
     }
     let fields = BTreeMap::from([
         ("accessToken", access_token),
         ("audience", audience),
         ("purpose", DISCOVERY_PURPOSE),
+    ]);
+    serde_json::to_vec(&fields).map_err(|_| AccountError::InvalidWire)
+}
+
+/// Creates the canonical inner payload for one verified history page.
+///
+/// # Errors
+///
+/// Returns [`AccountError::InvalidWire`] for invalid credentials, identifiers,
+/// counters, or a missing/mismatched pinned head.
+pub fn encode_history_request(
+    audience: &str,
+    access_token: &str,
+    group_id: &str,
+    after_sequence: u64,
+    expected_head_hash: Option<[u8; 32]>,
+) -> Result<Vec<u8>, AccountError> {
+    if !valid_credential(audience, 255)
+        || !valid_token(access_token)
+        || !is_lower_uuid(group_id)
+        || after_sequence > 8_192
+        || (after_sequence == 0) != expected_head_hash.is_none()
+    {
+        return Err(AccountError::InvalidWire);
+    }
+    let after_sequence = after_sequence.to_string();
+    let expected_head_hash =
+        expected_head_hash.map_or_else(String::new, |hash| STANDARD.encode(hash));
+    let fields = BTreeMap::from([
+        ("accessToken", access_token.to_owned()),
+        ("afterSequence", after_sequence),
+        ("audience", audience.to_owned()),
+        ("expectedHeadHash", expected_head_hash),
+        ("groupID", group_id.to_owned()),
+        ("purpose", HISTORY_PURPOSE.to_owned()),
     ]);
     serde_json::to_vec(&fields).map_err(|_| AccountError::InvalidWire)
 }
@@ -276,6 +301,141 @@ pub struct AccountDiscoveryMetadata {
     anchor_hash: [u8; 32],
     head_sequence: u64,
     head_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountGroupPage {
+    group_id: String,
+    generation: u64,
+    head_sequence: u64,
+    head_hash: [u8; 32],
+    after_sequence: u64,
+    next_sequence: u64,
+    has_more: bool,
+    events: Vec<VerifiedEvent>,
+}
+
+impl AccountGroupPage {
+    /// Strictly decodes one server page and verifies its signed hash chain.
+    ///
+    /// `expected_head_hash` and `expected_previous_hash` must both be absent
+    /// for the initial page and present for every continuation page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountError::InvalidWire`] for any schema, binding, proof,
+    /// pagination, or hash-chain inconsistency.
+    pub fn decode_json_strict(
+        bytes: &[u8],
+        expected_account_id: &str,
+        expected_group_id: &str,
+        expected_after_sequence: u64,
+        expected_head_hash: Option<[u8; 32]>,
+        expected_previous_hash: Option<[u8; 32]>,
+    ) -> Result<Self, AccountError> {
+        if bytes.len() > 65_536
+            || !is_lower_uuid(expected_account_id)
+            || !is_lower_uuid(expected_group_id)
+            || expected_after_sequence > 8_192
+            || (expected_after_sequence == 0)
+                != (expected_head_hash.is_none() && expected_previous_hash.is_none())
+        {
+            return Err(AccountError::InvalidWire);
+        }
+        let wire: GroupPageWire =
+            serde_json::from_slice(bytes).map_err(|_| AccountError::InvalidWire)?;
+        if wire.group_id != expected_group_id
+            || wire.generation == 0
+            || wire.generation > i64::MAX as u64
+            || !(1..=8_192).contains(&wire.head_sequence)
+            || wire.after_sequence != expected_after_sequence
+            || wire.next_sequence > 8_192
+            || wire.events.is_empty()
+            || wire.events.len() > 16
+        {
+            return Err(AccountError::InvalidWire);
+        }
+        let head_hash: [u8; 32] = canonical_base64(&wire.head_hash, 44)?
+            .try_into()
+            .map_err(|_| AccountError::InvalidWire)?;
+        if expected_head_hash.is_some_and(|expected| expected != head_hash) {
+            return Err(AccountError::InvalidWire);
+        }
+        let count = u64::try_from(wire.events.len()).map_err(|_| AccountError::InvalidWire)?;
+        if wire.next_sequence != wire.after_sequence.saturating_add(count)
+            || wire.next_sequence > wire.head_sequence
+            || wire.has_more != (wire.next_sequence < wire.head_sequence)
+        {
+            return Err(AccountError::InvalidWire);
+        }
+        let mut previous_hash = expected_previous_hash.unwrap_or([0; 32]);
+        let mut events = Vec::with_capacity(wire.events.len());
+        for (offset, raw) in wire.events.into_iter().enumerate() {
+            let event = VerifiedEvent::decode_json_strict(raw.get().as_bytes())?;
+            let sequence = wire
+                .after_sequence
+                .checked_add(u64::try_from(offset).map_err(|_| AccountError::InvalidWire)?)
+                .and_then(|value| value.checked_add(1))
+                .ok_or(AccountError::InvalidWire)?;
+            if event.account_id != expected_account_id
+                || event.group_id != expected_group_id
+                || event.generation != wire.generation
+                || event.sequence != sequence
+                || event.previous_hash != previous_hash
+                || (sequence == 1 && event.action != Action::Bootstrap)
+            {
+                return Err(AccountError::InvalidWire);
+            }
+            previous_hash = event.digest;
+            events.push(event);
+        }
+        if !wire.has_more && previous_hash != head_hash {
+            return Err(AccountError::InvalidWire);
+        }
+        Ok(Self {
+            group_id: wire.group_id,
+            generation: wire.generation,
+            head_sequence: wire.head_sequence,
+            head_hash,
+            after_sequence: wire.after_sequence,
+            next_sequence: wire.next_sequence,
+            has_more: wire.has_more,
+            events,
+        })
+    }
+
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+    #[must_use]
+    pub const fn head_sequence(&self) -> u64 {
+        self.head_sequence
+    }
+    #[must_use]
+    pub const fn head_hash(&self) -> [u8; 32] {
+        self.head_hash
+    }
+    #[must_use]
+    pub const fn after_sequence(&self) -> u64 {
+        self.after_sequence
+    }
+    #[must_use]
+    pub const fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+    #[must_use]
+    pub const fn has_more(&self) -> bool {
+        self.has_more
+    }
+    #[must_use]
+    pub fn events(&self) -> &[VerifiedEvent] {
+        &self.events
+    }
 }
 
 impl AccountDiscoveryMetadata {
@@ -560,6 +720,105 @@ struct DiscoveryWire {
     head_hash: Option<String>,
 }
 
+struct GroupPageWire {
+    group_id: String,
+    generation: u64,
+    head_sequence: u64,
+    head_hash: String,
+    after_sequence: u64,
+    next_sequence: u64,
+    has_more: bool,
+    events: Vec<Box<RawValue>>,
+}
+
+impl<'de> Deserialize<'de> for GroupPageWire {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct GroupPageVisitor;
+
+        impl<'de> Visitor<'de> for GroupPageVisitor {
+            type Value = GroupPageWire;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an exact bounded account group page")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut group_id = None;
+                let mut generation = None;
+                let mut head_sequence = None;
+                let mut head_hash = None;
+                let mut after_sequence = None;
+                let mut next_sequence = None;
+                let mut has_more = None;
+                let mut events = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "groupID" if group_id.is_none() => group_id = Some(map.next_value()?),
+                        "generation" if generation.is_none() => {
+                            generation = Some(map.next_value()?);
+                        }
+                        "headSequence" if head_sequence.is_none() => {
+                            head_sequence = Some(map.next_value()?);
+                        }
+                        "headHash" if head_hash.is_none() => head_hash = Some(map.next_value()?),
+                        "afterSequence" if after_sequence.is_none() => {
+                            after_sequence = Some(map.next_value()?);
+                        }
+                        "nextSequence" if next_sequence.is_none() => {
+                            next_sequence = Some(map.next_value()?);
+                        }
+                        "hasMore" if has_more.is_none() => has_more = Some(map.next_value()?),
+                        "events" if events.is_none() => events = Some(map.next_value()?),
+                        "groupID" => return Err(de::Error::duplicate_field("groupID")),
+                        "generation" => return Err(de::Error::duplicate_field("generation")),
+                        "headSequence" => return Err(de::Error::duplicate_field("headSequence")),
+                        "headHash" => return Err(de::Error::duplicate_field("headHash")),
+                        "afterSequence" => return Err(de::Error::duplicate_field("afterSequence")),
+                        "nextSequence" => return Err(de::Error::duplicate_field("nextSequence")),
+                        "hasMore" => return Err(de::Error::duplicate_field("hasMore")),
+                        "events" => return Err(de::Error::duplicate_field("events")),
+                        _ => {
+                            return Err(de::Error::unknown_field(
+                                &key,
+                                &[
+                                    "groupID",
+                                    "generation",
+                                    "headSequence",
+                                    "headHash",
+                                    "afterSequence",
+                                    "nextSequence",
+                                    "hasMore",
+                                    "events",
+                                ],
+                            ));
+                        }
+                    }
+                }
+                Ok(GroupPageWire {
+                    group_id: group_id.ok_or_else(|| de::Error::missing_field("groupID"))?,
+                    generation: generation.ok_or_else(|| de::Error::missing_field("generation"))?,
+                    head_sequence: head_sequence
+                        .ok_or_else(|| de::Error::missing_field("headSequence"))?,
+                    head_hash: head_hash.ok_or_else(|| de::Error::missing_field("headHash"))?,
+                    after_sequence: after_sequence
+                        .ok_or_else(|| de::Error::missing_field("afterSequence"))?,
+                    next_sequence: next_sequence
+                        .ok_or_else(|| de::Error::missing_field("nextSequence"))?,
+                    has_more: has_more.ok_or_else(|| de::Error::missing_field("hasMore"))?,
+                    events: events.ok_or_else(|| de::Error::missing_field("events"))?,
+                })
+            }
+        }
+        deserializer.deserialize_map(GroupPageVisitor)
+    }
+}
+
 impl<'de> Deserialize<'de> for DiscoveryWire {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -746,6 +1005,23 @@ fn canonical_base64(value: &str, encoded_limit: usize) -> Result<Vec<u8>, Accoun
         return Err(AccountError::InvalidWire);
     }
     Ok(bytes)
+}
+
+fn valid_credential(value: &str, maximum_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum_bytes
+        && !value.chars().any(char::is_whitespace)
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_token(value: &str) -> bool {
+    if value.len() != 43 {
+        return false;
+    }
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(value) else {
+        return false;
+    };
+    bytes.len() == 32 && URL_SAFE_NO_PAD.encode(bytes) == value
 }
 
 fn validate_public_key(bytes: &[u8]) -> Result<(), AccountError> {
