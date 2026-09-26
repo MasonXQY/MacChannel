@@ -31,10 +31,12 @@ Windows shell.
   crash recovery, real NTFS 8.3 alias rejection, and file-identity alias checks.
 - Phase 3 is in progress. The first headless slice implements strict signed
   HTTP and authenticated WSS codecs, bounded production HTTPS/WSS transport,
-  and a Windows CNG-backed JSON-lines presence peer. Local tests prove the
-  existing challenge/auth/presence contract; account enrollment, pairing,
-  mDNS, WebRTC and TURN interoperability are still outstanding. All Windows
-  UI/packaging work remains unstarted.
+  and a Windows CNG-backed JSON-lines presence peer. The next account slice
+  verifies finalized Swift/Go membership events and bounded group-discovery
+  responses, and adds signed same-account discovery to the headless peer
+  without exposing access tokens in process arguments. Full history sync,
+  approval, pairing, mDNS, WebRTC and TURN interoperability are still
+  outstanding. All Windows UI/packaging work remains unstarted.
 
 ## Non-negotiable gates
 

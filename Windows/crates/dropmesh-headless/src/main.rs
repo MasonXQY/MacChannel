@@ -1,24 +1,25 @@
 #[cfg(windows)]
 mod windows_main {
+    use std::io::Read as _;
     use std::process::ExitCode;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use clap::Parser as _;
+    use dropmesh_account::AccountDiscovery;
     use dropmesh_headless::{HeadlessArguments, HeadlessCommand};
-    use dropmesh_network::PresenceConnection;
+    use dropmesh_network::{AccountEnrollmentClient, PresenceConnection};
     use dropmesh_platform_windows::WindowsCngIdentity;
     use dropmesh_rendezvous::ServerFrame;
     use serde_json::json;
 
     pub fn run() -> ExitCode {
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
+        let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .max_blocking_threads(2)
             .enable_all()
             .build()
-        {
-            Ok(runtime) => runtime,
-            Err(_) => return fail("runtime_unavailable"),
+        else {
+            return fail("runtime_unavailable");
         };
         runtime.block_on(run_async())
     }
@@ -27,9 +28,8 @@ mod windows_main {
         let arguments = HeadlessArguments::parse();
         match arguments.command {
             HeadlessCommand::Presence(arguments) => {
-                let identity = match WindowsCngIdentity::load_or_create(&arguments.key_name) {
-                    Ok(identity) => identity,
-                    Err(_) => return fail("identity_unavailable"),
+                let Ok(identity) = WindowsCngIdentity::load_or_create(&arguments.key_name) else {
+                    return fail("identity_unavailable");
                 };
                 let epoch = match SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -39,20 +39,19 @@ mod windows_main {
                     Some(epoch) if epoch > 0 => epoch,
                     _ => return fail("clock_unavailable"),
                 };
-                let mut connection =
-                    match PresenceConnection::connect(&arguments.origin, &identity, epoch).await {
-                        Ok(connection) => connection,
-                        Err(_) => return fail("connection_failed"),
-                    };
+                let Ok(mut connection) =
+                    PresenceConnection::connect(&arguments.origin, &identity, epoch).await
+                else {
+                    return fail("connection_failed");
+                };
                 println!(
                     "{}",
                     json!({"type":"connected","deviceID":connection.device_id()})
                 );
                 let mut delivered = 0_u32;
                 loop {
-                    let event = match connection.next_event().await {
-                        Ok(event) => event,
-                        Err(_) => return fail("connection_closed"),
+                    let Ok(event) = connection.next_event().await else {
+                        return fail("connection_closed");
                     };
                     println!("{}", event_json(event));
                     delivered = delivered.saturating_add(1);
@@ -64,7 +63,76 @@ mod windows_main {
                     }
                 }
             }
+            HeadlessCommand::AccountDiscover(arguments) => {
+                let Ok(identity) = WindowsCngIdentity::load_or_create(&arguments.key_name) else {
+                    return fail("identity_unavailable");
+                };
+                let Ok(access_token) = read_access_token() else {
+                    return fail("access_token_unavailable");
+                };
+                let Some(epoch) = epoch_milliseconds() else {
+                    return fail("clock_unavailable");
+                };
+                let mut nonce = [0_u8; 32];
+                if getrandom::fill(&mut nonce).is_err() {
+                    return fail("random_unavailable");
+                }
+                let Ok(client) =
+                    AccountEnrollmentClient::new(&arguments.origin, &arguments.audience)
+                else {
+                    return fail("account_configuration_invalid");
+                };
+                let Ok(discovery) = client
+                    .discover(
+                        &identity,
+                        &nonce,
+                        epoch,
+                        &access_token,
+                        &arguments.account_id,
+                    )
+                    .await
+                else {
+                    return fail("account_discovery_failed");
+                };
+                match discovery {
+                    AccountDiscovery::Absent => {
+                        println!("{}", json!({"type":"account-group","status":"absent"}));
+                    }
+                    AccountDiscovery::Present(metadata) => println!(
+                        "{}",
+                        json!({
+                            "type":"account-group", "status":"present",
+                            "groupID":metadata.group_id(), "generation":metadata.generation(),
+                            "headSequence":metadata.head_sequence()
+                        })
+                    ),
+                }
+                ExitCode::SUCCESS
+            }
         }
+    }
+
+    fn epoch_milliseconds() -> Option<i64> {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+            .filter(|epoch| *epoch > 0)
+    }
+
+    fn read_access_token() -> Result<String, ()> {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(129)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ())?;
+        if bytes.len() > 128 {
+            return Err(());
+        }
+        while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+            bytes.pop();
+        }
+        String::from_utf8(bytes).map_err(|_| ())
     }
 
     fn event_json(event: ServerFrame) -> serde_json::Value {

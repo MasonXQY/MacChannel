@@ -333,9 +333,11 @@ name = "dropmesh-headless"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dropmesh-account",
  "dropmesh-network",
  "dropmesh-platform-windows",
  "dropmesh-rendezvous",
+ "getrandom 0.4.3",
  "serde_json",
  "tokio",
 ]
@@ -357,6 +359,7 @@ name = "dropmesh-network"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "dropmesh-account",
  "dropmesh-identity",
  "dropmesh-protocol",
  "dropmesh-rendezvous",

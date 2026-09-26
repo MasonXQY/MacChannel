@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use dropmesh_account::{AccountDiscovery, encode_discovery_request};
 use dropmesh_identity::DeviceIdentity;
 use dropmesh_rendezvous::{
     Challenge, MAX_FRAME_BYTES, MAX_HTTP_BODY_BYTES, RendezvousError, SUBPROTOCOL, ServerFrame,
@@ -67,10 +68,15 @@ pub struct SignedHttpClient {
 
 impl SignedHttpClient {
     pub fn new(origin: &str) -> Result<Self, NetworkError> {
+        Self::new_with_policy(origin, false)
+    }
+
+    fn new_with_policy(origin: &str, allow_insecure: bool) -> Result<Self, NetworkError> {
         install_crypto_provider();
-        let origin = parse_origin(origin, "https")?;
+        let required_scheme = if allow_insecure { "http" } else { "https" };
+        let origin = parse_origin(origin, required_scheme)?;
         let client = Client::builder()
-            .https_only(true)
+            .https_only(!allow_insecure)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .build()
@@ -121,6 +127,66 @@ impl SignedHttpClient {
             status: status.as_u16(),
             body: received,
         })
+    }
+}
+
+/// Signed account-enrollment operations required before a Windows device can
+/// join an existing same-account trust group.
+#[derive(Clone)]
+pub struct AccountEnrollmentClient {
+    http: SignedHttpClient,
+    audience: String,
+}
+
+impl AccountEnrollmentClient {
+    pub fn new(origin: &str, audience: &str) -> Result<Self, NetworkError> {
+        Self::new_with_policy(origin, audience, false)
+    }
+
+    fn new_with_policy(
+        origin: &str,
+        audience: &str,
+        allow_insecure: bool,
+    ) -> Result<Self, NetworkError> {
+        const VALIDATION_TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        encode_discovery_request(audience, VALIDATION_TOKEN)
+            .map_err(|_| NetworkError::InvalidConfiguration)?;
+        let http = SignedHttpClient::new_with_policy(origin, allow_insecure)?;
+        if http.origin.path() != "/" {
+            return Err(NetworkError::InvalidConfiguration);
+        }
+        Ok(Self {
+            http,
+            audience: audience.to_owned(),
+        })
+    }
+
+    pub async fn discover(
+        &self,
+        identity: &dyn DeviceIdentity,
+        nonce: &[u8; 32],
+        epoch_milliseconds: i64,
+        access_token: &str,
+        expected_account_id: &str,
+    ) -> Result<AccountDiscovery, NetworkError> {
+        let payload = encode_discovery_request(&self.audience, access_token)
+            .map_err(|_| NetworkError::InvalidConfiguration)?;
+        let response = self
+            .http
+            .post_signed(
+                "/v1/account/group/discover",
+                identity,
+                nonce,
+                &payload,
+                epoch_milliseconds,
+            )
+            .await?;
+        match response.status {
+            200 => AccountDiscovery::decode_json_strict(&response.body, expected_account_id)
+                .map_err(|_| NetworkError::InvalidResponse),
+            401 => Err(NetworkError::AuthenticationRejected),
+            _ => Err(NetworkError::InvalidResponse),
+        }
     }
 }
 
@@ -332,7 +398,10 @@ mod tests {
         ecdsa::{SigningKey, signature::Signer as _},
         elliptic_curve::sec1::ToSec1Point as _,
     };
-    use tokio::net::TcpListener;
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+    };
     use tokio_tungstenite::{
         accept_hdr_async,
         tungstenite::handshake::server::{Request, Response},
@@ -447,6 +516,76 @@ mod tests {
                 online: true
             }
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn account_discovery_posts_a_signed_request_and_verifies_the_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut block = [0_u8; 1_024];
+                let count = stream.read(&mut block).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&block[..count]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            assert!(headers.starts_with("POST /v1/account/group/discover HTTP/1.1\r\n"));
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .map(str::parse::<usize>)
+                })
+                .unwrap()
+                .unwrap();
+            while request.len() - header_end < length {
+                let mut block = [0_u8; 1_024];
+                let count = stream.read(&mut block).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&block[..count]);
+            }
+            let envelope =
+                SignedEnvelope::decode_canonical_json(&request[header_end..header_end + length])
+                    .unwrap();
+            envelope.verify().unwrap();
+            assert_eq!(
+                envelope.payload,
+                br#"{"accessToken":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","audience":"com.zensystech.dropmesh","purpose":"dropmesh.account.group.discover.v1"}"#
+            );
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 19\r\nConnection: close\r\n\r\n{\"status\":\"absent\"}",
+                )
+                .await
+                .unwrap();
+        });
+
+        let identity = TestIdentity::seeded(29);
+        let client = AccountEnrollmentClient::new_with_policy(
+            &format!("http://{address}"),
+            "com.zensystech.dropmesh",
+            true,
+        )
+        .unwrap();
+        let discovery = client
+            .discover(
+                &identity,
+                &[7; 32],
+                1_800_000_000_000,
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "11111111-1111-1111-1111-111111111111",
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery, dropmesh_account::AccountDiscovery::Absent);
         server.await.unwrap();
     }
 

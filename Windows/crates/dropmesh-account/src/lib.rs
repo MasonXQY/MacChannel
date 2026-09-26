@@ -1,13 +1,50 @@
 use std::collections::{BTreeMap, btree_map::Entry};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier as _};
 use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
+use serde_json::value::RawValue;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 const PURPOSE: &str = "dropmesh.account.group.event.v1";
+const DISCOVERY_PURPOSE: &str = "dropmesh.account.group.discover.v1";
+
+/// Creates the canonical inner payload for signed account-group discovery.
+///
+/// # Errors
+///
+/// Returns [`AccountError::InvalidWire`] when the audience or access token
+/// cannot be accepted by the existing Swift/Go service contract.
+pub fn encode_discovery_request(
+    audience: &str,
+    access_token: &str,
+) -> Result<Vec<u8>, AccountError> {
+    if audience.is_empty()
+        || audience.len() > 255
+        || audience.chars().any(char::is_whitespace)
+        || audience.chars().any(char::is_control)
+        || access_token.len() != 43
+    {
+        return Err(AccountError::InvalidWire);
+    }
+    let token = URL_SAFE_NO_PAD
+        .decode(access_token)
+        .map_err(|_| AccountError::InvalidWire)?;
+    if token.len() != 32 || URL_SAFE_NO_PAD.encode(token) != access_token {
+        return Err(AccountError::InvalidWire);
+    }
+    let fields = BTreeMap::from([
+        ("accessToken", access_token),
+        ("audience", audience),
+        ("purpose", DISCOVERY_PURPOSE),
+    ]);
+    serde_json::to_vec(&fields).map_err(|_| AccountError::InvalidWire)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AccountError {
@@ -44,6 +81,38 @@ pub struct VerifiedEvent {
 }
 
 impl VerifiedEvent {
+    /// Parses the exact three-field event JSON and verifies every required proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountError::InvalidWire`] for noncanonical input and
+    /// [`AccountError::InvalidProof`] when an event signature is invalid.
+    pub fn decode_json_strict(bytes: &[u8]) -> Result<Self, AccountError> {
+        if bytes.len() > 8_192 {
+            return Err(AccountError::InvalidWire);
+        }
+        let wire: EventWire =
+            serde_json::from_slice(bytes).map_err(|_| AccountError::InvalidWire)?;
+        let payload = canonical_base64(&wire.payload, 4_096)?;
+        let signature = canonical_base64(&wire.signature, 108)?;
+        let subject_signature = canonical_base64(&wire.subject_signature, 108)?;
+        let parsed = ParsedEvent::decode_canonical(&payload)?;
+        verify_signature(&parsed.actor.public_key, &payload, &signature)?;
+        if parsed.action == Action::Approve {
+            verify_signature(&parsed.subject.public_key, &payload, &subject_signature)?;
+        } else if !subject_signature.is_empty() {
+            return Err(AccountError::InvalidWire);
+        }
+        let canonical = format!(
+            "{{\"payload\":\"{}\",\"signature\":\"{}\",\"subjectSignature\":\"{}\"}}",
+            wire.payload, wire.signature, wire.subject_signature
+        );
+        if canonical.as_bytes() != bytes {
+            return Err(AccountError::InvalidWire);
+        }
+        Ok(parsed.into_verified(payload))
+    }
+
     #[must_use]
     pub fn account_id(&self) -> &str {
         &self.account_id
@@ -93,6 +162,15 @@ impl VerifiedEvent {
     pub fn canonical_payload(&self) -> &[u8] {
         &self.payload
     }
+
+    #[must_use]
+    pub const fn action(&self) -> &'static str {
+        match self.action {
+            Action::Bootstrap => "bootstrap",
+            Action::Approve => "approve",
+            Action::Remove => "remove",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,6 +178,136 @@ enum Action {
     Bootstrap,
     Approve,
     Remove,
+}
+
+/// Untrusted account-group discovery metadata. A caller must still apply the
+/// complete verified history and obtain local approval before granting trust.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AccountDiscovery {
+    Absent,
+    Present(Box<AccountDiscoveryMetadata>),
+}
+
+impl AccountDiscovery {
+    /// Parses and verifies the bounded discovery response returned by the
+    /// existing Swift/Go account enrollment contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountError::InvalidWire`] for ambiguous, malformed, or
+    /// inconsistently bound discovery metadata.
+    pub fn decode_json_strict(
+        bytes: &[u8],
+        expected_account_id: &str,
+    ) -> Result<Self, AccountError> {
+        if bytes.len() > 65_536 || !is_lower_uuid(expected_account_id) {
+            return Err(AccountError::InvalidWire);
+        }
+        let wire: DiscoveryWire =
+            serde_json::from_slice(bytes).map_err(|_| AccountError::InvalidWire)?;
+        if wire.status == "absent"
+            && wire.group_id.is_none()
+            && wire.generation.is_none()
+            && wire.anchor.is_none()
+            && wire.anchor_hash.is_none()
+            && wire.head_sequence.is_none()
+            && wire.head_hash.is_none()
+        {
+            return Ok(Self::Absent);
+        }
+        let (
+            Some(group_id),
+            Some(generation),
+            Some(anchor),
+            Some(anchor_hash),
+            Some(head_sequence),
+            Some(head_hash),
+        ) = (
+            wire.group_id,
+            wire.generation,
+            wire.anchor,
+            wire.anchor_hash,
+            wire.head_sequence,
+            wire.head_hash,
+        )
+        else {
+            return Err(AccountError::InvalidWire);
+        };
+        if wire.status != "present"
+            || !is_lower_uuid(&group_id)
+            || generation == 0
+            || generation > i64::MAX as u64
+            || !(1..=8_192).contains(&head_sequence)
+        {
+            return Err(AccountError::InvalidWire);
+        }
+        let anchor = VerifiedEvent::decode_json_strict(anchor.get().as_bytes())?;
+        let anchor_hash: [u8; 32] = canonical_base64(&anchor_hash, 44)?
+            .try_into()
+            .map_err(|_| AccountError::InvalidWire)?;
+        let head_hash: [u8; 32] = canonical_base64(&head_hash, 44)?
+            .try_into()
+            .map_err(|_| AccountError::InvalidWire)?;
+        if anchor.action != Action::Bootstrap
+            || anchor.account_id != expected_account_id
+            || anchor.group_id != group_id
+            || anchor.generation != generation
+            || anchor.digest != anchor_hash
+            || (head_sequence == 1 && head_hash != anchor_hash)
+        {
+            return Err(AccountError::InvalidWire);
+        }
+        Ok(Self::Present(Box::new(AccountDiscoveryMetadata {
+            group_id,
+            generation,
+            anchor,
+            anchor_hash,
+            head_sequence,
+            head_hash,
+        })))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountDiscoveryMetadata {
+    group_id: String,
+    generation: u64,
+    anchor: VerifiedEvent,
+    anchor_hash: [u8; 32],
+    head_sequence: u64,
+    head_hash: [u8; 32],
+}
+
+impl AccountDiscoveryMetadata {
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub const fn anchor(&self) -> &VerifiedEvent {
+        &self.anchor
+    }
+
+    #[must_use]
+    pub const fn anchor_hash(&self) -> [u8; 32] {
+        self.anchor_hash
+    }
+
+    #[must_use]
+    pub const fn head_sequence(&self) -> u64 {
+        self.head_sequence
+    }
+
+    #[must_use]
+    pub const fn head_hash(&self) -> [u8; 32] {
+        self.head_hash
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -334,6 +542,157 @@ impl ParsedEvent {
 struct DraftWire {
     payload: String,
     signature: String,
+}
+
+struct EventWire {
+    payload: String,
+    signature: String,
+    subject_signature: String,
+}
+
+struct DiscoveryWire {
+    status: String,
+    group_id: Option<String>,
+    generation: Option<u64>,
+    anchor: Option<Box<RawValue>>,
+    anchor_hash: Option<String>,
+    head_sequence: Option<u64>,
+    head_hash: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for DiscoveryWire {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct DiscoveryVisitor;
+
+        impl<'de> Visitor<'de> for DiscoveryVisitor {
+            type Value = DiscoveryWire;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an exact bounded account discovery object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut status = None;
+                let mut group_id = None;
+                let mut generation = None;
+                let mut anchor = None;
+                let mut anchor_hash = None;
+                let mut head_sequence = None;
+                let mut head_hash = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "status" if status.is_none() => status = Some(map.next_value()?),
+                        "groupID" if group_id.is_none() => group_id = Some(map.next_value()?),
+                        "generation" if generation.is_none() => {
+                            generation = Some(map.next_value()?);
+                        }
+                        "anchor" if anchor.is_none() => anchor = Some(map.next_value()?),
+                        "anchorHash" if anchor_hash.is_none() => {
+                            anchor_hash = Some(map.next_value()?);
+                        }
+                        "headSequence" if head_sequence.is_none() => {
+                            head_sequence = Some(map.next_value()?);
+                        }
+                        "headHash" if head_hash.is_none() => head_hash = Some(map.next_value()?),
+                        "status" => return Err(de::Error::duplicate_field("status")),
+                        "groupID" => return Err(de::Error::duplicate_field("groupID")),
+                        "generation" => return Err(de::Error::duplicate_field("generation")),
+                        "anchor" => return Err(de::Error::duplicate_field("anchor")),
+                        "anchorHash" => return Err(de::Error::duplicate_field("anchorHash")),
+                        "headSequence" => {
+                            return Err(de::Error::duplicate_field("headSequence"));
+                        }
+                        "headHash" => return Err(de::Error::duplicate_field("headHash")),
+                        _ => {
+                            return Err(de::Error::unknown_field(
+                                &key,
+                                &[
+                                    "status",
+                                    "groupID",
+                                    "generation",
+                                    "anchor",
+                                    "anchorHash",
+                                    "headSequence",
+                                    "headHash",
+                                ],
+                            ));
+                        }
+                    }
+                }
+                Ok(DiscoveryWire {
+                    status: status.ok_or_else(|| de::Error::missing_field("status"))?,
+                    group_id,
+                    generation,
+                    anchor,
+                    anchor_hash,
+                    head_sequence,
+                    head_hash,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(DiscoveryVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for EventWire {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EventVisitor;
+
+        impl<'de> Visitor<'de> for EventVisitor {
+            type Value = EventWire;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an exact payload/signature/subjectSignature object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut payload = None;
+                let mut signature = None;
+                let mut subject_signature = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "payload" if payload.is_none() => payload = Some(map.next_value()?),
+                        "signature" if signature.is_none() => signature = Some(map.next_value()?),
+                        "subjectSignature" if subject_signature.is_none() => {
+                            subject_signature = Some(map.next_value()?);
+                        }
+                        "payload" => return Err(de::Error::duplicate_field("payload")),
+                        "signature" => return Err(de::Error::duplicate_field("signature")),
+                        "subjectSignature" => {
+                            return Err(de::Error::duplicate_field("subjectSignature"));
+                        }
+                        _ => {
+                            return Err(de::Error::unknown_field(
+                                &key,
+                                &["payload", "signature", "subjectSignature"],
+                            ));
+                        }
+                    }
+                }
+                Ok(EventWire {
+                    payload: payload.ok_or_else(|| de::Error::missing_field("payload"))?,
+                    signature: signature.ok_or_else(|| de::Error::missing_field("signature"))?,
+                    subject_signature: subject_signature
+                        .ok_or_else(|| de::Error::missing_field("subjectSignature"))?,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EventVisitor)
+    }
 }
 
 impl<'de> Deserialize<'de> for DraftWire {

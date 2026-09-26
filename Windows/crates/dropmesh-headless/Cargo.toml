@@ -13,8 +13,10 @@ serde_json.workspace = true
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+dropmesh-account = { path = "../dropmesh-account" }
 dropmesh-platform-windows = { path = "../dropmesh-platform-windows" }
 dropmesh-rendezvous = { path = "../dropmesh-rendezvous" }
+getrandom.workspace = true
 
 [lints]
 workspace = true
