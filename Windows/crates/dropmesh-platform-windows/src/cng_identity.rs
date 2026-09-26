@@ -10,7 +10,9 @@ use dropmesh_identity::{
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use windows::Win32::Foundation::{NTE_BAD_KEYSET, NTE_EXISTS, NTE_NOT_FOUND, NTE_PERM};
+use windows::Win32::Foundation::{
+    NTE_BAD_KEYSET, NTE_EXISTS, NTE_NOT_FOUND, NTE_NOT_SUPPORTED, NTE_PERM,
+};
 use windows::Win32::Security::Cryptography::{
     BCRYPT_ECCPRIVATE_BLOB, BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDH_PUBLIC_P256_MAGIC,
     BCRYPT_ECDSA_PUBLIC_P256_MAGIC, CERT_KEY_SPEC, MS_KEY_STORAGE_PROVIDER,
@@ -23,7 +25,9 @@ use windows::Win32::Security::Cryptography::{
 use windows::Win32::Security::OBJECT_SECURITY_INFORMATION;
 use windows::core::{Error as WindowsError, HRESULT, HSTRING};
 
-use crate::export_policy::{NTE_PERM_CODE, is_expected_private_export_denial};
+use crate::export_policy::{
+    NTE_NOT_SUPPORTED_CODE, NTE_PERM_CODE, is_expected_private_export_denial,
+};
 
 const ECC_BLOB_HEADER_LEN: usize = 8;
 const P256_COORDINATE_LEN: usize = 32;
@@ -242,6 +246,15 @@ impl CngKey {
         name: &HSTRING,
         algorithm: windows::core::PCWSTR,
     ) -> Result<Self, WindowsIdentityError> {
+        Self::create_with_export_policy(provider, name, algorithm, 0)
+    }
+
+    fn create_with_export_policy(
+        provider: &CngProvider,
+        name: &HSTRING,
+        algorithm: windows::core::PCWSTR,
+        export_policy: u32,
+    ) -> Result<Self, WindowsIdentityError> {
         let mut handle = NCRYPT_KEY_HANDLE::default();
         // SAFETY: provider is live, `handle` is a valid out pointer, and both
         // Windows string arguments remain alive for the duration of the call.
@@ -257,7 +270,7 @@ impl CngKey {
             .map_err(|error| cng_error("create persisted key", &error))?;
         }
 
-        let export_policy = 0_u32.to_ne_bytes();
+        let export_policy = export_policy.to_ne_bytes();
         // SAFETY: `handle` was returned by CNG; the property input is a valid
         // four-byte DWORD for the duration of the call.
         let configure_result = unsafe {
@@ -379,11 +392,27 @@ impl CngKey {
             return Err(WindowsIdentityError::PrivateKeyExportable);
         }
 
+        let export_result = self.probe_private_export();
+        match export_result {
+            Ok(()) => Err(WindowsIdentityError::PrivateKeyExportable),
+            Err(error) => {
+                let code = error.code().0.cast_unsigned();
+                debug_assert_eq!(NTE_PERM.0.cast_unsigned(), NTE_PERM_CODE);
+                debug_assert_eq!(NTE_NOT_SUPPORTED.0.cast_unsigned(), NTE_NOT_SUPPORTED_CODE);
+                if is_expected_private_export_denial(code) {
+                    Ok(())
+                } else {
+                    Err(cng_error("probe private key export", &error))
+                }
+            }
+        }
+    }
+
+    fn probe_private_export(&self) -> windows::core::Result<()> {
         let mut private_size = 0_u32;
         // SAFETY: this is a size-only export probe using the native ECC private
-        // blob supported by the Microsoft Software KSP. Success would prove the
-        // private key export policy is ineffective and is therefore rejected.
-        let export_result = unsafe {
+        // blob documented for the Microsoft Software KSP.
+        unsafe {
             NCryptExportKey(
                 self.0,
                 None,
@@ -393,18 +422,6 @@ impl CngKey {
                 &raw mut private_size,
                 NCRYPT_SILENT_FLAG,
             )
-        };
-        match export_result {
-            Ok(()) => Err(WindowsIdentityError::PrivateKeyExportable),
-            Err(error) => {
-                let code = error.code().0.cast_unsigned();
-                debug_assert_eq!(NTE_PERM.0.cast_unsigned(), NTE_PERM_CODE);
-                if is_expected_private_export_denial(code) {
-                    Ok(())
-                } else {
-                    Err(cng_error("probe private key export", &error))
-                }
-            }
         }
     }
 
@@ -487,13 +504,31 @@ mod tests {
 
     use dropmesh_identity::DeviceIdentity;
 
-    use super::WindowsCngIdentity;
+    use windows::Win32::Security::Cryptography::{
+        NCRYPT_ALLOW_EXPORT_FLAG, NCRYPT_ECDSA_P256_ALGORITHM,
+    };
+    use windows::core::HSTRING;
+
+    use super::{CngKey, CngProvider, WindowsCngIdentity};
 
     #[test]
     fn persisted_identity_is_stable_signs_and_blocks_private_export() -> Result<(), Box<dyn Error>>
     {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let name = format!("DropMesh.Identity.Test.{}.{}", std::process::id(), suffix);
+        let provider = CngProvider::open()?;
+        let control_name = HSTRING::from(format!("{name}.export-control"));
+        let exportable = CngKey::create_with_export_policy(
+            &provider,
+            &control_name,
+            NCRYPT_ECDSA_P256_ALGORITHM,
+            NCRYPT_ALLOW_EXPORT_FLAG,
+        )?;
+        let control_probe = exportable.probe_private_export();
+        let control_cleanup = exportable.delete();
+        control_probe?;
+        control_cleanup?;
+
         let first = WindowsCngIdentity::load_or_create(&name)?;
         let first_metadata = first.metadata();
         first.verify_private_keys_non_exportable()?;
