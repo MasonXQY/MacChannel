@@ -144,7 +144,10 @@ fn rejects_traversal_absolute_and_windows_escape_paths() {
     }
 
     let safe = RelativePath::parse("資料/2026/report.txt").unwrap();
-    assert_eq!(safe.as_path().to_string_lossy(), "資料/2026/report.txt");
+    assert_eq!(
+        safe.as_path(),
+        std::path::Path::new("資料").join("2026").join("report.txt")
+    );
 }
 
 #[cfg(windows)]
