@@ -12,10 +12,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use windows::Win32::Foundation::{NTE_BAD_KEYSET, NTE_EXISTS, NTE_NOT_FOUND, NTE_PERM};
 use windows::Win32::Security::Cryptography::{
-    BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDH_PUBLIC_P256_MAGIC, BCRYPT_ECDSA_PUBLIC_P256_MAGIC,
-    CERT_KEY_SPEC, MS_KEY_STORAGE_PROVIDER, NCRYPT_ECDH_P256_ALGORITHM,
-    NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_FLAGS, NCRYPT_KEY_HANDLE,
-    NCRYPT_PERSIST_FLAG, NCRYPT_PKCS8_PRIVATE_KEY_BLOB, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG,
+    BCRYPT_ECCPRIVATE_BLOB, BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDH_PUBLIC_P256_MAGIC,
+    BCRYPT_ECDSA_PUBLIC_P256_MAGIC, CERT_KEY_SPEC, MS_KEY_STORAGE_PROVIDER,
+    NCRYPT_ECDH_P256_ALGORITHM, NCRYPT_ECDSA_P256_ALGORITHM, NCRYPT_EXPORT_POLICY_PROPERTY,
+    NCRYPT_FLAGS, NCRYPT_KEY_HANDLE, NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE, NCRYPT_SILENT_FLAG,
     NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey,
     NCryptFreeObject, NCryptGetProperty, NCryptOpenKey, NCryptOpenStorageProvider,
     NCryptSetProperty, NCryptSignHash,
@@ -380,13 +380,14 @@ impl CngKey {
         }
 
         let mut private_size = 0_u32;
-        // SAFETY: this is a size-only export probe. Success would prove the
+        // SAFETY: this is a size-only export probe using the native ECC private
+        // blob supported by the Microsoft Software KSP. Success would prove the
         // private key export policy is ineffective and is therefore rejected.
         let export_result = unsafe {
             NCryptExportKey(
                 self.0,
                 None,
-                NCRYPT_PKCS8_PRIVATE_KEY_BLOB,
+                BCRYPT_ECCPRIVATE_BLOB,
                 None,
                 None,
                 &raw mut private_size,
