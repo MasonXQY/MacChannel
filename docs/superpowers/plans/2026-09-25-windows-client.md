@@ -29,7 +29,12 @@ Windows shell.
   Clippy, and the 124-dependency RustSec audit passed. This includes CNG
   persistence/signing/private-export denial, DPAPI entropy binding, durable
   crash recovery, real NTFS 8.3 alias rejection, and file-identity alias checks.
-- Phase 3 and all Windows UI/packaging work have not started.
+- Phase 3 is in progress. The first headless slice implements strict signed
+  HTTP and authenticated WSS codecs, bounded production HTTPS/WSS transport,
+  and a Windows CNG-backed JSON-lines presence peer. Local tests prove the
+  existing challenge/auth/presence contract; account enrollment, pairing,
+  mDNS, WebRTC and TURN interoperability are still outstanding. All Windows
+  UI/packaging work remains unstarted.
 
 ## Non-negotiable gates
 

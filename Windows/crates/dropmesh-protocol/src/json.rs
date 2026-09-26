@@ -354,7 +354,7 @@ impl SignedEnvelope {
     }
 
     pub fn canonical_payload(&self) -> Result<Vec<u8>, ProtocolError> {
-        self.validate()?;
+        self.validate_unsigned()?;
         let device_id = self.device_id.to_lowercase();
         serde_json::to_vec(&CanonicalEnvelope {
             device_id: &device_id,
@@ -406,6 +406,14 @@ impl SignedEnvelope {
     }
 
     fn validate(&self) -> Result<(), ProtocolError> {
+        self.validate_unsigned()?;
+        if self.signature.is_empty() || self.signature.len() > MAX_SIGNED_ENVELOPE_SIGNATURE_BYTES {
+            return Err(ProtocolError::InvalidSignedEnvelope);
+        }
+        Ok(())
+    }
+
+    fn validate_unsigned(&self) -> Result<(), ProtocolError> {
         if Uuid::parse_str(&self.device_id).is_err()
             || self.device_id != self.device_id.to_lowercase()
             || !(1..=MAX_SAFE_JSON_INTEGER).contains(&self.epoch_milliseconds)
@@ -414,8 +422,6 @@ impl SignedEnvelope {
             || self.nonce.len() > MAX_SIGNED_ENVELOPE_NONCE_BYTES
             || self.payload.len() > MAX_SIGNED_ENVELOPE_PAYLOAD_BYTES
             || !matches!(self.public_key.len(), 64 | 65)
-            || self.signature.is_empty()
-            || self.signature.len() > MAX_SIGNED_ENVELOPE_SIGNATURE_BYTES
             || Uuid::parse_str(&self.device_id).ok()
                 != Some(device_id_for_exact_key_bytes(&self.public_key))
         {

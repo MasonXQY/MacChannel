@@ -1,0 +1,26 @@
+[package]
+name = "dropmesh-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dropmesh-identity = { path = "../dropmesh-identity" }
+dropmesh-rendezvous = { path = "../dropmesh-rendezvous" }
+futures-util.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+dropmesh-protocol = { path = "../dropmesh-protocol" }
+p256.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
