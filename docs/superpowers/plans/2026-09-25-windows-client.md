@@ -24,10 +24,11 @@ Windows shell.
   recovery. The portable suite passes 57 tests, Swift fixture regression passes
   7 tests, Windows x64 target checks and Clippy pass, and RustSec reports no
   known dependency advisories.
-- Phase 2 native acceptance remains pending. macOS cannot execute the CNG,
-  DPAPI, NTFS directory-flush/8.3 alias, and durable-state runtime tests; the
-  checked-in `windows-core.yml` workflow must run successfully on a Windows
-  runner before Phase 3 starts.
+- Phase 2 native acceptance is complete at commit `2a6718a`. GitHub Actions run
+  `36255143584` passed on `windows-2025`: all 64 native tests, warnings-as-errors
+  Clippy, and the 124-dependency RustSec audit passed. This includes CNG
+  persistence/signing/private-export denial, DPAPI entropy binding, durable
+  crash recovery, real NTFS 8.3 alias rejection, and file-identity alias checks.
 - Phase 3 and all Windows UI/packaging work have not started.
 
 ## Non-negotiable gates
