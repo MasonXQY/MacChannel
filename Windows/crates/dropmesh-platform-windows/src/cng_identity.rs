@@ -505,8 +505,7 @@ mod tests {
     use dropmesh_identity::DeviceIdentity;
 
     use windows::Win32::Security::Cryptography::{
-        NCRYPT_ALLOW_EXPORT_FLAG, NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG,
-        NCRYPT_ECDSA_P256_ALGORITHM,
+        NCRYPT_ALLOW_EXPORT_FLAG, NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG, NCRYPT_ECDSA_P256_ALGORITHM,
     };
     use windows::core::HSTRING;
 
